@@ -1,0 +1,15 @@
+# tether gateway: the Telegram channel and the cron scheduler.
+# tether setup writes this file. TZ sets the time zone of the cron schedules.
+[Unit]
+Description=tether gateway
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/tether gateway --data-dir /home/YOUR_USER/.tether --log-stderr
+Restart=on-failure
+RestartSec=5
+Environment=TZ=UTC
+
+[Install]
+WantedBy=default.target
