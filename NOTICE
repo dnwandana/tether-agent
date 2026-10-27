@@ -1,0 +1,48 @@
+Tether Agent
+Copyright (c) 2026 dnwandana
+
+Tether Agent is inspired by Hermes Agent from Nous Research:
+https://github.com/NousResearch/hermes-agent
+
+Tether Agent is a new program in Go, but some parts are ports of Hermes Agent
+code from Python to Go. Some prompts, rules, patterns, and test cases are
+copied from Hermes Agent. These parts include:
+
+- The secret redaction rules (internal/security/redact.go, from agent/redact.py).
+- The dangerous-command rules and the approval flow (internal/security/,
+  from tools/approval.py).
+- The threat rules of the skill guard (internal/skills/guard_patterns.go and
+  internal/skills/testdata/guard_golden.json, from tools/skills_guard.py).
+- The prompts for child agents, background reviews, and context compaction
+  (internal/agent/, internal/ctxmgr/).
+- The Telegram message format, stream, group gate, and media delivery rules
+  (internal/telegram/, from gateway/).
+- The fuzzy match of the patch tool (internal/tools/patch.go).
+- Test cases from the Hermes Agent test suite.
+
+Comments in the source code that name "Hermes" point to the origin of a rule
+or a text. Hermes Agent is distributed under the MIT License below.
+
+-------------------------------------------------------------------------------
+
+MIT License
+
+Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

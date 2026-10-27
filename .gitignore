@@ -1,0 +1,51 @@
+# Coding agents
+.agents/
+.claude/
+.superpowers/
+docs/superpowers/
+skills-lock.json
+CLAUDE.local.md
+
+# Build output
+/bin/
+/dist/
+# "go build ./cmd/tether" writes the binary to the repo root.
+/tether
+
+# Go test and profile output
+*.test
+*.out
+*.prof
+coverage.*
+go.work
+go.work.sum
+
+# Local secrets and state
+.env
+.env.*
+*.db
+*.db-shm
+*.db-wal
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Local tether state (a run with --data-dir or TETHER_HOME in the repo)
+.tether/
+gateway.lock
+*.log
+*.db-journal
+
+# More secrets
+.envrc
+*.pem
+*.key
+
+# Go tooling
+__debug_bin*
+# "make cross" output if you build it in the repo root.
+/tether-*
