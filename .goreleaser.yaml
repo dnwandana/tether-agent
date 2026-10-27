@@ -1,0 +1,50 @@
+# goreleaser configuration for Tether Agent.
+# The build needs Go 1.26 or later (see go.mod).
+# Check this file with "goreleaser check".
+version: 2
+
+project_name: tether-agent
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: tether
+    main: ./cmd/tether
+    binary: tether
+    env:
+      # CGO is off, so the binaries are static.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # The release targets are linux/amd64, linux/arm64, and darwin/arm64.
+      - goos: darwin
+        goarch: amd64
+
+archives:
+  - id: tether
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    # NOTICE carries the Hermes Agent copyright notice that the MIT License
+    # requires in each copy.
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
