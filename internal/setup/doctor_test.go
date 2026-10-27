@@ -1,0 +1,296 @@
+package setup
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// ctx is the context of the calls in the tests.
+var ctx = context.Background()
+
+// sseFixture is the OpenAI stream that the fake providers send.
+const sseFixture = "../provider/testdata/openai_text_stream.sse"
+
+// okProvider answers each call with a short OpenAI stream.
+func okProvider(t *testing.T) *httptest.Server {
+	t.Helper()
+	sse, err := os.ReadFile(sseFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(sse)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// downProvider answers each call with HTTP 503.
+func downProvider(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// botServer is a fake Bot API. Each method returns the JSON result of the map. A missing
+// method returns an error reply.
+func botServer(t *testing.T, results map[string]func() any) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := r.URL.Path[strings.LastIndexByte(r.URL.Path, '/')+1:]
+		w.Header().Set("Content-Type", "application/json")
+		f, ok := results[method]
+		if !ok {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": 404, "description": "Not Found"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": f()})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// okTelegram is a fake Bot API whose getMe works.
+func okTelegram(t *testing.T) *httptest.Server {
+	return botServer(t, map[string]func() any{
+		"getMe": func() any { return map[string]any{"id": 99, "is_bot": true, "username": "tether_test_bot"} },
+	})
+}
+
+// allPrograms finds every host program.
+func allPrograms(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+// without returns a LookPath that misses the named programs.
+func without(names ...string) func(string) (string, error) {
+	return func(name string) (string, error) {
+		for _, n := range names {
+			if n == name {
+				return "", exec.ErrNotFound
+			}
+		}
+		return allPrograms(name)
+	}
+}
+
+// writeDataDir writes config.yaml and a 0600 .env with the key of the primary provider.
+func writeDataDir(t *testing.T, provURL, extra string) string {
+	t.Helper()
+	dir := t.TempDir()
+	cfg := "providers:\n  primary:\n    format: openai\n    base_url: " + provURL +
+		"\n    api_key: ${PRIMARY_API_KEY}\n    model: m\npricing:\n  sources: []\n" + extra
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := "PRIMARY_API_KEY=sk-doctor-secret-123456\nTELEGRAM_BOT_TOKEN=123:doctor-token-abcdef\n"
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(env), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// doctorWithFakes returns a doctor over a data dir with the fake provider, the fake Bot
+// API, and the LookPath. Telegram is on. Free disk space is 50 GB.
+func doctorWithFakes(t *testing.T, prov, tg *httptest.Server, look func(string) (string, error)) *Doctor {
+	t.Helper()
+	dir := writeDataDir(t, prov.URL, "telegram:\n  enabled: true\n")
+	return &Doctor{
+		DataDir:      dir,
+		ConfigPath:   filepath.Join(dir, "config.yaml"),
+		HC:           prov.Client(),
+		LookPath:     look,
+		TelegramBase: tg.URL,
+		Getenv:       func(string) string { return "" },
+		freeBytes:    func(string) (uint64, error) { return 50 << 30, nil },
+	}
+}
+
+// find returns the check with the name.
+func find(t *testing.T, checks []Check, name string) Check {
+	t.Helper()
+	for _, c := range checks {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("no check %q in %+v", name, checks)
+	return Check{}
+}
+
+func TestAllGreen(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	checks := d.Run(ctx)
+	for _, c := range checks {
+		if c.Status != StatusOK {
+			t.Errorf("%+v", c)
+		}
+	}
+	for _, name := range []string{"config", ".env", "provider primary", "telegram", "state.db", "chrome",
+		"python3", "pdftotext", "ffmpeg", "edge-tts", "whisper-cli", "disk"} {
+		find(t, checks, name)
+	}
+	if c := find(t, checks, "provider primary"); !strings.Contains(c.Detail, "model m answered") {
+		t.Fatal(c)
+	}
+	if c := find(t, checks, "telegram"); !strings.Contains(c.Detail, "@tether_test_bot") {
+		t.Fatal(c)
+	}
+}
+
+func TestLooseDotEnvFails(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	env := filepath.Join(d.DataDir, ".env")
+	if err := os.Chmod(env, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := find(t, d.Run(ctx), ".env")
+	if c.Status != StatusFail || !strings.Contains(c.Next, "chmod 600 "+env) {
+		t.Fatal(c)
+	}
+}
+
+func TestStrictDotEnvShowsItsMode(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	if err := os.Chmod(filepath.Join(d.DataDir, ".env"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	c := find(t, d.Run(ctx), ".env")
+	if c.Status != StatusOK || !strings.HasPrefix(c.Detail, "mode 0400,") {
+		t.Fatal(c)
+	}
+}
+
+func TestProviderDownFails(t *testing.T) {
+	d := doctorWithFakes(t, downProvider(t), okTelegram(t), allPrograms)
+	checks := d.Run(ctx)
+	c := find(t, checks, "provider primary")
+	if c.Status != StatusFail || !strings.Contains(c.Detail, "primary") || c.Next == "" {
+		t.Fatal(c)
+	}
+	if !HasFail(checks) {
+		t.Fatal("HasFail is false")
+	}
+}
+
+func TestMissingPythonIsWarnNamingFeature(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), without("python3"))
+	c := find(t, d.Run(ctx), "python3")
+	if c.Status != StatusWarn || !strings.Contains(c.Detail, "run_script is off") || c.Next == "" {
+		t.Fatal(c)
+	}
+}
+
+func TestMissingChromeIsWarn(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), without("google-chrome", "chromium", "chromium-browser"))
+	c := find(t, d.Run(ctx), "chrome")
+	if c.Status != StatusWarn || !strings.Contains(c.Detail, "browser_") || !strings.Contains(c.Next, "browser.chrome_path") {
+		t.Fatal(c)
+	}
+}
+
+func TestMissingFFmpegWarnsOnlyWithVoice(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), without("ffmpeg"))
+	if c := find(t, d.Run(ctx), "ffmpeg"); c.Status != StatusWarn || c.Next == "" {
+		t.Fatal(c)
+	}
+	// Telegram off: no voice notes, so a missing ffmpeg loses nothing.
+	b, err := os.ReadFile(d.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := strings.Replace(string(b), "telegram:\n  enabled: true\n", "", 1)
+	if err := os.WriteFile(d.ConfigPath, []byte(off), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c := find(t, d.Run(ctx), "ffmpeg"); c.Status != StatusOK {
+		t.Fatal(c)
+	}
+}
+
+func TestBadMCPServerFails(t *testing.T) {
+	prov := okProvider(t)
+	dir := writeDataDir(t, prov.URL, "mcp:\n  servers:\n    broken:\n      command: [\"/nonexistent/tether-mcp-server\"]\n      connect_timeout_s: 5\n")
+	d := &Doctor{DataDir: dir, ConfigPath: filepath.Join(dir, "config.yaml"), HC: prov.Client(), LookPath: allPrograms,
+		Getenv: func(string) string { return "" }, freeBytes: func(string) (uint64, error) { return 50 << 30, nil }}
+	c := find(t, d.Run(ctx), "mcp broken")
+	if c.Status != StatusFail || c.Next == "" {
+		t.Fatal(c)
+	}
+}
+
+func TestLowDiskWarns(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	d.freeBytes = func(string) (uint64, error) { return 200 << 20, nil }
+	if c := find(t, d.Run(ctx), "disk"); c.Status != StatusWarn || c.Next == "" {
+		t.Fatal(c)
+	}
+}
+
+func TestBrokenConfigFails(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	if err := os.WriteFile(d.ConfigPath, []byte("providers:\n  primary:\n    format: openai\n    api_key: ${NOT_SET_ANYWHERE_X}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := d.Run(ctx)
+	c := find(t, checks, "config")
+	if c.Status != StatusFail || !strings.Contains(c.Detail, "NOT_SET_ANYWHERE_X") || c.Next == "" {
+		t.Fatal(c)
+	}
+	// The host programs are still checked.
+	find(t, checks, "python3")
+}
+
+func TestDoctorHidesSecrets(t *testing.T) {
+	// The provider echoes the key in its error body.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad key "+r.Header.Get("Authorization"), http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	d := doctorWithFakes(t, srv, okTelegram(t), allPrograms)
+	out := Format(d.Run(ctx))
+	if strings.Contains(out, "sk-doctor-secret-123456") || strings.Contains(out, "doctor-token-abcdef") {
+		t.Fatal(out)
+	}
+}
+
+func TestEveryWarnAndFailHasNext(t *testing.T) {
+	d := doctorWithFakes(t, downProvider(t), botServer(t, nil), func(string) (string, error) { return "", errors.New("no") })
+	d.freeBytes = func(string) (uint64, error) { return 1, nil }
+	for _, c := range d.Run(ctx) {
+		if c.Status != StatusOK && c.Next == "" {
+			t.Errorf("no next action: %+v", c)
+		}
+	}
+}
+
+func TestFormatSymbols(t *testing.T) {
+	out := Format([]Check{
+		{Name: "a", Status: StatusOK, Detail: "fine"},
+		{Name: "b", Status: StatusWarn, Detail: "meh", Next: "do b"},
+		{Name: "c", Status: StatusFail, Detail: "bad", Next: "do c"},
+	})
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatal(out)
+	}
+	if !strings.HasPrefix(lines[0], "✓ a") || strings.Contains(lines[0], "→") {
+		t.Fatal(lines[0])
+	}
+	if !strings.HasPrefix(lines[1], "⚠ b") || !strings.Contains(lines[1], "→ do b") {
+		t.Fatal(lines[1])
+	}
+	if !strings.HasPrefix(lines[2], "✗ c") || !strings.Contains(lines[2], "→ do c") {
+		t.Fatal(lines[2])
+	}
+}
