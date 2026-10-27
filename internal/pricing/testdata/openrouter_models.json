@@ -1,0 +1,57 @@
+{
+  "data": [
+    {
+      "id": "z-ai/glm-4.7",
+      "canonical_slug": "z-ai/glm-4.7",
+      "name": "Z.AI: GLM 4.7",
+      "created": 1766000000,
+      "description": "GLM-4.7 is a large language model from Z.AI.",
+      "context_length": 202752,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": ["text"],
+        "output_modalities": ["text"],
+        "tokenizer": "Other",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000006",
+        "completion": "0.0000022",
+        "request": "0",
+        "image": "0",
+        "web_search": "0",
+        "internal_reasoning": "0",
+        "input_cache_read": "0.00000011"
+      },
+      "top_provider": {"context_length": 202752, "max_completion_tokens": 131072, "is_moderated": false},
+      "per_request_limits": null,
+      "supported_parameters": ["max_tokens", "temperature", "tools", "tool_choice", "reasoning"]
+    },
+    {
+      "id": "openai/gpt-4o-mini",
+      "canonical_slug": "openai/gpt-4o-mini",
+      "name": "OpenAI: GPT-4o-mini",
+      "context_length": 128000,
+      "pricing": {
+        "prompt": "0.00000015",
+        "completion": "0.0000006",
+        "request": "0",
+        "image": "0.000217",
+        "input_cache_read": "0.000000075"
+      },
+      "supported_parameters": ["max_tokens", "tools"]
+    },
+    {
+      "id": "meta-llama/llama-3.3-70b-instruct:free",
+      "name": "Meta: Llama 3.3 70B Instruct (free)",
+      "context_length": 65536,
+      "pricing": {"prompt": "0", "completion": "0", "request": "0", "image": "0"}
+    },
+    {
+      "id": "openrouter/auto",
+      "name": "Auto Router",
+      "context_length": 2000000,
+      "pricing": {"prompt": "-1", "completion": "-1"}
+    }
+  ]
+}
