@@ -1,0 +1,60 @@
+"""tether_tools: call the Tether Agent tools from a run_script script.
+
+Tether Agent generates this module for each run. Each function sends one tool call over
+the Unix socket in TETHER_RPC_SOCK and returns the result text. A failed call raises
+ToolError with the error text of the tool.
+"""
+
+import json
+import os
+import socket
+
+
+class ToolError(Exception):
+    """A tool call failed. The message is the error text of the tool."""
+
+
+_sock = None
+_buf = b""
+_next_id = 0
+
+
+def _conn():
+    global _sock
+    if _sock is None:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(os.environ["TETHER_RPC_SOCK"])
+        _sock = s
+    return _sock
+
+
+def _call(tool, args):
+    """Calls the tool with the args dict and returns the result text."""
+    global _buf, _next_id
+    _next_id += 1
+    s = _conn()
+    line = json.dumps({"id": _next_id, "tool": tool, "args": args}) + "\n"
+    s.sendall(line.encode("utf-8"))
+    while b"\n" not in _buf:
+        chunk = s.recv(65536)
+        if not chunk:
+            raise ToolError("the tool server closed the connection")
+        _buf += chunk
+    raw, _buf = _buf.split(b"\n", 1)
+    resp = json.loads(raw.decode("utf-8"))
+    if not resp.get("ok"):
+        raise ToolError(resp.get("error") or "the tool call failed")
+    return resp.get("result", "")
+
+
+def _args(params):
+    kwargs = params.pop("kwargs", None) or {}
+    out = {k: v for k, v in params.items() if v is not None}
+    out.update(kwargs)
+    return out
+{{range .}}
+
+def {{.Name}}({{.Signature}}):
+    """{{.Doc}}"""
+    return _call("{{.Name}}", _args(dict(locals())))
+{{end}}
