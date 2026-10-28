@@ -141,18 +141,24 @@ func (t VisionTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (str
 	if q == "" {
 		q = defaultVisionQuestion
 	}
-	ch, err := t.Prov.Stream(ctx, provider.Request{
+	return askVision(ctx, t.Prov, img, q)
+}
+
+// askVision sends one user message with the question and the image to prov and returns
+// the answer text. An empty answer is an error.
+func askVision(ctx context.Context, prov provider.Provider, img provider.Image, q string) (string, error) {
+	ch, err := prov.Stream(ctx, provider.Request{
 		Messages: []provider.Message{{Role: provider.RoleUser, Content: q, Images: []provider.Image{img}}},
 	})
 	if err != nil {
-		return "", toolErr("the vision model %s failed: %v", t.Prov.Name(), err)
+		return "", toolErr("the vision model %s failed: %v", prov.Name(), err)
 	}
 	res, err := provider.Collect(ch, nil)
 	if err != nil {
-		return "", toolErr("the vision model %s failed: %v", t.Prov.Name(), err)
+		return "", toolErr("the vision model %s failed: %v", prov.Name(), err)
 	}
 	if strings.TrimSpace(res.Text) == "" {
-		return "", toolErr("the vision model %s gave an empty answer", t.Prov.Name())
+		return "", toolErr("the vision model %s gave an empty answer", prov.Name())
 	}
 	return res.Text, nil
 }
@@ -233,4 +239,22 @@ func LoadImageFile(path string, maxBytes int64) (provider.Image, error) {
 		return provider.Image{}, errors.New(errorText("view_image", err))
 	}
 	return img, nil
+}
+
+// DescribeImage sends the image file at path and the prompt to the vision provider prov and
+// returns the trimmed answer. The file must be an image of 10 MB or less. An empty answer is
+// an error. The Telegram inbox uses it to describe a sticker.
+func DescribeImage(ctx context.Context, prov provider.Provider, path, prompt string) (string, error) {
+	if prov == nil {
+		return "", errors.New("no vision model is configured")
+	}
+	img, err := VisionTool{}.loadFile(path)
+	if err != nil {
+		return "", errors.New(errorText("view_image", err))
+	}
+	out, err := askVision(ctx, prov, img, prompt)
+	if err != nil {
+		return "", errors.New(errorText("view_image", err))
+	}
+	return strings.TrimSpace(out), nil
 }

@@ -170,3 +170,23 @@ func TestImagesFromMarkers(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestDescribeImage(t *testing.T) {
+	fp := recording("  A duck waves.  ")
+	out, err := DescribeImage(ctx, fp, pngFile(t), "Describe this sticker.")
+	if err != nil || out != "A duck waves." || len(fp.requests) != 1 {
+		t.Fatalf("%q %v", out, err)
+	}
+	m := fp.requests[0].Messages[0]
+	if m.Content != "Describe this sticker." || len(m.Images) != 1 || m.Images[0].MIME != "image/png" {
+		t.Fatalf("%+v", m)
+	}
+	if _, err := DescribeImage(ctx, recording(" "), pngFile(t), "q"); err == nil {
+		t.Fatal("an empty answer must be an error")
+	}
+	txt := filepath.Join(t.TempDir(), "a.txt")
+	_ = os.WriteFile(txt, []byte("hello"), 0o600)
+	if _, err := DescribeImage(ctx, recording("x"), txt, "q"); err == nil {
+		t.Fatal("a text file is not an image")
+	}
+}
