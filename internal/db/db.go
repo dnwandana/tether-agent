@@ -5,8 +5,11 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +26,23 @@ var migrations embed.FS
 // The pool has one connection, so the writes of one process never compete with each other.
 // Do not run a second query while the rows of an earlier query are open, because the second
 // query then waits for the connection forever.
-type DB struct{ *sql.DB }
+//
+// Each open DB holds a shared lock on state.db.lock until Close. tether restore takes the
+// exclusive lock, so it can find every tether process that has the DB open.
+type DB struct {
+	*sql.DB
+	lock *os.File
+}
+
+// Close closes the database, then releases the shared lock on state.db.lock.
+func (d *DB) Close() error {
+	err := d.DB.Close()
+	if d.lock != nil {
+		err = errors.Join(err, unlock(d.lock))
+		d.lock = nil
+	}
+	return err
+}
 
 // dsnParams sets the pragmas on every new connection. busy_timeout makes a writer wait for the
 // lock of another process instead of a fail with SQLITE_BUSY. _txlock=immediate starts each
@@ -32,21 +51,83 @@ type DB struct{ *sql.DB }
 const dsnParams = "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate"
 
 // Open opens or creates the database at path and applies the embedded migrations in name order.
+// It takes the shared lock first, so it does not create the database while a restore runs.
 func Open(path string) (*DB, error) {
 	if strings.ContainsRune(path, '?') {
 		return nil, fmt.Errorf("db: open %s: the path must not contain '?'", path)
 	}
+	lock, err := lockShared(path)
+	if err != nil {
+		if errors.Is(err, ErrRestoreRunning) {
+			return nil, fmt.Errorf("db: %w in %s. Wait for it to end, then try again", ErrRestoreRunning, filepath.Dir(path))
+		}
+		return nil, err
+	}
 	sdb, err := sql.Open("sqlite", path+dsnParams)
 	if err != nil {
+		unlock(lock)
 		return nil, fmt.Errorf("db: open %s: %w", path, err)
 	}
 	sdb.SetMaxOpenConns(1)
-	d := &DB{sdb}
+	d := &DB{DB: sdb, lock: lock}
 	if err := d.migrate(context.Background()); err != nil {
-		sdb.Close()
+		d.Close()
 		return nil, fmt.Errorf("db: open %s: %w", path, err)
 	}
 	return d, nil
+}
+
+// OpenExisting opens the database at path with the shared lock and runs no migrations. backup
+// and restore use it, because they must not change the schema of the file that they read.
+// A missing file is an error.
+func OpenExisting(path string) (*DB, error) {
+	if strings.ContainsRune(path, '?') {
+		return nil, fmt.Errorf("db: open %s: the path must not contain '?'", path)
+	}
+	// Check the file before the lock and before sql.Open, because the driver creates a
+	// missing file.
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("db: open %s: %w", path, err)
+	}
+	lock, err := lockShared(path)
+	if err != nil {
+		if errors.Is(err, ErrRestoreRunning) {
+			return nil, fmt.Errorf("db: %w in %s. Wait for it to end, then try again", ErrRestoreRunning, filepath.Dir(path))
+		}
+		return nil, err
+	}
+	sdb, err := sql.Open("sqlite", path+dsnParams)
+	if err != nil {
+		unlock(lock)
+		return nil, fmt.Errorf("db: open %s: %w", path, err)
+	}
+	sdb.SetMaxOpenConns(1)
+	return &DB{DB: sdb, lock: lock}, nil
+}
+
+// LatestVersion returns the highest version of the embedded migrations. This is the schema
+// version that this binary writes.
+func LatestVersion() int {
+	ms, err := loadMigrations()
+	if err != nil {
+		// The migration files are embedded in the binary and the tests apply them, so this
+		// cannot occur.
+		return 0
+	}
+	v := 0
+	for _, m := range ms {
+		v = max(v, m.version)
+	}
+	return v
+}
+
+// SchemaVersion returns the highest version in schema_version, or 0 when the table is empty.
+func (d *DB) SchemaVersion(ctx context.Context) (int, error) {
+	var v int
+	if err := d.QueryRowContext(ctx, "SELECT coalesce(max(version), 0) FROM schema_version").Scan(&v); err != nil {
+		return 0, fmt.Errorf("db: read schema_version: %w", err)
+	}
+	return v, nil
 }
 
 type migration struct {
