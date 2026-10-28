@@ -1,6 +1,7 @@
 package security
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -163,5 +164,28 @@ func TestCheckWritableErrorNamesSecurityDoc(t *testing.T) {
 	err := CheckWritable("/home/d/.ssh/id_rsa", []string{"/home/d/.ssh/"}, false)
 	if err == nil || !strings.Contains(err.Error(), "protected path (see SECURITY.md)") {
 		t.Fatal(err)
+	}
+}
+
+func TestProtectedPathsBackupsAndDBLock(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, ".tether")
+	p := ProtectedPaths(data, home)
+	for _, f := range []string{
+		filepath.Join(data, "backups"),
+		filepath.Join(data, "backups/tether-backup-20261028-174210.tar.gz"),
+		filepath.Join(data, "state.db.lock"),
+	} {
+		if err := CheckWritable(f, p, true); !errors.Is(err, ErrProtected) {
+			t.Fatalf("%s: %v", f, err)
+		}
+	}
+	for _, f := range []string{
+		filepath.Join(data, "pre-restore-20261029-091500/state.db"),
+		filepath.Join(data, "backups-old/x"),
+	} {
+		if err := CheckWritable(f, p, false); err != nil {
+			t.Fatalf("%s must be writable: %v", f, err)
+		}
 	}
 }

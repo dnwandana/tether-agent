@@ -808,14 +808,5 @@ func approvalWait(timeoutS int) time.Duration {
 // NewRedactor returns a redactor that masks the .env values and the values of the secret
 // variables in the process environment.
 func NewRedactor(dotenv map[string]string) *security.Redactor {
-	var vals []string
-	for _, v := range dotenv {
-		vals = append(vals, v)
-	}
-	for _, kv := range os.Environ() {
-		if name, v, ok := strings.Cut(kv, "="); ok && security.IsSecretName(name, dotenv) {
-			vals = append(vals, v)
-		}
-	}
-	return security.NewRedactor(vals)
+	return security.NewRedactor(security.KnownSecretValues(dotenv, os.Environ()))
 }

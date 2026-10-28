@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -130,6 +131,49 @@ func IsSecretName(name string, dotenv map[string]string) bool {
 		strings.HasSuffix(u, "_TOKEN") ||
 		strings.HasSuffix(u, "_SECRET") ||
 		strings.Contains(u, "PASSWORD")
+}
+
+// KnownSecretValues returns the values that the redactor and the backup mask
+// hide: each dotenv value, and the value of each secret name in environ.
+// environ has the NAME=value format of os.Environ.
+func KnownSecretValues(dotenv map[string]string, environ []string) []string {
+	vals := make([]string, 0, len(dotenv))
+	for _, v := range dotenv {
+		vals = append(vals, v)
+	}
+	for _, kv := range environ {
+		if name, v, ok := strings.Cut(kv, "="); ok && IsSecretName(name, dotenv) {
+			vals = append(vals, v)
+		}
+	}
+	return vals
+}
+
+// KnownSecretNames maps each value of KnownSecretValues to the name of its variable, so a
+// backup can write ${NAME} in place of the value. A .env name wins over an environ name, and
+// the first name in sorted order wins between two .env names. An empty value is not in the map.
+func KnownSecretNames(dotenv map[string]string, environ []string) map[string]string {
+	names := make(map[string]string, len(dotenv))
+	keys := make([]string, 0, len(dotenv))
+	for k := range dotenv {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		if v := dotenv[k]; v != "" {
+			if _, ok := names[v]; !ok {
+				names[v] = k
+			}
+		}
+	}
+	for _, kv := range environ {
+		if name, v, ok := strings.Cut(kv, "="); ok && v != "" && IsSecretName(name, dotenv) {
+			if _, ok := names[v]; !ok {
+				names[v] = name
+			}
+		}
+	}
+	return names
 }
 
 // ChildEnv returns the environment for a child process, as NAME=value

@@ -19,6 +19,11 @@ const skillsDir = "skills"
 // can put a script there.
 const scriptsDir = "scripts"
 
+// backupsDir is the name of the backup archive folder in the data dir. No
+// tool can write in it. A restore of an archive installs its skills and
+// scripts, so an agent must not plant a crafted archive there.
+const backupsDir = "backups"
+
 // maxLinkHops limits the symlinks that realPath follows for one path.
 const maxLinkHops = 40
 
@@ -50,8 +55,10 @@ func ProtectedPaths(dataDir, home string) []string {
 			filepath.Join(dataDir, ".env"),
 			filepath.Join(dataDir, "config.yaml"),
 			filepath.Join(dataDir, "state.db"),
+			filepath.Join(dataDir, "state.db.lock"),
 			filepath.Join(dataDir, skillsDir)+"/",
 			filepath.Join(dataDir, scriptsDir)+"/",
+			filepath.Join(dataDir, backupsDir)+"/",
 		)
 	}
 	return out

@@ -169,6 +169,21 @@ func Mask(token string) string {
 	return string(r[:6]) + "..." + string(r[n-4:])
 }
 
+// RedactExact returns s with only the known secret values masked, so that the
+// backup mask does not change text that only looks like a secret.
+func (r *Redactor) RedactExact(s string) string {
+	if r == nil || r.exact == nil || s == "" {
+		return s
+	}
+	return r.exact.Replace(s)
+}
+
+// LooksLikeSecret reports whether s contains a known vendor key prefix. The
+// warning scan of config.yaml uses it.
+func LooksLikeSecret(s string) bool {
+	return containsAny(s, prefixLiterals) && prefixRe.MatchString(s)
+}
+
 // Redact returns s with the secrets masked. Text with no secrets comes back
 // unchanged.
 func (r *Redactor) Redact(s string) string {
