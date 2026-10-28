@@ -15,8 +15,8 @@ copied from Hermes Agent. These parts include:
   internal/skills/testdata/guard_golden.json, from tools/skills_guard.py).
 - The prompts for child agents, background reviews, and context compaction
   (internal/agent/, internal/ctxmgr/).
-- The Telegram message format, stream, group gate, and media delivery rules
-  (internal/telegram/, from gateway/).
+- The Telegram message format, stream, group gate, incoming media notes, sticker
+  cache, and media delivery rules (internal/telegram/, from gateway/).
 - The fuzzy match of the patch tool (internal/tools/patch.go).
 - Test cases from the Hermes Agent test suite.
 
