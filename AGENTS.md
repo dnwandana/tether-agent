@@ -29,8 +29,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
 ## Architecture
 
 - `cmd/tether/main.go`: `run()` returns an exit code and never calls `os.Exit`, so tests
-  call it directly. The subcommands are `chat` (the default), `gateway`, `setup`, `doctor`,
-  `skills`, `sessions`, `pairing`, `usage`, and `version`.
+  call it directly. The subcommands are `chat`, `gateway`, `setup`, `doctor`, `skills`,
+  `sessions`, `pairing`, `usage`, `update`, `version`, and `help`.
 - `internal/app` is the composition root. `app.New` builds config, DB, providers, tools, MCP,
   and the agent. Only `Options.Gateway` builds the cron scheduler and the background
   `delegate_task` batches. Only the gateway role polls Telegram.

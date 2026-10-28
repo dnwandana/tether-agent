@@ -17,6 +17,8 @@ stop when they are idle. These parts are the browser, the MCP servers, and the m
    install -m 0755 tether ~/.local/bin/tether
    ```
 
+   Run `tether` with no command to see all the commands.
+
 2. Run the setup wizard. The wizard asks for your provider, an optional fallback provider,
    and an optional Telegram bot. It writes `~/.tether/config.yaml` and
    `~/.tether/.env`.
@@ -25,7 +27,8 @@ stop when they are idle. These parts are the browser, the MCP servers, and the m
    tether setup
    ```
 
-3. Run the checks. Each line shows ✓, ⚠, or ✗, and a next action.
+3. Run the checks. Each line shows ✓, ⚠, or ✗, and a next action. It also tells you when a
+   newer release is available.
 
    ```sh
    tether doctor
@@ -45,6 +48,13 @@ stop when they are idle. These parts are the browser, the MCP servers, and the m
 
    ```sh
    tether chat
+   ```
+
+6. Later, get the newest release with `tether update`. Run `tether update --check` to only see
+   if there is one.
+
+   ```sh
+   tether update
    ```
 
 ## Configuration example

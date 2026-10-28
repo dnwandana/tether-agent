@@ -354,3 +354,19 @@ as literal text, for example in a `subprocess` call, needs approval or is blocke
 cannot see a command that the script builds while it runs, for example from parts of a string or
 from decoded data. The tool stubs send their calls through the approval gate and the protected
 path checks. Hide the `code_execution` toolset from a channel when you do not trust its users.
+
+## Self-update
+
+`tether update` replaces the binary with a release from GitHub.
+
+- The command downloads the archive from the GitHub release of the repository over HTTPS.
+- It checks the SHA-256 of the archive against `checksums.txt` from the same release.
+- It runs the new binary one time with `version` and compares the output.
+- It replaces the file with one rename in the folder of the binary.
+- It never reads `config.yaml`, `.env`, or `state.db`.
+- It needs write permission on the folder of the binary. A binary in `/usr/local/bin` needs
+  `sudo tether update`.
+- A running gateway keeps the old code until a restart. The command prints the restart command
+  and does not run it.
+- The checksum file comes from the same release. The check finds a cut-off or a corrupted
+  download. It does not protect against a compromised GitHub account.
