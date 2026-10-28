@@ -8,6 +8,9 @@ import "errors"
 // them.
 func isTerminal(int) bool { return false }
 
+// IsTerminal is always false on this system, because the terminal check is not available.
+func IsTerminal(fd int) bool { return isTerminal(fd) }
+
 // echoOff is not available on this system.
 func echoOff(int) (func() error, error) {
 	return nil, errors.New("setup: hidden input is not available on this system")

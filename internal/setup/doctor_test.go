@@ -455,3 +455,21 @@ func TestTelegramPrivacyMode(t *testing.T) {
 		}
 	}
 }
+
+func TestHostChecksGit(t *testing.T) {
+	cfg := config.Default()
+	d := &Doctor{LookPath: without("git"), Getenv: func(string) string { return "" }}
+	got := find(t, d.HostChecks(&cfg), "git")
+	want := Check{Name: "git", Status: StatusWarn,
+		Detail: "not found, so skills install and update cannot fetch from a git URL",
+		Next:   "install git (apt install git)"}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+
+	d.LookPath = allPrograms
+	got = find(t, d.HostChecks(&cfg), "git")
+	if want := (Check{Name: "git", Status: StatusOK, Detail: "/usr/bin/git"}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}

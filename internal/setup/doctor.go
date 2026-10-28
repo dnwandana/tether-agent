@@ -339,8 +339,8 @@ func (d *Doctor) checkStateDB(ctx context.Context) Check {
 	return c
 }
 
-// HostChecks checks the optional host programs: Chrome, python3, pdftotext, ffmpeg, and the
-// programs of the TTS and STT commands. A missing program is a warning, and the detail
+// HostChecks checks the optional host programs: Chrome, python3, pdftotext, git, ffmpeg, and
+// the programs of the TTS and STT commands. A missing program is a warning, and the detail
 // names the feature that is lost.
 func (d *Doctor) HostChecks(cfg *config.Config) []Check {
 	var out []Check
@@ -358,7 +358,8 @@ func (d *Doctor) HostChecks(cfg *config.Config) []Check {
 	out = append(out,
 		d.program("python3", "execute_code is off", "install python3 (apt install python3)"),
 		d.program("pdftotext", "the agent cannot read the text of PDF files",
-			"install poppler-utils (apt install poppler-utils)"))
+			"install poppler-utils (apt install poppler-utils)"),
+		d.program("git", "skills install and update cannot fetch from a git URL", "install git (apt install git)"))
 
 	ffmpeg := d.program("ffmpeg", "Telegram voice replies go as audio files, and whisper-cli cannot convert voice notes",
 		"install ffmpeg (apt install ffmpeg)")

@@ -4,6 +4,10 @@ package setup
 
 import "golang.org/x/sys/unix"
 
+// IsTerminal reports whether fd is a terminal. Commands outside this package use it to
+// decide whether they can ask a question.
+func IsTerminal(fd int) bool { return isTerminal(fd) }
+
 // isTerminal reports whether fd is a terminal. Only a terminal has termios settings.
 func isTerminal(fd int) bool {
 	_, err := unix.IoctlGetTermios(fd, ioctlGetTermios)
