@@ -1,0 +1,13 @@
+usage: tether doctor [flags]
+
+Check the install. The checks are the config, .env, the providers, Telegram,
+state.db, the host programs, the MCP servers, the free disk space, and the
+newest release. Each line shows ✓, ⚠, or ✗ and the next action. The exit code
+is 1 when a check fails. A running gateway does not stop the checks.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+
+Examples:
+  tether doctor

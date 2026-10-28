@@ -1,0 +1,18 @@
+usage: tether update [flags]
+
+Replace this binary with the newest release from GitHub. The command downloads
+the archive for this platform, checks its SHA-256 against checksums.txt, runs
+the new binary once, and then replaces the old file in one step. A running
+gateway keeps the old version until you restart it.
+
+Flags:
+  --check              Report a newer release. Do not download.
+  --tag vX.Y.Z         Install this release instead of the newest one.
+  --force              Install also when the version is the same or a dev build.
+  --data-dir DIR       The data folder. Used only to find a running gateway.
+
+Examples:
+  tether update --check
+  tether update
+  tether update --tag v0.3.0 --force
+  sudo tether update            # when the binary is in /usr/local/bin

@@ -1,0 +1,17 @@
+usage: tether sessions <command> [flags]
+
+Show the stored sessions, or export one. The command opens only state.db.
+
+Commands:
+  list                 Show the 50 newest sessions.
+  export <id>          Write the messages of a session as JSONL.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+  --out FILE           export only: the output file. The default is
+                       <data dir>/exports/<id>.jsonl.
+
+Examples:
+  tether sessions list
+  tether sessions export 0199e2f6a1b2c4f9a1d --out chat.jsonl

@@ -1,0 +1,21 @@
+usage: tether setup [flags]
+
+Run the interactive setup in five steps:
+  1. The provider.
+  2. An optional fallback provider.
+  3. An optional Telegram bot, with the owner pairing.
+  4. The host programs.
+  5. The systemd unit.
+
+A second run shows the current values as the defaults. Before the setup changes
+config.yaml or .env, it saves a .bak copy.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+  --system             Write a system unit to /etc/systemd/system, not a user
+                       unit. This needs root.
+
+Examples:
+  tether setup
+  sudo tether setup --system

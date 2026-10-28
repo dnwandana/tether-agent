@@ -1,0 +1,12 @@
+usage: tether usage [today|7d|30d] [flags]
+
+Show the calls, the tokens, the speed, and the cost of each model. The default
+range is today. The cost comes from the stored price of each call.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+
+Examples:
+  tether usage
+  tether usage 7d

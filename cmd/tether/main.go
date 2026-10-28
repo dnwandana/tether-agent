@@ -42,11 +42,25 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run executes the subcommand in args and returns the process exit code.
-// It does not call os.Exit, so tests can call it.
+// run executes the subcommand in args and returns the process exit code. Bare tether prints
+// the main help. It does not call os.Exit, so tests can call it.
 func run(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-		return runChat(args, stdout, stderr)
+	// "tether help" goes to runHelp in the switch, because "tether help X" needs it.
+	if len(args) == 0 || args[0] == "-h" || args[0] == "-help" || args[0] == "--help" {
+		fmt.Fprint(stdout, mainHelp(dataDir("")))
+		return 0
+	}
+	if strings.HasPrefix(args[0], "-") {
+		fmt.Fprintf(stderr, "tether: a command is needed\n%s\n", helpPointer)
+		return 2
+	}
+	// The word help counts only directly after the command name. So "tether skills reset
+	// help" still resets a skill with the name help.
+	if len(args) >= 2 && isHelpWord(args[1]) {
+		if _, ok := findHelp(args[0]); ok {
+			fmt.Fprint(stdout, commandHelp(args[0]))
+			return 0
+		}
 	}
 	switch args[0] {
 	case "chat":
@@ -54,8 +68,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "gateway":
 		return runGateway(args[1:], stdout, stderr)
 	case "version":
-		fmt.Fprintf(stdout, "tether %s\n", version)
-		return 0
+		return runVersion(args[1:], stdout, stderr)
 	case "skills":
 		return runSkills(args[1:], stdout, stderr)
 	case "sessions":
@@ -68,39 +81,54 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDoctor(args[1:], stdout, stderr)
 	case "setup":
 		return runSetup(args[1:], stdout, stderr)
+	case "update":
+		return runUpdate(args[1:], stdout, stderr)
+	case "help":
+		return runHelp(args[1:], stdout, stderr)
 	case "gen-tools-doc":
 		// A hidden command for the developers. It does not show in the help text.
 		return runGenToolsDoc(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
+		if s := suggestCommand(args[0]); s != "" {
+			fmt.Fprintf(stderr, "Did you mean %q? ", s)
+		}
+		fmt.Fprintln(stderr, helpPointer)
 		return 2
 	}
+}
+
+// runVersion prints the version of this binary and returns the exit code. It takes no flag
+// and no argument.
+func runVersion(args []string, stdout, stderr io.Writer) int {
+	fl := flag.NewFlagSet("version", flag.ContinueOnError)
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
+	}
+	if len(rest) > 0 {
+		return usageError(stderr, "version", "unexpected argument: "+rest[0])
+	}
+	fmt.Fprintf(stdout, "tether %s\n", version)
+	return 0
 }
 
 // stdin is the input of the chat. Tests replace it.
 var stdin io.Reader = os.Stdin
 
-// chatUsage is the help text of the chat subcommand.
-const chatUsage = `usage: tether [chat] [--data-dir DIR] [--log-stderr] [--log-level LEVEL]
-
-Start the interactive chat. Type /exit or press Ctrl-D to stop.
-`
-
 // runChat starts the interactive CLI chat and returns the exit code. The logs go to
 // <data dir>/logs/tether.log, and never to the terminal unless --log-stderr is given.
 func runChat(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("chat", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	fl.Usage = func() { fmt.Fprint(stderr, chatUsage) }
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
 	logStderr := fl.Bool("log-stderr", false, "write the logs to stderr instead of the log file")
 	logLevel := fl.String("log-level", "", "log level: debug, info, warn, or error (default: log.level)")
-	if err := fl.Parse(args); err != nil {
-		return 2
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
 	}
-	if fl.NArg() > 0 {
-		fl.Usage()
-		return 2
+	if len(rest) > 0 {
+		return usageError(stderr, "chat", "unexpected argument: "+rest[0])
 	}
 	dir := dataDir(*dataFlag)
 	// Ctrl-C does not end the chat here: the CLI handles it. During a turn it stops the
@@ -131,15 +159,6 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// gatewayUsage is the help text of the gateway subcommand.
-const gatewayUsage = `usage: tether gateway [--data-dir DIR] [--log-stderr] [--log-level LEVEL]
-
-Run the Telegram channel and the cron scheduler until SIGINT or SIGTERM. Only one gateway
-can run for a data folder. Use --log-stderr under systemd.
-
-Set TETHER_PPROF to a loopback address, for example 127.0.0.1:6060, to serve net/http/pprof.
-`
-
 // gatewayContext returns the base context of the gateway. Tests replace it to stop the
 // gateway without a signal.
 var gatewayContext = context.Background
@@ -165,20 +184,21 @@ type turnContextSetter interface {
 // telegramBaseURL replaces the Bot API root of the gateway. Tests set it.
 var telegramBaseURL = ""
 
+// doctorReleaseAPI replaces the GitHub API base of the doctor release check. Tests set it.
+var doctorReleaseAPI = ""
+
 // runGateway runs the gateway role and returns the exit code.
 func runGateway(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("gateway", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	fl.Usage = func() { fmt.Fprint(stderr, gatewayUsage) }
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
 	logStderr := fl.Bool("log-stderr", false, "write the logs to stderr instead of the log file")
 	logLevel := fl.String("log-level", "", "log level: debug, info, warn, or error (default: log.level)")
-	if err := fl.Parse(args); err != nil {
-		return 2
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
 	}
-	if fl.NArg() > 0 {
-		fl.Usage()
-		return 2
+	if len(rest) > 0 {
+		return usageError(stderr, "gateway", "unexpected argument: "+rest[0])
 	}
 	dir := dataDir(*dataFlag)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -400,41 +420,28 @@ func dataDir(flagValue string) string {
 	return filepath.Join(home, ".tether")
 }
 
-// skillsUsage is the help text of the skills subcommand.
-const skillsUsage = `usage: tether skills [--data-dir DIR] <command>
-
-Commands:
-  list            Show each skill with its source (local, external, or builtin).
-  reset [name]    Restore a bootstrap skill from the binary. With no name, restore all of them.
-`
-
 // runSkills runs the skills subcommand and returns the exit code.
 func runSkills(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("skills", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	fl.Usage = func() { fmt.Fprint(stderr, skillsUsage) }
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
-	if err := fl.Parse(args); err != nil {
-		return 2
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
 	}
-	rest := fl.Args()
 	if len(rest) == 0 {
-		fl.Usage()
-		return 2
+		return usageError(stderr, "skills", "a command is needed: list or reset")
 	}
 	dir := dataDir(*dataFlag)
 	skillsDir := filepath.Join(dir, "skills")
 	switch rest[0] {
 	case "list":
-		if len(rest) != 1 {
-			fl.Usage()
-			return 2
+		if len(rest) > 1 {
+			return usageError(stderr, "skills", "unexpected argument: "+rest[1])
 		}
 		return skillsList(dir, skillsDir, stdout, stderr)
 	case "reset":
 		if len(rest) > 2 {
-			fl.Usage()
-			return 2
+			return usageError(stderr, "skills", "unexpected argument: "+rest[2])
 		}
 		names := skills.BootstrapNames()
 		if len(rest) == 2 {
@@ -449,9 +456,7 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	default:
-		fmt.Fprintf(stderr, "skills: unknown command: %s\n", rest[0])
-		fl.Usage()
-		return 2
+		return usageError(stderr, "skills", "unknown command: "+rest[0])
 	}
 }
 
@@ -533,37 +538,33 @@ func parseInterleaved(fl *flag.FlagSet, args []string) ([]string, error) {
 // variables in the process environment.
 func newRedactor(dotenv map[string]string) *security.Redactor { return app.NewRedactor(dotenv) }
 
-// sessionsUsage is the help text of the sessions subcommand.
-const sessionsUsage = `usage: tether sessions [--data-dir DIR] <command>
-
-Commands:
-  list                       Show the 50 newest sessions.
-  export <id> [--out FILE]   Write the messages of a session as JSONL.
-                             The default file is <data dir>/exports/<id>.jsonl.
-`
-
 // runSessions runs the sessions subcommand and returns the exit code. It opens state.db
 // and nothing else.
 func runSessions(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("sessions", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	fl.Usage = func() { fmt.Fprint(stderr, sessionsUsage) }
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
 	outFlag := fl.String("out", "", "export file (default: <data dir>/exports/<id>.jsonl)")
-	rest, err := parseInterleaved(fl, args)
-	if err != nil {
-		return 2
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
 	}
 	if len(rest) == 0 {
-		fl.Usage()
-		return 2
+		return usageError(stderr, "sessions", "a command is needed: list or export")
 	}
-	switch {
-	case rest[0] == "list" && len(rest) == 1:
-	case rest[0] == "export" && len(rest) == 2:
+	switch rest[0] {
+	case "list":
+		if len(rest) > 1 {
+			return usageError(stderr, "sessions", "unexpected argument: "+rest[1])
+		}
+	case "export":
+		if len(rest) < 2 {
+			return usageError(stderr, "sessions", "export needs a session id")
+		}
+		if len(rest) > 2 {
+			return usageError(stderr, "sessions", "unexpected argument: "+rest[2])
+		}
 	default:
-		fl.Usage()
-		return 2
+		return usageError(stderr, "sessions", "unknown command: "+rest[0])
 	}
 	dir := dataDir(*dataFlag)
 	dbPath := filepath.Join(dir, "state.db")
@@ -650,15 +651,6 @@ func sessionsExport(ctx context.Context, st *sessions.Store, id, path string) (i
 	return n, nil
 }
 
-// pairingUsage is the help text of the pairing subcommand.
-const pairingUsage = `usage: tether pairing [--data-dir DIR] <command>
-
-Commands:
-  list [platform]                 Show the pending pairing requests and the approved users.
-  approve [platform] <code>       Approve a pairing code. The default platform is telegram.
-  revoke [platform] <user id>     Remove the access of a user. The default platform is telegram.
-`
-
 // defaultPairPlatform is the platform of approve and revoke when the command gives none.
 const defaultPairPlatform = "telegram"
 
@@ -667,31 +659,41 @@ const defaultPairPlatform = "telegram"
 // visible at once.
 func runPairing(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("pairing", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	fl.Usage = func() { fmt.Fprint(stderr, pairingUsage) }
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
-	rest, err := parseInterleaved(fl, args)
-	if err != nil {
-		return 2
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
 	}
 	if len(rest) == 0 {
-		fl.Usage()
-		return 2
+		return usageError(stderr, "pairing", "a command is needed: list, approve, or revoke")
 	}
 	cmd, params := rest[0], rest[1:]
 	platform := defaultPairPlatform
-	switch {
-	case cmd == "list" && len(params) <= 1:
+	switch cmd {
+	case "list":
+		if len(params) > 1 {
+			return usageError(stderr, "pairing", "unexpected argument: "+params[1])
+		}
 		platform = ""
 		if len(params) == 1 {
 			platform = params[0]
 		}
-	case (cmd == "approve" || cmd == "revoke") && len(params) == 1:
-	case (cmd == "approve" || cmd == "revoke") && len(params) == 2:
-		platform, params = params[0], params[1:]
+	case "approve", "revoke":
+		switch len(params) {
+		case 0:
+			what := "a code"
+			if cmd == "revoke" {
+				what = "a user id"
+			}
+			return usageError(stderr, "pairing", cmd+" needs "+what)
+		case 1:
+		case 2:
+			platform, params = params[0], params[1:]
+		default:
+			return usageError(stderr, "pairing", "unexpected argument: "+params[2])
+		}
 	default:
-		fl.Usage()
-		return 2
+		return usageError(stderr, "pairing", "unknown command: "+cmd)
 	}
 	platform = strings.ToLower(strings.TrimSpace(platform))
 	dbPath := filepath.Join(dataDir(*dataFlag), "state.db")
@@ -784,32 +786,25 @@ func pairingRevoke(ctx context.Context, p *telegram.Pairing, platform, userID st
 	}
 }
 
-// usageUsage is the help text of the usage subcommand.
-const usageUsage = `usage: tether usage [--data-dir DIR] [today|7d|30d]
-
-Show the calls, the tokens, the speed, and the cost of each model. The default range is
-today. The cost comes from the stored price of each call.
-`
-
 // runUsage runs the usage subcommand and returns the exit code. It opens state.db and reads
 // the config for the flat-rate providers.
 func runUsage(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("usage", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	fl.Usage = func() { fmt.Fprint(stderr, usageUsage) }
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
-	rest, err := parseInterleaved(fl, args)
-	if err != nil {
-		return 2
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
+	}
+	if len(rest) > 1 {
+		return usageError(stderr, "usage", "unexpected argument: "+rest[1])
 	}
 	scope := "today"
 	if len(rest) == 1 {
 		scope = rest[0]
 	}
 	since, ok := obs.UsageSince(scope, time.Now())
-	if len(rest) > 1 || !ok {
-		fl.Usage()
-		return 2
+	if !ok {
+		return usageError(stderr, "usage", "unknown range "+scope+"; use today, 7d, or 30d")
 	}
 	dir := dataDir(*dataFlag)
 	dbPath := filepath.Join(dir, "state.db")
@@ -843,28 +838,19 @@ func runUsage(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// doctorUsage is the help text of the doctor subcommand.
-const doctorUsage = `usage: tether doctor [--data-dir DIR]
-
-Check the config, .env, the providers, Telegram, state.db, the host programs, the MCP
-servers, and the free disk space. Each line shows ✓, ⚠, or ✗ and the next action. The
-exit code is 1 when a check fails. A running gateway does not stop the checks.
-`
-
 // runDoctor runs the doctor checks and returns the exit code.
 func runDoctor(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	fl.Usage = func() { fmt.Fprint(stderr, doctorUsage) }
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
-	if err := fl.Parse(args); err != nil {
-		return 2
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
 	}
-	if fl.NArg() > 0 {
-		fl.Usage()
-		return 2
+	if len(rest) > 0 {
+		return usageError(stderr, "doctor", "unexpected argument: "+rest[0])
 	}
-	d := &setup.Doctor{DataDir: dataDir(*dataFlag), HC: &http.Client{}, TelegramBase: telegramBaseURL}
+	d := &setup.Doctor{DataDir: dataDir(*dataFlag), HC: &http.Client{}, TelegramBase: telegramBaseURL,
+		Version: version, ReleaseAPI: doctorReleaseAPI}
 	checks := d.Run(context.Background())
 	fmt.Fprint(stdout, setup.Format(checks))
 	if setup.HasFail(checks) {
@@ -873,29 +859,17 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// setupUsage is the help text of the setup subcommand.
-const setupUsage = `usage: tether setup [--data-dir DIR] [--system]
-
-Run the interactive setup: the provider, the fallback provider, Telegram with the owner
-pairing, the host programs, and the systemd unit. A second run shows the current values as
-the defaults. Before the setup changes config.yaml or .env, it saves a .bak copy.
-
-With --system, step 5 writes a system unit to /etc/systemd/system. This needs root.
-`
-
 // runSetup runs the setup wizard and returns the exit code.
 func runSetup(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("setup", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	fl.Usage = func() { fmt.Fprint(stderr, setupUsage) }
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
 	system := fl.Bool("system", false, "write a system unit instead of a user unit (needs root)")
-	if err := fl.Parse(args); err != nil {
-		return 2
+	rest, code, ok := parseCommand(fl, args, stdout, stderr)
+	if !ok {
+		return code
 	}
-	if fl.NArg() > 0 {
-		fl.Usage()
-		return 2
+	if len(rest) > 0 {
+		return usageError(stderr, "setup", "unexpected argument: "+rest[0])
 	}
 	dir, err := filepath.Abs(dataDir(*dataFlag))
 	if err != nil {

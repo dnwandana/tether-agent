@@ -1,0 +1,18 @@
+usage: tether chat [flags]
+
+Start the interactive chat in this terminal. Type /exit or press Ctrl-D to stop.
+Ctrl-C stops the running turn. At the prompt, Ctrl-C ends the chat. A chat can
+run next to the gateway.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+  --log-stderr         Write the logs to stderr instead of logs/tether.log.
+  --log-level LEVEL    debug, info, warn, or error. The default is log.level.
+
+Commands in the chat:
+{{chat-commands}}
+
+Examples:
+  tether chat
+  tether chat --log-stderr --log-level debug

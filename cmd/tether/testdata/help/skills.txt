@@ -1,0 +1,17 @@
+usage: tether skills <command> [flags]
+
+Show the skills, or restore the bootstrap skills that come in the binary.
+
+Commands:
+  list                 Show each skill with its source: local, external, or
+                       builtin.
+  reset [name]         Restore a bootstrap skill from the binary. With no name,
+                       restore all of them.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+
+Examples:
+  tether skills list
+  tether skills reset tether-memory

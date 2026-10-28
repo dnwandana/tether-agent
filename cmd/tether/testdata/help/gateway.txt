@@ -1,0 +1,24 @@
+usage: tether gateway [flags]
+
+Run the Telegram channel and the cron scheduler until SIGINT or SIGTERM. Only
+one gateway can run for a data folder. A chat can run next to it.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+  --log-stderr         Write the logs to stderr instead of logs/tether.log.
+                       Use it under systemd.
+  --log-level LEVEL    debug, info, warn, or error. The default is log.level.
+
+Environment:
+  TETHER_PPROF         A loopback address, for example 127.0.0.1:6060. The
+                       gateway serves net/http/pprof on it.
+
+Run it as a systemd user service (Linux):
+  systemctl --user daemon-reload
+  systemctl --user enable --now tether
+  loginctl enable-linger $USER
+
+Examples:
+  tether gateway
+  tether gateway --log-stderr --log-level debug

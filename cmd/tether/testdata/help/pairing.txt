@@ -1,0 +1,18 @@
+usage: tether pairing <command> [flags]
+
+Control who can talk to the bot. A new user sends a message to the bot and gets
+a pairing code. You approve the code here. The default platform is telegram.
+
+Commands:
+  list [platform]              Show the pending requests and the approved users.
+  approve [platform] <code>    Approve a pairing code.
+  revoke [platform] <user id>  Remove the access of a user.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+
+Examples:
+  tether pairing list
+  tether pairing approve K7Q2MXRP
+  tether pairing revoke 123456789

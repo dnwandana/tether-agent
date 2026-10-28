@@ -34,12 +34,17 @@ func TestVersionSubcommand(t *testing.T) {
 }
 
 func TestUnknownSubcommandFails(t *testing.T) {
-	var out, errb bytes.Buffer
-	if run([]string{"nope"}, &out, &errb) != 2 {
-		t.Fatal("want exit 2")
-	}
-	if !strings.Contains(errb.String(), "unknown command: nope") {
-		t.Fatal(errb.String())
+	for in, want := range map[string]string{
+		"doctr": "unknown command: doctr\nDid you mean \"doctor\"? Run \"tether help\" for the commands.\n",
+		"zzz":   "unknown command: zzz\nRun \"tether help\" for the commands.\n",
+	} {
+		var out, errb bytes.Buffer
+		if code := run([]string{in}, &out, &errb); code != 2 {
+			t.Fatalf("%s: exit %d", in, code)
+		}
+		if errb.String() != want || out.Len() != 0 {
+			t.Fatalf("%s: stderr %q, stdout %q", in, errb.String(), out.String())
+		}
 	}
 }
 
@@ -292,10 +297,10 @@ func TestChatSubcommand(t *testing.T) {
 		t.Fatal(key, sess, err)
 	}
 
-	// --log-stderr sends the logs to stderr, and no args also start the chat.
+	// --log-stderr sends the logs to stderr.
 	stdin = strings.NewReader("again\n")
 	out.Reset()
-	if code := run([]string{"--data-dir", dir, "--log-stderr"}, &out, &errb); code != 0 {
+	if code := run([]string{"chat", "--data-dir", dir, "--log-stderr"}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 	if !strings.Contains(errb.String(), "turn end") {
@@ -621,6 +626,15 @@ func TestGatewayStartsTelegramAndCron(t *testing.T) {
 
 func TestDoctorExitCode(t *testing.T) {
 	t.Setenv("TETHER_HOME", t.TempDir())
+	// A fake GitHub API: the test binary is a dev build, so the release check sends no request.
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"tag_name":"v0.9.0","published_at":"2026-10-20T10:00:00Z","assets":[]}`))
+	}))
+	defer gh.Close()
+	oldAPI := doctorReleaseAPI
+	doctorReleaseAPI = gh.URL
+	t.Cleanup(func() { doctorReleaseAPI = oldAPI })
 	// No config: providers.primary is missing, so the config check fails.
 	dir := t.TempDir()
 	var out, errb bytes.Buffer
@@ -628,6 +642,9 @@ func TestDoctorExitCode(t *testing.T) {
 		t.Fatalf("exit %d: %s %s", code, out.String(), errb.String())
 	}
 	if !strings.Contains(out.String(), "✗ config") || !strings.Contains(out.String(), "→ run tether setup") {
+		t.Fatal(out.String())
+	}
+	if !strings.Contains(out.String(), "✓ release: dev build; the release check is off") {
 		t.Fatal(out.String())
 	}
 
@@ -810,5 +827,78 @@ func TestGatewayFirstSignalRestoresTheDefault(t *testing.T) {
 	}
 	if <-stoppedAtEnd {
 		t.Fatal("the gateway must restore the default signal action at the first signal, so that a second signal ends the process")
+	}
+}
+
+func TestCommandBadUsage(t *testing.T) {
+	t.Setenv("TETHER_HOME", t.TempDir())
+	for _, name := range []string{"chat", "gateway", "doctor", "setup", "version"} {
+		h, _ := findHelp(name)
+		for _, c := range []struct{ arg, reason string }{
+			{"--verbose", "unknown flag --verbose"},
+			{"extra", "unexpected argument: extra"},
+		} {
+			var out, errb bytes.Buffer
+			want := name + ": " + c.reason + "\nusage: " + h.Usage + "\nRun \"tether " + name + " help\" for the details.\n"
+			if code := run([]string{name, c.arg}, &out, &errb); code != 2 || errb.String() != want {
+				t.Errorf("%s %s: exit %d %q", name, c.arg, code, errb.String())
+			}
+		}
+	}
+}
+
+func TestHelpFlagAfterOtherFlags(t *testing.T) {
+	dir := t.TempDir()
+	var out, errb bytes.Buffer
+	if code := run([]string{"chat", "--data-dir", dir, "--help"}, &out, &errb); code != 0 || out.String() != commandHelp("chat") {
+		t.Fatalf("exit %d %q", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.db")); err == nil {
+		t.Fatal("help must not start the chat")
+	}
+}
+
+func TestVersionTakesNoDataDir(t *testing.T) {
+	var out, errb bytes.Buffer
+	code := run([]string{"version", "--data-dir", "d"}, &out, &errb)
+	first, _, _ := strings.Cut(errb.String(), "\n")
+	if code != 2 || first != "version: unknown flag --data-dir" {
+		t.Fatalf("exit %d %q", code, errb.String())
+	}
+	if out.Len() != 0 {
+		t.Fatalf("stdout %q", out.String())
+	}
+}
+
+func TestSubcommandBadUsage(t *testing.T) {
+	t.Setenv("TETHER_HOME", t.TempDir())
+	for _, c := range []struct {
+		args   []string
+		reason string
+	}{
+		{[]string{"skills"}, "a command is needed: list or reset"},
+		{[]string{"skills", "frob"}, "unknown command: frob"},
+		{[]string{"skills", "list", "x"}, "unexpected argument: x"},
+		{[]string{"skills", "reset", "a", "b"}, "unexpected argument: b"},
+		{[]string{"sessions"}, "a command is needed: list or export"},
+		{[]string{"sessions", "export"}, "export needs a session id"},
+		{[]string{"sessions", "export", "a", "b"}, "unexpected argument: b"},
+		{[]string{"sessions", "frob"}, "unknown command: frob"},
+		{[]string{"pairing"}, "a command is needed: list, approve, or revoke"},
+		{[]string{"pairing", "approve"}, "approve needs a code"},
+		{[]string{"pairing", "revoke"}, "revoke needs a user id"},
+		{[]string{"pairing", "revoke", "a", "b", "c"}, "unexpected argument: c"},
+		{[]string{"pairing", "frob"}, "unknown command: frob"},
+		{[]string{"usage", "90d"}, "unknown range 90d; use today, 7d, or 30d"},
+		{[]string{"usage", "7d", "x"}, "unexpected argument: x"},
+		{[]string{"sessions", "--verbose"}, "unknown flag --verbose"},
+	} {
+		name := c.args[0]
+		h, _ := findHelp(name)
+		want := name + ": " + c.reason + "\nusage: " + h.Usage + "\nRun \"tether " + name + " help\" for the details.\n"
+		var out, errb bytes.Buffer
+		if code := run(c.args, &out, &errb); code != 2 || errb.String() != want {
+			t.Errorf("%v: exit %d %q", c.args, code, errb.String())
+		}
 	}
 }

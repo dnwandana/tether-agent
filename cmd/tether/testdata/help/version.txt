@@ -1,0 +1,6 @@
+usage: tether version
+
+Print the version of this binary.
+
+Examples:
+  tether version

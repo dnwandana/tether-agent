@@ -1,0 +1,40 @@
+Tether Agent: a personal AI agent
+
+Usage:
+  tether <command> [flags]
+
+Start here:
+  setup       Run the setup wizard: provider, Telegram, host programs, systemd.
+  doctor      Check the install. Each line shows ✓, ⚠, or ✗ and the next action.
+
+Run the agent:
+  chat        Start the interactive chat in this terminal.
+  gateway     Run the Telegram channel and the cron scheduler.
+
+Manage data:
+  sessions    List the sessions, or export one as JSONL.
+  skills      List the skills, or restore a bootstrap skill.
+  pairing     Approve or revoke the Telegram users.
+  usage       Show the calls, the tokens, and the cost of each model.
+
+Maintain:
+  update      Replace this binary with the newest release from GitHub.
+  version     Print the version.
+  help        Print this help, or the help of one command.
+
+Flags for most commands:
+  --data-dir DIR    The data folder. The default is TETHER_HOME, then ~/.tether.
+
+Data folder (/home/you/.tether):
+  config.yaml       The settings. See docs/CONFIG.md.
+  .env              The API keys and the bot token.
+  state.db          The sessions, the messages, and the usage.
+  logs/tether.log   The log of chat and gateway.
+
+Environment:
+  TETHER_HOME       The data folder, when --data-dir is not set.
+  TETHER_PPROF      A loopback address for net/http/pprof in the gateway.
+
+Run "tether help <command>" or "tether <command> --help" for the flags
+of a command.
+Docs: https://github.com/dnwandana/tether-agent

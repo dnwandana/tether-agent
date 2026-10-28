@@ -25,7 +25,7 @@ func TestStartupUnder100ms(t *testing.T) {
 	dir := minimalDataDir(t)
 	env := startupEnv(t, dir)
 	for _, args := range [][]string{
-		{"version", "--data-dir", dir},
+		{"version"},
 		{"chat", "--data-dir", dir},
 	} {
 		best := time.Hour

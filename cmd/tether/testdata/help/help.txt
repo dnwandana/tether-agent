@@ -1,0 +1,7 @@
+usage: tether help [command]
+
+Print the main help, or the help of one command.
+
+Examples:
+  tether help
+  tether help update
