@@ -111,6 +111,35 @@ To move Tether Agent to a new host, do these steps:
 Stop the gateway and close `tether chat` before a restore. The restore moves the replaced data
 to `~/.tether/pre-restore-<time>/`.
 
+## Install a skill
+
+A skill is a folder with a `SKILL.md` file. The binary has an index of public skills. Show the
+index, and filter it with a word:
+
+```sh
+tether skills list --available
+tether skills list --available pdf
+```
+
+Install a skill by its name in the index, or from a local folder, a git URL, or a GitHub repo:
+
+```sh
+tether skills install pdf
+tether skills install openai/skills --skill playwright
+tether skills install ./my-skills
+```
+
+The install scans the skill with the skill guard, shows the findings, and asks you to confirm.
+The guard does not catch everything, so read the files of a skill before you use it. The
+install records the skill in `~/.tether/skills/.hub/lock.json`. A remote install needs the `git`
+program. A session that already runs keeps its skill list. Send `/new` to use the new skill.
+
+To see if an installed skill has a newer version at its source, run:
+
+```sh
+tether skills check
+```
+
 ## Architecture
 
 - One binary has two roles: `gateway` runs Telegram and cron, and `chat` runs the CLI.

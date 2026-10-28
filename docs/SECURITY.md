@@ -324,6 +324,40 @@ of groups are exfiltration, injection, obfuscation, and persistence.
   `caution` skill.
 - **Bootstrap skills** are trusted. The guard does not scan them.
 
+### Installed skills
+
+The owner installs a public skill with `tether skills install <source>`. The loader does not scan
+an installed skill again, so the guard scans it once, before the move.
+
+- `tether skills install` and `tether skills update` always scan in strict mode, also when
+  `skills.guard` is `false`. Strict mode does not honor `.skillignore` and `.clawhubignore`, and
+  it scans every text file. The report lists the files that are not text as
+  `not scanned (binary)`.
+- If the skill has more than 1 MB of text, the command refuses it. No flag passes this limit.
+- The trust level comes from the source. A GitHub repo in `TRUSTED_REPOS` (`openai/skills`,
+  `anthropics/skills`, `huggingface/skills`, and `NVIDIA/skills`) is `trusted`. Every other
+  source, a local folder too, is `community`.
+
+The policy for each verdict and trust level:
+
+| Verdict | community | trusted |
+|---|---|---|
+| safe | confirm | confirm |
+| caution | blocked; `--force` passes it to the confirm | confirm |
+| dangerous | blocked; the owner override can pass it | blocked; the owner override can pass it |
+
+- **Owner override:** for a `dangerous` skill, the owner must type the skill name. The owner
+  override works only when stdin and stdout are both terminals. No flag gives the owner override.
+  `--yes` and `--force` never pass a `dangerous` verdict. The lockfile records the owner override.
+- **Hardline rule:** the approval gate blocks `tether skills install`, `tether skills update`, and
+  `tether skills uninstall` from the agent in every approval mode. No cron setting and no "Always"
+  answer allows them. Only the owner runs these commands, in a terminal. `tether skills check` and
+  `tether skills list` are read-only, and the agent can run them.
+- A command that hides the words, for example through a shell variable, can get past the hardline
+  rule. The terminal tool runs commands with no TTY, so the owner override is a second layer.
+- The lockfile is `skills/.hub/lock.json`. It records the source, the commit, the trust level,
+  the verdict, and a content hash for each installed skill.
+
 ### API keys in skills
 
 Do not put an API call with a key in a skill. Use this pattern:

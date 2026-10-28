@@ -18,6 +18,9 @@ copied from Hermes Agent. These parts include:
 - The Telegram message format, stream, group gate, incoming media notes, sticker
   cache, and media delivery rules (internal/telegram/, from gateway/).
 - The fuzzy match of the patch tool (internal/tools/patch.go).
+- The skill install flow, the trust policy, the TRUSTED_REPOS list, the lockfile
+shape, and the install disclaimer text (internal/skills/, from
+tools/skills_hub.py, tools/skills_guard.py, and hermes_cli/skills_hub.py).
 - Test cases from the Hermes Agent test suite.
 
 Comments in the source code that name "Hermes" point to the origin of a rule
