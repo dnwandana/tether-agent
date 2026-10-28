@@ -338,7 +338,8 @@ func (bt *BrowserTools) navigate(ctx context.Context, raw json.RawMessage, env *
 	if text == "" {
 		text = "[the page has no text]"
 	}
-	b.WriteString("\n" + text)
+	b.WriteString("\n")
+	b.WriteString(text)
 	return b.String(), nil
 }
 

@@ -82,6 +82,9 @@ func childSessions(t *testing.T, a *Agent, parentID string) []sessions.Session {
 		}
 		ids = append(ids, id)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	rows.Close()
 	var out []sessions.Session
 	for _, id := range ids {

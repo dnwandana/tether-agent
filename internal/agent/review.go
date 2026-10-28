@@ -674,15 +674,15 @@ func (a *Agent) goReview(ctx context.Context, f func(context.Context)) {
 // false at the timeout. Cancel Agent.Background first, else the running reviews go on.
 func (a *Agent) WaitReviews(timeout time.Duration) bool {
 	// A goReview that passed its check under the lock has called reviewWG.Add before
-	// this point.
-	a.reviewMu.Lock()
-	//lint:ignore SA2001 The empty critical section orders WaitReviews after each goReview.
-	a.reviewMu.Unlock()
+	// this point, so reviewWG.Wait starts under the lock and never runs before that
+	// reviewWG.Add.
 	done := make(chan struct{})
+	a.reviewMu.Lock()
 	go func() {
 		a.reviewWG.Wait()
 		close(done)
 	}()
+	a.reviewMu.Unlock()
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 	select {

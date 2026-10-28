@@ -506,10 +506,12 @@ func fnmatch(pattern, name string) bool {
 			set = strings.TrimPrefix(set, "!")
 			set = strings.ReplaceAll(set, `\`, `\\`)
 			if neg {
-				b.WriteString("[^" + set + "]")
+				b.WriteString("[^")
 			} else {
-				b.WriteString("[" + set + "]")
+				b.WriteString("[")
 			}
+			b.WriteString(set)
+			b.WriteString("]")
 			i = j
 		default:
 			b.WriteString(regexp.QuoteMeta(string(c)))

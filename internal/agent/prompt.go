@@ -66,7 +66,10 @@ func BuildSystemPrompt(in PromptInput) string {
 		var b strings.Builder
 		b.WriteString("## SKILLS")
 		for _, sk := range in.SkillsIndex {
-			b.WriteString("\n- " + oneLine(sk.Name) + ": " + capRunes(oneLine(sk.Description), skillDescMax))
+			b.WriteString("\n- ")
+			b.WriteString(oneLine(sk.Name))
+			b.WriteString(": ")
+			b.WriteString(capRunes(oneLine(sk.Description), skillDescMax))
 		}
 		parts = append(parts, b.String())
 	}
@@ -74,7 +77,8 @@ func BuildSystemPrompt(in PromptInput) string {
 		var b strings.Builder
 		b.WriteString("## TOOL NOTES")
 		for _, n := range in.ToolNotes {
-			b.WriteString("\n- " + n)
+			b.WriteString("\n- ")
+			b.WriteString(n)
 		}
 		parts = append(parts, b.String())
 	}
@@ -86,18 +90,23 @@ func BuildSystemPrompt(in PromptInput) string {
 // directory, the channel, and the chat.
 func contextSection(in PromptInput) string {
 	var b strings.Builder
-	b.WriteString("## CONTEXT\n- Date and time: " + in.Now.Format(promptTimeFormat))
+	b.WriteString("## CONTEXT\n- Date and time: ")
+	b.WriteString(in.Now.Format(promptTimeFormat))
 	if in.TZ != "" {
-		b.WriteString("\n- Time zone: " + in.TZ)
+		b.WriteString("\n- Time zone: ")
+		b.WriteString(in.TZ)
 	}
 	if in.WorkDir != "" {
-		b.WriteString("\n- Working directory: " + in.WorkDir)
+		b.WriteString("\n- Working directory: ")
+		b.WriteString(in.WorkDir)
 	}
 	if in.Channel != "" {
-		b.WriteString("\n- Channel: " + in.Channel)
+		b.WriteString("\n- Channel: ")
+		b.WriteString(in.Channel)
 	}
 	if in.ChatInfo != "" {
-		b.WriteString("\n- Chat: " + in.ChatInfo)
+		b.WriteString("\n- Chat: ")
+		b.WriteString(in.ChatInfo)
 	}
 	return b.String()
 }

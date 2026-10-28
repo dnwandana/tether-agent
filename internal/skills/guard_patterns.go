@@ -273,7 +273,9 @@ func compilePy(src string) *regexp.Regexp {
 			case inClass:
 				b.WriteString(set)
 			default:
-				b.WriteString("[" + set + "]")
+				b.WriteString("[")
+				b.WriteString(set)
+				b.WriteString("]")
 			}
 		case c == '[' && !inClass:
 			inClass = true

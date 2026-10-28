@@ -163,15 +163,15 @@ func (b *Batches) finish(id, status string, results []ChildResult) {
 // Wait waits until every batch goroutine returns, or until timeout. It returns false at
 // the timeout. Cancel Batches.Ctx first, else the running children go on.
 func (b *Batches) Wait(timeout time.Duration) bool {
-	// A Start that passed its check under the lock has called wg.Add before this point.
-	b.mu.Lock()
-	//lint:ignore SA2001 The empty critical section orders Wait after each Start.
-	b.mu.Unlock()
+	// A Start that passed its check under the lock has called wg.Add before this point,
+	// so wg.Wait starts under the lock and never runs before that wg.Add.
 	done := make(chan struct{})
+	b.mu.Lock()
 	go func() {
 		b.wg.Wait()
 		close(done)
 	}()
+	b.mu.Unlock()
 	t := time.NewTimer(timeout)
 	defer t.Stop()
 	select {

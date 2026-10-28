@@ -218,9 +218,13 @@ func (p *MediaPolicy) ExtractMedia(text string) (clean string, files []OutFile) 
 			case err == nil:
 				add(path)
 			case errors.Is(err, ErrMediaBlocked):
-				b.WriteString("[blocked file: " + t.path + "]")
+				b.WriteString("[blocked file: ")
+				b.WriteString(t.path)
+				b.WriteString("]")
 			default:
-				b.WriteString("[missing file: " + t.path + "]")
+				b.WriteString("[missing file: ")
+				b.WriteString(t.path)
+				b.WriteString("]")
 			}
 		}
 		b.WriteString(clean[last:])
