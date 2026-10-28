@@ -68,8 +68,18 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
 - A new config key goes into the structs and `Default()` in `internal/config/config.go`. Add
   its row to `docs/CONFIG.md`. `internal/config/docs_test.go` compares each yaml key and its
   default with that table.
-- Tests reset global state: `security.AddProtectedPathPatterns(nil)` and the command table of
-  `gateway.Register`.
+- A slash command replies with a `gateway.Reply` through `CommandCtx.send`. The text is common
+  Markdown. Do these steps:
+  1. Escape user text, for example a title, a model name, or an error, with
+     `gateway.EscapeMarkdown`. Keep `markdownEscapes` in `internal/gateway/markdown.go` and
+     `mdEscapes` in `internal/telegram/format.go` the same.
+  2. Check `c.interactive()`. The CLI shows no buttons, so give it a line with the command to
+     send.
+  3. Keep a button action short. Telegram callback data has a limit of 64 bytes, and
+     `encodeCmd` cuts a longer action. A tap runs the action as a typed command through
+     `Gateway.Submit`.
+- Tests reset global state: `security.AddProtectedPathPatterns(nil)`, the command table of
+  `gateway.Register`, and `gateway.pickTip` and `gateway.nowFunc`.
 - `internal/skills/testdata/guard_golden.json` is the output of the Hermes threat patterns.
   No tool regenerates it.
 

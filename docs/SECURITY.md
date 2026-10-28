@@ -229,6 +229,17 @@ When no allowlist is set and `allow_all_users` is `false`, the bot permits nobod
 - In a direct message, `telegram.unauthorized_dm_behavior` sets the result. The default is
   `ignore` when an allowlist is set, else `pair`.
 
+### Command buttons
+
+- A button of a command reply works only for the user who sent the command. The callback data
+  holds the Telegram user ID of that user. Another user gets `⛔ This button is for another user.`
+- A tap passes the same allowlist checks as a message. A user who fails them gets
+  `⛔ Only the owner can answer this prompt.`
+- A tap runs the command through the same queue as a typed command, so a busy session refuses
+  the same commands.
+- A tap with data that is not a command gets `⚠️ This button is too old. Send the command again.`
+  A tap never starts a model turn.
+
 ### Pairing codes
 
 In pair mode, the bot replies with a pairing code. The owner approves the code on the host:
