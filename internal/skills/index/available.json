@@ -1,0 +1,530 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "agents-sdk",
+      "description": "Build, debug, or review Cloudflare Agents SDK applications using the agents package.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/agents-sdk",
+      "ref": ""
+    },
+    {
+      "name": "algorithmic-art",
+      "description": "Creating algorithmic art using p5.js with seeded randomness and interactive parameter exploration. Use this when users request creating art using code, generative art, algorithmic art, flow fields, or particle systems. Create original algorithmic art rather than copying existing artists' work to avoid copyright violations.",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/algorithmic-art",
+      "ref": ""
+    },
+    {
+      "name": "brand-guidelines",
+      "description": "Applies Anthropic's official brand colors and typography to any sort of artifact that may benefit from having Anthropic's look-and-feel. Use it when brand colors or style guidelines, visual formatting, or company design standards apply.",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/brand-guidelines",
+      "ref": ""
+    },
+    {
+      "name": "cloudflare-email-service",
+      "description": "Implement or troubleshoot Cloudflare Email Sending and Email Routing integrations and their delivery configuration.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/cloudflare-email-service",
+      "ref": ""
+    },
+    {
+      "name": "code-review",
+      "description": "Review the changes since a fixed point (commit, branch, tag, or merge-base) along two axes: Standards (does the code follow this repo's documented coding standards?) and Spec (does the code match what the originating issue/spec asked for?). Runs both reviews in parallel sub-agents and reports them side by side. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to \"review since X\".",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/code-review",
+      "ref": ""
+    },
+    {
+      "name": "codebase-design",
+      "description": "Shared vocabulary for designing deep modules. Use when the user wants to design or improve a module's interface, find deepening opportunities, decide where a seam goes, make code more testable or AI-navigable, or when another skill needs the deep-module vocabulary.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/codebase-design",
+      "ref": ""
+    },
+    {
+      "name": "diagnosing-bugs",
+      "description": "Diagnosis loop for hard bugs and performance regressions. Use when the user says \"diagnose\"/\"debug this\", or reports something broken/throwing/failing/slow.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/diagnosing-bugs",
+      "ref": ""
+    },
+    {
+      "name": "dispatching-parallel-agents",
+      "description": "Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/dispatching-parallel-agents",
+      "ref": ""
+    },
+    {
+      "name": "doc-coauthoring",
+      "description": "Guide users through a structured workflow for co-authoring documentation. Use when user wants to write documentation, proposals, technical specs, decision docs, or similar structured content. This workflow helps users efficiently transfer context, refine content through iteration, and verify the doc works for readers. Trigger when user mentions writing docs, creating proposals, drafting specs, or similar documentation tasks.",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/doc-coauthoring",
+      "ref": ""
+    },
+    {
+      "name": "domain-modeling",
+      "description": "Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a GLOSSARY.md, or recording or editing an ADR.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/domain-modeling",
+      "ref": ""
+    },
+    {
+      "name": "executing-plans",
+      "description": "Use when executing an implementation plan in the current session as the implementer yourself — your human partner chose inline execution, or no subagent tool is available",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/executing-plans",
+      "ref": ""
+    },
+    {
+      "name": "figma",
+      "description": "Bring Figma into a HyperFrames video - rendered assets, brand tokens, components, storyboard frames as reconstructed motion (frames read as states, not slides), shaders and connector-assisted motion. Use when the person pastes a figma.com link or asks to use a Figma design, frame, logo or brand.",
+      "url": "https://github.com/heygen-com/hyperframes",
+      "path": "skills/figma",
+      "ref": ""
+    },
+    {
+      "name": "finishing-a-development-branch",
+      "description": "Use when implementation is complete, all tests pass, and you need to decide how to integrate the work",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/finishing-a-development-branch",
+      "ref": ""
+    },
+    {
+      "name": "frontend-design",
+      "description": "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one. Helps with aesthetic direction, typography, and making choices that don't read as templated defaults.",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/frontend-design",
+      "ref": ""
+    },
+    {
+      "name": "gateway-workers",
+      "description": "Build, debug, or review Cloudflare Workers invoked by the Forward action in Gateway HTTP policies, including the GatewayMiddleware entrypoint, Gateway types, context, and continuation.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/gateway-workers",
+      "ref": ""
+    },
+    {
+      "name": "gh-address-comments",
+      "description": "Help address review/issue comments on the open GitHub PR for the current branch using gh CLI; verify gh auth first and prompt the user to authenticate if not logged in.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/gh-address-comments",
+      "ref": ""
+    },
+    {
+      "name": "gh-fix-ci",
+      "description": "Use when a user asks to debug or fix failing GitHub PR checks that run in GitHub Actions; use `gh` to inspect checks and logs, summarize failure context, draft a fix plan, and implement only after explicit approval. Treat external providers (for example Buildkite) as out of scope and report only the details URL.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/gh-fix-ci",
+      "ref": ""
+    },
+    {
+      "name": "grill-me",
+      "description": "A relentless interview to sharpen a plan or design.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/grill-me",
+      "ref": ""
+    },
+    {
+      "name": "grill-with-docs",
+      "description": "A relentless interview to sharpen a plan or design, which also creates docs (ADR's and glossary) as we go.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/grill-with-docs",
+      "ref": ""
+    },
+    {
+      "name": "grilling",
+      "description": "Grill the user relentlessly about a plan, decision, or idea. Use when the user wants to stress-test their thinking, or uses any 'grill' trigger phrases.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/grilling",
+      "ref": ""
+    },
+    {
+      "name": "handoff",
+      "description": "Compact the current conversation into a handoff document for another agent to pick up.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/handoff",
+      "ref": ""
+    },
+    {
+      "name": "hyperframes-registry",
+      "description": "About 450 ready-made HyperFrames blocks and components installed as editable source - transitions, overlays, titles, kinetic type, captions, charts, map overlays, 3D, camera moves. Use it before hand-building any named visual (CRT scanlines, glitch, film grain, a chart); also for hyperframes add and catalog.",
+      "url": "https://github.com/heygen-com/hyperframes",
+      "path": "skills/hyperframes-registry",
+      "ref": ""
+    },
+    {
+      "name": "implement",
+      "description": "Implement a piece of work based on a spec or set of tickets.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/implement",
+      "ref": ""
+    },
+    {
+      "name": "implement-spec",
+      "description": "Implement the result of /to-spec and /to-tickets in code.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/implement-spec",
+      "ref": ""
+    },
+    {
+      "name": "improve-codebase-architecture",
+      "description": "Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/improve-codebase-architecture",
+      "ref": ""
+    },
+    {
+      "name": "internal-comms",
+      "description": "A set of resources to help me write all kinds of internal communications, using the formats that my company likes to use. Claude should use this skill whenever asked to write some sort of internal communications (status reports, leadership updates, 3P updates, company newsletters, FAQs, incident reports, project updates, etc.).",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/internal-comms",
+      "ref": ""
+    },
+    {
+      "name": "jupyter-notebook",
+      "description": "Use when the user asks to create, scaffold, or edit Jupyter notebooks (`.ipynb`) for experiments, explorations, or tutorials; prefer the bundled templates and run the helper script `new_notebook.py` to generate a clean starting notebook.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/jupyter-notebook",
+      "ref": ""
+    },
+    {
+      "name": "k2",
+      "description": "Build and troubleshoot Cloudflare K2 or K2 Streams durable logs. Use for stream setup, producing from Workers or HTTP, configuring retention and inputs, and consuming through subscriptions.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/k2",
+      "ref": ""
+    },
+    {
+      "name": "linear",
+      "description": "Manage issues, projects & team workflows in Linear. Use when the user wants to read, create or updates tickets in Linear.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/linear",
+      "ref": ""
+    },
+    {
+      "name": "netlify-deploy",
+      "description": "Deploy web projects to Netlify using the Netlify CLI (`npx netlify`). Use when the user asks to deploy, host, publish, or link a site/repo on Netlify, including preview and production deploys.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/netlify-deploy",
+      "ref": ""
+    },
+    {
+      "name": "nextjs-on-cloudflare",
+      "description": "Build, migrate, and deploy Next.js apps on Cloudflare Workers with vinext. Use when starting a Next.js project on Cloudflare, moving an existing app to Workers, choosing between vinext and OpenNext, or setting up vinext for Workers. For setup, migration, or deployment, install vinext's upstream skills with `npx skills add cloudflare/vinext` if missing, then read and follow the applicable skill and docs.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/nextjs-on-cloudflare",
+      "ref": ""
+    },
+    {
+      "name": "notion-research-documentation",
+      "description": "Research across Notion and synthesize into structured documentation; use when gathering info from multiple Notion sources to produce briefs, comparisons, or reports with citations.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/notion-research-documentation",
+      "ref": ""
+    },
+    {
+      "name": "pdf",
+      "description": "Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting text/tables from PDFs, combining or merging multiple PDFs into one, splitting PDFs apart, rotating pages, adding watermarks, creating new PDFs, filling PDF forms, encrypting/decrypting PDFs, extracting images, and OCR on scanned PDFs to make them searchable. If the user mentions a .pdf file or asks to produce one, use this skill.",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/pdf",
+      "ref": ""
+    },
+    {
+      "name": "playwright",
+      "description": "Use when the task requires automating a real browser from the terminal (navigation, form filling, snapshots, screenshots, data extraction, UI-flow debugging) via `playwright-cli` or the bundled wrapper script.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/playwright",
+      "ref": ""
+    },
+    {
+      "name": "pr",
+      "description": "Use when writing a PR body.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/pr",
+      "ref": ""
+    },
+    {
+      "name": "prototype",
+      "description": "Build a throwaway prototype to answer a design question. Use when the user wants to sanity-check whether a state model or logic feels right, or explore what a UI should look like.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/prototype",
+      "ref": ""
+    },
+    {
+      "name": "receiving-code-review",
+      "description": "Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/receiving-code-review",
+      "ref": ""
+    },
+    {
+      "name": "remotion-captions",
+      "description": "Transcribing, displaying and animating captions",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-captions",
+      "ref": ""
+    },
+    {
+      "name": "remotion-create",
+      "description": "Create a new Remotion video",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-create",
+      "ref": ""
+    },
+    {
+      "name": "remotion-docs",
+      "description": "Search Remotion documentation",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-docs",
+      "ref": ""
+    },
+    {
+      "name": "remotion-interactivity",
+      "description": "Structure Remotion markup for interactivity",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-interactivity",
+      "ref": ""
+    },
+    {
+      "name": "remotion-maps",
+      "description": "Remotion Map animation knowledge",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-maps",
+      "ref": ""
+    },
+    {
+      "name": "remotion-multimedia",
+      "description": "Interacting with Mediabunny",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-multimedia",
+      "ref": ""
+    },
+    {
+      "name": "remotion-render",
+      "description": "Export a Remotion video",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-render",
+      "ref": ""
+    },
+    {
+      "name": "remotion-saas",
+      "description": "Build an app with Remotion",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-saas",
+      "ref": ""
+    },
+    {
+      "name": "remotion-studio",
+      "description": "Preview a Remotion video",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-studio",
+      "ref": ""
+    },
+    {
+      "name": "remotion-upgrade",
+      "description": "Upgrade Remotion, and related packages",
+      "url": "https://github.com/remotion-dev/skills",
+      "path": "skills/remotion-upgrade",
+      "ref": ""
+    },
+    {
+      "name": "requesting-code-review",
+      "description": "Use when completing tasks, implementing major features, or before merging to verify work meets requirements",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/requesting-code-review",
+      "ref": ""
+    },
+    {
+      "name": "research",
+      "description": "Investigate a question against high-trust primary sources and capture the findings as a Markdown file in the repo. Use when the user wants a topic researched, docs or API facts gathered, or reading legwork delegated to a background agent.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/research",
+      "ref": ""
+    },
+    {
+      "name": "sandbox-next",
+      "description": "Build or maintain Cloudflare Sandbox apps on @cloudflare/sandbox@next (SDK 1.0 preview). Use sandbox-migrate-to-next when porting a stable app.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/sandbox-next",
+      "ref": ""
+    },
+    {
+      "name": "security-ownership-map",
+      "description": "Analyze git repositories to build a security ownership topology (people-to-file), compute bus factor and sensitive-code ownership, and export CSV/JSON for graph databases and visualization. Trigger only when the user explicitly wants a security-oriented ownership or bus-factor analysis grounded in git history (for example: orphaned sensitive code, security maintainers, CODEOWNERS reality checks for risk, sensitive hotspots, or ownership clusters). Do not trigger for general maintainer lists or non-security ownership questions.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/security-ownership-map",
+      "ref": ""
+    },
+    {
+      "name": "security-threat-model",
+      "description": "Repository-grounded threat modeling that enumerates trust boundaries, assets, attacker capabilities, abuse paths, and mitigations, and writes a concise Markdown threat model. Trigger only when the user explicitly asks to threat model a codebase or path, enumerate threats/abuse paths, or perform AppSec threat modeling. Do not trigger for general architecture summaries, code review, or non-security design work.",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/security-threat-model",
+      "ref": ""
+    },
+    {
+      "name": "setup-pre-commit",
+      "description": "Set up Husky pre-commit hooks with lint-staged (Prettier), type checking, and tests in the current repo. Use when user wants to add pre-commit hooks, set up Husky, configure lint-staged, or add commit-time formatting/typechecking/testing.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/misc/setup-pre-commit",
+      "ref": ""
+    },
+    {
+      "name": "slack-gif-creator",
+      "description": "Knowledge and utilities for creating animated GIFs optimized for Slack. Provides constraints, validation tools, and animation concepts. Use when users request animated GIFs for Slack like \"make me a GIF of X doing Y for Slack.\"",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/slack-gif-creator",
+      "ref": ""
+    },
+    {
+      "name": "tdd",
+      "description": "Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions \"red-green-refactor\", or wants integration tests.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/tdd",
+      "ref": ""
+    },
+    {
+      "name": "teach",
+      "description": "Teach the user a new skill or concept, within this workspace.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/teach",
+      "ref": ""
+    },
+    {
+      "name": "test-driven-development",
+      "description": "Use when implementing any feature or bugfix, before writing implementation code",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/test-driven-development",
+      "ref": ""
+    },
+    {
+      "name": "theme-factory",
+      "description": "Toolkit for styling artifacts with a theme. These artifacts can be slides, docs, reportings, HTML landing pages, etc. There are 10 pre-set themes with colors/fonts that you can apply to any artifact that has been creating, or can generate a new theme on-the-fly.",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/theme-factory",
+      "ref": ""
+    },
+    {
+      "name": "to-questionnaire",
+      "description": "Turn a decision you can't fully answer into a questionnaire for someone else to fill in.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/to-questionnaire",
+      "ref": ""
+    },
+    {
+      "name": "to-spec",
+      "description": "Turn the current conversation into a spec and publish it to the project issue tracker: no interview, just synthesis of what you've already discussed.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/to-spec",
+      "ref": ""
+    },
+    {
+      "name": "to-tickets",
+      "description": "Break a plan, spec, or the current conversation into a set of tracer-bullet tickets, each declaring its blocking edges, published to the configured tracker (edges as text in one file per ticket locally, or native blocking links on a real tracker).",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/to-tickets",
+      "ref": ""
+    },
+    {
+      "name": "triage",
+      "description": "Move issues and external PRs through a state machine of triage roles, categorise, verify, grill if needed, and write agent-ready briefs.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/triage",
+      "ref": ""
+    },
+    {
+      "name": "using-git-worktrees",
+      "description": "Use when starting feature work that needs isolation from current workspace or before executing implementation plans - ensures an isolated workspace exists via native tools or git worktree fallback",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/using-git-worktrees",
+      "ref": ""
+    },
+    {
+      "name": "vercel-deploy",
+      "description": "Deploy applications and websites to Vercel. Use when the user requests deployment actions like \"deploy my app\", \"deploy and give me the link\", \"push this live\", or \"create a preview deployment\".",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/vercel-deploy",
+      "ref": ""
+    },
+    {
+      "name": "verification-before-completion",
+      "description": "Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/verification-before-completion",
+      "ref": ""
+    },
+    {
+      "name": "wait-what",
+      "description": "Stop. That last message did not land: re-pitch it.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/productivity/wait-what",
+      "ref": ""
+    },
+    {
+      "name": "wayfinder",
+      "description": "Plan a huge chunk of work (more than one agent session can hold) as a shared map of decision tickets on your issue tracker, and resolve them one at a time until the way to the destination is clear.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/wayfinder",
+      "ref": ""
+    },
+    {
+      "name": "web-perf",
+      "description": "Audit, diagnose, or optimize website loading and interaction performance, Core Web Vitals, and Lighthouse performance scores.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/web-perf",
+      "ref": ""
+    },
+    {
+      "name": "webapp-testing",
+      "description": "Toolkit for interacting with and testing local web applications using Playwright. Supports verifying frontend functionality, debugging UI behavior, capturing browser screenshots, and viewing browser logs.",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills/webapp-testing",
+      "ref": ""
+    },
+    {
+      "name": "wizard",
+      "description": "Generate an interactive bash wizard that walks a human through steps only they can perform. Use when provisioning infrastructure, setting up credentials or CI secrets, walking an unfamiliar third-party dashboard, or running a one-off migration or cutover. Don't invoke this for steps the agent can perform itself.",
+      "url": "https://github.com/mattpocock/skills",
+      "path": "skills/engineering/wizard",
+      "ref": ""
+    },
+    {
+      "name": "workers-best-practices",
+      "description": "Cloudflare Workers best practices for production applications. Use when writing, reviewing, or configuring Workers.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/workers-best-practices",
+      "ref": ""
+    },
+    {
+      "name": "workers-profiling",
+      "description": "Profile or debug CPU usage and memory allocation in deployed Cloudflare Workers and Durable Objects. Then use this information to optimize your code.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/workers-profiling",
+      "ref": ""
+    },
+    {
+      "name": "wrangler",
+      "description": "Run or troubleshoot Wrangler CLI commands in projects that have a wrangler.jsonc, wrangler.json, or wrangler.toml file, including local development, Previews, deployment, and resource management. For new projects and projects without a Wrangler configuration file, use the cf CLI instead.",
+      "url": "https://github.com/cloudflare/skills",
+      "path": "skills/wrangler",
+      "ref": ""
+    },
+    {
+      "name": "writing-plans",
+      "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+      "url": "https://github.com/obra/superpowers",
+      "path": "skills/writing-plans",
+      "ref": ""
+    },
+    {
+      "name": "yeet",
+      "description": "Use only when the user explicitly asks to stage, commit, push, and open a GitHub pull request in one flow using the GitHub CLI (`gh`).",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated/yeet",
+      "ref": ""
+    }
+  ]
+}
