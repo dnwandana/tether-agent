@@ -373,10 +373,11 @@ func TestCLICtrlCAtPromptExits(t *testing.T) {
 func TestCLICommandsSwitchSession(t *testing.T) {
 	d := testDeps(t, &fakeProv{})
 	out := runCLI(t, d, "hello\n/new\nsecond\n/sessions\n/nope\n")
-	if !strings.Contains(out, "New session ") || !strings.Contains(out, "Unknown command /nope") {
+	if !strings.Contains(out, "✨ Starting new session.\nSend a message to begin.\n") ||
+		!strings.Contains(out, "💡 Tip: ") || !strings.Contains(out, "Unknown command /nope") {
 		t.Fatal(out)
 	}
-	list, _ := d.Store.List(context.Background(), "cli:test", 10)
+	list, _, _ := d.Store.ListPage(context.Background(), "cli:test", sessions.ListQuery{Limit: 10})
 	if len(list) != 2 || list[0].MessageCount != 2 || list[1].MessageCount != 2 {
 		t.Fatalf("%+v", list)
 	}
@@ -387,10 +388,44 @@ func TestCLIDeleteAsksToConfirm(t *testing.T) {
 	ctx := context.Background()
 	old, _ := d.Store.Create(ctx, sessions.Session{Key: "cli:test", Source: "cli"})
 	out := runCLI(t, d, "/delete "+old.ID+"\nn\n/delete "+old.ID+"\ny\n")
-	if !strings.Contains(out, "Not deleted.") || !strings.Contains(out, "Deleted session "+old.ID) {
+	if !strings.Contains(out, "Not deleted.") || !strings.Contains(out, "🗑 Deleted \"New session\"") {
 		t.Fatal(out)
 	}
 	if _, err := d.Store.Get(ctx, old.ID); err == nil {
 		t.Fatal("not deleted")
+	}
+}
+
+// registerTestCommand adds cmd to the command table and removes it at the end of the test.
+func registerTestCommand(t *testing.T, cmd Command) {
+	t.Helper()
+	old, had := lookupCommand(cmd.Name)
+	Register(cmd)
+	t.Cleanup(func() {
+		if had {
+			Register(old)
+			return
+		}
+		commandsMu.Lock()
+		delete(commands, cmd.Name)
+		commandsMu.Unlock()
+	})
+}
+
+func TestCLIUnknownCommandPointsToHelp(t *testing.T) {
+	out := runCLI(t, testDeps(t, &fakeProv{}), "/nope\n")
+	if !strings.Contains(out, "Unknown command /nope. Send /help to see the commands.\n") {
+		t.Fatal(out)
+	}
+}
+
+func TestCLIReplyHasNoMarkdownMarkers(t *testing.T) {
+	registerTestCommand(t, Command{Name: "t-md", Run: func(_ context.Context, c *CommandCtx, _ string) error {
+		c.Reply("🧠 **Model: default**")
+		return nil
+	}})
+	out := runCLI(t, testDeps(t, &fakeProv{}), "/t-md\n")
+	if !strings.Contains(out, "🧠 Model: default\n") || strings.Contains(out, "**") {
+		t.Fatal(out)
 	}
 }

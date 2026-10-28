@@ -209,14 +209,14 @@ func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args st
 	ints <-chan os.Signal, turn func(context.Context, *sessions.Session, string, io.Writer) error) (*sessions.Session, error) {
 	cmd, ok := lookupCommand(name)
 	if !ok {
-		fmt.Fprintf(c.Out, "Unknown command /%s. The commands are: %s, /exit.\n", name, commandList())
+		fmt.Fprintf(c.Out, "Unknown command /%s. Send /help to see the commands.\n", name)
 		return sess, nil
 	}
 	cc := &CommandCtx{
 		Deps:    c.deps(),
 		Key:     c.Key,
 		Session: sess,
-		Reply:   func(text string) { fmt.Fprintln(c.Out, text) },
+		Reply:   func(text string) { fmt.Fprintln(c.Out, StripMarkdown(text)) },
 		Confirm: func(prompt string) bool {
 			fmt.Fprintf(c.Out, "%s [y/N] ", prompt)
 			line, err := feed.next(ctx, ints)

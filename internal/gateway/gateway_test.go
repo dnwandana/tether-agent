@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -145,7 +146,7 @@ func TestCommandsBypassAndRouteToCommandTable(t *testing.T) {
 	if err := g.Handle(ctx, inb("k1", "/sessions@tether_bot"), func() Renderer { return r }); err != nil {
 		t.Fatal(err)
 	}
-	if time.Since(start) > 200*time.Millisecond || len(r.acks) != 1 || !strings.Contains(r.acks[0], "Sessions") {
+	if time.Since(start) > 200*time.Millisecond || len(r.acks) != 1 || !strings.Contains(r.acks[0], "Your sessions") {
 		t.Fatal(time.Since(start), r.acks)
 	}
 	if r.done {
@@ -367,7 +368,7 @@ func TestStateCommandsRefusedWhileBusy(t *testing.T) {
 			t.Fatal(cmd, err)
 		}
 		name, _, _ := IsCommand(cmd)
-		want := "⏳ Agent is running — `/" + name + "` can't run mid-turn. Wait for the current response or `/stop` first."
+		want := "⏳ **Busy**\n`/" + name + "` cannot run during a task. Wait for the answer, or stop the task."
 		if len(r.acks) != 1 || r.acks[0] != want {
 			t.Fatalf("%s: %q", cmd, r.acks)
 		}
@@ -382,7 +383,7 @@ func TestStateCommandsRefusedWhileBusy(t *testing.T) {
 	// The read-only commands and the run controls still work.
 	r := &recRenderer{}
 	_ = g.Handle(context.Background(), inb("k", "/sessions"), func() Renderer { return r })
-	if len(r.acks) != 1 || !strings.Contains(r.acks[0], "Sessions") {
+	if len(r.acks) != 1 || !strings.Contains(r.acks[0], "Your sessions") {
 		t.Fatal(r.acks)
 	}
 	_ = f
@@ -436,5 +437,71 @@ func TestStopAfterHandoffFreesTheKey(t *testing.T) {
 	g.mu.Unlock()
 	if busy {
 		t.Fatal("the key is still busy")
+	}
+}
+
+// replyRenderer is a recRenderer that also records the AckReply calls.
+type replyRenderer struct {
+	recRenderer
+	replies []Reply
+}
+
+func (r *replyRenderer) AckReply(rep Reply) {
+	r.mu.Lock()
+	r.replies = append(r.replies, rep)
+	r.mu.Unlock()
+}
+
+// registerReplyCommand registers the test command t-reply. It sends one Reply with one
+// button and records the result of c.interactive() in *interactive.
+func registerReplyCommand(t *testing.T, interactive *bool) {
+	t.Helper()
+	registerTestCommand(t, Command{Name: "t-reply", WhileBusy: true, Run: func(_ context.Context, c *CommandCtx, _ string) error {
+		*interactive = c.interactive()
+		c.send(Reply{Text: "x", Buttons: [][]Button{{{Text: "A", Data: "/a"}}}})
+		return nil
+	}})
+}
+
+func TestRunCommandSendsReplyToReplyRenderer(t *testing.T) {
+	g, _ := gatewayWithSlowProvider(t, 0)
+	var interactive bool
+	registerReplyCommand(t, &interactive)
+	r := &replyRenderer{}
+	if err := g.Handle(context.Background(), inb("k1", "/t-reply"), func() Renderer { return r }); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]Button{{{Text: "A", Data: "/a"}}}
+	if len(r.replies) != 1 || r.replies[0].Text != "x" || !reflect.DeepEqual(r.replies[0].Buttons, want) {
+		t.Fatalf("%+v", r.replies)
+	}
+	if !interactive || len(r.acks) != 0 {
+		t.Fatal(interactive, r.acks)
+	}
+}
+
+func TestRunCommandFallsBackToAckText(t *testing.T) {
+	g, _ := gatewayWithSlowProvider(t, 0)
+	interactive := true
+	registerReplyCommand(t, &interactive)
+	r := &recRenderer{}
+	if err := g.Handle(context.Background(), inb("k1", "/t-reply"), func() Renderer { return r }); err != nil {
+		t.Fatal(err)
+	}
+	if interactive || !reflect.DeepEqual(r.acks, []string{"x"}) {
+		t.Fatal(interactive, r.acks)
+	}
+}
+
+func TestLazyRendererAckReply(t *testing.T) {
+	rr := &replyRenderer{}
+	(&lazyRenderer{new: func() Renderer { return rr }}).AckReply(Reply{Text: "y"})
+	if len(rr.replies) != 1 || rr.replies[0].Text != "y" {
+		t.Fatalf("%+v", rr.replies)
+	}
+	plain := &recRenderer{}
+	(&lazyRenderer{new: func() Renderer { return plain }}).AckReply(Reply{Text: "z"})
+	if !reflect.DeepEqual(plain.acks, []string{"z"}) {
+		t.Fatal(plain.acks)
 	}
 }

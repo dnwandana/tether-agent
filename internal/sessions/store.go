@@ -213,30 +213,86 @@ func (s *Store) Append(ctx context.Context, sessionID string, m provider.Message
 	return id, nil
 }
 
-// List returns the sessions of key that are not archived, with the most recently active
-// session first. It returns at most limit sessions.
-func (s *Store) List(ctx context.Context, key string, limit int) ([]SessionSummary, error) {
+// ListQuery selects one page of the sessions of a key.
+type ListQuery struct {
+	Offset, Limit int
+	Search        string // case-insensitive match on the title; "" for all
+	Exclude       string // a session ID to leave out; "" for none
+	Archived      bool   // true: only archived sessions; false: only not archived
+}
+
+// ListPage returns one page of the sessions of key, with the most recently active session
+// first, and the number of sessions that match q on all pages. A Limit of 0 or less gives
+// all the rows from Offset.
+func (s *Store) ListPage(ctx context.Context, key string, q ListQuery) (page []SessionSummary, total int, err error) {
+	where := `s.session_key = ? AND s.archived = ?`
+	args := []any{key, boolInt(q.Archived)}
+	if q.Exclude != "" {
+		where += ` AND s.id != ?`
+		args = append(args, q.Exclude)
+	}
+	if q.Search != "" {
+		where += ` AND s.title LIKE ? ESCAPE '\' COLLATE NOCASE`
+		args = append(args, "%"+escapeLike(q.Search)+"%")
+	}
+	// The count query is done before the page query starts. The pool has one connection,
+	// so a second query while rows are open deadlocks.
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sessions s WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("sessions: list %s: %w", key, err)
+	}
+	if total == 0 || q.Offset >= total {
+		return nil, total, nil
+	}
+	limit := q.Limit
+	if limit <= 0 {
+		limit = -1 // SQLite reads a negative LIMIT as no limit.
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixCols("s.")+`,
 		(SELECT count(*) FROM messages m WHERE m.session_id = s.id)
-		FROM sessions s WHERE s.session_key = ? AND s.archived = 0
-		ORDER BY s.last_active DESC, s.id DESC LIMIT ?`, key, limit)
+		FROM sessions s WHERE `+where+`
+		ORDER BY s.last_active DESC, s.id DESC LIMIT ? OFFSET ?`, append(args, limit, q.Offset)...)
 	if err != nil {
-		return nil, fmt.Errorf("sessions: list %s: %w", key, err)
+		return nil, 0, fmt.Errorf("sessions: list %s: %w", key, err)
 	}
 	defer rows.Close()
-	var out []SessionSummary
 	for rows.Next() {
 		var count int
 		sess, err := scanSession(rows, &count)
 		if err != nil {
-			return nil, fmt.Errorf("sessions: list %s: %w", key, err)
+			return nil, 0, fmt.Errorf("sessions: list %s: %w", key, err)
 		}
-		out = append(out, SessionSummary{Session: *sess, MessageCount: count})
+		page = append(page, SessionSummary{Session: *sess, MessageCount: count})
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("sessions: list %s: %w", key, err)
+		return nil, 0, fmt.Errorf("sessions: list %s: %w", key, err)
 	}
-	return out, nil
+	return page, total, nil
+}
+
+// escapeLike escapes the LIKE wildcards and the escape character, so that the words match
+// literally.
+func escapeLike(words string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(words)
+}
+
+// CountArchived returns the number of archived sessions of key.
+func (s *Store) CountArchived(ctx context.Context, key string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM sessions
+		WHERE session_key = ? AND archived = 1`, key).Scan(&n); err != nil {
+		return 0, fmt.Errorf("sessions: count the archived sessions of %s: %w", key, err)
+	}
+	return n, nil
+}
+
+// CountMessages returns the number of messages of the session with the id. An unknown
+// id gives 0.
+func (s *Store) CountMessages(ctx context.Context, id string) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE session_id = ?`, id).Scan(&n); err != nil {
+		return 0, fmt.Errorf("sessions: count the messages of %s: %w", id, err)
+	}
+	return n, nil
 }
 
 // Rename sets the title of the session.
@@ -244,9 +300,15 @@ func (s *Store) Rename(ctx context.Context, id, title string) error {
 	return s.setColumn(ctx, id, "title", title)
 }
 
-// Archive hides the session from List. The session and its messages stay.
+// Archive moves the session to the archived list of ListPage. The session and its
+// messages stay.
 func (s *Store) Archive(ctx context.Context, id string) error {
 	return s.setColumn(ctx, id, "archived", 1)
+}
+
+// Unarchive moves the session back from the archived list of ListPage.
+func (s *Store) Unarchive(ctx context.Context, id string) error {
+	return s.setColumn(ctx, id, "archived", 0)
 }
 
 // SetModel sets the model override of the session: "name", "name:model", or "" for none.

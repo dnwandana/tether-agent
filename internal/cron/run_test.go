@@ -312,7 +312,7 @@ func TestFreshSessionPerRun(t *testing.T) {
 			t.Fatal("the second run sees the first run")
 		}
 	}
-	list, err := f.store.List(bg, "cron:j1", 10)
+	list, _, err := f.store.ListPage(bg, "cron:j1", sessions.ListQuery{Limit: 10})
 	if err != nil || len(list) != 2 {
 		t.Fatal(list, err)
 	}
@@ -340,7 +340,7 @@ func TestScriptJobNoModelCall(t *testing.T) {
 	if !o.Send || o.Text != "allsaints: 4120/9000\n" || o.Status != "ok" || o.SessionID != "" || len(f.fp.reqs()) != 0 {
 		t.Fatal(o)
 	}
-	if list, _ := f.store.List(bg, "cron:j1", 10); len(list) != 0 {
+	if list, _, _ := f.store.ListPage(bg, "cron:j1", sessions.ListQuery{Limit: 10}); len(list) != 0 {
 		t.Fatal("a script job creates no session", list)
 	}
 }

@@ -8,17 +8,25 @@ import (
 	"time"
 )
 
-// The busy texts. They are the same as Hermes gateway/run.py.
+// The busy texts of Tether Agent, in Markdown. A busy ack adds the task details line.
 const (
-	SteerAck           = "⏩ Steered into current run (%s). Your message arrives after the next tool call."
-	QueueAck           = "⏳ Queued for the next turn (%s). I'll respond once the current task finishes."
-	StopReply          = "⚡ Stopped. You can continue this session."
-	NoTaskReply        = "No active task to stop."
-	SteerStartingReply = "Agent still starting — /steer queued for the next turn."
+	SteerAck           = "⏩ **Note sent to the task**\nThe agent reads it after the current tool."
+	QueueAck           = "⏳ **Queued**\nI will answer after the current task."
+	StopReply          = "⏹ **Stopped**\nThe session is safe. Send a message to continue."
+	NoTaskReply        = "💤 **No task to stop**"
+	SteerStartingReply = "⏩ **Note saved**\nThe agent did not start yet. It reads the note at the start of the task."
+	steerUsage         = "⏩ **Send a note with the command**\nExample: `/steer also check the error log`"
+	// stopKeepOneReply and stopKeepManyReply are the replies to /stop keep while messages wait.
+	stopKeepOneReply  = "⏹ **Stopped**\nThe waiting message runs now."
+	stopKeepManyReply = "⏹ **Stopped**\nThe waiting messages run now, one at a time."
 )
 
-// BusyHint is added to the first busy ack of a session.
-const BusyHint = "(Send /stop to cancel, or /steer <text> to guide the run.)"
+// stopButton is on the busy replies where no message of the owner waits. It runs /stop.
+var stopButton = []Button{{Text: "⏹ Stop the task", Data: "/stop"}}
+
+// queuedStopButton is on the reply to a message that waits in the queue. It runs /stop keep,
+// so the waiting messages stay and the next one starts.
+var queuedStopButton = []Button{{Text: "⏹ Stop the current task", Data: "/stop keep"}}
 
 const (
 	// busyAckEvery is the minimum time between two busy acks of one session (Hermes).
@@ -26,8 +34,6 @@ const (
 	// debounceWindow and debounceHardCap merge the busy texts of a key (Hermes).
 	debounceWindow  = 350 * time.Millisecond
 	debounceHardCap = time.Second
-	// steerPreviewMax is the number of runes of the /steer text in its reply.
-	steerPreviewMax = 60
 )
 
 func init() {
@@ -36,8 +42,13 @@ func init() {
 }
 
 // cmdStop stops the run of the key. The Stop hook of the channel sends the reply. With no
-// hook, no task runs.
-func cmdStop(_ context.Context, c *CommandCtx, _ string) error {
+// hook, no task runs. "/stop keep" stops only the running task and keeps the queue. Other
+// arguments do not change /stop.
+func cmdStop(_ context.Context, c *CommandCtx, args string) error {
+	if strings.TrimSpace(args) == "keep" {
+		stopKeep(c)
+		return nil
+	}
 	if c.Hooks.Stop == nil {
 		c.reply("%s", NoTaskReply)
 		return nil
@@ -46,11 +57,30 @@ func cmdStop(_ context.Context, c *CommandCtx, _ string) error {
 	return nil
 }
 
+// stopKeep runs the StopKeep hook and replies with the number of the waiting messages.
+func stopKeep(c *CommandCtx) {
+	if c.Hooks.StopKeep == nil {
+		c.reply("%s", NoTaskReply)
+		return
+	}
+	stopped, waiting := c.Hooks.StopKeep()
+	switch {
+	case !stopped:
+		c.reply("%s", NoTaskReply)
+	case waiting == 1:
+		c.reply("%s", stopKeepOneReply)
+	case waiting > 1:
+		c.reply("%s", stopKeepManyReply)
+	default:
+		c.reply("%s", StopReply)
+	}
+}
+
 // cmdSteer gives the text to the Steer hook of the channel, which sends the reply.
 func cmdSteer(_ context.Context, c *CommandCtx, args string) error {
 	text := strings.TrimSpace(args)
 	if text == "" {
-		c.reply("Usage: /steer <text>")
+		c.reply("%s", steerUsage)
 		return nil
 	}
 	if c.Hooks.Steer == nil {
@@ -75,7 +105,7 @@ func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer
 	if !ok {
 		return false
 	}
-	g.ack(rs, in.Key, SteerAck, r)
+	g.ack(rs, in.Key, SteerAck, stopButton, r)
 	return true
 }
 
@@ -108,12 +138,12 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 	ks.queue = append(ks.queue, &pendingTurn{in: in, newRenderer: newRenderer})
 	rs = ks.running
 	g.mu.Unlock()
-	g.ack(rs, in.Key, QueueAck, r)
+	g.ack(rs, in.Key, QueueAck, queuedStopButton, r)
 }
 
 // steerCommand runs /steer text for the key of in. With a run, the text goes into the
 // run. While the agent starts, the text waits for the next turn. With no run, the text
-// runs as a normal message: the returned rest runs its turn.
+// runs as a normal message: the returned rest runs its turn. Its reply has no busy limit.
 func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func() Renderer, r Renderer, text string) (rest func() error) {
 	rest = func() error { return nil }
 	m := in
@@ -126,7 +156,7 @@ func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func
 	}
 	if rs := ks.running; rs != nil && rs.Steer != nil && !rs.ended && !rs.stopped && rs.Steer.Push(text) {
 		g.mu.Unlock()
-		r.Ack(fmt.Sprintf("⏩ Steer queued — arrives after the next tool call: '%s'", preview(text, steerPreviewMax)))
+		ackReply(r, Reply{Text: withDetail(SteerAck, BusyAckDetail(rs, g.clock())), Buttons: [][]Button{stopButton}})
 		return rest
 	}
 	ks.queue = append(ks.queue, &pendingTurn{in: m, newRenderer: newRenderer})
@@ -172,9 +202,42 @@ func (g *Gateway) stopKey(key string) bool {
 	return had
 }
 
-// ack sends a busy ack with the detail of rs to r. It sends at most one ack per session in
-// busyAckEvery. The first ack of a session ends with BusyHint.
-func (g *Gateway) ack(rs *RunState, key, format string, r Renderer) {
+// stopKeepQueue stops the run of key and drops its merged busy text, but it keeps the queue.
+// The end of the stopped turn gives the key to the next queued message. It does not cancel
+// the background work of the key. It returns false when the key had no run, and the number
+// of the queued messages that will run.
+func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
+	g.debouncer().Drop(key)
+	g.mu.Lock()
+	ks := g.key(key)
+	stopped = ks.current != nil || ks.running != nil
+	if ks.current != nil {
+		// A turn that starts now runs no agent, and a steer for it does not become a turn.
+		ks.current.discard = true
+	}
+	rs := ks.running
+	if rs != nil {
+		rs.stopped = true
+	}
+	for _, p := range ks.queue {
+		// next drops a queued slash command, so it does not count.
+		if !isCommandText(p.in) {
+			waiting++
+		}
+	}
+	g.mu.Unlock()
+	if rs != nil {
+		rs.Cancel()
+	}
+	if stopped {
+		g.logger().Info("gateway: the run is stopped, the queue stays", "key", key, "waiting", waiting)
+	}
+	return stopped, waiting
+}
+
+// ack sends text with the details line of rs and one row of buttons to r. It sends at most
+// one ack per session in busyAckEvery (Hermes).
+func (g *Gateway) ack(rs *RunState, key, text string, buttons []Button, r Renderer) {
 	now := g.clock()
 	id := key
 	if rs != nil && rs.SessionID != "" {
@@ -186,22 +249,24 @@ func (g *Gateway) ack(rs *RunState, key, format string, r Renderer) {
 		return
 	}
 	if g.lastAck == nil {
-		g.lastAck, g.hinted = map[string]time.Time{}, map[string]bool{}
+		g.lastAck = map[string]time.Time{}
 	}
 	g.lastAck[id] = now
-	first := !g.hinted[id]
-	g.hinted[id] = true
 	g.mu.Unlock()
-	text := busyAckText(format, BusyAckDetail(rs, now))
-	if first {
-		text += "\n\n" + BusyHint
-	}
-	r.Ack(text)
+	ackReply(r, Reply{Text: withDetail(text, BusyAckDetail(rs, now)), Buttons: [][]Button{buttons}})
 }
 
-// BusyAckDetail returns the state of the run for a busy ack, for example
-// "3 min elapsed, iteration 4/90, running: web_fetch". Like Hermes, it leaves out an
-// elapsed time under 1 min and an empty tool.
+// ackReply sends rep with AckReply when r can show buttons, else it sends rep.Text with Ack.
+func ackReply(r Renderer, rep Reply) {
+	if rr, ok := r.(ReplyRenderer); ok {
+		rr.AckReply(rep)
+		return
+	}
+	r.Ack(rep.Text)
+}
+
+// BusyAckDetail returns the task details of rs, for example "2 min · step 4/90 · web_fetch".
+// Like Hermes, it leaves out an elapsed time under 1 min and an empty tool.
 func BusyAckDetail(rs *RunState, now time.Time) string {
 	if rs == nil {
 		return ""
@@ -209,28 +274,28 @@ func BusyAckDetail(rs *RunState, now time.Time) string {
 	var parts []string
 	if !rs.Started.IsZero() {
 		if m := int(now.Sub(rs.Started) / time.Minute); m > 0 {
-			parts = append(parts, fmt.Sprintf("%d min elapsed", m))
+			parts = append(parts, fmt.Sprintf("%d min", m))
 		}
 	}
 	if rs.Round != nil {
 		if i, max := rs.Round(); max > 0 {
-			parts = append(parts, fmt.Sprintf("iteration %d/%d", i, max))
+			parts = append(parts, fmt.Sprintf("step %d/%d", i, max))
 		}
 	}
 	if rs.Tool != nil {
 		if tool := rs.Tool(); tool != "" {
-			parts = append(parts, "running: "+tool)
+			parts = append(parts, tool)
 		}
 	}
-	return strings.Join(parts, ", ")
+	return strings.Join(parts, " · ")
 }
 
-// busyAckText fills format with detail. An empty detail removes the parentheses.
-func busyAckText(format, detail string) string {
+// withDetail adds detail to text as a last line in italics. An empty detail adds no line.
+func withDetail(text, detail string) string {
 	if detail == "" {
-		return strings.Replace(fmt.Sprintf(format, ""), " ()", "", 1)
+		return text
 	}
-	return fmt.Sprintf(format, detail)
+	return text + "\n_" + detail + "_"
 }
 
 // steerable reports whether in is a plain text that can go into a run as a steer.
@@ -243,15 +308,6 @@ func steerable(in Inbound) bool {
 func isCommandText(in Inbound) bool {
 	_, _, ok := IsCommand(in.Text)
 	return ok
-}
-
-// preview returns the first max runes of s, with "..." when s is longer.
-func preview(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "..."
 }
 
 func (g *Gateway) clock() time.Time {
@@ -291,6 +347,15 @@ func (l *lazyRenderer) Boundary()                    { l.get().Boundary() }
 func (l *lazyRenderer) Notice(text string)           { l.get().Notice(text) }
 func (l *lazyRenderer) Done(final string, err error) { l.get().Done(final, err) }
 func (l *lazyRenderer) Ack(text string)              { l.get().Ack(text) }
+
+// AckReply sends r with its buttons when the inner renderer can show them, else r.Text.
+func (l *lazyRenderer) AckReply(r Reply) {
+	if rr, ok := l.get().(ReplyRenderer); ok {
+		rr.AckReply(r)
+		return
+	}
+	l.get().Ack(r.Text)
+}
 
 // Debouncer merges the texts that arrive for one key within a short time. A text waits
 // for window. Each new text restarts the wait, but the merged text flushes at hardCap

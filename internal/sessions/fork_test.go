@@ -53,6 +53,26 @@ func TestForkDefaultTitle(t *testing.T) {
 	}
 }
 
+func TestForkUntitledTitle(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	untitled, err := s.Create(ctx, Session{Key: "telegram:dm:1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.Fork(ctx, untitled.ID, "")
+	if err != nil || f.Title != "New session (fork)" {
+		t.Fatal(f, err)
+	}
+	titled, err := s.Create(ctx, Session{Key: "telegram:dm:1", Title: "Plan the Bali trip"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f, err = s.Fork(ctx, titled.ID, ""); err != nil || f.Title != "Plan the Bali trip (fork)" {
+		t.Fatal(f, err)
+	}
+}
+
 func TestForkRemapsCompactionRows(t *testing.T) {
 	ctx := context.Background()
 	d := openTestDB(t)

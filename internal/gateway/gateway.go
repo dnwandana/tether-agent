@@ -65,6 +65,10 @@ type Renderer interface {
 	Ack(text string)
 }
 
+// ReplyRenderer is a Renderer that can show buttons and rich messages. A Renderer without
+// it gets the text of a Reply only.
+type ReplyRenderer interface{ AckReply(r Reply) }
+
 // RunState describes the running turn of a key.
 type RunState struct {
 	// Cancel stops the turn (/stop).
@@ -99,9 +103,8 @@ type Gateway struct {
 	now func() time.Time
 	// debounce merges the busy texts of a key. Nil uses 350 ms and a hard cap of 1 s.
 	debounce *Debouncer
-	// lastAck and hinted hold the last busy ack time and the hint flag per session.
+	// lastAck holds the time of the last busy ack per session.
 	lastAck map[string]time.Time
-	hinted  map[string]bool
 }
 
 // keyState is the state of one session key. Gateway.mu guards it.
@@ -206,7 +209,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	g.mu.Unlock()
 	// A slash text is dropped when it leaves the queue, so it gets no ack.
 	if !isCommandText(in) {
-		g.ack(rs, in.Key, QueueAck, newRenderer())
+		g.ack(rs, in.Key, QueueAck, queuedStopButton, newRenderer())
 	}
 	return func() error {
 		select {
@@ -429,9 +432,13 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (pendingSteer string
 	return res.PendingSteer
 }
 
-// BusyCommandReply is the reply to a command that cannot run while the key is busy. It is
-// the text of Hermes gateway/run.py; %s is the command name.
-const BusyCommandReply = "⏳ Agent is running — `/%s` can't run mid-turn. Wait for the current response or `/stop` first."
+// BusyCommandReply is the reply to a command that cannot run while the key is busy. %s is
+// the command name.
+const BusyCommandReply = "⏳ **Busy**\n`/%s` cannot run during a task. Wait for the answer, or stop the task."
+
+// commandErrorReply is the reply to a command that failed. The first %s is the command name,
+// and the second %s is the error text with its Markdown characters escaped.
+const commandErrorReply = "⚠️ **/%s failed**\n%s. Try again later."
 
 // runCommand runs one slash command for the key of in. While the key is busy, a command
 // without WhileBusy gets BusyCommandReply, because it can change the session of the turn
@@ -445,7 +452,7 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 		busy := g.key(in.Key).busy
 		g.mu.Unlock()
 		if busy {
-			r.Ack(fmt.Sprintf(BusyCommandReply, cmd.Name))
+			ackReply(r, Reply{Text: fmt.Sprintf(BusyCommandReply, cmd.Name), Buttons: [][]Button{stopButton}})
 			return rest
 		}
 	}
@@ -472,12 +479,16 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 					r.Ack(NoTaskReply)
 				}
 			},
-			Steer: func(text string) { rest = g.steerCommand(ctx, in, newRenderer, r, text) },
+			StopKeep: func() (bool, int) { return g.stopKeepQueue(in.Key) },
+			Steer:    func(text string) { rest = g.steerCommand(ctx, in, newRenderer, r, text) },
 		},
+	}
+	if rr, ok := r.(ReplyRenderer); ok {
+		c.Send = rr.AckReply
 	}
 	if err := cmd.Run(ctx, c, args); err != nil {
 		g.logger().Error("gateway: the command failed", "command", cmd.Name, "key", in.Key, "err", err.Error())
-		r.Ack("error: " + err.Error())
+		ackReply(r, Reply{Text: fmt.Sprintf(commandErrorReply, cmd.Name, EscapeMarkdown(strings.TrimSuffix(err.Error(), ".")))})
 		return func() error { return err }
 	}
 	return rest

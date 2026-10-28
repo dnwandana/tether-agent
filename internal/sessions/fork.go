@@ -10,7 +10,7 @@ import (
 // Fork copies the session with the id into a new session with parent_id set to id. The
 // copy has all the messages in order and all the compaction rows, with their message ids
 // changed to the ids of the copies. An empty title gives "<old title> (fork)", or
-// "fork of <id>" when the old session has no title.
+// "New session (fork)" when the old session has no title, so no title shows an id.
 // All copies happen in one transaction, so a failure leaves no partial session.
 func (s *Store) Fork(ctx context.Context, id, title string) (*Session, error) {
 	orig, err := s.Get(ctx, id)
@@ -20,7 +20,7 @@ func (s *Store) Fork(ctx context.Context, id, title string) (*Session, error) {
 	if title == "" {
 		title = orig.Title + " (fork)"
 		if orig.Title == "" {
-			title = "fork of " + orig.ID
+			title = "New session (fork)"
 		}
 	}
 	now := time.Now().UTC()

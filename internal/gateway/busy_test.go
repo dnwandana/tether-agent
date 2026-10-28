@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -45,7 +46,14 @@ func (f *recFactory) acks() []string {
 // is short, and the clock is fake. done is closed when the first turn ends.
 func busyGateway(t *testing.T) (g *Gateway, f *recFactory, clk *fakeClock, done chan struct{}) {
 	t.Helper()
-	g, _ = gatewayWithSlowProvider(t, 2*time.Second)
+	g, f, clk, done, _ = busyGatewayProv(t)
+	return g, f, clk, done
+}
+
+// busyGatewayProv is busyGateway, and it also returns the fake provider.
+func busyGatewayProv(t *testing.T) (g *Gateway, f *recFactory, clk *fakeClock, done chan struct{}, fp *fakeProv) {
+	t.Helper()
+	g, fp = gatewayWithSlowProvider(t, 2*time.Second)
 	clk = &fakeClock{t: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)}
 	g.now = clk.now
 	g.debounce = NewDebouncer(time.Millisecond, 10*time.Millisecond)
@@ -60,7 +68,7 @@ func busyGateway(t *testing.T) (g *Gateway, f *recFactory, clk *fakeClock, done 
 		<-done
 		g.Wait(5 * time.Second)
 	})
-	return g, f, clk, done
+	return g, f, clk, done, fp
 }
 
 // mustRun returns the running state of key or fails the test.
@@ -98,8 +106,7 @@ func TestTextWhileBusySteersAndAcks(t *testing.T) {
 		t.Fatal(rs.Steer.Pending())
 	}
 	acks := f.acks()
-	if len(acks) != 1 || !strings.HasPrefix(acks[0], "⏩ Steered into current run (") ||
-		!strings.Contains(acks[0], "Your message arrives after the next tool call.") {
+	if len(acks) != 1 || !strings.HasPrefix(acks[0], SteerAck) {
 		t.Fatal(acks)
 	}
 	// A steer is not also queued, and it does not stop the run.
@@ -130,42 +137,168 @@ func TestAckRateLimit30s(t *testing.T) {
 	}
 }
 
-func TestFirstAckHasOneTimeHint(t *testing.T) {
-	g, f, clk, _ := busyGateway(t)
-	_ = g.Handle(context.Background(), inb("k", "one"), f.new)
-	waitFor(t, func() bool { return len(f.acks()) == 1 })
-	clk.add(time.Minute)
-	_ = g.Handle(context.Background(), inb("k", "two"), f.new)
-	waitFor(t, func() bool { return len(f.acks()) == 2 })
-	acks := f.acks()
-	if !strings.HasSuffix(acks[0], "\n\n"+BusyHint) {
-		t.Fatalf("%q", acks[0])
-	}
-	if strings.Contains(acks[1], BusyHint) {
-		t.Fatalf("%q", acks[1])
-	}
-}
-
-func TestBusyAckDetail(t *testing.T) {
+func TestBusyAckDetailFormat(t *testing.T) {
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	rs := &RunState{
-		Started: now.Add(-3*time.Minute - 10*time.Second),
+		Started: now.Add(-2*time.Minute - 10*time.Second),
 		Round:   func() (int, int) { return 4, 90 },
 		Tool:    func() string { return "web_fetch" },
 	}
-	if got := BusyAckDetail(rs, now); got != "3 min elapsed, iteration 4/90, running: web_fetch" {
+	if got := BusyAckDetail(rs, now); got != "2 min · step 4/90 · web_fetch" {
 		t.Fatal(got)
 	}
-	// Hermes leaves out a zero elapsed time and an idle tool.
-	rs.Started, rs.Tool = now.Add(-10*time.Second), func() string { return "" }
-	if got := BusyAckDetail(rs, now); got != "iteration 4/90" {
+	// Like Hermes, the detail leaves out an elapsed time under 1 min and an idle tool.
+	rs.Started, rs.Tool = now.Add(-20*time.Second), func() string { return "" }
+	if got := BusyAckDetail(rs, now); got != "step 4/90" {
 		t.Fatal(got)
 	}
 	if BusyAckDetail(nil, now) != "" || BusyAckDetail(&RunState{}, now) != "" {
 		t.Fatal("no detail without a run")
 	}
-	if got := busyAckText(QueueAck, ""); got != "⏳ Queued for the next turn. I'll respond once the current task finishes." {
-		t.Fatal(got)
+	if got := withDetail(QueueAck, "step 4/90"); got != "⏳ **Queued**\nI will answer after the current task.\n_step 4/90_" {
+		t.Fatalf("%q", got)
+	}
+	if got := withDetail(QueueAck, ""); got != QueueAck {
+		t.Fatalf("%q", got)
+	}
+}
+
+// replyFactory hands out replyRenderers and keeps them in order.
+type replyFactory struct {
+	mu   sync.Mutex
+	list []*replyRenderer
+}
+
+func (f *replyFactory) new() Renderer {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := &replyRenderer{}
+	f.list = append(f.list, r)
+	return r
+}
+
+// replies returns the AckReply calls of all renderers of f, in order.
+func (f *replyFactory) replies() []Reply {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []Reply
+	for _, r := range f.list {
+		r.mu.Lock()
+		out = append(out, r.replies...)
+		r.mu.Unlock()
+	}
+	return out
+}
+
+// wantBusyReply fails the test when rep is not text with the detail line of rs and buttons.
+func wantBusyReply(t *testing.T, g *Gateway, rs *RunState, rep Reply, text string, buttons []Button) {
+	t.Helper()
+	want := withDetail(text, BusyAckDetail(rs, g.clock()))
+	if rep.Text != want || !reflect.DeepEqual(rep.Buttons, [][]Button{buttons}) {
+		t.Fatalf("got %q %+v, want %q %+v", rep.Text, rep.Buttons, want, buttons)
+	}
+	if strings.Contains(rep.Text, "(Send /stop") {
+		t.Fatalf("%q", rep.Text)
+	}
+}
+
+func TestQueuedReplyHasStopButton(t *testing.T) {
+	g, _, _, _ := busyGateway(t)
+	rs := g.mustRun(t, "k")
+	f := &replyFactory{}
+	go func() { _ = g.Handle(context.Background(), media("k"), f.new) }()
+	waitFor(t, func() bool { return len(f.replies()) == 1 })
+	wantBusyReply(t, g, rs, f.replies()[0], QueueAck, []Button{{Text: "⏹ Stop the current task", Data: "/stop keep"}})
+	if !strings.HasPrefix(f.replies()[0].Text, "⏳ **Queued**\nI will answer after the current task.") {
+		t.Fatalf("%q", f.replies()[0].Text)
+	}
+	// A second queued message within 30 s gets no reply.
+	go func() { _ = g.Handle(context.Background(), media("k"), f.new) }()
+	waitFor(t, func() bool { return g.queueLen("k") == 2 })
+	time.Sleep(20 * time.Millisecond)
+	if n := len(f.replies()); n != 1 {
+		t.Fatal(f.replies())
+	}
+	// Drop the queue, so that no queued turn runs after the test.
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+}
+
+func TestSteerReplyForPlainText(t *testing.T) {
+	g, _, clk, _ := busyGateway(t)
+	rs := g.mustRun(t, "k")
+	f := &replyFactory{}
+	_ = g.Handle(context.Background(), inb("k", "one"), f.new)
+	waitFor(t, func() bool { return len(f.replies()) == 1 })
+	rep := f.replies()[0]
+	if !strings.HasPrefix(rep.Text, "⏩ **Note sent to the task**\nThe agent reads it after the current tool.") {
+		t.Fatalf("%q", rep.Text)
+	}
+	wantBusyReply(t, g, rs, rep, SteerAck, []Button{{Text: "⏹ Stop the task", Data: "/stop"}})
+	// The limit of one busy reply in 30 s applies.
+	clk.add(5 * time.Second)
+	_ = g.Handle(context.Background(), inb("k", "two"), f.new)
+	waitFor(t, func() bool { return rs.Steer.Pending() == "one\ntwo" })
+	if n := len(f.replies()); n != 1 {
+		t.Fatal(f.replies())
+	}
+}
+
+func TestBusyCommandReplyHasStopButton(t *testing.T) {
+	g, _, _, _ := busyGateway(t)
+	r := &replyRenderer{}
+	_ = g.Handle(context.Background(), inb("k", "/rename x"), func() Renderer { return r })
+	want := Reply{
+		Text:    "⏳ **Busy**\n`/rename` cannot run during a task. Wait for the answer, or stop the task.",
+		Buttons: [][]Button{{{Text: "⏹ Stop the task", Data: "/stop"}}},
+	}
+	if len(r.replies) != 1 || !reflect.DeepEqual(r.replies[0], want) || len(r.acks) != 0 {
+		t.Fatalf("%+v %q", r.replies, r.acks)
+	}
+}
+
+func TestStopSteerAndErrorTexts(t *testing.T) {
+	g, _, _, done := busyGateway(t)
+	r := &recRenderer{}
+	_ = g.Handle(context.Background(), inb("k", "/steer"), func() Renderer { return r })
+	if !reflect.DeepEqual(r.acks, []string{"⏩ **Send a note with the command**\nExample: `/steer also check the error log`"}) {
+		t.Fatalf("%q", r.acks)
+	}
+	r = &recRenderer{}
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return r })
+	<-done
+	if !reflect.DeepEqual(r.acks, []string{"⏹ **Stopped**\nThe session is safe. Send a message to continue."}) {
+		t.Fatalf("%q", r.acks)
+	}
+	waitFor(t, func() bool { _, ok := g.Running("k"); return !ok })
+	r = &recRenderer{}
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return r })
+	if !reflect.DeepEqual(r.acks, []string{"💤 **No task to stop**"}) {
+		t.Fatalf("%q", r.acks)
+	}
+
+	registerTestCommand(t, Command{Name: "t-err", Run: func(context.Context, *CommandCtx, string) error {
+		return errors.New("database is locked")
+	}})
+	rr := &replyRenderer{}
+	if err := g.Handle(context.Background(), inb("k", "/t-err"), func() Renderer { return rr }); err == nil {
+		t.Fatal("the error of the command must return")
+	}
+	want := Reply{Text: "⚠️ **/t-err failed**\ndatabase is locked. Try again later."}
+	if len(rr.replies) != 1 || !reflect.DeepEqual(rr.replies[0], want) {
+		t.Fatalf("%+v %q", rr.replies, rr.acks)
+	}
+}
+
+func TestSteerCommandReplyHasNoLimit(t *testing.T) {
+	g, _, _, _ := busyGateway(t)
+	rs := g.mustRun(t, "k")
+	for i := range 2 {
+		r := &replyRenderer{}
+		_ = g.Handle(context.Background(), inb("k", "/steer use the cache"), func() Renderer { return r })
+		if len(r.replies) != 1 {
+			t.Fatal(i, r.replies, r.acks)
+		}
+		wantBusyReply(t, g, rs, r.replies[0], SteerAck, []Button{{Text: "⏹ Stop the task", Data: "/stop"}})
 	}
 }
 
@@ -233,7 +366,7 @@ func TestMediaWhileBusyIsQueuedNotSteered(t *testing.T) {
 		t.Fatal("media must not be steered")
 	}
 	waitFor(t, func() bool { return len(f.acks()) == 1 })
-	if acks := f.acks(); !strings.HasPrefix(acks[0], "⏳ Queued for the next turn (") {
+	if acks := f.acks(); !strings.HasPrefix(acks[0], QueueAck) {
 		t.Fatal(acks)
 	}
 	// The media message runs as its own turn after the current one.
@@ -276,7 +409,7 @@ func TestSteerBeforeAgentStartsQueues(t *testing.T) {
 	_ = g.Handle(context.Background(), inb("s", "later"), f.new)
 	waitFor(t, func() bool { return g.queueLen("s") == 1 })
 	waitFor(t, func() bool { return len(f.acks()) == 1 })
-	if acks := f.acks(); !strings.HasPrefix(acks[0], "⏳ Queued for the next turn") {
+	if acks := f.acks(); !strings.HasPrefix(acks[0], QueueAck) {
 		t.Fatal(acks)
 	}
 }
@@ -351,7 +484,7 @@ func TestNewCancelsRunAndClearsQueue(t *testing.T) {
 	_ = g.Handle(context.Background(), inb("k", "/new"), func() Renderer { return r })
 	<-done
 	<-returned
-	if len(r.acks) != 1 || !strings.HasPrefix(r.acks[0], "New session") {
+	if len(r.acks) != 1 || !strings.HasPrefix(r.acks[0], "✨ Starting new session.") {
 		t.Fatal(r.acks)
 	}
 	sess, _ := g.Deps.Store.Active(context.Background(), "k")
@@ -368,13 +501,13 @@ func TestSteerCommandModes(t *testing.T) {
 	g, _, _, _ := busyGateway(t)
 	r := &recRenderer{}
 	_ = g.Handle(context.Background(), inb("k", "/steer use the cache"), func() Renderer { return r })
-	if g.mustRun(t, "k").Steer.Pending() != "use the cache" || len(r.acks) != 1 || !strings.HasPrefix(r.acks[0], "⏩ Steer queued") {
+	if g.mustRun(t, "k").Steer.Pending() != "use the cache" || len(r.acks) != 1 || !strings.HasPrefix(r.acks[0], SteerAck) {
 		t.Fatal(r.acks)
 	}
 	// No text: usage.
 	r = &recRenderer{}
 	_ = g.Handle(context.Background(), inb("k", "/steer"), func() Renderer { return r })
-	if len(r.acks) != 1 || !strings.Contains(r.acks[0], "Usage: /steer") {
+	if len(r.acks) != 1 || r.acks[0] != steerUsage {
 		t.Fatal(r.acks)
 	}
 
@@ -503,5 +636,144 @@ func TestStoppedTurnErrorIsCanceled(t *testing.T) {
 	f.mu.Unlock()
 	if !errors.Is(r.err, context.Canceled) {
 		t.Fatal(r.err)
+	}
+}
+
+// stopKeepWaiting queues n media messages on the busy key "k" and returns a channel that
+// is closed when all of their Handle calls return.
+func stopKeepWaiting(t *testing.T, g *Gateway, f func() Renderer, n int) chan struct{} {
+	t.Helper()
+	returned := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range n {
+		m := media("k")
+		m.Text = "queued " + string(rune('a'+i))
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = g.Handle(context.Background(), m, f) }()
+		waitFor(t, func() bool { return g.queueLen("k") == i+1 })
+	}
+	go func() { wg.Wait(); close(returned) }()
+	return returned
+}
+
+// waitClosed fails the test when ch is not closed within 5 s.
+func waitClosed(t *testing.T, ch chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal(what)
+	}
+}
+
+func TestStopKeepRunsQueuedMessage(t *testing.T) {
+	g, f, _, done, fp := busyGatewayProv(t)
+	returned := stopKeepWaiting(t, g, f.new, 1)
+	r := &recRenderer{}
+	_ = g.Handle(context.Background(), inb("k", "/stop keep"), func() Renderer { return r })
+	waitClosed(t, done, "/stop keep must end the run")
+	if !reflect.DeepEqual(r.acks, []string{"⏹ **Stopped**\nThe waiting message runs now."}) {
+		t.Fatalf("%q", r.acks)
+	}
+	waitFor(t, func() bool { got := fp.lastUserTexts(); return len(got) == 2 })
+	if got := fp.lastUserTexts(); !strings.Contains(got[1], "queued a") {
+		t.Fatal(got)
+	}
+	g.mustRun(t, "k").Cancel()
+	waitClosed(t, returned, "the queued turn must end")
+}
+
+func TestStopKeepManyWaiting(t *testing.T) {
+	g, f, _, done, _ := busyGatewayProv(t)
+	returned := stopKeepWaiting(t, g, f.new, 2)
+	r := &recRenderer{}
+	_ = g.Handle(context.Background(), inb("k", "/stop keep"), func() Renderer { return r })
+	waitClosed(t, done, "/stop keep must end the run")
+	if !reflect.DeepEqual(r.acks, []string{"⏹ **Stopped**\nThe waiting messages run now, one at a time."}) {
+		t.Fatalf("%q", r.acks)
+	}
+	// One message runs now, and the other one still waits.
+	waitFor(t, func() bool { _, ok := g.Running("k"); return ok })
+	if n := g.queueLen("k"); n != 1 {
+		t.Fatal(n)
+	}
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+	waitClosed(t, returned, "/stop must end the queued turns")
+}
+
+func TestStopKeepNoWaiting(t *testing.T) {
+	g, _, _, done, _ := busyGatewayProv(t)
+	r := &recRenderer{}
+	_ = g.Handle(context.Background(), inb("k", "/stop keep"), func() Renderer { return r })
+	waitClosed(t, done, "/stop keep must end the run")
+	if !reflect.DeepEqual(r.acks, []string{StopReply}) {
+		t.Fatalf("%q", r.acks)
+	}
+}
+
+func TestStopStillDropsQueue(t *testing.T) {
+	for _, cmd := range []string{"/stop", "/stop now"} {
+		t.Run(cmd, func(t *testing.T) {
+			g, f, _, done, _ := busyGatewayProv(t)
+			returned := stopKeepWaiting(t, g, f.new, 1)
+			r := &recRenderer{}
+			_ = g.Handle(context.Background(), inb("k", cmd), func() Renderer { return r })
+			waitClosed(t, done, "/stop must end the run")
+			waitClosed(t, returned, "the queued message must be dropped")
+			if !reflect.DeepEqual(r.acks, []string{StopReply}) {
+				t.Fatalf("%q", r.acks)
+			}
+			if !g.Wait(5 * time.Second) {
+				t.Fatal("wait")
+			}
+			if got := f.finals(); len(got) != 1 {
+				t.Fatal("the queued message must not run:", got)
+			}
+		})
+	}
+}
+
+func TestQueuedStopButtonKeepsQueue(t *testing.T) {
+	g, _, _, done, fp := busyGatewayProv(t)
+	rf := &replyFactory{}
+	returned := stopKeepWaiting(t, g, rf.new, 1)
+	waitFor(t, func() bool { return len(rf.replies()) == 1 })
+	rep := rf.replies()[0]
+	if len(rep.Buttons) != 1 || len(rep.Buttons[0]) != 1 {
+		t.Fatalf("%+v", rep.Buttons)
+	}
+	// A tap runs the action of the button as a typed command.
+	_ = g.Handle(context.Background(), inb("k", rep.Buttons[0][0].Data), func() Renderer { return &recRenderer{} })
+	waitClosed(t, done, "the tap must end the run")
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	g.mustRun(t, "k").Cancel()
+	waitClosed(t, returned, "the queued turn must end")
+}
+
+func TestStopKeepIdle(t *testing.T) {
+	g, _ := gatewayWithSlowProvider(t, 0)
+	r := &recRenderer{}
+	_ = g.Handle(context.Background(), inb("k", "/stop keep"), func() Renderer { return r })
+	if !reflect.DeepEqual(r.acks, []string{"💤 **No task to stop**"}) {
+		t.Fatalf("%q", r.acks)
+	}
+}
+
+func TestCommandErrorReplyEscapesErrorText(t *testing.T) {
+	g, _ := gatewayWithSlowProvider(t, 0)
+	registerTestCommand(t, Command{Name: "t-err", Run: func(context.Context, *CommandCtx, string) error {
+		return errors.New("no such table: usage_daily *x*")
+	}})
+	rr := &replyRenderer{}
+	if err := g.Handle(context.Background(), inb("k", "/t-err"), func() Renderer { return rr }); err == nil {
+		t.Fatal("the error of the command must return")
+	}
+	want := Reply{Text: "⚠️ **/t-err failed**\nno such table: usage\\_daily \\*x\\*. Try again later."}
+	if len(rr.replies) != 1 || !reflect.DeepEqual(rr.replies[0], want) {
+		t.Fatalf("%+v %q", rr.replies, rr.acks)
+	}
+	// The CLI shows the error text literally.
+	if got := StripMarkdown(rr.replies[0].Text); !strings.Contains(got, "usage_daily *x*.") {
+		t.Fatalf("%q", got)
 	}
 }

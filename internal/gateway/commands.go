@@ -25,19 +25,36 @@ type CommandCtx struct {
 	Session *sessions.Session
 	// Reply sends a text to the caller.
 	Reply func(text string)
+	// Send sends a Reply with buttons to the caller. It is nil on a text-only channel.
+	Send func(r Reply)
 	// Confirm asks the caller a yes or no question. Nil means that the channel cannot ask.
 	Confirm func(prompt string) bool
 	Hooks   CommandHooks
 }
 
-// CommandHooks connect the commands to the run of the key. With a nil Stop or Steer hook,
-// the command replies NoTaskReply.
+// Reply is one command reply with optional buttons.
+type Reply struct {
+	// Text is common Markdown. It is the only part that a text-only channel shows.
+	Text string
+	// Buttons holds rows of buttons. Button.Text is the label, and Button.Data is the action.
+	Buttons [][]Button
+	// Rich is optional rich-message Markdown. Text is the fallback.
+	Rich string
+	// Edit replaces the message of the pressed button, when there is one.
+	Edit bool
+}
+
+// CommandHooks connect the commands to the run of the key. With a nil Stop, StopKeep, or
+// Steer hook, the command replies NoTaskReply.
 type CommandHooks struct {
 	// BeforeNew runs before /new replaces the session, for example to start the review of
 	// the old session. Nil uses Deps.BeforeNew.
 	BeforeNew func(ctx context.Context, old *sessions.Session)
 	// Stop stops the run of the key.
 	Stop func()
+	// StopKeep stops the running task of the key and keeps its queue. It returns false when
+	// no task runs, and the number of messages that wait.
+	StopKeep func() (stopped bool, waiting int)
 	// Steer adds guidance to the run of the key.
 	Steer func(text string)
 }
@@ -52,9 +69,6 @@ type Command struct {
 	WhileBusy bool
 }
 
-// sessionsListMax is the number of sessions that /sessions shows.
-const sessionsListMax = 20
-
 var (
 	commandsMu sync.RWMutex
 	commands   = map[string]Command{}
@@ -68,13 +82,14 @@ func init() {
 		{Name: "reset", Help: "Start a new session (the same as /new)", Run: cmdNew, WhileBusy: true},
 		{Name: "rename", Help: "Rename the current session: /rename <title>", Run: cmdRename},
 		{Name: "archive", Help: "Hide the current session from /sessions", Run: cmdArchive},
-		{Name: "delete", Help: "Delete a session: /delete <id>", Run: cmdDelete},
+		{Name: "delete", Help: "Delete a session", Run: cmdDelete},
 		{Name: "model", Help: "Pin the model of this session: /model <provider>[:<model>] | clear", Run: cmdModel},
 		{Name: "prompt", Help: "Set the base prompt of this session: /prompt set <text> | show | clear", Run: cmdPrompt},
 		{Name: "fork", Help: "Copy the current session and switch to the copy: /fork [title]", Run: cmdFork},
 		{Name: "compact", Help: "Replace the older messages of this session with a summary now", Run: cmdCompact},
 		ReloadMCPCommand(nil),
 		{Name: "usage", Help: "Show the token use and the cost of each model: /usage [today|7d|30d|session]", Run: cmdUsage, WhileBusy: true},
+		{Name: "help", Help: "Show all commands", Run: cmdHelp, WhileBusy: true},
 	} {
 		Register(c)
 	}
@@ -103,17 +118,6 @@ func lookupCommand(name string) (Command, bool) {
 	defer commandsMu.RUnlock()
 	c, ok := commands[name]
 	return c, ok
-}
-
-// commandList returns the command names as "/a, /b, ...", in name order.
-func commandList() string {
-	all := Commands()
-	names := make([]string, 0, len(all))
-	for n := range all {
-		names = append(names, "/"+n)
-	}
-	sort.Strings(names)
-	return strings.Join(names, ", ")
 }
 
 // IsCommand splits a slash command into its name and its arguments. It removes the bot
@@ -150,6 +154,19 @@ func (c *CommandCtx) reply(format string, args ...any) {
 	}
 }
 
+// interactive reports whether the channel of the caller shows buttons.
+func (c *CommandCtx) interactive() bool { return c.Send != nil }
+
+// send sends r with its buttons. A text-only channel gets r.Text only.
+func (c *CommandCtx) send(r Reply) {
+	switch {
+	case c.Send != nil:
+		c.Send(r)
+	case c.Reply != nil:
+		c.Reply(r.Text)
+	}
+}
+
 // current returns the session of the key. It creates one when the key has none.
 func (c *CommandCtx) current(ctx context.Context) (*sessions.Session, error) {
 	if c.Session != nil {
@@ -163,13 +180,43 @@ func (c *CommandCtx) current(ctx context.Context) (*sessions.Session, error) {
 	return s, nil
 }
 
-// owned returns the session with the id when it belongs to the key of the caller.
+// owned returns the session with the id when it belongs to the key of the caller. For a
+// session that does not exist or that belongs to another key, the error is a
+// notFoundError, and its text is the reply to send.
 func (c *CommandCtx) owned(ctx context.Context, id string) (*sessions.Session, error) {
 	s, err := c.store().Get(ctx, id)
 	if errors.Is(err, sessions.ErrNotFound) || err == nil && s.Key != c.Key {
-		return nil, fmt.Errorf("no session %s in this chat. Send /sessions to see the sessions", id)
+		return nil, notFoundError{id: id}
 	}
 	return s, err
+}
+
+// notFoundError tells that this chat has no session with the id.
+type notFoundError struct{ id string }
+
+func (e notFoundError) Error() string { return notFoundText(e.id) }
+
+// notFoundText returns the reply for a session ID that this chat does not have. The reply
+// shows the ID, because the owner typed it.
+func notFoundText(id string) string {
+	return fmt.Sprintf("⚠️ **Session not found**\nThis chat has no session `%s`. Send /sessions to see your sessions.", id)
+}
+
+// ownedOrReply returns the session with the id, like owned. When this chat has no such
+// session, it sends the not-found reply and returns nil and no error.
+func (c *CommandCtx) ownedOrReply(ctx context.Context, id string) (*sessions.Session, error) {
+	s, err := c.owned(ctx, id)
+	var nf notFoundError
+	if errors.As(err, &nf) {
+		c.send(Reply{Text: nf.Error()})
+		return nil, nil
+	}
+	return s, err
+}
+
+// messageCount returns the number of messages of the session with the id.
+func (c *CommandCtx) messageCount(ctx context.Context, id string) (int, error) {
+	return c.store().CountMessages(ctx, id)
 }
 
 // sessionTemplate returns the fields of a new session for key, copied from old when it
@@ -182,49 +229,67 @@ func sessionTemplate(key string, old *sessions.Session) sessions.Session {
 	return sessions.Session{Source: src, Kind: "chat"}
 }
 
-func cmdSessions(ctx context.Context, c *CommandCtx, _ string) error {
-	list, err := c.store().List(ctx, c.Key, sessionsListMax)
+func cmdSessions(ctx context.Context, c *CommandCtx, args string) error {
+	a := parseListArgs("sessions", args)
+	mode := listSessions
+	if a.Archived {
+		mode = listArchived
+	}
+	r, err := c.listReply(ctx, mode, a, nowFunc())
 	if err != nil {
 		return err
 	}
-	if len(list) == 0 {
-		c.reply("No sessions in this chat.")
-		return nil
-	}
-	var b strings.Builder
-	b.WriteString("Sessions (newest first):")
-	for _, s := range list {
-		mark := " "
-		if c.Session != nil && s.ID == c.Session.ID {
-			mark = "*"
-		}
-		title := s.Title
-		if title == "" {
-			title = "(no title)"
-		}
-		fmt.Fprintf(&b, "\n%s %s  %s  %s  %d messages", mark, s.ID, title,
-			s.LastActive.Local().Format(time.DateTime), s.MessageCount)
-	}
-	c.reply("%s", b.String())
+	c.send(r)
 	return nil
 }
 
 func cmdResume(ctx context.Context, c *CommandCtx, args string) error {
-	if args == "" {
-		c.reply("Usage: /resume <id>. Send /sessions to see the ids.")
+	a := parseListArgs("resume", args)
+	if a.ID == "" {
+		r, err := c.listReply(ctx, listResume, a, nowFunc())
+		if err != nil {
+			return err
+		}
+		c.send(r)
 		return nil
 	}
-	s, err := c.owned(ctx, args)
+	s, err := c.ownedOrReply(ctx, a.ID)
+	if s == nil || err != nil {
+		return err
+	}
+	// The resume of an archived session takes it out of the archive. The Undo button of
+	// /archive uses this.
+	if s.Archived {
+		if err := c.store().Unarchive(ctx, s.ID); err != nil {
+			return err
+		}
+		s.Archived = false
+	}
+	n, err := c.messageCount(ctx, s.ID)
 	if err != nil {
-		c.reply("%v", err)
-		return nil
+		return err
 	}
 	if err := c.store().SetActive(ctx, c.Key, s.ID); err != nil {
 		return err
 	}
 	c.Session = s
-	c.reply("Resumed session %s%s.", s.ID, titleSuffix(s.Title))
+	c.send(backReply(s, n, nowFunc()))
 	return nil
+}
+
+// backReply returns the reply after a switch to the session s with msgs messages.
+func backReply(s *sessions.Session, msgs int, now time.Time) Reply {
+	text := fmt.Sprintf("↩️ **Back to \"%s\"**\n", sessionTitle(s.Title))
+	last := formatDay(s.LastActive, now) + " at " + s.LastActive.In(time.Local).Format("15:04")
+	switch msgs {
+	case 0:
+		text += "No messages yet."
+	case 1:
+		text += "1 message. Last message " + last + "."
+	default:
+		text += fmt.Sprintf("%d messages. Last message %s.", msgs, last)
+	}
+	return Reply{Text: text}
 }
 
 func cmdNew(ctx context.Context, c *CommandCtx, _ string) error {
@@ -251,14 +316,30 @@ func cmdNew(ctx context.Context, c *CommandCtx, _ string) error {
 		return err
 	}
 	c.Session = s
-	c.reply("New session %s.", s.ID)
+	c.send(Reply{Text: newReply(c.Deps)})
 	return nil
+}
+
+// newReply returns the reply to /new and /reset. With no agent, the reply has no model
+// and no context lines.
+func newReply(d *Deps) string {
+	text := "✨ Starting new session.\nSend a message to begin.\n\n"
+	if d.Agent != nil {
+		model, window := d.Agent.DefaultModel()
+		text += fmt.Sprintf("Model: %s\nContext: %s\n\n", model, formatContext(window))
+	}
+	return text + "💡 Tip: " + pickTip()
 }
 
 func cmdRename(ctx context.Context, c *CommandCtx, args string) error {
 	title := strings.Join(strings.Fields(args), " ")
 	if title == "" {
-		c.reply("Usage: /rename <title>")
+		// Only show the title. A command that shows help must not create a session.
+		shown := "none"
+		if c.Session != nil && c.Session.Title != "" {
+			shown = EscapeMarkdown(c.Session.Title)
+		}
+		c.send(Reply{Text: "✏️ **Title: " + shown + "**\nTo change it, send `/rename <new title>`."})
 		return nil
 	}
 	s, err := c.current(ctx)
@@ -269,7 +350,7 @@ func cmdRename(ctx context.Context, c *CommandCtx, args string) error {
 		return err
 	}
 	s.Title = title
-	c.reply("Renamed the session to %q.", title)
+	c.send(Reply{Text: fmt.Sprintf("✏️ **Renamed to \"%s\"**", sessionTitle(title))})
 	return nil
 }
 
@@ -282,33 +363,67 @@ func cmdArchive(ctx context.Context, c *CommandCtx, _ string) error {
 		return err
 	}
 	s.Archived = true
-	c.reply("Archived session %s. /sessions does not show it now. Send /new to start a new session.", s.ID)
+	text := fmt.Sprintf("🗄 **Archived \"%s\"**\nThe session list does not show it now.", sessionTitle(s.Title))
+	if !c.interactive() {
+		text += fmt.Sprintf("\nSend /resume %s to undo.", s.ID)
+	}
+	// Undo runs /resume, and /resume takes the session out of the archive.
+	c.send(Reply{Text: text, Buttons: [][]Button{{
+		{Text: "↩️ Undo", Data: "/resume " + s.ID},
+		{Text: "🆕 New session", Data: "/new"},
+	}}})
 	return nil
 }
 
-// confirmWord is the last argument of /delete on a channel that has no Confirm.
+// confirmWord is the last argument of /delete that deletes with no question.
 const confirmWord = "confirm"
 
 func cmdDelete(ctx context.Context, c *CommandCtx, args string) error {
 	fields := strings.Fields(args)
-	if len(fields) == 0 || len(fields) > 2 || len(fields) == 2 && fields[1] != confirmWord {
-		c.reply("Usage: /delete <id>")
-		return nil
+	confirmed := len(fields) == 2 && fields[1] == confirmWord && isSessionID(fields[0])
+	id := ""
+	if confirmed {
+		id = fields[0]
+	} else {
+		a := parseListArgs("delete", args)
+		if a.ID == "" {
+			r, err := c.listReply(ctx, listDelete, a, nowFunc())
+			if err != nil {
+				return err
+			}
+			c.send(r)
+			return nil
+		}
+		id = a.ID
 	}
-	s, err := c.owned(ctx, fields[0])
-	if err != nil {
-		c.reply("%v", err)
-		return nil
+	s, err := c.ownedOrReply(ctx, id)
+	if s == nil || err != nil {
+		return err
 	}
-	question := fmt.Sprintf("Delete session %s%s and all its messages? You cannot undo this.", s.ID, titleSuffix(s.Title))
-	switch {
-	case len(fields) == 2:
-	case c.Confirm == nil:
-		c.reply("%s\nTo delete it, send: /delete %s %s", question, s.ID, confirmWord)
-		return nil
-	case !c.Confirm(question):
-		c.reply("Not deleted.")
-		return nil
+	if !confirmed {
+		n, err := c.messageCount(ctx, s.ID)
+		if err != nil {
+			return err
+		}
+		messages := fmt.Sprintf("This deletes %d messages. You cannot undo this.", n)
+		if n == 1 {
+			messages = "This deletes 1 message. You cannot undo this."
+		}
+		question := fmt.Sprintf("🗑 **Delete \"%s\"?**\n%s", sessionTitle(s.Title), messages)
+		switch {
+		case c.interactive():
+			c.send(Reply{Text: question, Buttons: [][]Button{{
+				{Text: "🗑 Delete", Data: "/delete " + s.ID + " " + confirmWord},
+				{Text: "Cancel", Data: "cancel"},
+			}}})
+			return nil
+		case c.Confirm == nil:
+			c.send(Reply{Text: fmt.Sprintf("%s\nTo delete it, send: /delete %s %s", question, s.ID, confirmWord)})
+			return nil
+		case !c.Confirm(fmt.Sprintf("Delete %q? %s", plainTitle(s.Title), messages)):
+			c.send(Reply{Text: "Not deleted."})
+			return nil
+		}
 	}
 	if err := c.store().Delete(ctx, s.ID); err != nil {
 		return err
@@ -323,7 +438,7 @@ func cmdDelete(ctx context.Context, c *CommandCtx, args string) error {
 	if c.Session != nil && c.Session.ID == s.ID {
 		c.Session = nil
 	}
-	c.reply("Deleted session %s.", s.ID)
+	c.send(Reply{Text: fmt.Sprintf("🗑 **Deleted \"%s\"**", sessionTitle(s.Title)), Edit: true})
 	return nil
 }
 
@@ -333,11 +448,7 @@ func cmdModel(ctx context.Context, c *CommandCtx, args string) error {
 		return err
 	}
 	if args == "" {
-		cur := s.ModelOverride
-		if cur == "" {
-			cur = "the default (primary)"
-		}
-		c.reply("Model: %s. The providers are: %s.", cur, strings.Join(c.providerNames(), ", "))
+		c.send(c.modelReply(s))
 		return nil
 	}
 	if args == "clear" {
@@ -345,24 +456,84 @@ func cmdModel(ctx context.Context, c *CommandCtx, args string) error {
 			return err
 		}
 		s.ModelOverride = ""
-		c.reply("This session uses the default model again.")
+		c.send(Reply{Text: "🧠 **Model: default**\nThis session uses the default model again."})
 		return nil
 	}
 	name, model, _ := strings.Cut(args, ":")
 	if _, ok := c.Deps.Providers[name]; !ok || strings.ContainsAny(args, " \t\n") {
-		c.reply("unknown provider: %s. The providers are: %s.", name, strings.Join(c.providerNames(), ", "))
+		c.send(Reply{Text: fmt.Sprintf("⚠️ **Unknown provider: %s**\nThe providers are: %s.",
+			EscapeMarkdown(name), strings.Join(c.providerNames(), ", "))})
 		return nil
 	}
 	if strings.Contains(args, ":") && model == "" {
-		c.reply("Usage: /model <provider>[:<model>]")
+		c.send(Reply{Text: "⚠️ **No model after the colon**\nSend /model <provider> or /model <provider>:<model>."})
 		return nil
 	}
 	if err := c.store().SetModel(ctx, s.ID, args); err != nil {
 		return err
 	}
 	s.ModelOverride = args
-	c.reply("This session now uses %s.", args)
+	c.send(Reply{
+		Text:    fmt.Sprintf("🧠 **Model: %s**\nThis session uses it from the next message.", EscapeMarkdown(args)),
+		Buttons: [][]Button{{{Text: "↺ Use the default", Data: "/model clear"}}},
+	})
 	return nil
+}
+
+// modelButtonsPerRow is the number of provider buttons in one row of the /model reply.
+const modelButtonsPerRow = 3
+
+// modelReply returns the reply to /model with no argument. It names the provider and the
+// model that the session s uses now. On a channel with buttons, it has one button for each
+// provider. A text-only channel gets the command to type.
+func (c *CommandCtx) modelReply(s *sessions.Session) Reply {
+	head := "default"
+	if s.ModelOverride != "" {
+		head = EscapeMarkdown(s.ModelOverride)
+	}
+	name, model := c.modelInUse(s)
+	text := fmt.Sprintf("🧠 **Model: %s**\n`%s`", head, name)
+	if model != "" {
+		text += " · " + EscapeMarkdown(model)
+	}
+	names := c.providerNames()
+	if !c.interactive() {
+		text += fmt.Sprintf("\nSend /model <provider> to change it. The providers are: %s.", strings.Join(names, ", "))
+		return Reply{Text: text}
+	}
+	var rows [][]Button
+	for i, n := range names {
+		if i%modelButtonsPerRow == 0 {
+			rows = append(rows, nil)
+		}
+		label := n
+		if n == name {
+			label = "✓ " + n
+		}
+		rows[len(rows)-1] = append(rows[len(rows)-1], Button{Text: label, Data: "/model " + n})
+	}
+	return Reply{Text: text + "\nSelect a provider for this session:", Buttons: rows}
+}
+
+// modelInUse returns the provider name and the model that the session s uses now: the
+// model override when it names a known provider, else the default provider "primary".
+func (c *CommandCtx) modelInUse(s *sessions.Session) (name, model string) {
+	name = "primary"
+	if s.ModelOverride != "" {
+		n, m, _ := strings.Cut(s.ModelOverride, ":")
+		if _, ok := c.Deps.Providers[n]; ok {
+			name, model = n, m
+		}
+	}
+	if model == "" {
+		if p := c.Deps.Providers[name]; p != nil {
+			model = p.Model()
+		}
+	}
+	if model == "" && c.Deps.Cfg != nil {
+		model = c.Deps.Cfg.Providers[name].Model
+	}
+	return name, model
 }
 
 // providerNames returns the provider names in order.
@@ -374,6 +545,13 @@ func (c *CommandCtx) providerNames() []string {
 	sort.Strings(names)
 	return names
 }
+
+// useBasePrompt is the button that removes the custom prompt.
+var useBasePrompt = [][]Button{{{Text: "🧹 Use the base prompt", Data: "/prompt clear"}}}
+
+// promptHelp is the reply to /prompt with an argument that is not known.
+const promptHelp = "📝 **Prompt commands**\n`/prompt` shows the prompt.\n" +
+	"`/prompt set <text>` replaces the base prompt in this session.\n`/prompt clear` goes back to the base prompt."
 
 func cmdPrompt(ctx context.Context, c *CommandCtx, args string) error {
 	sub, text, _ := strings.Cut(args, " ")
@@ -388,23 +566,37 @@ func cmdPrompt(ctx context.Context, c *CommandCtx, args string) error {
 			return err
 		}
 		s.PromptOverride = text
-		c.reply("The custom prompt of this session is set. It replaces the base prompt.")
-	case sub == "show" && text == "":
+		c.send(Reply{Text: "📝 **Custom prompt set**\nIt replaces the base prompt in this session.", Buttons: useBasePrompt})
+	case (sub == "" || sub == "show") && text == "":
 		if s.PromptOverride == "" {
-			c.reply("This session uses the base prompt.")
+			c.send(Reply{Text: "📝 **Prompt: base prompt**\nTo replace it in this session, send `/prompt set <text>`."})
 		} else {
-			c.reply("Custom prompt:\n%s", s.PromptOverride)
+			c.send(Reply{Text: "📝 **Prompt: custom**\n" + quoteMarkdown(s.PromptOverride), Buttons: useBasePrompt})
 		}
 	case sub == "clear" && text == "":
 		if err := c.store().SetPrompt(ctx, s.ID, ""); err != nil {
 			return err
 		}
 		s.PromptOverride = ""
-		c.reply("The custom prompt is removed. This session uses the base prompt.")
+		c.send(Reply{Text: "📝 **Base prompt again**\nThe custom prompt is removed."})
 	default:
-		c.reply("Usage: /prompt set <text> | /prompt show | /prompt clear")
+		c.send(Reply{Text: promptHelp})
 	}
 	return nil
+}
+
+// quoteMarkdown returns text as a Markdown quote. Each line gets the "> " prefix, and the
+// Markdown markers in the text show literally.
+func quoteMarkdown(text string) string {
+	lines := strings.Split(EscapeMarkdown(text), "\n")
+	for i, l := range lines {
+		if l == "" {
+			lines[i] = ">"
+		} else {
+			lines[i] = "> " + l
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func cmdFork(ctx context.Context, c *CommandCtx, args string) error {
@@ -420,21 +612,20 @@ func cmdFork(ctx context.Context, c *CommandCtx, args string) error {
 		return err
 	}
 	c.Session = f
-	c.reply("Forked into %s. The original session is unchanged.", f.ID)
-	return nil
-}
-
-// titleSuffix returns ` ("title")`, or "" for an empty title.
-func titleSuffix(title string) string {
-	if title == "" {
-		return ""
+	text := fmt.Sprintf("🍴 **Copied to \"%s\"**\nYou are in the copy now. \"%s\" did not change.",
+		sessionTitle(f.Title), sessionTitle(s.Title))
+	if !c.interactive() {
+		text += fmt.Sprintf("\nSend /resume %s to go back.", s.ID)
 	}
-	return fmt.Sprintf(" (%q)", title)
+	c.send(Reply{Text: text, Buttons: [][]Button{{
+		{Text: "↩️ Back to \"" + buttonTitle(s.Title) + "\"", Data: "/resume " + s.ID},
+	}}})
+	return nil
 }
 
 func cmdCompact(ctx context.Context, c *CommandCtx, _ string) error {
 	if c.Deps.Agent == nil || c.Deps.Agent.Compactor == nil {
-		c.reply("Compaction is not available.")
+		c.send(Reply{Text: "🗜 **Compaction is not available**"})
 		return nil
 	}
 	s, err := c.current(ctx)
@@ -442,14 +633,53 @@ func cmdCompact(ctx context.Context, c *CommandCtx, _ string) error {
 		return err
 	}
 	n, err := c.Deps.Agent.CompactNow(ctx, s)
+	c.send(compactReply(n, err))
+	return nil
+}
+
+// compactReply returns the reply to /compact after n messages became one summary, or
+// after the error err.
+func compactReply(n int, err error) Reply {
 	switch {
 	case err != nil:
-		c.reply("Compaction failed: %v", err)
+		return Reply{Text: fmt.Sprintf("⚠️ **Compaction failed**\n%s. Try again later.",
+			EscapeMarkdown(strings.TrimSuffix(err.Error(), ".")))}
 	case n == 0:
-		c.reply("Nothing to compact.")
+		return Reply{Text: "🗜 **Nothing to compact**\nThis session is still short."}
 	default:
-		c.reply("Compacted: %d messages → 1 summary.", n)
+		return Reply{Text: fmt.Sprintf("🗜 **Compacted**\n%d messages → 1 summary. The session keeps the context.", n)}
 	}
+}
+
+// helpTelegram is the reply to /help on a channel with buttons. Telegram shows the
+// command /reload-mcp as /reload_mcp in its menu.
+const helpTelegram = "📖 **Commands**\n\n" +
+	"**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
+	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n" +
+	"/delete · delete a session\n\n" +
+	"**This session**\n/model · change the model\n/prompt · change the prompt\n" +
+	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
+	"**The current task**\n/stop · stop it\n/steer · send it a note\n" +
+	"/approve · /deny · answer an approval\n\n" +
+	"**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers"
+
+// helpCLI is the reply to /help on a text-only channel. It does not have the Telegram
+// commands, and it has /exit.
+const helpCLI = "📖 **Commands**\n\n" +
+	"**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
+	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n" +
+	"/delete · delete a session\n\n" +
+	"**This session**\n/model · change the model\n/prompt · change the prompt\n" +
+	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
+	"**The current task**\n/stop · stop it\n/steer · send it a note\n\n" +
+	"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
+
+func cmdHelp(_ context.Context, c *CommandCtx, _ string) error {
+	text := helpCLI
+	if c.interactive() {
+		text = helpTelegram
+	}
+	c.send(Reply{Text: text})
 	return nil
 }
 
@@ -462,7 +692,7 @@ func ReloadMCPCommand(m *mcp.Manager) Command {
 		Help: "Reload the MCP servers and their tool lists. The next request has no prompt cache",
 		Run: func(ctx context.Context, c *CommandCtx, _ string) error {
 			if m == nil {
-				c.reply("No MCP servers are configured.")
+				c.send(Reply{Text: "🔌 **No MCP servers**\nAdd a server under `mcp.servers` in config.yaml."})
 				return nil
 			}
 			var reg *tools.Registry
@@ -473,47 +703,79 @@ func ReloadMCPCommand(m *mcp.Manager) Command {
 				reg = tools.NewRegistry()
 			}
 			res, err := m.ReloadReport(ctx, reg)
-			c.reply("%s", reloadMCPReply(res, err))
+			c.send(Reply{Text: reloadMCPReply(res, err)})
 			return nil
 		},
 	}
 }
 
-// reloadMCPReply returns the reply to /reload-mcp (Hermes gateway.reload_mcp text).
+// reloadMCPReply returns the reply to /reload-mcp. The parts of the report follow Hermes
+// gateway.reload_mcp.
 func reloadMCPReply(res mcp.ReloadResult, err error) string {
 	if errors.Is(err, mcp.ErrServerList) {
-		return fmt.Sprintf("MCP reload failed: %v\nThe MCP tools did not change.", err)
+		return fmt.Sprintf("⚠️ **MCP reload failed**\n%s\nThe MCP tools did not change.", EscapeMarkdown(err.Error()))
 	}
-	lines := []string{"MCP servers reloaded."}
+	lines := []string{"🔌 **MCP servers reloaded**"}
 	for _, l := range []struct {
 		label string
 		names []string
 	}{{"Reloaded", res.Reloaded}, {"Added", res.Added}, {"Removed", res.Removed}} {
 		if len(l.names) > 0 {
-			lines = append(lines, l.label+": "+strings.Join(l.names, ", "))
+			lines = append(lines, "• "+l.label+": "+escapeNames(l.names))
 		}
 	}
 	if res.Servers == 0 {
 		lines = append(lines, "No MCP servers are enabled.")
 	} else {
-		lines = append(lines, fmt.Sprintf("%d tools available from %d servers.", res.Tools, res.Servers))
+		lines = append(lines, fmt.Sprintf("%s from %s.", plural(res.Tools, "tool"), plural(res.Servers, "server")))
 	}
 	if len(res.Skipped) > 0 {
-		lines = append(lines, "Not added, because a different tool has the same name: "+strings.Join(res.Skipped, ", "))
+		lines = append(lines, "• Not added, because another tool has the same name: "+escapeNames(res.Skipped))
 	}
 	if err != nil {
-		lines = append(lines, fmt.Sprintf("Some servers did not reload. They keep their last tool lists: %v", err))
+		lines = append(lines, "⚠️ Some servers did not reload. They keep their last tool lists: "+EscapeMarkdown(err.Error()))
 	}
-	lines = append(lines, "The changes apply from the next message. That request has no prompt cache.")
+	lines = append(lines, "_The changes apply from your next message. That message does not use the prompt cache._")
 	return strings.Join(lines, "\n")
 }
 
-// usageHelp is the reply to /usage with a range that is not known.
-const usageHelp = "Usage: /usage [today|7d|30d|session]"
+// escapeNames returns the names as a comma list. The Markdown markers in a name show
+// literally.
+func escapeNames(names []string) string {
+	return EscapeMarkdown(strings.Join(names, ", "))
+}
+
+// plural returns "1 {word}" or "{n} {word}s".
+func plural(n int, word string) string {
+	if n == 1 {
+		return "1 " + word
+	}
+	return fmt.Sprintf("%d %ss", n, word)
+}
+
+// usageRange is one range of /usage: the argument and the button label.
+type usageRange struct{ arg, label string }
+
+// usageRanges are the ranges of /usage in button order. The header names a range with the
+// label in lower case.
+var usageRanges = []usageRange{{"today", "Today"}, {"7d", "7 days"}, {"30d", "30 days"}, {"session", "Session"}}
+
+// usageButtons returns the range buttons of /usage with a check mark on the current range.
+func usageButtons(current string) [][]Button {
+	row := make([]Button, 0, len(usageRanges))
+	for _, u := range usageRanges {
+		label := u.label
+		if u.arg == current {
+			label = "✓ " + label
+		}
+		row = append(row, Button{Text: label, Data: "/usage " + u.arg})
+	}
+	return [][]Button{row}
+}
 
 func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 	if c.Deps.Agent == nil || c.Deps.Agent.DB == nil {
-		c.reply("The usage data is not available.")
+		c.send(Reply{Text: "📊 **Usage is not available**"})
 		return nil
 	}
 	scope := strings.ToLower(strings.TrimSpace(args))
@@ -521,38 +783,76 @@ func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 		scope = "today"
 	}
 	var since time.Time
-	var sessionID string
+	var head string
+	var session *sessions.Session
 	if scope == "session" {
 		s, err := c.current(ctx)
 		if err != nil {
 			return err
 		}
-		sessionID = s.ID
+		session = s
+		head = fmt.Sprintf("📊 **Usage: \"%s\"**", sessionTitle(s.Title))
 	} else {
 		var ok bool
 		if since, ok = obs.UsageSince(scope, time.Now()); !ok {
-			c.reply(usageHelp)
+			names := make([]string, len(usageRanges))
+			for i, u := range usageRanges {
+				names[i] = u.arg
+			}
+			c.send(Reply{Text: fmt.Sprintf("⚠️ **Unknown range: %s**\nThe ranges are: %s.",
+				EscapeMarkdown(scope), strings.Join(names, ", "))})
 			return nil
 		}
+		for _, u := range usageRanges {
+			if u.arg == scope {
+				head = "📊 **Usage: " + strings.ToLower(u.label) + "**"
+			}
+		}
+	}
+	sessionID := ""
+	if session != nil {
+		sessionID = session.ID
 	}
 	rows, compactions, err := obs.UsageReport(ctx, c.Deps.Agent.DB, since, sessionID, FlatProviders(c.Deps.Cfg))
 	if err != nil {
 		return err
 	}
-	table := obs.FormatUsage(rows)
-	// Telegram shows the table in a fixed-width font only in a code block.
-	if strings.HasPrefix(c.Key, "telegram:") {
-		table = "```\n" + table + "\n```"
+	r := Reply{Edit: args != ""}
+	if c.interactive() {
+		r.Buttons = usageButtons(scope)
 	}
-	head := "Usage " + scope + ":"
-	if sessionID != "" {
-		head = fmt.Sprintf("Usage of session %s:", sessionID)
+	// tail is the last line of a session report.
+	tail := ""
+	if session != nil {
+		tail = fmt.Sprintf("Compactions: %d", compactions)
 	}
-	text := head + "\n" + table
-	if sessionID != "" {
-		text += fmt.Sprintf("\nCompactions: %d", compactions)
+	switch {
+	case len(rows) == 0 && session != nil:
+		unit := "compactions"
+		if compactions == 1 {
+			unit = "compaction"
+		}
+		r.Text = fmt.Sprintf("%s\nNo model calls yet. %d %s.", head, compactions, unit)
+	case len(rows) == 0:
+		r.Text = head + "\nNo model calls in this range."
+	case !c.interactive():
+		// The CLI keeps the wide table with the tok/s column.
+		r.Text = head + "\n" + obs.FormatUsage(rows)
+		if tail != "" {
+			r.Text += "\n" + tail
+		}
+	default:
+		// Telegram shows the narrow table in a fixed-width font only in a code block. A
+		// line right after a Markdown table becomes a table row, so a blank line comes
+		// before the tail of the rich message.
+		r.Rich = head + "\n\n" + obs.FormatUsageMarkdown(rows)
+		r.Text = head + "\n```\n" + obs.FormatUsageNarrow(rows) + "\n```"
+		if tail != "" {
+			r.Rich += "\n\n" + tail
+			r.Text += "\n" + tail
+		}
 	}
-	c.reply("%s", text)
+	c.send(r)
 	return nil
 }
 
