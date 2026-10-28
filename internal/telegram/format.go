@@ -17,18 +17,23 @@ import (
 // mdv2Special holds the characters that MarkdownV2 escapes outside code.
 const mdv2Special = "_*[]()~`>#+-=|{}.!\\"
 
+// mdEscapes holds the characters that a backslash makes literal in common
+// markdown. It is the set that gateway.EscapeMarkdown escapes in user text.
+const mdEscapes = "\\*_`[]|~"
+
 var (
-	reFenced     = regexp.MustCompile("```(?:[^\\n]*\\n)?[\\s\\S]*?```")
-	reInlineCode = regexp.MustCompile("`[^`\x00]+`")
-	reLink       = regexp.MustCompile(`\[([^\]]+)\]\(([^()\x00]*(?:\([^()\x00]*\)[^()\x00]*)*)\)`)
-	reHeader     = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
-	reBold       = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	reItalic     = regexp.MustCompile(`\*([^*\n]+)\*`)
-	reStrike     = regexp.MustCompile(`~~(.+?)~~`)
-	reSpoiler    = regexp.MustCompile(`\|\|(.+?)\|\|`)
-	reQuote      = regexp.MustCompile(`(?m)^((?:\*\*)?>{1,3}) (.+)$`)
+	reFenced  = regexp.MustCompile("```(?:[^\\n]*\\n)?[\\s\\S]*?```")
+	reLink    = regexp.MustCompile(`\[([^\]]+)\]\(([^()\x00]*(?:\([^()\x00]*\)[^()\x00]*)*)\)`)
+	reHeader  = regexp.MustCompile(`(?m)^#{1,6}\s+(.+)$`)
+	reBold    = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reItalic  = regexp.MustCompile(`^\*([^*\n]+)\*`)
+	reStrike  = regexp.MustCompile(`~~(.+?)~~`)
+	reSpoiler = regexp.MustCompile(`\|\|(.+?)\|\|`)
+	reQuote   = regexp.MustCompile(`(?m)^((?:\*\*)?>{1,3}) (.+)$`)
 	// reQuoteStart matches the start of a line that reQuote converts.
 	reQuoteStart = regexp.MustCompile(`^(?:\*\*)?>{1,3} .`)
+	// reQuoteBare matches a ">" line with no text.
+	reQuoteBare = regexp.MustCompile(`^>{1,3}$`)
 	// reQuoteNext matches the start of a line that continues a quote. tdlib
 	// continues a quote only when ">" comes after the newline.
 	reQuoteNext = regexp.MustCompile(`^\n>{1,3} .`)
@@ -124,11 +129,8 @@ func ToMarkdownV2(md string) string {
 		return ph("```" + lang + "\n" + body + "```")
 	})
 
-	// 2) Inline code. The regex excludes NUL, so a code span cannot hold the
-	// placeholder of a fenced block.
-	text = replaceGroups(reInlineCode, text, func(g []string) string {
-		return ph(strings.ReplaceAll(g[0], `\`, `\\`))
-	})
+	// 2) Inline code and backslash escapes.
+	text = replaceCodeAndEscapes(text, ph)
 
 	// 3) Links. Inside the URL, only ) and \ need an escape. The URL regex
 	// excludes NUL, because a URL is plain text and cannot hold code.
@@ -157,7 +159,10 @@ func ToMarkdownV2(md string) string {
 	text = replaceGroups(reStrike, text, func(g []string) string { return ph("~" + escapeMDV2(g[1]) + "~") })
 	text = replaceGroups(reSpoiler, text, func(g []string) string { return ph("||" + escapeMDV2(g[1]) + "||") })
 
-	// 9) Block quotes. "**>" starts an expandable quote and a final "||"
+	// 9) Block quotes. A bare ">" line after a quote line keeps the quote open over
+	// an empty line. It gets an empty placeholder, so reQuote converts it too.
+	text = quoteBareLines(text, ph)
+	// "**>" starts an expandable quote and a final "||"
 	// ends it. tdlib reads the "||" as the mark only where the quote ends,
 	// so the mark cannot come before a line that continues the quote.
 	text = replaceGroupsAt(reQuote, text, func(m []int, g []string) string {
@@ -186,32 +191,125 @@ func ToMarkdownV2(md string) string {
 	return escapeBareBrackets(text)
 }
 
+// quoteBareLines adds an empty placeholder after each bare ">" line that comes after
+// a quote line. tdlib ends a quote at a newline without ">" after it, so an
+// escaped ">" would split the quote in two.
+func quoteBareLines(text string, ph func(string) string) string {
+	lines := strings.Split(text, "\n")
+	for i := 1; i < len(lines); i++ {
+		if reQuoteBare.MatchString(lines[i]) && reQuoteStart.MatchString(lines[i-1]) {
+			lines[i] += " " + ph("")
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // lineStart returns the byte index of the start of the line that holds s[i].
 func lineStart(s string, i int) int {
 	return strings.LastIndexByte(s[:i], '\n') + 1
 }
 
-// replaceItalic converts *x* to _x_. Telegram reads "__" as underline, so an
-// empty bold entity separates two italic entities that touch (Bot API,
-// MarkdownV2 style).
-func replaceItalic(text string, ph func(string) string) string {
-	idx := reItalic.FindAllStringSubmatchIndex(text, -1)
-	if idx == nil {
+// replaceCodeAndEscapes moves inline code spans and backslash escapes behind
+// placeholders, in one scan from left to right. A backslash escape outside
+// code gives the literal character, so "\_" cannot start italic and "\`"
+// cannot start code. Inside code, a backslash is literal. A code span cannot
+// hold NUL, so it cannot hold the placeholder of a fenced block.
+func replaceCodeAndEscapes(text string, ph func(string) string) string {
+	if !strings.ContainsAny(text, "`\\") {
 		return text
 	}
 	var b strings.Builder
-	last := 0
-	for i, m := range idx {
-		b.WriteString(text[last:m[0]])
-		v := "_" + escapeMDV2(text[m[2]:m[3]]) + "_"
-		if i > 0 && idx[i-1][1] == m[0] {
+	b.Grow(len(text))
+	for i := 0; i < len(text); {
+		c := text[i]
+		if c == '\\' && i+1 < len(text) && strings.IndexByte(mdEscapes, text[i+1]) >= 0 {
+			// Each character in mdEscapes is special in MarkdownV2.
+			b.WriteString(ph(text[i : i+2]))
+			i += 2
+			continue
+		}
+		if c == '`' {
+			j := strings.IndexByte(text[i+1:], '`')
+			if j > 0 && strings.IndexByte(text[i+1:i+1+j], 0) < 0 {
+				b.WriteString(ph(strings.ReplaceAll(text[i:i+j+2], `\`, `\\`)))
+				i += j + 2
+				continue
+			}
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String()
+}
+
+// replaceItalic converts *x* and _x_ to MarkdownV2 italic. The text of *x* is
+// on one line. A "_" opens italic at the start of a word and closes it at the
+// end of a word, so a "_" in snake_case stays literal. Telegram reads "__" as
+// underline, so an empty bold entity separates two italic entities that touch
+// (Bot API, MarkdownV2 style).
+func replaceItalic(text string, ph func(string) string) string {
+	if !strings.ContainsAny(text, "*_") {
+		return text
+	}
+	var b strings.Builder
+	last, prevEnd := 0, -1
+	for i := 0; i < len(text); {
+		end, inner := -1, ""
+		switch text[i] {
+		case '*':
+			if m := reItalic.FindStringSubmatchIndex(text[i:]); m != nil {
+				end, inner = i+m[1], text[i+m[2]:i+m[3]]
+			}
+		case '_':
+			if j := closeUnderscore(text, i); j > 0 {
+				end, inner = j+1, text[i+1:j]
+			}
+		}
+		if end < 0 {
+			i++
+			continue
+		}
+		b.WriteString(text[last:i])
+		v := "_" + escapeMDV2(inner) + "_"
+		if prevEnd == i {
 			v = "**" + v
 		}
 		b.WriteString(ph(v))
-		last = m[1]
+		last, prevEnd, i = end, end, end
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+// closeUnderscore returns the index of the "_" that closes the italic span
+// that the "_" at s[i] opens, or -1. The rules are the rules of
+// gateway.StripMarkdown, on one line, and a "__" is never a marker:
+//   - The open "_" has no word character before it, and a character that is
+//     not a space and not "_" after it.
+//   - The close "_" has a character that is not a space and not "_" before
+//     it, and no word character after it.
+func closeUnderscore(s string, i int) int {
+	if wordBefore(s, i) || i+1 >= len(s) || s[i+1] == '_' {
+		return -1
+	}
+	if r, _ := utf8.DecodeRuneInString(s[i+1:]); unicode.IsSpace(r) {
+		return -1
+	}
+	for j := i + 2; j < len(s); j++ {
+		switch s[j] {
+		case '\n':
+			return -1
+		case '_':
+			if s[j-1] == '_' || wordAfter(s, j+1) {
+				continue
+			}
+			if r, _ := utf8.DecodeLastRuneInString(s[:j]); unicode.IsSpace(r) {
+				continue
+			}
+			return j
+		}
+	}
+	return -1
 }
 
 // isFenceLang reports whether info can be the language of a pre entity.
@@ -476,13 +574,24 @@ func isTableRow(line string) bool {
 	return s != "" && strings.Contains(s, "|")
 }
 
+// splitTableRow returns the cells of a table row. A "|" after a backslash
+// escape is part of the cell, as in GitHub Flavored Markdown.
 func splitTableRow(line string) []string {
 	s := strings.TrimSpace(line)
 	s = strings.TrimPrefix(s, "|")
-	s = strings.TrimSuffix(s, "|")
-	cells := strings.Split(s, "|")
-	for i := range cells {
-		cells[i] = strings.TrimSpace(cells[i])
+	var cells []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case '|':
+			cells = append(cells, strings.TrimSpace(s[start:i]))
+			start = i + 1
+		}
+	}
+	if rest := strings.TrimSpace(s[start:]); rest != "" || len(cells) == 0 {
+		cells = append(cells, rest)
 	}
 	return cells
 }

@@ -85,14 +85,6 @@ func openTestDB(t *testing.T) *db.DB {
 	return d
 }
 
-func commandNames(cmds []BotCommand) []string {
-	out := make([]string, len(cmds))
-	for i, c := range cmds {
-		out[i] = c.Command
-	}
-	return out
-}
-
 func TestOffsetPersistedBeforeHandle(t *testing.T) {
 	srv, _ := updatesServer(t, []Update{{UpdateID: 100}, {UpdateID: 101}})
 	d := openTestDB(t)
@@ -193,14 +185,38 @@ func TestBackoffCapsAt30s(t *testing.T) {
 	}
 }
 
-func TestCommandsListMatchesSpec(t *testing.T) {
-	want := []string{"start", "new", "reset", "sessions", "resume", "rename", "archive", "delete", "fork", "model", "prompt", "compact", "usage", "stop", "steer", "sethome", "reload_mcp", "approve", "deny"}
-	if !reflect.DeepEqual(commandNames(BotCommands()), want) {
-		t.Fatal(commandNames(BotCommands()))
+func TestBotCommandsMenu(t *testing.T) {
+	want := []BotCommand{
+		{Command: "new", Description: "Start a new session"},
+		{Command: "sessions", Description: "See and resume sessions"},
+		{Command: "stop", Description: "Stop the current task"},
+		{Command: "steer", Description: "Send a note to the current task"},
+		{Command: "model", Description: "Change the model"},
+		{Command: "usage", Description: "See tokens and cost"},
+		{Command: "help", Description: "See all commands"},
+		{Command: "rename", Description: "Change the session title"},
+		{Command: "fork", Description: "Copy this session"},
+		{Command: "compact", Description: "Make the context shorter"},
+		{Command: "prompt", Description: "Change the prompt"},
+		{Command: "archive", Description: "Hide this session"},
+		{Command: "delete", Description: "Delete a session"},
+		{Command: "approve", Description: "Allow the waiting command"},
+		{Command: "deny", Description: "Deny the waiting command"},
+		{Command: "sethome", Description: "Send cron results here"},
+		{Command: "reload_mcp", Description: "Reload the MCP servers"},
+	}
+	if got := BotCommands(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
 	for _, c := range BotCommands() {
-		if c.Description == "" || len(c.Description) > 256 {
-			t.Fatal("bad description", c)
+		for _, r := range c.Description {
+			if r > 0x2000 {
+				t.Errorf("the description of %q has the icon %q", c.Command, r)
+			}
+		}
+		switch c.Command {
+		case "start", "reset", "resume":
+			t.Errorf("%q must not be in the menu", c.Command)
 		}
 	}
 }

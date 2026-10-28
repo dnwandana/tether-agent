@@ -26,21 +26,22 @@ const (
 // maxCommandPreview is the longest command in an approval message (Hermes).
 const maxCommandPreview = 3800
 
-// The texts of an approval message after the answer (Hermes label_map).
+// The first lines of an approval message after the answer. These are Tether Agent texts.
+// The approval scopes follow Hermes.
 const (
-	labelOnce    = "✅ Approved once"
-	labelSession = "✅ Approved for session"
-	labelAlways  = "✅ Approved permanently"
-	labelDenied  = "❌ Denied"
-	labelTimeout = "❌ Denied (timeout)"
+	labelOnce    = "✅ **Allowed once**"
+	labelSession = "✅ **Allowed in this session**"
+	labelAlways  = "✅ **Always allowed**"
+	labelDenied  = "❌ **Denied**"
+	labelTimeout = "⌛ **Denied: no answer**"
 )
 
 // The answers to a button press that cannot act.
 const (
-	resolvedText     = "This prompt has already been resolved."
-	notAuthorized    = "⛔ You are not authorized to answer this prompt."
-	wrongChat        = "⛔ This button belongs to another chat."
-	invalidCallback  = "Invalid button data."
+	resolvedText     = "✔️ This prompt has an answer already."
+	notAuthorized    = "⛔ Only the owner can answer this prompt."
+	wrongChat        = "⛔ This button is for another chat."
+	invalidCallback  = "⚠️ This button is too old. Send the command again."
 	askDoneButton    = "Done"
 	askNoAnswerLabel = "⏱ No answer."
 )
@@ -54,6 +55,9 @@ type Interactions struct {
 	// Authorized reports whether the user of a button press may answer. Nil allows every
 	// user. Channel.Run sets it to the authorization check of the channel.
 	Authorized func(ctx context.Context, cq CallbackQuery) bool
+	// ApprovalTimeout is the time that the approval gate waits for an answer. The approval
+	// message shows it. Zero leaves out the line about the time.
+	ApprovalTimeout time.Duration
 
 	mu      sync.Mutex
 	pending map[string]*prompt
@@ -123,39 +127,44 @@ func (it *Interactions) promptApproval(ctx context.Context, chatID int64, thread
 	if desc == "" {
 		desc = "dangerous command"
 	}
-	text := "⚠ Dangerous command: " + desc
+	text := "🛡 **Approval needed**\nThe agent wants to run a " + desc
 	if req.ChildName != "" {
 		text += " (from subagent " + req.ChildName + ")"
 	}
-	text += "\n```\n" + cmd + "\n```"
+	block := "\n```\n" + cmd + "\n```"
+	text += "." + block
+	if it.ApprovalTimeout > 0 {
+		text += "\n_No answer in " + formatWait(it.ApprovalTimeout) + " = deny._"
+	}
 	p := it.add(approvalPrefix, chatID, threadID)
 	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
-		{{Text: "✅ Once", CallbackData: callbackData(approvalPrefix, p.id, "once")},
-			{Text: "✅ This session", CallbackData: callbackData(approvalPrefix, p.id, "session")}},
-		{{Text: "✅ Always", CallbackData: callbackData(approvalPrefix, p.id, "always")},
+		{{Text: "✅ Allow once", CallbackData: callbackData(approvalPrefix, p.id, "once")},
+			{Text: "✅ Allow in this session", CallbackData: callbackData(approvalPrefix, p.id, "session")}},
+		{{Text: "✅ Always allow", CallbackData: callbackData(approvalPrefix, p.id, "always")},
 			{Text: "❌ Deny", CallbackData: callbackData(approvalPrefix, p.id, "deny")}},
 	}}
 	if err := it.send(ctx, p, text, kb); err != nil {
 		it.remove(p.id)
 		return security.ScopeDeny, fmt.Errorf("telegram approval: %w", err)
 	}
+	// After the answer, the message keeps the command, so the chat shows what ran.
 	ectx := context.WithoutCancel(ctx)
 	select {
 	case r := <-p.reply:
-		it.edit(ectx, p, approvalLabel(r.scope))
+		it.editMarkdown(ectx, p, it.approvalLabel(r.scope)+block)
 		return r.scope, nil
 	case <-ctx.Done():
 		if !it.remove(p.id) {
 			// An answer came at the same time.
 			r := <-p.reply
-			it.edit(ectx, p, approvalLabel(r.scope))
+			it.editMarkdown(ectx, p, it.approvalLabel(r.scope)+block)
 			return r.scope, nil
 		}
 		label := labelDenied
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			label = labelTimeout
+			label = it.approvalLabel(security.ScopeTimeout)
 		}
-		it.edit(ectx, p, label)
+		it.editMarkdown(ectx, p, label+block)
 		return security.ScopeTimeout, ctx.Err()
 	}
 }
@@ -238,7 +247,8 @@ func (it *Interactions) HandleCallback(ctx context.Context, cq CallbackQuery) bo
 			answerCB(invalidCallback)
 			return true
 		}
-		answerCB(approvalLabel(scope))
+		// A pop-up shows plain text, so it gets the label without the bold markers.
+		answerCB(strings.ReplaceAll(it.approvalLabel(scope), "**", ""))
 		if !it.deliver(id, promptReply{scope: scope}) {
 			it.logger().Info("telegram: the approval was answered already", "prompt", id)
 		}
@@ -402,6 +412,27 @@ func (it *Interactions) send(ctx context.Context, p *prompt, text string, kb *In
 	return nil
 }
 
+// editMarkdown replaces the text of the prompt message with md as MarkdownV2 and removes
+// its buttons. When Telegram rejects the markup, it sends the text without the markup.
+func (it *Interactions) editMarkdown(ctx context.Context, p *prompt, md string) {
+	it.mu.Lock()
+	msgID := p.msgID
+	it.mu.Unlock()
+	if msgID == 0 {
+		return
+	}
+	formatted := cutUTF16(ToMarkdownV2(md), maxMessageLen)
+	params := EditMessageTextParams{ChatID: p.chatID, MessageID: msgID, Text: formatted, ParseMode: "MarkdownV2"}
+	_, err := it.C.EditMessageText(ctx, params)
+	if err != nil && isBadRequest(err) && !isNotModified(err) {
+		params.Text, params.ParseMode = StripMarkdownV2(formatted), ""
+		_, err = it.C.EditMessageText(ctx, params)
+	}
+	if err != nil && !isNotModified(err) {
+		it.logger().Info("telegram: cannot edit the prompt message", "err", err.Error())
+	}
+}
+
 // edit replaces the text of the prompt message with plain text and removes its buttons.
 func (it *Interactions) edit(ctx context.Context, p *prompt, text string) {
 	it.mu.Lock()
@@ -456,8 +487,9 @@ func parseCallback(data string) (kind, id, arg string, ok bool) {
 	return parts[0], parts[1], parts[2], true
 }
 
-// approvalLabel returns the text of an approval message after the answer.
-func approvalLabel(s security.Scope) string {
+// approvalLabel returns the first line of an approval message after the answer. The
+// timeout line names the wait when ApprovalTimeout is set.
+func (it *Interactions) approvalLabel(s security.Scope) string {
 	switch s {
 	case security.ScopeOnce:
 		return labelOnce
@@ -466,9 +498,21 @@ func approvalLabel(s security.Scope) string {
 	case security.ScopeAlways:
 		return labelAlways
 	case security.ScopeTimeout:
+		if it.ApprovalTimeout > 0 {
+			return "⌛ **Denied: no answer in " + formatWait(it.ApprovalTimeout) + "**"
+		}
 		return labelTimeout
 	}
 	return labelDenied
+}
+
+// formatWait returns a wait as whole minutes ("10 min"), or as seconds ("45 s") under a
+// minute.
+func formatWait(d time.Duration) string {
+	if d < time.Minute {
+		return strconv.Itoa(int(d/time.Second)) + " s"
+	}
+	return strconv.Itoa(int(d/time.Minute)) + " min"
 }
 
 // answerSummary returns the answer of a question as one line.
@@ -482,29 +526,25 @@ func answerSummary(a tools.Answer) string {
 	return a.Text
 }
 
-// resolveReply returns the reply to /approve or /deny that answered n approvals (Hermes).
+// resolveReply returns the reply to /approve or /deny that answered n approvals. These are
+// Tether Agent texts. The scopes and the oldest-first order follow Hermes.
 func resolveReply(name string, scope security.Scope, n int) string {
-	if name == "deny" {
-		switch {
-		case n == 0:
-			return noPendingDeny
-		case n == 1:
-			return "❌ Command denied."
-		}
-		return fmt.Sprintf("❌ Commands denied (%d commands).", n)
+	switch {
+	case n == 0:
+		return noPendingApproval
+	case name == "deny" && n == 1:
+		return labelDenied + "\nThe agent continues without the command."
+	case name == "deny":
+		return fmt.Sprintf("❌ **Denied %d commands**\nThe agent continues without them.", n)
+	case n > 1:
+		return fmt.Sprintf("✅ **Allowed %d commands**\nThe agent continues.", n)
 	}
-	if n == 0 {
-		return noPendingApprove
-	}
-	what := ""
+	label := labelOnce
 	switch scope {
 	case security.ScopeSession:
-		what = " (pattern approved for this session)"
+		label = labelSession
 	case security.ScopeAlways:
-		what = " (pattern approved permanently)"
+		label = labelAlways
 	}
-	if n == 1 {
-		return "✅ Command approved" + what + ". The agent is resuming..."
-	}
-	return fmt.Sprintf("✅ Commands approved%s (%d commands). The agent is resuming...", what, n)
+	return label + "\nThe agent continues."
 }

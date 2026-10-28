@@ -35,8 +35,8 @@ const (
 	PairMaxFailures = 5
 )
 
-// PairBusyReply is the Hermes reply when the bot cannot give a new code.
-const PairBusyReply = "Too many pairing requests right now~ Please try again later!"
+// PairBusyReply is the reply when the bot cannot give a new code.
+const PairBusyReply = "⏳ **Too many pairing requests**\nTry again later."
 
 // The pairing status values in the pairing table.
 const (
@@ -88,12 +88,25 @@ type PairRow struct {
 	ApprovedAt time.Time // zero for a pending user
 }
 
-// PairReply returns the Hermes reply that gives a pairing code to the user.
+// PairReply returns the reply that gives a pairing code to the user.
 func PairReply(platform, code string) string {
-	return "Hi~ I don't recognize you yet!\n\n" +
-		"Here's your pairing code: `" + code + "`\n\n" +
-		"Ask the bot owner to run:\n" +
-		"`tether pairing approve " + platform + " " + code + "`"
+	return "🔐 **Pairing needed**\nI do not know you yet. Your pairing code is `" + code + "`.\n\n" +
+		"Ask the owner to run this command:\n" +
+		"`tether pairing approve " + platform + " " + code + "`\n" +
+		"_The code expires in " + durationText(PairCodeTTL) + "._"
+}
+
+// durationText returns d as whole hours, for example "1 hour", or else as whole minutes,
+// for example "30 minutes".
+func durationText(d time.Duration) string {
+	n, unit := int(d/time.Minute), "minute"
+	if d >= time.Hour && d%time.Hour == 0 {
+		n, unit = int(d/time.Hour), "hour"
+	}
+	if n == 1 {
+		return "1 " + unit
+	}
+	return strconv.Itoa(n) + " " + unit + "s"
 }
 
 // Request makes a new pairing code for an unknown user and returns the code

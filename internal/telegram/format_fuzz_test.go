@@ -18,6 +18,9 @@ func FuzzMarkdownV2(f *testing.F) {
 	f.Add("~~old~~ ||spoiler|| *it* _u_ #tag a|b c>d e=f")
 	f.Add("| a | b |\n|---|---|\n| 1 | 2.5 |\n")
 	f.Add("😀 \\ \\. \\\\ " + strings.Repeat("x.", 50))
+	f.Add("**Fix my\\_project** \\*draft\\* \\[x\\] a\\|b \\` `c\\_d`")
+	f.Add("_2 min · step 4/90 · web_fetch_\n__init__ snake_case _x_ _y_z_")
+	f.Add("| a\\|b | `c|d` |\n|---|---|\n| _e_ | f\\_g |\n")
 	f.Fuzz(func(t *testing.T, md string) {
 		if !utf8.ValidString(md) {
 			return

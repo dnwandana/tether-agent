@@ -351,7 +351,8 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		Media: telegram.NewMediaPolicy(a.DataDir, security.EnvLookup(a.DotEnv), a.Log),
 		Bot:   me,
 		Log:   a.Log,
-		UI:    &telegram.Interactions{C: c, Log: a.Log},
+		// The approval message shows the wait of the gate. Zero config means the gate default.
+		UI: &telegram.Interactions{C: c, Log: a.Log, ApprovalTimeout: approvalWait(a.Cfg.Approvals.TimeoutS)},
 	}
 	a.Telegram = ch
 	a.Agent.ChatInfo = telegram.ChatInfo(cfg, me)
@@ -756,6 +757,15 @@ func (a *App) Close() error {
 		a.logFile = nil
 	}
 	return errors.Join(errs...)
+}
+
+// approvalWait returns the time that the approval gate waits for an answer. It uses the
+// same default as security.Gate when timeoutS is zero or less.
+func approvalWait(timeoutS int) time.Duration {
+	if timeoutS <= 0 {
+		return security.DefaultApprovalTimeout
+	}
+	return time.Duration(timeoutS) * time.Second
 }
 
 // NewRedactor returns a redactor that masks the .env values and the values of the secret

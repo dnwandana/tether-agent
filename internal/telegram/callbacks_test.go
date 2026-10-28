@@ -84,18 +84,15 @@ func TestApprovalButtonsAndEdit(t *testing.T) {
 	if err != nil || sc != security.ScopeSession {
 		t.Fatal(sc, err)
 	}
-	if api.lastCall("editMessageText").Body["text"] != "✅ Approved for session" {
+	if api.lastCall("editMessageText").Body["text"] != ToMarkdownV2("✅ **Allowed in this session**\n```\nrm -rf /tmp/x\n```") {
 		t.Fatal(api.lastCall("editMessageText").Body)
 	}
-	texts, data := keyboardOf(api, 0)
-	if !reflect.DeepEqual(texts, []string{"✅ Once", "✅ This session", "✅ Always", "❌ Deny"}) {
-		t.Fatal(texts)
-	}
+	_, data := keyboardOf(api, 0)
 	if !strings.HasPrefix(data[0], "ap:") || !strings.HasSuffix(data[0], ":once") || len(strings.Split(data[0], ":")[1]) != 16 {
 		t.Fatal(data)
 	}
 	body := api.lastCall("sendMessage").Body
-	if body["chat_id"] != float64(5) || !strings.Contains(body["text"].(string), "Dangerous command: recursive delete") ||
+	if body["chat_id"] != float64(5) || !strings.Contains(StripMarkdownV2(body["text"].(string)), "The agent wants to run a recursive delete.") ||
 		!strings.Contains(body["text"].(string), "rm -rf /tmp/x") {
 		t.Fatal(body)
 	}
@@ -112,7 +109,7 @@ func TestApprovalTimeoutEdits(t *testing.T) {
 	if sc != security.ScopeTimeout || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(sc, err)
 	}
-	if api.lastCall("editMessageText").Body["text"] != "❌ Denied (timeout)" {
+	if api.lastCall("editMessageText").Body["text"] != ToMarkdownV2("⌛ **Denied: no answer**\n```\nrm -rf /\n```") {
 		t.Fatal(api.all())
 	}
 	if it.ResolveApprovals(5, security.ScopeOnce, true) != 0 {
@@ -142,10 +139,124 @@ func TestApproveAllFallback(t *testing.T) {
 			t.Fatal(r)
 		}
 	}
-	if resolveReply("approve", security.ScopeOnce, 2) != "✅ Commands approved (2 commands). The agent is resuming..." ||
-		resolveReply("approve", security.ScopeOnce, 0) != "No pending command to approve." ||
-		resolveReply("deny", security.ScopeDeny, 1) != "❌ Command denied." {
-		t.Fatal("replies")
+}
+
+func TestApprovalPromptText(t *testing.T) {
+	it, api := interactions(t)
+	it.ApprovalTimeout = 10 * time.Minute
+	prompt := func(req security.ApprovalRequest) {
+		tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		defer cancel()
+		_, _ = it.For(5, "").PromptApproval(tctx, req)
+	}
+	prompt(security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete"})
+	want := "🛡 **Approval needed**\nThe agent wants to run a recursive delete.\n```\nrm -rf ./build\n```\n_No answer in 10 min = deny._"
+	if got := api.lastCall("sendMessage").Body["text"]; got != ToMarkdownV2(want) {
+		t.Fatalf("got %q, want %q", got, ToMarkdownV2(want))
+	}
+	texts, _ := keyboardOf(api, 0)
+	if !reflect.DeepEqual(texts, []string{"✅ Allow once", "✅ Allow in this session", "✅ Always allow", "❌ Deny"}) {
+		t.Fatal(texts)
+	}
+	prompt(security.ApprovalRequest{Command: "rm -rf ./build"})
+	want = "🛡 **Approval needed**\nThe agent wants to run a dangerous command.\n```\nrm -rf ./build\n```\n_No answer in 10 min = deny._"
+	if got := api.lastCall("sendMessage").Body["text"]; got != ToMarkdownV2(want) {
+		t.Fatalf("got %q, want %q", got, ToMarkdownV2(want))
+	}
+	prompt(security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete", ChildName: "researcher"})
+	want = "🛡 **Approval needed**\nThe agent wants to run a recursive delete (from subagent researcher).\n```\nrm -rf ./build\n```\n_No answer in 10 min = deny._"
+	if got := api.lastCall("sendMessage").Body["text"]; got != ToMarkdownV2(want) {
+		t.Fatalf("got %q, want %q", got, ToMarkdownV2(want))
+	}
+	it.ApprovalTimeout = 0
+	prompt(security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete"})
+	want = "🛡 **Approval needed**\nThe agent wants to run a recursive delete.\n```\nrm -rf ./build\n```"
+	if got := api.lastCall("sendMessage").Body["text"]; got != ToMarkdownV2(want) {
+		t.Fatalf("got %q, want %q", got, ToMarkdownV2(want))
+	}
+}
+
+func TestApprovalEditKeepsCommand(t *testing.T) {
+	const block = "\n```\nrm -rf ./build\n```"
+	for i, c := range []struct{ label, popup string }{
+		{"✅ **Allowed once**", "✅ Allowed once"},
+		{"✅ **Allowed in this session**", "✅ Allowed in this session"},
+		{"✅ **Always allowed**", "✅ Always allowed"},
+		{"❌ **Denied**", "❌ Denied"},
+	} {
+		it, api := interactions(t)
+		go func() {
+			waitSends(t, api, 1)
+			_, data := keyboardOf(api, 0)
+			it.HandleCallback(ctx, press(5, data[i]))
+		}()
+		if _, err := it.For(5, "").PromptApproval(ctx, security.ApprovalRequest{Command: "rm -rf ./build", Description: "d"}); err != nil {
+			t.Fatal(err)
+		}
+		edit := api.lastCall("editMessageText").Body
+		if edit["text"] != ToMarkdownV2(c.label+block) || edit["parse_mode"] != "MarkdownV2" || edit["reply_markup"] != nil {
+			t.Fatalf("%d: %v", i, edit)
+		}
+		if got := api.lastCall("answerCallbackQuery").Body["text"]; got != c.popup {
+			t.Fatalf("%d: pop-up %q", i, got)
+		}
+	}
+	it, api := interactions(t)
+	it.ApprovalTimeout = 10 * time.Minute
+	tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	_, _ = it.For(5, "").PromptApproval(tctx, security.ApprovalRequest{Command: "rm -rf ./build", Description: "d"})
+	if got := api.lastCall("editMessageText").Body["text"]; got != ToMarkdownV2("⌛ **Denied: no answer in 10 min**"+block) {
+		t.Fatal(got)
+	}
+}
+
+func TestFormatWait(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		600 * time.Second: "10 min",
+		45 * time.Second:  "45 s",
+		90 * time.Second:  "1 min",
+		time.Minute:       "1 min",
+	} {
+		if got := formatWait(d); got != want {
+			t.Errorf("formatWait(%v) = %q, want %q", d, got, want)
+		}
+	}
+}
+
+func TestResolveReplyTexts(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		scope security.Scope
+		n     int
+		want  string
+	}{
+		{"approve", security.ScopeOnce, 1, "✅ **Allowed once**\nThe agent continues."},
+		{"approve", security.ScopeSession, 1, "✅ **Allowed in this session**\nThe agent continues."},
+		{"approve", security.ScopeAlways, 1, "✅ **Always allowed**\nThe agent continues."},
+		{"approve", security.ScopeOnce, 3, "✅ **Allowed 3 commands**\nThe agent continues."},
+		{"approve", security.ScopeSession, 2, "✅ **Allowed 2 commands**\nThe agent continues."},
+		{"deny", security.ScopeDeny, 1, "❌ **Denied**\nThe agent continues without the command."},
+		{"deny", security.ScopeDeny, 2, "❌ **Denied 2 commands**\nThe agent continues without them."},
+		{"approve", security.ScopeOnce, 0, "💤 **No command waits for approval**"},
+		{"deny", security.ScopeDeny, 0, "💤 **No command waits for approval**"},
+	} {
+		if got := resolveReply(c.name, c.scope, c.n); got != c.want {
+			t.Errorf("resolveReply(%q, %v, %d) = %q, want %q", c.name, c.scope, c.n, got, c.want)
+		}
+	}
+}
+
+func TestTapErrorTexts(t *testing.T) {
+	for got, want := range map[string]string{
+		resolvedText:    "✔️ This prompt has an answer already.",
+		notAuthorized:   "⛔ Only the owner can answer this prompt.",
+		wrongChat:       "⛔ This button is for another chat.",
+		invalidCallback: "⚠️ This button is too old. Send the command again.",
+	} {
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
 	}
 }
 
@@ -298,12 +409,12 @@ func TestApproveCommandInChat(t *testing.T) {
 	if sc := <-out; sc != security.ScopeSession {
 		t.Fatal(sc)
 	}
-	if !strings.Contains(h.sentTexts(), "pattern approved for this session") {
+	if !strings.Contains(h.sentTexts(), "✅ Allowed in this session\nThe agent continues.") {
 		t.Fatal(h.sentTexts())
 	}
 	h.update(dmText(5, "/deny"))
 	h.waitIdle()
-	if !strings.Contains(h.sentTexts(), "No pending command to deny.") {
+	if !strings.Contains(h.sentTexts(), "💤 No command waits for approval") {
 		t.Fatal(h.sentTexts())
 	}
 }

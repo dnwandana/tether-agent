@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -316,7 +317,7 @@ func TestSetHomeAndHomeTarget(t *testing.T) {
 	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowAllUsers = true })
 	h.update(topic("17585", "/sethome"))
 	h.waitIdle()
-	if !strings.Contains(h.sentTexts(), "Home channel set") {
+	if !strings.Contains(h.sentTexts(), "🏠 Home channel: G") {
 		t.Fatal(h.sentTexts())
 	}
 	cfg := config.Default().Telegram
@@ -672,5 +673,249 @@ func TestE2ETTSFileSentThroughGateway(t *testing.T) {
 	h.waitIdle()
 	if s := fileSends(h.api); len(s) != 1 || s[0].Method != "sendVoice" {
 		t.Fatalf("%+v / %v", s, h.api.methods())
+	}
+}
+
+// cmdTap returns a press of a command button with data on the message msgID. A negative
+// chat is a group.
+func cmdTap(chat, from int64, msgID int, data string) CallbackQuery {
+	typ := "private"
+	if chat < 0 {
+		typ = "supergroup"
+	}
+	return CallbackQuery{ID: "cb", From: User{ID: from, FirstName: "U"},
+		Message: &Message{MessageID: msgID, Chat: Chat{ID: chat, Type: typ}}, Data: data}
+}
+
+// tap handles cq as a new update in its own goroutine, like the poller.
+func (h *tgHarness) tap(cq CallbackQuery) {
+	h.next++
+	u := Update{UpdateID: h.next, CallbackQuery: &cq}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.ch.handleUpdate(ctx, h.gw, u)
+	}()
+}
+
+// answers returns the text of each answerCallbackQuery call, in order.
+func (h *tgHarness) answers() []string {
+	var out []string
+	for _, c := range h.api.all() {
+		if c.Method == "answerCallbackQuery" {
+			s, _ := c.Body["text"].(string)
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// addSessions creates n sessions for the key, with the titles "s1" to "sn".
+func (h *tgHarness) addSessions(key, chat, user string, n int) []*sessions.Session {
+	h.t.Helper()
+	var out []*sessions.Session
+	for i := 1; i <= n; i++ {
+		s, err := h.st.Create(ctx, sessions.Session{Key: key, Source: "telegram", ChatID: chat, UserID: user,
+			Title: "s" + strconv.Itoa(i)})
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func ownerHarness(t *testing.T, prov *tgProv) *tgHarness {
+	return harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"7"} })
+}
+
+func TestCmdTapRunsCommand(t *testing.T) {
+	h := ownerHarness(t, &tgProv{})
+	h.addSessions("telegram:dm:7", "7", "7", 2)
+	h.tap(cmdTap(7, 7, 55, encodeCmd("7", "/sessions")))
+	h.waitIdle()
+	if a := h.answers(); len(a) != 1 || a[0] != "" {
+		t.Fatal(a)
+	}
+	if h.api.count("sendMessage") != 1 || h.api.count("editMessageText") != 0 {
+		t.Fatal(h.api.methods())
+	}
+	c := h.api.lastCall("sendMessage")
+	if txt, _ := c.Body["text"].(string); !strings.HasPrefix(txt, ToMarkdownV2("📋 **Your sessions**")) {
+		t.Fatal(txt)
+	}
+	data := buttonData(c.Body)
+	if len(data) == 0 {
+		t.Fatal("the session list has no buttons")
+	}
+	for _, d := range data {
+		if !strings.HasPrefix(d, "cmd:7:") {
+			t.Fatal(data)
+		}
+	}
+}
+
+func TestCmdTapPageEditsMessage(t *testing.T) {
+	h := ownerHarness(t, &tgProv{})
+	h.addSessions("telegram:dm:7", "7", "7", 10)
+	h.tap(cmdTap(7, 7, 55, encodeCmd("7", "/sessions 2")))
+	h.waitIdle()
+	if h.api.count("editMessageText") != 1 || h.api.count("sendMessage") != 0 {
+		t.Fatal(h.api.methods())
+	}
+	if c := h.api.lastCall("editMessageText"); c.Body["message_id"] != float64(55) || c.Body["chat_id"] != float64(7) {
+		t.Fatalf("%+v", c.Body)
+	}
+}
+
+func TestCmdTapUnauthorizedDoesNothing(t *testing.T) {
+	prov := &tgProv{}
+	h := ownerHarness(t, prov)
+	h.tap(cmdTap(99, 99, 55, encodeCmd("99", "/new")))
+	h.waitIdle()
+	if a := h.answers(); len(a) != 1 || a[0] != notAuthorized {
+		t.Fatal(a)
+	}
+	if h.session("telegram:dm:99") != nil || h.api.count("sendMessage") != 0 || prov.count() != 0 {
+		t.Fatal(h.api.methods())
+	}
+}
+
+func TestCmdTapOtherUserRefused(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) {
+		c.AllowAllUsers = true
+		c.GroupSessionsPerUser = true
+	})
+	key := h.ch.sessionKey(Normalized{Kind: KindGroup, ChatID: "-100", UserID: "7"})
+	s := h.addSessions(key, "-100", "7", 1)[0]
+	h.tap(cmdTap(-100, 8, 55, encodeCmd("7", "/delete "+s.ID+" confirm")))
+	h.tap(cmdTap(-100, 8, 55, encodeCmd("7", "cancel")))
+	h.waitIdle()
+	if a := h.answers(); len(a) != 2 || a[0] != otherUser || a[1] != otherUser {
+		t.Fatal(a)
+	}
+	if _, err := h.st.Get(ctx, s.ID); err != nil {
+		t.Fatal("the session of 7 must stay:", err)
+	}
+	if h.api.count("sendMessage") != 0 || h.api.count("editMessageText") != 0 {
+		t.Fatal(h.api.methods())
+	}
+}
+
+func TestCmdTapBusyRuleApplies(t *testing.T) {
+	prov := &tgProv{delay: 300 * time.Millisecond}
+	h := ownerHarness(t, prov)
+	h.update(dmText(7, "hi"))
+	deadline := time.Now().Add(5 * time.Second)
+	for prov.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	h.tap(cmdTap(7, 7, 55, encodeCmd("7", "/rename x")))
+	h.waitIdle()
+	if !strings.Contains(h.sentTexts(), "cannot run during a task") {
+		t.Fatal(h.sentTexts())
+	}
+	if s := h.session("telegram:dm:7"); s == nil || s.Title == "x" {
+		t.Fatalf("%+v", s)
+	}
+}
+
+func TestCmdTapCancelAndNoop(t *testing.T) {
+	h := ownerHarness(t, &tgProv{})
+	h.tap(cmdTap(7, 7, 55, encodeCmd("7", "cancel")))
+	h.waitIdle()
+	if h.api.count("editMessageText") != 1 || h.api.count("sendMessage") != 0 {
+		t.Fatal(h.api.methods())
+	}
+	c := h.api.lastCall("editMessageText")
+	if txt, _ := c.Body["text"].(string); c.Body["message_id"] != float64(55) || StripMarkdownV2(txt) != "Not deleted." {
+		t.Fatalf("%+v", c.Body)
+	}
+	if _, ok := c.Body["reply_markup"]; ok {
+		t.Fatalf("the buttons must go: %+v", c.Body)
+	}
+	h.tap(cmdTap(7, 7, 55, encodeCmd("7", "·")))
+	h.waitIdle()
+	if a := h.answers(); len(a) != 2 || a[0] != "" || a[1] != "" {
+		t.Fatal(a)
+	}
+	if h.api.count("editMessageText") != 1 || h.api.count("sendMessage") != 0 {
+		t.Fatal(h.api.methods())
+	}
+}
+
+func TestCmdTapInvalidData(t *testing.T) {
+	prov := &tgProv{}
+	h := ownerHarness(t, prov)
+	// A text that is not a command does not start a turn.
+	h.tap(cmdTap(7, 7, 55, "cmd:7:hello"))
+	h.tap(cmdTap(7, 7, 55, "cmd:x"))
+	cq := cmdTap(7, 7, 55, encodeCmd("7", "/new"))
+	cq.Message = nil
+	h.tap(cq)
+	h.waitIdle()
+	a := h.answers()
+	if len(a) != 3 {
+		t.Fatal(a)
+	}
+	for _, s := range a {
+		if s != invalidCallback {
+			t.Fatal(a)
+		}
+	}
+	if prov.count() != 0 || h.api.count("sendMessage") != 0 {
+		t.Fatal(h.api.methods())
+	}
+}
+
+func TestStartHelpWithButtons(t *testing.T) {
+	h := ownerHarness(t, &tgProv{})
+	h.update(dmText(7, "/start"))
+	h.waitIdle()
+	if h.api.count("sendMessage") != 1 {
+		t.Fatal(h.api.methods())
+	}
+	c := h.api.lastCall("sendMessage")
+	if c.Body["text"] != ToMarkdownV2(StartHelp) {
+		t.Fatalf("%q", c.Body["text"])
+	}
+	want := []string{"cmd:7:/sessions", "cmd:7:/model", "cmd:7:/usage"}
+	if got := buttonData(c.Body); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatal(got)
+	}
+	if StartHelp != "👋 **Tether Agent is ready**\nSend a message to start a conversation.\n\n"+
+		"/new · start a new session\n/sessions · see your sessions\n/stop · stop the current task\n/help · see all commands" {
+		t.Fatal(StartHelp)
+	}
+}
+
+func TestSetHomeText(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowAllUsers = true })
+	m := group("/sethome")
+	m.Chat.Title = "Alice"
+	h.update(m)
+	h.waitIdle()
+	want := ToMarkdownV2("🏠 **Home channel: Alice**\nCron results and messages from other channels come to this chat.")
+	got, _ := h.api.lastCall("sendMessage").Body["text"].(string)
+	if got != want || strings.Contains(got, "100") {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+
+	// Markdown characters in the chat name show literally.
+	m.Chat.Title = "my_team *x*"
+	h.update(m)
+	h.waitIdle()
+	got, _ = h.api.lastCall("sendMessage").Body["text"].(string)
+	if !strings.HasPrefix(got, `🏠 *Home channel: my\_team \*x\**`+"\n") || checkMDV2(got) != nil {
+		t.Fatalf("%q", got)
+	}
+
+	_ = h.ch.DB.Close()
+	h.update(m)
+	h.waitIdle()
+	got, _ = h.api.lastCall("sendMessage").Body["text"].(string)
+	if txt := StripMarkdownV2(got); !strings.HasPrefix(txt, "⚠️ Cannot save the home channel\n") ||
+		!strings.HasSuffix(txt, ". Try again later.") {
+		t.Fatalf("%q", txt)
 	}
 }

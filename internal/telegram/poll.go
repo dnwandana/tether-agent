@@ -176,29 +176,28 @@ func (p *Poller) RegisterCommands(ctx context.Context) error {
 	return p.C.SetMyCommands(ctx, BotCommands())
 }
 
-// BotCommands returns the bot command menu. Telegram does not
-// allow "-" in a command name, so "/reload-mcp" is "reload_mcp" here.
+// BotCommands returns the bot command menu. The most-used commands come first. Telegram does
+// not allow "-" in a command name, so "/reload-mcp" is "reload_mcp" here. "/start",
+// "/reset", and "/resume" still work, but they are not in the menu.
 func BotCommands() []BotCommand {
 	return []BotCommand{
-		{Command: "start", Description: "Show help or the pairing code."},
-		{Command: "new", Description: "Start a new session."},
-		{Command: "reset", Description: "Start a new session."},
-		{Command: "sessions", Description: "List the recent sessions."},
-		{Command: "resume", Description: "Go back to an earlier session."},
-		{Command: "rename", Description: "Change the session title."},
-		{Command: "archive", Description: "Archive a session."},
-		{Command: "delete", Description: "Delete a session."},
-		{Command: "fork", Description: "Copy the session into a new session."},
-		{Command: "model", Description: "Show or set the model for this session."},
-		{Command: "prompt", Description: "Show or set the system prompt for this session."},
-		{Command: "compact", Description: "Compact the session context now."},
-		{Command: "usage", Description: "Show the token use and the cost."},
-		{Command: "stop", Description: "Stop the current run."},
-		{Command: "steer", Description: "Send a note to the current run."},
-		{Command: "sethome", Description: "Make this chat the home channel."},
-		{Command: "reload_mcp", Description: "Reload the MCP servers."},
-		{Command: "approve", Description: "Approve the pending command."},
-		{Command: "deny", Description: "Deny the pending command."},
+		{Command: "new", Description: "Start a new session"},
+		{Command: "sessions", Description: "See and resume sessions"},
+		{Command: "stop", Description: "Stop the current task"},
+		{Command: "steer", Description: "Send a note to the current task"},
+		{Command: "model", Description: "Change the model"},
+		{Command: "usage", Description: "See tokens and cost"},
+		{Command: "help", Description: "See all commands"},
+		{Command: "rename", Description: "Change the session title"},
+		{Command: "fork", Description: "Copy this session"},
+		{Command: "compact", Description: "Make the context shorter"},
+		{Command: "prompt", Description: "Change the prompt"},
+		{Command: "archive", Description: "Hide this session"},
+		{Command: "delete", Description: "Delete a session"},
+		{Command: "approve", Description: "Allow the waiting command"},
+		{Command: "deny", Description: "Deny the waiting command"},
+		{Command: "sethome", Description: "Send cron results here"},
+		{Command: "reload_mcp", Description: "Reload the MCP servers"},
 	}
 }
 

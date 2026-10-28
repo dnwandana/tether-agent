@@ -40,10 +40,30 @@ func TestCodeShapeAndReply(t *testing.T) {
 			t.Fatalf("code %q has %q, which is not in the alphabet", code, r)
 		}
 	}
-	if !strings.Contains(reply, "I don't recognize you yet") ||
-		!strings.Contains(reply, "Here's your pairing code: `"+code+"`") ||
-		!strings.Contains(reply, "tether pairing approve telegram "+code) {
+	if reply != PairReply("telegram", code) {
 		t.Fatal(reply)
+	}
+}
+
+func TestPairReplyText(t *testing.T) {
+	want := "🔐 **Pairing needed**\nI do not know you yet. Your pairing code is `K7QM2XPA`.\n\n" +
+		"Ask the owner to run this command:\n`tether pairing approve telegram K7QM2XPA`\n" +
+		"_The code expires in 1 hour._"
+	if got := PairReply("telegram", "K7QM2XPA"); got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	if PairBusyReply != "⏳ **Too many pairing requests**\nTry again later." {
+		t.Fatal(PairBusyReply)
+	}
+	// The italic line keeps its markup on Telegram.
+	if got := ToMarkdownV2(PairReply("telegram", "K7QM2XPA")); !strings.HasSuffix(got, "\n_The code expires in 1 hour\\._") {
+		t.Fatal(got)
+	}
+	for d, want := range map[time.Duration]string{time.Hour: "1 hour", 2 * time.Hour: "2 hours",
+		30 * time.Minute: "30 minutes", time.Minute: "1 minute"} {
+		if got := durationText(d); got != want {
+			t.Errorf("durationText(%v) = %q, want %q", d, got, want)
+		}
 	}
 }
 

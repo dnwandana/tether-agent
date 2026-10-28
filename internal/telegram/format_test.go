@@ -298,3 +298,100 @@ func TestFormatFuzzRegressions(t *testing.T) {
 		}
 	}
 }
+
+// Reply text escapes user text with gateway.EscapeMarkdown. A backslash before one of
+// \ * _ ` [ ] | gives the literal character.
+func TestFormatBackslashEscapes(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"**Fix my\\_project**", `*Fix my\_project*`},
+		{`a\*b\*c`, `a\*b\*c`},
+		{`\*\*draft\*\*`, `\*\*draft\*\*`},
+		{`\[x\](y)`, `\[x\]\(y\)`},
+		{`a\|b`, `a\|b`},
+		{`\|\|not a spoiler\|\|`, `\|\|not a spoiler\|\|`},
+		{`C:\\dir`, `C:\\dir`},
+		{"\\`x\\` and `code`", "\\`x\\` and `code`"},
+		{"`a\\_b`", "`a\\\\_b`"},
+		{`\(x\)`, `\\\(x\\\)`},
+		{"_Fix my\\_project_", `_Fix my\_project_`},
+		{"# Title \\*x\\*", `*Title \*x\**`},
+		{"[a\\]b](https://x.y)", `[a\]b](https://x.y)`},
+		{`end\`, `end\\`},
+	}
+	for _, c := range cases {
+		got := ToMarkdownV2(c.in)
+		if err := checkMDV2(got); err != nil {
+			t.Errorf("checkMDV2(%q) = %v", got, err)
+		}
+		if got != c.want {
+			t.Errorf("ToMarkdownV2(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+// "_x_" at the edges of a word is italic. A "_" inside a word stays literal.
+func TestFormatUnderscoreItalic(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"_2 min · step 4/90 · web_fetch_", `_2 min · step 4/90 · web\_fetch_`},
+		{"_a_ and _b_", "_a_ and _b_"},
+		{"(_note_)", `\(_note_\)`},
+		{"**bold** _it_", "*bold* _it_"},
+		{"> _quoted_", "> _quoted_"},
+		{"agent_one", `agent\_one`},
+		{"snake_case_name", `snake\_case\_name`},
+		{"__init__", `\_\_init\_\_`},
+		{"_private_var", `\_private\_var`},
+		{"_ not italic _", `\_ not italic \_`},
+		{"_open only", `\_open only`},
+		{"_x\ny_", "\\_x\ny\\_"},
+		{"_a__", `\_a\_\_`},
+		{"_a_*b*", "_a_**_b_"},
+		{"*a*_b_", "_a_**_b_"},
+	}
+	for _, c := range cases {
+		got := ToMarkdownV2(c.in)
+		if err := checkMDV2(got); err != nil {
+			t.Errorf("checkMDV2(%q) = %v", got, err)
+		}
+		if got != c.want {
+			t.Errorf("ToMarkdownV2(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestFormatTableEscapedPipe(t *testing.T) {
+	got := ToMarkdownV2("| A | B |\n|---|---|\n| a\\|b | 2 |")
+	if got != "*a\\|b*\n• B: 2" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// A bare ">" line keeps a quote open over an empty line, as in a quoted
+// prompt with two paragraphs.
+func TestFormatQuoteEmptyLine(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"> a\n>\n> b", "> a\n> \n> b"},
+		{"> a\n>\n>\n> b", "> a\n> \n> \n> b"},
+		{"**> a||\n>\n> b", "**> a\\|\\|\n> \n> b"},
+		{"**> a\n>\n> b||", "**> a\n> \n> b\\|\\|"},
+		// A bare ">" that does not follow a quote line is text.
+		{"a\n>\nb", "a\n\\>\nb"},
+	}
+	for _, c := range cases {
+		got := ToMarkdownV2(c.in)
+		if err := checkMDV2(got); err != nil {
+			t.Errorf("checkMDV2(%q) = %v", got, err)
+		}
+		if got != c.want {
+			t.Errorf("ToMarkdownV2(%q)\n got %q\nwant %q", c.in, got, c.want)
+		}
+	}
+}
+
+// An escaped tilde shows literally and does not start a strikethrough.
+func TestFormatEscapedTilde(t *testing.T) {
+	got := ToMarkdownV2(`**\~\~old\~\~ plan**`)
+	if want := `*\~\~old\~\~ plan*`; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

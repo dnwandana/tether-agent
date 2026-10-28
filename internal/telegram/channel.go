@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
@@ -30,14 +31,19 @@ const (
 const typingEvery = 4 * time.Second
 
 // StartHelp is the reply to /start for a user who may use the bot.
-const StartHelp = "Hi~ I am ready. Send me a message to start.\n\n" +
-	"/new starts a new session, /stop stops the current run, and /sessions lists your sessions."
+const StartHelp = "👋 **Tether Agent is ready**\nSend a message to start a conversation.\n\n" +
+	"/new · start a new session\n/sessions · see your sessions\n/stop · stop the current task\n/help · see all commands"
 
-// The /approve and /deny replies. They are the texts of Hermes.
-const (
-	noPendingApprove = "No pending command to approve."
-	noPendingDeny    = "No pending command to deny."
-)
+// startButtons are the buttons of the /start reply.
+var startButtons = [][]gateway.Button{{
+	{Text: "📋 Sessions", Data: "/sessions"},
+	{Text: "🧠 Model", Data: "/model"},
+	{Text: "📊 Usage", Data: "/usage"},
+}}
+
+// noPendingApproval is the reply to /approve and /deny when no command waits. It is a
+// Tether Agent text.
+const noPendingApproval = "💤 **No command waits for approval**"
 
 // Channel is the Telegram channel of the gateway. It implements
 // gateway.Channel with the name "telegram".
@@ -73,6 +79,10 @@ type Channel struct {
 	// active holds the renderer of the running turn of each session key, for Progress.
 	activeMu sync.Mutex
 	active   map[string]*tgRenderer
+
+	// richFailed is set at the first failed rich message. Later failures log at the debug
+	// level.
+	richFailed atomic.Bool
 }
 
 var _ gateway.Channel = (*Channel)(nil)
@@ -147,6 +157,10 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		}
 	}()
 	if u.CallbackQuery != nil {
+		if strings.HasPrefix(u.CallbackQuery.Data, cmdPrefix+":") {
+			ch.commandCallback(ctx, gw, *u.CallbackQuery)
+			return
+		}
 		if ch.UI == nil || !ch.UI.HandleCallback(ctx, *u.CallbackQuery) {
 			// An old or unknown button. Stop the spinner of the button.
 			_ = ch.C.AnswerCallbackQuery(ctx, u.CallbackQuery.ID, "", false)
@@ -255,7 +269,7 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 	}
 	newRenderer := func() gateway.Renderer {
 		r := ch.newRenderer(ctx, chatID, n.ThreadID, n.Kind == KindDM)
-		r.key, r.handoff = in.Key, release
+		r.key, r.handoff, r.userID = in.Key, release, n.UserID
 		return r
 	}
 	// Submit returns when the gateway has taken the message, so the next update of the chat
@@ -316,28 +330,30 @@ func (ch *Channel) localCommand(ctx context.Context, m Message, n Normalized, te
 	if !ok {
 		return false
 	}
-	reply := func(s string) {
-		if _, err := ch.sendText(ctx, m.Chat.ID, n.ThreadID, s, sendOpts{}); err != nil {
+	send := func(s string, o sendOpts) {
+		if _, err := ch.sendText(ctx, m.Chat.ID, n.ThreadID, s, o); err != nil {
 			ch.logger().Warn("telegram: cannot send the command reply", "command", name, "err", err.Error())
 		}
 	}
+	reply := func(s string) { send(s, sendOpts{}) }
 	switch name {
 	case "start":
-		reply(StartHelp)
+		send(StartHelp, sendOpts{keyboard: cmdKeyboard(n.UserID, startButtons)})
 	case "sethome":
 		if err := SetHome(ctx, ch.DB, n.ChatID, n.ThreadID); err != nil {
 			ch.logger().Error("telegram: cannot save the home channel", "err", err.Error())
-			reply("Failed to save home channel: " + err.Error())
+			reply("⚠️ **Cannot save the home channel**\n" + gateway.EscapeMarkdown(err.Error()) + ". Try again later.")
 			return true
 		}
-		name := m.Chat.Title
-		if name == "" {
-			name = n.UserName
+		title := m.Chat.Title
+		if title == "" {
+			title = n.UserName
 		}
-		if name == "" {
-			name = n.ChatID
+		if title == "" {
+			title = n.ChatID
 		}
-		reply(fmt.Sprintf("✅ Home channel set to **%s** (ID: %s).\nCron jobs and cross-platform messages will be delivered here.", name, n.ChatID))
+		reply("🏠 **Home channel: " + gateway.EscapeMarkdown(title) + "**\n" +
+			"Cron results and messages from other channels come to this chat.")
 	case "approve", "deny":
 		reply(ch.resolveText(m.Chat.ID, name, args))
 	default:
@@ -406,6 +422,68 @@ func (ch *Channel) pairApproved(ctx context.Context) func(string) bool {
 		return nil
 	}
 	return func(uid string) bool { return ch.Pair.IsApproved(ctx, "telegram", uid) }
+}
+
+// commandCallback runs the action of a command button. The action goes through the gateway
+// like a typed command, so the busy rule and the ownership check apply. Only the user who
+// sent the command that made the button can tap it.
+func (ch *Channel) commandCallback(ctx context.Context, gw *gateway.Gateway, cq CallbackQuery) {
+	answer := func(text string) {
+		if err := ch.C.AnswerCallbackQuery(ctx, cq.ID, text, false); err != nil {
+			ch.logger().Debug("telegram: cannot answer the button press", "err", err.Error())
+		}
+	}
+	user, action, ok := decodeCmd(cq.Data)
+	if ok && action != "·" && action != "cancel" {
+		_, _, ok = gateway.IsCommand(action)
+	}
+	if !ok || cq.Message == nil {
+		answer(invalidCallback)
+		return
+	}
+	if !ch.callbackAuthorized(ctx, cq) {
+		answer(notAuthorized)
+		return
+	}
+	if user != strconv.FormatInt(cq.From.ID, 10) {
+		answer(otherUser)
+		return
+	}
+	answer("")
+	msg := cq.Message
+	n := Normalize(Message{Chat: msg.Chat, MessageThreadID: msg.MessageThreadID,
+		IsTopicMessage: msg.IsTopicMessage, From: &cq.From})
+	newRenderer := func() *tgRenderer {
+		r := ch.newRenderer(ctx, msg.Chat.ID, n.ThreadID, n.Kind == KindDM)
+		r.key, r.userID, r.editMsgID = ch.sessionKey(n), n.UserID, msg.MessageID
+		return r
+	}
+	switch action {
+	case "·":
+		return
+	case "cancel":
+		newRenderer().AckReply(gateway.Reply{Text: "Not deleted.", Edit: true})
+		return
+	}
+	in := gateway.Inbound{
+		Key:      ch.sessionKey(n),
+		Source:   "telegram",
+		ChatID:   n.ChatID,
+		ThreadID: n.ThreadID,
+		UserID:   n.UserID,
+		UserName: n.UserName,
+		Text:     CanonicalCommand(action),
+		IsText:   true,
+		Target:   gateway.Target{Source: "telegram", ChatID: n.ChatID, ThreadID: n.ThreadID},
+	}
+	if ch.observeShared(n) {
+		in.UserID = ""
+	}
+	gw.Submit(ctx, in, func() gateway.Renderer { return newRenderer() }, func(err error) {
+		if err != nil && ctx.Err() == nil {
+			ch.logger().Warn("telegram: the button command failed", "key", in.Key, "err", err.Error())
+		}
+	})
 }
 
 // callbackAuthorized reports whether the user who pressed a button may use the bot. A
@@ -669,6 +747,11 @@ type tgRenderer struct {
 	threadID string
 	status   *Status
 	stream   *Streamer
+	// userID is the Telegram user ID of the sender. The command buttons of a reply carry it.
+	userID string
+	// editMsgID is the message of the pressed button, or 0. A reply with Edit set replaces
+	// that message.
+	editMsgID int
 
 	// handoff releases the typing action of the inbound message, when the turn takes it
 	// over. It can be nil.
@@ -683,7 +766,10 @@ type tgRenderer struct {
 	cur, prev strings.Builder
 }
 
-var _ gateway.Renderer = (*tgRenderer)(nil)
+var (
+	_ gateway.Renderer      = (*tgRenderer)(nil)
+	_ gateway.ReplyRenderer = (*tgRenderer)(nil)
+)
 
 func (ch *Channel) newRenderer(ctx context.Context, chatID int64, threadID string, isDM bool) *tgRenderer {
 	rctx := context.WithoutCancel(ctx)
@@ -762,6 +848,82 @@ func (r *tgRenderer) Ack(text string) {
 	if _, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, text, sendOpts{}); err != nil {
 		r.ch.logger().Warn("telegram: cannot send the reply", "chat", r.chatID, "err", err.Error())
 	}
+}
+
+// AckReply sends a command reply with its buttons. A reply with Edit set replaces the
+// message of the pressed button, when there is one. Rich goes as a rich message, and Text is
+// the fallback when Telegram refuses it.
+func (r *tgRenderer) AckReply(rep gateway.Reply) {
+	kb := cmdKeyboard(r.userID, rep.Buttons)
+	if rep.Edit && r.editMsgID > 0 && r.editReply(rep, kb) {
+		return
+	}
+	if rep.Rich != "" {
+		p := SendRichMessageParams{ChatID: r.chatID, RichMessage: InputRichMessage{Markdown: rep.Rich}, ReplyMarkup: kb}
+		if id, ok := ThreadParam(r.threadID, false); ok {
+			p.MessageThreadID = id
+		}
+		_, err := r.ch.C.SendRichMessage(r.ctx, p)
+		if err == nil {
+			return
+		}
+		r.ch.richFailure(err)
+	}
+	if strings.TrimSpace(rep.Text) == "" {
+		return
+	}
+	if _, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, rep.Text, sendOpts{keyboard: kb}); err != nil {
+		r.ch.logger().Warn("telegram: cannot send the reply", "chat", r.chatID, "err", err.Error())
+	}
+}
+
+// editReply replaces the message of the pressed button with rep. An edit to the same text
+// is a success. It returns false when Telegram refuses the edit, for example because the
+// message is too old. Then the caller sends a new message.
+func (r *tgRenderer) editReply(rep gateway.Reply, kb *InlineKeyboardMarkup) bool {
+	p := EditMessageTextParams{ChatID: r.chatID, MessageID: r.editMsgID, ReplyMarkup: kb}
+	var richErr error
+	if rep.Rich != "" {
+		p.RichMessage = &InputRichMessage{Markdown: rep.Rich}
+		_, err := r.ch.C.EditMessageText(r.ctx, p)
+		if err == nil || isNotModified(err) {
+			return true
+		}
+		richErr, p.RichMessage = err, nil
+	}
+	if strings.TrimSpace(rep.Text) == "" {
+		return false
+	}
+	parts := finalParts(rep.Text)
+	if len(parts) > 1 {
+		// One message cannot hold the text.
+		return false
+	}
+	p.Text, p.ParseMode = parts[0], "MarkdownV2"
+	_, err := r.ch.C.EditMessageText(r.ctx, p)
+	if err != nil && isBadRequest(err) && !isNotModified(err) {
+		p.Text, p.ParseMode = StripMarkdownV2(parts[0]), ""
+		_, err = r.ch.C.EditMessageText(r.ctx, p)
+	}
+	if err != nil && !isNotModified(err) {
+		r.ch.logger().Debug("telegram: cannot edit the reply, send a new message", "chat", r.chatID, "err", err.Error())
+		return false
+	}
+	// The text edit worked, so the rich edit failed because of the rich message.
+	if richErr != nil {
+		r.ch.richFailure(richErr)
+	}
+	return true
+}
+
+// richFailure logs a failed rich message. Only the first failure logs at the warn level, so
+// a Bot API server without rich messages does not fill the log.
+func (ch *Channel) richFailure(err error) {
+	if ch.richFailed.CompareAndSwap(false, true) {
+		ch.logger().Warn("telegram: the rich message failed, send the text reply", "err", err.Error())
+		return
+	}
+	ch.logger().Debug("telegram: the rich message failed, send the text reply", "err", err.Error())
 }
 
 // Done stops the typing loop, sends the final text, closes the status message, and sends
