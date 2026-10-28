@@ -688,3 +688,18 @@ func TestNoVisionModelMarkerText(t *testing.T) {
 		t.Fatalf("the transcript matches the model view: %q", stored)
 	}
 }
+
+func TestDefaultModel(t *testing.T) {
+	a, _ := newAgent(t, &fakeProv{name: "primary", model: "anthropic/claude-sonnet-5"})
+	pc := a.Cfg.Providers["primary"]
+	pc.ContextWindow = 200000
+	a.Cfg.Providers["primary"] = pc
+	if m, w := a.DefaultModel(); m != "anthropic/claude-sonnet-5" || w != 200000 {
+		t.Fatal(m, w)
+	}
+	// A provider with no model name gives the model of its config entry.
+	a.Prov = &fakeProv{name: "primary"}
+	if m, w := a.DefaultModel(); m != "test-model" || w != 200000 {
+		t.Fatal(m, w)
+	}
+}

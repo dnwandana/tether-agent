@@ -471,6 +471,19 @@ func (a *Agent) CompactNow(ctx context.Context, s *sessions.Session) (int, error
 	return len(before) - len(after) + 1, nil
 }
 
+// DefaultModel returns the model of the default provider and its context window. When the
+// provider has no model name, the model comes from the config entry of the provider.
+func (a *Agent) DefaultModel() (model string, contextWindow int) {
+	if a.Prov == nil {
+		return "", 0
+	}
+	model = a.Prov.Model()
+	if model == "" {
+		model = a.config().Providers[a.Prov.Name()].Model
+	}
+	return model, a.contextWindow(a.Prov)
+}
+
 // contextWindow returns the context window of the model of prov.
 func (a *Agent) contextWindow(prov provider.Provider) int {
 	name := prov.Name()
