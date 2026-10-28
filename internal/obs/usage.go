@@ -130,13 +130,152 @@ func FormatUsage(rows []UsageRow) string {
 			pad := strings.Repeat(" ", widths[i]-utf8.RuneCountInString(cell))
 			// The model column aligns left and the number columns align right.
 			if i == 0 {
-				b.WriteString(cell + pad)
+				b.WriteString(cell)
+				b.WriteString(pad)
 			} else {
-				b.WriteString("  " + pad + cell)
+				b.WriteString("  ")
+				b.WriteString(pad)
+				b.WriteString(cell)
 			}
 		}
 	}
 	return b.String()
+}
+
+// unknownCost is the cost cell of the rich and the narrow tables when the price is not
+// known.
+const unknownCost = "–"
+
+// FormatUsageMarkdown returns the rows as a GitHub Flavored Markdown table with a bold Total
+// row. The model column shows the short model names. The cells escape the Markdown markers,
+// so a model name shows literally.
+func FormatUsageMarkdown(rows []UsageRow) string {
+	names := shortNames(rows)
+	var b strings.Builder
+	b.WriteString("| Model | Calls | In | Out | Cost |\n|:--|--:|--:|--:|--:|\n")
+	var calls, in, out int
+	for i, r := range rows {
+		fmt.Fprintf(&b, "| %s | %d | %s | %s | %s |\n", escapeCell(names[i]), r.Calls,
+			tableTokens(r.InTok), tableTokens(r.OutTok), escapeCell(rowCost(r)))
+		calls, in, out = calls+r.Calls, in+r.InTok, out+r.OutTok
+	}
+	fmt.Fprintf(&b, "| **Total** | **%d** | **%s** | **%s** | **%s** |", calls,
+		tableTokens(in), tableTokens(out), escapeCell(totalCost(rows)))
+	return b.String()
+}
+
+// The column widths of FormatUsageNarrow. The sum is 34, so the table fits on a phone.
+const (
+	narrowModel  = 12
+	narrowCalls  = 7
+	narrowTokens = 8
+	narrowCost   = 7
+)
+
+// FormatUsageNarrow returns a fixed-width table, 34 characters wide, with a total row. The
+// columns are model, calls, tokens (in plus out), and cost. A long model name ends with "…".
+func FormatUsageNarrow(rows []UsageRow) string {
+	names := shortNames(rows)
+	lines := []string{narrowLine("model", "calls", "tokens", "cost")}
+	var calls, tokens int
+	for i, r := range rows {
+		lines = append(lines, narrowLine(names[i], strconv.Itoa(r.Calls), tableTokens(r.InTok+r.OutTok), rowCost(r)))
+		calls, tokens = calls+r.Calls, tokens+r.InTok+r.OutTok
+	}
+	lines = append(lines, strings.Repeat("─", narrowModel+narrowCalls+narrowTokens+narrowCost),
+		narrowLine("total", strconv.Itoa(calls), tableTokens(tokens), totalCost(rows)))
+	return strings.Join(lines, "\n")
+}
+
+// narrowLine returns one line of FormatUsageNarrow. The model aligns left, and the other
+// cells align right.
+func narrowLine(model, calls, tokens, cost string) string {
+	if utf8.RuneCountInString(model) > narrowModel {
+		model = string([]rune(model)[:narrowModel-1]) + "…"
+	}
+	return padRight(model, narrowModel) + padLeft(calls, narrowCalls) + padLeft(tokens, narrowTokens) + padLeft(cost, narrowCost)
+}
+
+func padRight(s string, w int) string {
+	return s + strings.Repeat(" ", max(0, w-utf8.RuneCountInString(s)))
+}
+
+func padLeft(s string, w int) string {
+	return strings.Repeat(" ", max(0, w-utf8.RuneCountInString(s))) + s
+}
+
+// shortNames returns the model name of each row without the provider prefix, for example
+// "claude-sonnet-5" for "anthropic/claude-sonnet-5". When two rows have the same short name,
+// those rows keep the full name.
+func shortNames(rows []UsageRow) []string {
+	names := make([]string, len(rows))
+	count := map[string]int{}
+	for i, r := range rows {
+		names[i] = r.Model[strings.LastIndex(r.Model, "/")+1:]
+		count[names[i]]++
+	}
+	for i, r := range rows {
+		if count[names[i]] > 1 {
+			names[i] = r.Model
+		}
+	}
+	return names
+}
+
+// markdownCell escapes the characters that break a GitHub Flavored Markdown table cell or
+// start a Markdown marker.
+var markdownCell = strings.NewReplacer(`\`, `\\`, `|`, `\|`, `*`, `\*`, `_`, `\_`)
+
+func escapeCell(s string) string { return markdownCell.Replace(s) }
+
+// tableTokens returns n with one decimal and a "k" or "M" suffix, for example "412.3k".
+func tableTokens(n int) string {
+	switch {
+	case n < 1000:
+		return strconv.Itoa(n)
+	case n < 999_950:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	}
+}
+
+// rowCost returns the cost cell of one row of the rich and the narrow tables.
+func rowCost(r UsageRow) string {
+	switch {
+	case r.Flat:
+		return "flat"
+	case r.CostKnown:
+		return humanCost(r.CostUSD)
+	}
+	return unknownCost
+}
+
+// totalCost returns the total cost of the rows. It adds only the known prices, and it ends
+// with "+" when a row has no known price. With no known price at all, it is "flat" when
+// each row has a flat-rate plan, else unknownCost.
+func totalCost(rows []UsageRow) string {
+	var sum float64
+	priced, unknown := false, false
+	for _, r := range rows {
+		switch {
+		case r.Flat:
+		case r.CostKnown:
+			sum += r.CostUSD
+			priced = true
+		default:
+			unknown = true
+		}
+	}
+	switch {
+	case priced && unknown:
+		return humanCost(sum) + "+"
+	case priced:
+		return humanCost(sum)
+	case unknown:
+		return unknownCost
+	}
+	return "flat"
 }
 
 // humanTokens returns n with a "k" or "M" suffix and three significant digits at most,

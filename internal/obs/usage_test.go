@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/db"
 )
@@ -204,5 +205,81 @@ func TestUsageSince(t *testing.T) {
 	}
 	if _, ok := UsageSince("1y", now); ok {
 		t.Fatal("1y")
+	}
+}
+
+// tableRows returns the two rows of the usage table examples.
+func tableRows() []UsageRow {
+	return []UsageRow{
+		{Model: "anthropic/claude-sonnet-5", Provider: "openrouter", Calls: 18, InTok: 412300, OutTok: 21700, CostUSD: 1.62, CostKnown: true},
+		{Model: "zai/glm-4.6", Provider: "zai", Calls: 7, InTok: 88100, OutTok: 4200, Flat: true},
+	}
+}
+
+func TestFormatUsageMarkdown(t *testing.T) {
+	want := "| Model | Calls | In | Out | Cost |\n" +
+		"|:--|--:|--:|--:|--:|\n" +
+		"| claude-sonnet-5 | 18 | 412.3k | 21.7k | $1.62 |\n" +
+		"| glm-4.6 | 7 | 88.1k | 4.2k | flat |\n" +
+		"| **Total** | **25** | **500.4k** | **25.9k** | **$1.62** |"
+	if got := FormatUsageMarkdown(tableRows()); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestFormatUsageMarkdownEscapesAndUnknownCost(t *testing.T) {
+	rows := append(tableRows(), UsageRow{Model: `x/my_model|v2*\`, Calls: 1, InTok: 10, OutTok: 5})
+	got := FormatUsageMarkdown(rows)
+	if !strings.Contains(got, "\n| my\\_model\\|v2\\*\\\\ | 1 | 10 | 5 | – |\n") {
+		t.Fatalf("got:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "| **Total** | **26** | **500.4k** | **25.9k** | **$1.62+** |") {
+		t.Fatalf("got:\n%s", got)
+	}
+	// Two rows with the same short name keep the full names.
+	got = FormatUsageMarkdown([]UsageRow{{Model: "a/m", Calls: 1, Flat: true}, {Model: "b/m", Calls: 1, Flat: true}})
+	if !strings.Contains(got, "\n| a/m | 1 |") || !strings.Contains(got, "\n| b/m | 1 |") {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestFormatUsageNarrow(t *testing.T) {
+	want := "model         calls  tokens   cost\n" +
+		"claude-sonn…     18  434.0k  $1.62\n" +
+		"glm-4.6           7   92.3k   flat\n" +
+		"──────────────────────────────────\n" +
+		"total            25  526.3k  $1.62"
+	got := FormatUsageNarrow(tableRows())
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if n := utf8.RuneCountInString(line); n != 34 {
+			t.Fatalf("%q has %d runes", line, n)
+		}
+	}
+	got = FormatUsageNarrow([]UsageRow{{Model: "m", Calls: 2, InTok: 3, OutTok: 4}})
+	if !strings.Contains(got, "\nm"+strings.Repeat(" ", 17)+"2       7      –\n") || !strings.HasSuffix(got, "total             2       7      –") {
+		t.Fatalf("got:\n%s", got)
+	}
+}
+
+func TestUsageTotalCost(t *testing.T) {
+	flat := UsageRow{Model: "f", Flat: true}
+	priced := UsageRow{Model: "p", CostKnown: true, CostUSD: 0.5}
+	unknown := UsageRow{Model: "u"}
+	for _, tc := range []struct {
+		rows []UsageRow
+		want string
+	}{
+		{[]UsageRow{flat}, "flat"},
+		{[]UsageRow{unknown}, "–"},
+		{[]UsageRow{flat, unknown}, "–"},
+		{[]UsageRow{priced, flat}, "$0.50"},
+		{[]UsageRow{priced, unknown}, "$0.50+"},
+	} {
+		if got := totalCost(tc.rows); got != tc.want {
+			t.Errorf("%+v: got %q, want %q", tc.rows, got, tc.want)
+		}
 	}
 }
