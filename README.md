@@ -86,6 +86,31 @@ OPENROUTER_API_KEY=...
 The agent uses the fallback provider only when the primary provider fails before the first
 byte of the answer. All keys and their default values are in [docs/CONFIG.md](docs/CONFIG.md).
 
+## Backup and restore
+
+`tether backup` saves `state.db`, `config.yaml`, the memory, the skills, and the scripts to one
+`.tar.gz` archive in `~/.tether/backups/`. The archive holds no `.env` and no literal keys. It
+holds your messages, so keep it private.
+
+To make a backup each night, add this line to your user crontab (`crontab -e`). Cron does
+not read your shell `PATH`, so give the full path of the binary:
+
+```sh
+0 3 * * * $HOME/.local/bin/tether backup
+```
+
+Each backup is a new file. Delete the old archives in `~/.tether/backups/` from time to time.
+
+To move Tether Agent to a new host, do these steps:
+
+1. Run `tether backup` on the old host.
+2. Copy the archive and `~/.tether/.env` to the new host.
+3. Run `tether restore FILE` on the new host.
+4. Run `systemctl --user start tether`.
+
+Stop the gateway and close `tether chat` before a restore. The restore moves the replaced data
+to `~/.tether/pre-restore-<time>/`.
+
 ## Architecture
 
 - One binary has two roles: `gateway` runs Telegram and cron, and `chat` runs the CLI.

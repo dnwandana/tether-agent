@@ -143,6 +143,27 @@ the logs, in tool output, in error text, and in the text that goes to the model.
   the process environment. It ignores values of fewer than 8 characters, because they match
   too much normal text.
 
+### Backups
+
+`tether backup` writes the data to one archive. `tether restore` puts the data from an archive
+back in the data folder.
+
+- `tether backup` writes the archive with mode 0600. The archive holds every message.
+- The archive never holds `.env` or `.history`.
+- The backup replaces a literal key in `providers.<p>.api_key`, `telegram.bot_token`,
+  `mcp.servers.<s>.env`, and `mcp.servers.<s>.headers` with a `${NAME}` reference.
+- The backup masks each known secret value in the messages, the memory files, the skills, and
+  the scripts. The list of known values is the same list that the redactor uses.
+- The backup replaces each known secret value in the other strings of `config.yaml` with a
+  `${NAME}` reference to its variable. The value works again after a restore when `.env` has
+  that name.
+- The backup reports other values in `config.yaml` that look like a key. It does not change
+  these values.
+- `tether restore` refuses links, absolute paths, `..` paths, and names that are not tether
+  data files.
+- `tether restore` keeps the replaced data in `<data>/pre-restore-<time>/`. This folder holds
+  the data without masks.
+
 ## Protected paths
 
 `write_file`, `patch`, and `skill_manage` refuse to write to these paths. The approval gate
@@ -155,6 +176,8 @@ default.
 - `<data>/state.db`, and also `<data>/state.db-wal` and `<data>/state.db-shm`
 - `<data>/skills/` (only `skill_manage` can write there)
 - `<data>/scripts/` (only the user can put cron scripts there)
+- `<data>/backups/` (an archive in it can install skills and scripts on restore)
+- `<data>/state.db.lock`
 
 A protected file also covers each name that starts with the file name and a `-`, for example
 `<data>/config.yaml-old`.
