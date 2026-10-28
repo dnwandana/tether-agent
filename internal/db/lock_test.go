@@ -150,3 +150,45 @@ func TestSchemaVersionMatchesLatest(t *testing.T) {
 		t.Fatal(v, LatestVersion(), err)
 	}
 }
+
+func TestOpenReadOnlyTakesSharedLock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.db")
+	w, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenReadOnly(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A restore must see the reader.
+	if _, err := LockExclusive(p); !errors.Is(err, ErrInUse) {
+		t.Fatalf("LockExclusive err = %v, want ErrInUse", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	release, err := LockExclusive(p)
+	if err != nil {
+		t.Fatal("Close kept the shared lock:", err)
+	}
+	// While a restore runs, the reader gets a clear error.
+	if _, err := OpenReadOnly(p); !errors.Is(err, ErrRestoreRunning) {
+		t.Fatalf("OpenReadOnly err = %v, want ErrRestoreRunning", err)
+	}
+	release()
+}
+
+func TestOpenReadOnlyMissingFileNoLock(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.db")
+	if d, err := OpenReadOnly(p); err == nil {
+		d.Close()
+		t.Fatal("a missing file must give an error")
+	}
+	if _, err := os.Stat(LockPath(p)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("OpenReadOnly made the lock file: %v", err)
+	}
+}

@@ -3,10 +3,44 @@ package db
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 )
+
+func TestOpenReadOnly(t *testing.T) {
+	ctx := context.Background()
+	missing := filepath.Join(t.TempDir(), "state.db")
+	if d, err := OpenReadOnly(missing); err == nil {
+		d.Close()
+		t.Fatal("a missing file must give an error")
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("OpenReadOnly created the file: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	w, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.KVSet(ctx, "k", "v"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if v, ok, err := r.KVGet(ctx, "k"); err != nil || !ok || v != "v" {
+		t.Fatalf("KVGet = %q, %v, %v", v, ok, err)
+	}
+	if err := r.KVSet(ctx, "k", "x"); err == nil {
+		t.Fatal("a write through the read-only handle must fail")
+	}
+}
 
 func TestOpenCreatesSchemaAndWAL(t *testing.T) {
 	d, err := Open(filepath.Join(t.TempDir(), "state.db"))

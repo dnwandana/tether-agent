@@ -130,6 +130,40 @@ func (d *DB) SchemaVersion(ctx context.Context) (int, error) {
 	return v, nil
 }
 
+// OpenReadOnly opens the database at path for reads only. It does not create
+// the file and does not apply the migrations, so a CLI command can read the
+// state.db of a running gateway and never change it. It takes the shared lock
+// like Open, so tether restore does not replace the file under the reader.
+func OpenReadOnly(path string) (*DB, error) {
+	if strings.ContainsRune(path, '?') {
+		return nil, fmt.Errorf("db: open %s: the path must not contain '?'", path)
+	}
+	// Check the file before the lock, so a missing state.db leaves no lock file.
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("db: open %s: %w", path, err)
+	}
+	lock, err := lockShared(path)
+	if err != nil {
+		if errors.Is(err, ErrRestoreRunning) {
+			return nil, fmt.Errorf("db: %w in %s. Wait for it to end, then try again", ErrRestoreRunning, filepath.Dir(path))
+		}
+		return nil, err
+	}
+	sdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)&_pragma=query_only(1)")
+	if err != nil {
+		unlock(lock)
+		return nil, fmt.Errorf("db: open %s: %w", path, err)
+	}
+	sdb.SetMaxOpenConns(1)
+	// sql.Open does not connect, so a missing file shows only at the first use.
+	if err := sdb.Ping(); err != nil {
+		sdb.Close()
+		unlock(lock)
+		return nil, fmt.Errorf("db: open %s: %w", path, err)
+	}
+	return &DB{DB: sdb, lock: lock}, nil
+}
+
 type migration struct {
 	version int
 	name    string
