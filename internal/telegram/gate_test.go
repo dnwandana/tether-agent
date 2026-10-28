@@ -361,3 +361,48 @@ func TestObserveRules(t *testing.T) {
 		t.Fatal("command observed", d)
 	}
 }
+
+func TestGateNoContent(t *testing.T) {
+	base := config.Default().Telegram // require_mention is false
+	empty := func(m Message) Message { m.Text, m.Entities = "", nil; return m }
+	withMedia := func(f func(*Message)) Message { m := empty(group("")); f(&m); return m }
+	cases := []struct {
+		name   string
+		msg    Message
+		accept bool
+		reason string
+	}{
+		{"dm service", empty(dm("")), false, "no_content"},
+		{"group join", empty(group("")), false, "no_content"},
+		{"forum service", empty(forumNoThread("")), false, "no_content"},
+		{"photo no caption", withMedia(func(m *Message) { m.Photo = sizes(320) }), true, "require_mention_off"},
+		{"album part", withMedia(func(m *Message) { m.Photo, m.MediaGroupID = sizes(320), "g1" }), true, "require_mention_off"},
+		{"voice", withMedia(func(m *Message) { m.Voice = &Voice{FileID: "v"} }), true, "require_mention_off"},
+		{"document", withMedia(func(m *Message) { m.Document = &Document{FileID: "d"} }), true, "require_mention_off"},
+		{"caption only", withMedia(func(m *Message) { m.Caption = "look" }), true, "require_mention_off"},
+		{"bare mention", group("@tether_bot"), true, "require_mention_off"},
+		{"video", withMedia(func(m *Message) { m.Video = &Video{FileID: "v"} }), true, "require_mention_off"},
+		{"audio", withMedia(func(m *Message) { m.Audio = &Audio{FileID: "a"} }), true, "require_mention_off"},
+		{"sticker", withMedia(func(m *Message) { m.Sticker = &Sticker{FileID: "s"} }), true, "require_mention_off"},
+		{"location", withMedia(func(m *Message) { m.Location = &Location{Latitude: 1} }), true, "require_mention_off"},
+		{"venue", withMedia(func(m *Message) { m.Venue = &Venue{Title: "x"} }), true, "require_mention_off"},
+	}
+	for _, c := range cases {
+		d := Gate(base, "tether_bot", 99, c.msg, Normalize(c.msg))
+		if d.Accept != c.accept || d.Observe || d.Reason != c.reason {
+			t.Errorf("%s: %+v", c.name, d)
+		}
+	}
+}
+
+func TestMediaPresentCoversEveryType(t *testing.T) {
+	if mediaPresent(Message{}) || hasMedia([]Message{{Text: "hi"}}) {
+		t.Fatal("no media expected")
+	}
+	for _, m := range []Message{{Photo: sizes(1)}, {Document: &Document{}}, {Voice: &Voice{}}, {Video: &Video{}},
+		{Audio: &Audio{}}, {Sticker: &Sticker{}}, {Location: &Location{}}, {Venue: &Venue{}}} {
+		if !mediaPresent(m) || !hasMedia([]Message{m}) {
+			t.Errorf("%+v: media expected", m)
+		}
+	}
+}

@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -188,6 +189,24 @@ func dmText(uid int64, text string) Message {
 func fromUser(m Message, uid int64, name string) Message {
 	m.From = &User{ID: uid, FirstName: name}
 	return m
+}
+
+// edit handles m as an edited message, the way the poller gives it: in Message and in
+// EditedMessage.
+func (h *tgHarness) edit(m Message) {
+	h.next++
+	u := Update{UpdateID: h.next, Message: &m, EditedMessage: &m}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.ch.handleUpdate(ctx, h.gw, u)
+	}()
+}
+
+func debugLog(h *tgHarness) *bytes.Buffer {
+	var buf bytes.Buffer
+	h.ch.Log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	return &buf
 }
 
 func TestDMTurnStreamsAndPersists(t *testing.T) {
@@ -917,5 +936,186 @@ func TestSetHomeText(t *testing.T) {
 	if txt := StripMarkdownV2(got); !strings.HasPrefix(txt, "⚠️ Cannot save the home channel\n") ||
 		!strings.HasSuffix(txt, ". Try again later.") {
 		t.Fatalf("%q", txt)
+	}
+}
+
+func TestJoinEventMakesNoTurn(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	var m Message
+	raw := `{"message_id":1,"from":{"id":5,"is_bot":false,"first_name":"Dana"},
+	 "chat":{"id":-1004488060068,"title":"Kuli Online","is_forum":true,"type":"supergroup"},
+	 "date":1793175153,"new_chat_members":[{"id":99,"is_bot":true,"first_name":"Tether Agent"}]}`
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	h.update(m)
+	h.update(dmText(5, "")) // a DM contact or poll: no decoded content
+	h.waitIdle()
+	if prov.count() != 0 || h.api.count("sendMessage") != 0 {
+		t.Fatalf("turns %d, sent %q", prov.count(), h.sentTexts())
+	}
+	if s := h.session("telegram:group:-1004488060068:1"); s != nil {
+		t.Fatalf("session %+v", s)
+	}
+}
+
+func TestEditedLiveLocationMakesNoTurn(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	buf := debugLog(h)
+	loc := dmText(5, "")
+	loc.Text, loc.Entities, loc.Location = "", nil, &Location{Latitude: 1, Longitude: 2}
+	h.update(loc) // the first live location message is not an edit
+	h.waitIdle()
+	h.edit(loc)
+	h.edit(loc)
+	h.waitIdle()
+	if prov.count() != 1 {
+		t.Fatalf("turns %d, want 1", prov.count())
+	}
+	if !strings.Contains(buf.String(), `"reason":"live_location_update"`) {
+		t.Fatal(buf.String())
+	}
+}
+
+func TestEditedTextStillGetsATurn(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	h.edit(dmText(5, "fixed typo"))
+	h.waitIdle()
+	if prov.count() != 1 {
+		t.Fatalf("turns %d, want 1", prov.count())
+	}
+}
+
+func TestGateDecisionsLogged(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	buf := debugLog(h)
+	h.update(dmText(5, "hi"))
+	h.update(fromUser(forumNoThread("hello"), 5, "U"))
+	join := fromUser(group(""), 5, "U")
+	join.Entities = nil
+	h.update(join)
+	h.waitIdle()
+	var accepted, dropped []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		switch rec["msg"] {
+		case "telegram: message accepted":
+			accepted = append(accepted, rec)
+		case "telegram: message not accepted":
+			dropped = append(dropped, rec)
+		}
+	}
+	if len(accepted) != 2 || len(dropped) != 1 || dropped[0]["reason"] != "no_content" {
+		t.Fatalf("accepted %v, dropped %v", accepted, dropped)
+	}
+	for _, rec := range accepted {
+		switch rec["reason"] {
+		case "dm":
+			if rec["chat"] != "5" || rec["thread"] != nil {
+				t.Errorf("dm line %v", rec)
+			}
+		case "require_mention_off":
+			if rec["thread"] != "1" {
+				t.Errorf("forum line %v", rec)
+			}
+		default:
+			t.Errorf("reason %v", rec)
+		}
+	}
+}
+
+func serviceMsg(t *testing.T, raw string) Message {
+	t.Helper()
+	var m Message
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestBotJoinAndRemovalLogged(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	buf := debugLog(h)
+	const chat = `"chat":{"id":-1004488060068,"title":"Kuli Online","is_forum":true,"type":"supergroup"}`
+	const from = `"from":{"id":1071241487,"first_name":"Dana"}`
+	h.update(serviceMsg(t, `{"message_id":1,`+from+`,`+chat+`,"new_chat_members":[{"id":99,"is_bot":true}]}`))
+	h.update(serviceMsg(t, `{"message_id":2,`+from+`,`+chat+`,"new_chat_members":[{"id":7,"first_name":"Rani"}]}`))
+	h.update(serviceMsg(t, `{"message_id":3,`+from+`,`+chat+`,"left_chat_member":{"id":99,"is_bot":true}}`))
+	h.waitIdle()
+	out := buf.String()
+	for _, want := range []string{
+		`"level":"INFO","msg":"telegram: the bot was added to a group","chat":"-1004488060068","title":"Kuli Online","by":"1071241487"`,
+		`"level":"INFO","msg":"telegram: the bot was removed from a group","chat":"-1004488060068","title":"Kuli Online","by":"1071241487"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "the bot was added") != 1 {
+		t.Error("a join of another member must not log")
+	}
+	// The sender is not an allowed user and the group is unknown: no reply, no pairing code,
+	// no session, no turn.
+	if prov.count() != 0 || h.api.count("sendMessage") != 0 || h.session("telegram:group:-1004488060068:1") != nil {
+		t.Fatalf("turns %d, sent %q", prov.count(), h.sentTexts())
+	}
+}
+
+func TestMigrationLogged(t *testing.T) {
+	const old, next = "-4488060068", "-1004488060068"
+	migrate := `{"message_id":4,"from":{"id":5,"first_name":"Dana"},"chat":{"id":-4488060068,"title":"Kuli","type":"group"},"migrate_to_chat_id":-1004488060068}`
+	from := `{"message_id":1,"from":{"id":5,"first_name":"Dana"},"chat":{"id":-1004488060068,"title":"Kuli","type":"supergroup"},"migrate_from_chat_id":-4488060068}`
+	all := "allowed_chats, free_response_chats, group_allowed_chats, home_chat, home channel, cron jobs"
+
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) {
+		c.AllowedChats = []string{old}
+		c.FreeResponseChats = []string{old}
+		c.GroupAllowedChats = []string{old}
+		c.HomeChat = old
+	})
+	buf := debugLog(h)
+	if err := SetHome(ctx, h.ch.DB, old, ""); err != nil {
+		t.Fatal(err)
+	}
+	h.ch.CronChats = func(context.Context) ([]string, error) { return []string{"-77", old}, nil }
+	h.update(serviceMsg(t, migrate))
+	h.update(serviceMsg(t, from))
+	h.waitIdle()
+	want := `"level":"WARN","msg":"telegram: the group chat moved to a new chat id. Put the new id in the config.","old_chat":"` +
+		old + `","new_chat":"` + next + `","old_id_in":"` + all + `"`
+	if out := buf.String(); !strings.Contains(out, want) || strings.Count(out, "moved to a new chat id") != 1 {
+		t.Fatalf("want %s in\n%s", want, out)
+	}
+
+	// No place holds the old id, and allowed_chats lists only another chat: INFO, no old_id_in.
+	q := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedChats = []string{"-999"} })
+	qbuf := debugLog(q)
+	q.update(serviceMsg(t, migrate))
+	q.waitIdle()
+	info := `"level":"INFO","msg":"telegram: the group chat moved to a new chat id","old_chat":"` + old + `","new_chat":"` + next + `"}`
+	if !strings.Contains(qbuf.String(), info) {
+		t.Fatalf("want %s in\n%s", info, qbuf.String())
+	}
+
+	// allowed_chats does not list the old id, but another place holds it: the WARN line still
+	// comes, because logServiceEvent runs before Gate.
+	w := harness(t, &tgProv{}, func(c *config.TelegramConfig) {
+		c.AllowedChats = []string{"-999"}
+		c.FreeResponseChats = []string{old}
+	})
+	wbuf := debugLog(w)
+	w.update(serviceMsg(t, migrate))
+	w.waitIdle()
+	warn := `"level":"WARN","msg":"telegram: the group chat moved to a new chat id. Put the new id in the config.","old_chat":"` +
+		old + `","new_chat":"` + next + `","old_id_in":"free_response_chats"`
+	if !strings.Contains(wbuf.String(), warn) {
+		t.Fatalf("want %s in\n%s", warn, wbuf.String())
 	}
 }

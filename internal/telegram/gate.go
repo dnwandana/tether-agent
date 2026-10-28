@@ -89,6 +89,19 @@ func Normalize(m Message) Normalized {
 	return n
 }
 
+// mediaPresent reports if the message has a media field that Tether Agent
+// reads. Gate and hasMedia use this one list.
+func mediaPresent(m Message) bool {
+	return len(m.Photo) > 0 || m.Document != nil || m.Voice != nil || m.Video != nil ||
+		m.Audio != nil || m.Sticker != nil || m.Location != nil || m.Venue != nil
+}
+
+// hasContent reports if the message has text, a caption, or media. It reads m,
+// not the normalized text, so a caption and a bare mention count.
+func hasContent(m Message) bool {
+	return m.Text != "" || m.Caption != "" || mediaPresent(m)
+}
+
 // Gate decides if the bot answers a message. It runs the gate steps of Hermes
 // _should_process_message in order. botUser is the bot user name
 // without "@", and botID is the bot user id.
@@ -97,6 +110,12 @@ func Gate(cfg config.TelegramConfig, botUser string, botID int64, m Message, n N
 		return Decision{Accept: true, Text: StripMention(n.Text, botUser), Reason: reason}
 	}
 	drop := func(reason string) Decision { return Decision{Reason: reason} }
+
+	// 0) A service message or a type that Tether Agent does not read has no
+	// content. It must not become an empty turn.
+	if !hasContent(m) {
+		return drop("no_content")
+	}
 
 	switch n.Kind {
 	case KindDM:

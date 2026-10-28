@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +64,9 @@ type Channel struct {
 	// UI holds the approval buttons and the clarify prompts. Nil means that no prompt is
 	// shown.
 	UI *Interactions
+	// CronChats returns the Telegram chat ids of all cron jobs. The migration log uses it to
+	// find the old chat id in the cron jobs. Nil skips this check.
+	CronChats func(ctx context.Context) ([]string, error)
 
 	// turnCtx is the context of the update handlers and the turns. Nil uses the context of
 	// Run. SetTurnContext sets it.
@@ -178,6 +182,13 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 	if n.Kind == KindChannel {
 		return
 	}
+	ch.logServiceEvent(ctx, m, n)
+	// A live location sends an edit every few seconds. Each edit must not start a turn. The
+	// first live location message is not an edit, so it gets one turn.
+	if u.EditedMessage != nil && (m.Location != nil || m.Venue != nil) {
+		ch.logger().Debug("telegram: message not accepted", "chat", n.ChatID, "reason", "live_location_update")
+		return
+	}
 	// A free-text answer to the clarify tool. It comes before the gate, because the answer in a
 	// group does not mention the bot. Only an authorized user can answer.
 	if ch.UI != nil && m.Text != "" && !strings.HasPrefix(m.Text, "/") &&
@@ -194,6 +205,13 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		ch.logger().Debug("telegram: message not accepted", "chat", n.ChatID, "reason", d.Reason)
 		return
 	}
+	// This line comes before Authorize, so a debug run shows each gate decision.
+	attrs := []any{"chat", n.ChatID}
+	if n.ThreadID != "" {
+		attrs = append(attrs, "thread", n.ThreadID)
+	}
+	attrs = append(attrs, "reason", d.Reason)
+	ch.logger().Debug("telegram: message accepted", attrs...)
 	switch Authorize(ch.Cfg, n, ch.pairApproved(ctx)) {
 	case AuthIgnore:
 		ch.logger().Info("telegram: message from an unauthorized user ignored", "chat", n.ChatID, "user", n.UserID)
@@ -211,6 +229,63 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		return
 	}
 	ch.dispatch(ctx, gw, n, []Message{m}, text)
+}
+
+// logServiceEvent writes one log line for a service event that concerns the bot. It only
+// logs and changes no state, because any person can add the bot to a group and send these
+// events. handleUpdate always goes on to Gate after it, and Gate drops the event as
+// no_content. A message with MigrateFromChatID writes no line, because the
+// MigrateToChatID message gives the same facts.
+func (ch *Channel) logServiceEvent(ctx context.Context, m Message, n Normalized) {
+	switch {
+	case m.MigrateToChatID != 0:
+		newID := strconv.FormatInt(m.MigrateToChatID, 10)
+		if places := ch.oldIDPlaces(ctx, n.ChatID); len(places) > 0 {
+			ch.logger().Warn("telegram: the group chat moved to a new chat id. Put the new id in the config.",
+				"old_chat", n.ChatID, "new_chat", newID, "old_id_in", strings.Join(places, ", "))
+		} else {
+			ch.logger().Info("telegram: the group chat moved to a new chat id",
+				"old_chat", n.ChatID, "new_chat", newID)
+		}
+	case slices.ContainsFunc(m.NewChatMembers, func(u User) bool { return u.ID == ch.Bot.ID }):
+		ch.logger().Info("telegram: the bot was added to a group",
+			"chat", n.ChatID, "title", m.Chat.Title, "by", n.UserID)
+	case m.LeftChatMember != nil && m.LeftChatMember.ID == ch.Bot.ID:
+		ch.logger().Info("telegram: the bot was removed from a group",
+			"chat", n.ChatID, "title", m.Chat.Title, "by", n.UserID)
+	}
+}
+
+// oldIDPlaces returns the names of the places that hold oldID, in a fixed order. The
+// operator must put the new chat id in each of these places after a migration.
+func (ch *Channel) oldIDPlaces(ctx context.Context, oldID string) []string {
+	var places []string
+	for _, l := range []struct {
+		name string
+		list []string
+	}{
+		{"allowed_chats", ch.Cfg.AllowedChats},
+		{"free_response_chats", ch.Cfg.FreeResponseChats},
+		{"group_allowed_chats", ch.Cfg.GroupAllowedChats},
+	} {
+		if inList(l.list, oldID) {
+			places = append(places, l.name)
+		}
+	}
+	if strings.TrimSpace(ch.Cfg.HomeChat) == oldID {
+		places = append(places, "home_chat")
+	}
+	if ch.DB != nil {
+		if chat, ok, err := ch.DB.KVGet(ctx, homeChatKey); err == nil && ok && chat == oldID {
+			places = append(places, "home channel")
+		}
+	}
+	if ch.CronChats != nil {
+		if chats, err := ch.CronChats(ctx); err == nil && slices.Contains(chats, oldID) {
+			places = append(places, "cron jobs")
+		}
+	}
+	return places
 }
 
 // dispatch builds the inbound message of msgs and gives it to the gateway. text is the
@@ -500,7 +575,7 @@ func (ch *Channel) callbackAuthorized(ctx context.Context, cq CallbackQuery) boo
 
 func hasMedia(msgs []Message) bool {
 	for _, m := range msgs {
-		if len(m.Photo) > 0 || m.Document != nil || m.Voice != nil {
+		if mediaPresent(m) {
 			return true
 		}
 	}
