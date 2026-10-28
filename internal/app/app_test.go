@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -491,6 +492,23 @@ func TestAddTelegramWiresChannelCronAndPrompts(t *testing.T) {
 	}
 }
 
+func TestAddTelegramWiresStickerInbox(t *testing.T) {
+	url, _, _ := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, "telegram:\n  enabled: true\n  bot_token: T\n")
+	ch, err := a.AddTelegram(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ch.Inbox.Stickers.(*telegram.KVStickers); !ok || ch.Inbox.Describe != nil {
+		t.Fatalf("stickers %T, describe set %v", ch.Inbox.Stickers, ch.Inbox.Describe != nil)
+	}
+	v := gatewayApp(t, url, "telegram:\n  enabled: true\n  bot_token: T\nagent:\n  vision_provider: primary\n")
+	vch, err := v.AddTelegram(ctx)
+	if err != nil || vch.Inbox.Describe == nil {
+		t.Fatalf("a vision provider must set Describe: %v", err)
+	}
+}
+
 func TestDelegationAndOptionalTools(t *testing.T) {
 	a := newApp(t)
 	if _, ok := a.Registry.Get("delegate_task"); !ok || a.Delegator == nil {
@@ -693,5 +711,19 @@ func TestHousekeepingRetentionZeroKeepsAll(t *testing.T) {
 	a.Housekeeping(hctx)
 	if _, err := a.Store.Get(ctx, s.ID); err != nil {
 		t.Fatalf("retention_days 0 must keep all sessions: %v", err)
+	}
+}
+
+func TestCronChatIDs(t *testing.T) {
+	jobs := []cron.Job{
+		{Deliver: "telegram:-100:9"},
+		{Deliver: "telegram:-200"},
+		{Deliver: "", Origin: cron.Origin{Source: "telegram", ChatID: "-300"}},
+		{Deliver: "origin", Origin: cron.Origin{Source: "telegram", ChatID: "-400"}},
+		{Deliver: "origin", Origin: cron.Origin{Source: "cli"}},
+		{Deliver: "local", Origin: cron.Origin{Source: "telegram", ChatID: "-500"}},
+	}
+	if got := cronChatIDs(jobs); !slices.Equal(got, []string{"-100", "-200", "-300", "-400"}) {
+		t.Fatal(got)
 	}
 }

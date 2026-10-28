@@ -333,6 +333,13 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		return nil, fmt.Errorf("telegram: the bot token check (getMe) failed, so check telegram.bot_token: %w", err)
 	}
 	ffmpeg, _ := exec.LookPath("ffmpeg")
+	// Static stickers go to the vision model. Nil Describe gives the fallback note.
+	var describe func(ctx context.Context, path, prompt string) (string, error)
+	if vp, ok := tools.VisionProvider(a.Cfg, a.Providers); ok {
+		describe = func(ctx context.Context, path, prompt string) (string, error) {
+			return tools.DescribeImage(ctx, vp, path, prompt)
+		}
+	}
 	ch := &telegram.Channel{
 		Cfg:  cfg,
 		C:    c,
@@ -343,6 +350,8 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 			MediaDir: filepath.Join(a.DataDir, "cache", "media"),
 			// Voice notes go to the speech-to-text backend.
 			Transcribe: a.Media.TranscribeFunc(),
+			Describe:   describe,
+			Stickers:   &telegram.KVStickers{DB: a.DB, Log: a.Log},
 			Log:        a.Log,
 		},
 		Out: &telegram.Sender{C: c, ConvertVoice: telegram.FFmpegToOpus(ffmpeg)},
@@ -353,6 +362,16 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		Log:   a.Log,
 		// The approval message shows the wait of the gate. Zero config means the gate default.
 		UI: &telegram.Interactions{C: c, Log: a.Log, ApprovalTimeout: approvalWait(a.Cfg.Approvals.TimeoutS)},
+	}
+	if a.Cron != nil {
+		// The migration log reads the cron jobs only when a chat moves, not at start.
+		ch.CronChats = func(ctx context.Context) ([]string, error) {
+			jobs, err := a.Cron.List(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return cronChatIDs(jobs), nil
+		}
 	}
 	a.Telegram = ch
 	a.Agent.ChatInfo = telegram.ChatInfo(cfg, me)
@@ -369,6 +388,24 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 	}
 	a.Log.Info("telegram bot checked", "bot", me.Username)
 	return ch, nil
+}
+
+// cronChatIDs returns the Telegram chat ids of jobs. A deliver of "telegram:<chat>[:<thread>]"
+// gives <chat>. A deliver of "" or "origin" gives the origin chat of a Telegram job.
+func cronChatIDs(jobs []cron.Job) []string {
+	var ids []string
+	for _, j := range jobs {
+		switch {
+		case strings.HasPrefix(j.Deliver, "telegram:"):
+			chat, _, _ := strings.Cut(strings.TrimPrefix(j.Deliver, "telegram:"), ":")
+			if chat != "" {
+				ids = append(ids, chat)
+			}
+		case (j.Deliver == "" || j.Deliver == "origin") && j.Origin.Source == "telegram" && j.Origin.ChatID != "":
+			ids = append(ids, j.Origin.ChatID)
+		}
+	}
+	return ids
 }
 
 // mcpReapEvery is the time between two checks for idle MCP servers. Tests change it.
