@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/app"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
@@ -425,21 +427,87 @@ func dataDir(flagValue string) string {
 	return filepath.Join(home, ".tether")
 }
 
+// skillsCommandFlags names the flags that each skills command uses, in
+// addition to --data-dir. A command that is not in the map is unknown.
+var skillsCommandFlags = map[string][]string{
+	"install":   {"skill", "ref", "yes", "force"},
+	"list":      {"available"},
+	"reset":     {},
+	"uninstall": {"yes"},
+	"check":     {},
+	"update":    {"yes", "force"},
+}
+
+// skillsFlagCheck returns false and prints the bad-usage lines when a flag
+// is set that the skills command cmd does not use.
+func skillsFlagCheck(fl *flag.FlagSet, cmd string, stderr io.Writer) (code int, ok bool) {
+	allowed := map[string]bool{"data-dir": true}
+	for _, name := range skillsCommandFlags[cmd] {
+		allowed[name] = true
+	}
+	var bad string
+	fl.Visit(func(f *flag.Flag) {
+		if bad == "" && !allowed[f.Name] {
+			bad = f.Name
+		}
+	})
+	if bad != "" {
+		return usageError(stderr, "skills", "flag --"+bad+" is not used by skills "+cmd), false
+	}
+	return 0, true
+}
+
 // runSkills runs the skills subcommand and returns the exit code.
 func runSkills(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("skills", flag.ContinueOnError)
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
+	skillFlag := fl.String("skill", "", "install: the skill to select by its frontmatter name")
+	refFlag := fl.String("ref", "", "install: a branch, a tag, or a full commit SHA")
+	yesFlag := fl.Bool("yes", false, "confirm with no prompt")
+	forceFlag := fl.Bool("force", false, "accept the risk of a caution verdict or a new install")
+	availableFlag := fl.Bool("available", false, "list: show the curated index")
 	rest, code, ok := parseCommand(fl, args, stdout, stderr)
 	if !ok {
 		return code
 	}
 	if len(rest) == 0 {
-		return usageError(stderr, "skills", "a command is needed: list or reset")
+		return usageError(stderr, "skills", "a command is needed: list, install, check, update, uninstall, or reset")
+	}
+	if _, known := skillsCommandFlags[rest[0]]; !known {
+		return usageError(stderr, "skills", "unknown command: "+rest[0])
+	}
+	if code, ok := skillsFlagCheck(fl, rest[0], stderr); !ok {
+		return code
 	}
 	dir := dataDir(*dataFlag)
 	skillsDir := filepath.Join(dir, "skills")
 	switch rest[0] {
+	case "install":
+		if len(rest) < 2 {
+			return usageError(stderr, "skills", "install needs a source")
+		}
+		if len(rest) > 2 {
+			return usageError(stderr, "skills", "unexpected argument: "+rest[2])
+		}
+		// An interrupt cancels the fetch, and the installer then removes its staging folder.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		req := skills.InstallRequest{Source: rest[1], Skill: *skillFlag, Ref: *refFlag, Yes: *yesFlag, Force: *forceFlag}
+		if _, err := newInstaller(ctx, dir, stdout, stderr).Install(ctx, req); err != nil {
+			return skillsError(stderr, "install", err)
+		}
+		return 0
 	case "list":
+		if *availableFlag {
+			if len(rest) > 2 {
+				return usageError(stderr, "skills", "unexpected argument: "+rest[2])
+			}
+			word := ""
+			if len(rest) == 2 {
+				word = rest[1]
+			}
+			return skillsListAvailable(skillsDir, word, stdout, stderr)
+		}
 		if len(rest) > 1 {
 			return usageError(stderr, "skills", "unexpected argument: "+rest[1])
 		}
@@ -460,23 +528,104 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stdout, "reset %s\n", name)
 		}
 		return 0
+	case "uninstall":
+		if len(rest) < 2 {
+			return usageError(stderr, "skills", "uninstall needs a skill name")
+		}
+		if len(rest) > 2 {
+			return usageError(stderr, "skills", "unexpected argument: "+rest[2])
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		req := skills.UninstallRequest{Name: rest[1], Yes: *yesFlag, CronUsers: cronUsers(dir)}
+		if err := newInstaller(ctx, dir, stdout, stderr).Uninstall(ctx, req); err != nil {
+			return skillsError(stderr, "uninstall", err)
+		}
+		return 0
+	case "check":
+		if len(rest) > 2 {
+			return usageError(stderr, "skills", "unexpected argument: "+rest[2])
+		}
+		name := ""
+		if len(rest) == 2 {
+			name = rest[1]
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		rows, err := skills.Check(ctx, skillsDir, skills.FindGit, name)
+		if err != nil {
+			// A bad lockfile or an unknown name means that no skill was
+			// checked. Exit code 1 means "an update is available", so a
+			// script must not see it here.
+			skillsError(stderr, "check", err)
+			return 2
+		}
+		skills.FormatCheck(stdout, rows)
+		return skills.CheckExitCode(rows)
+	case "update":
+		// A local source needs no git, so a missing git is not an error here.
+		// The installer reports it for each skill that needs it.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		req := skills.UpdateRequest{Names: rest[1:], Yes: *yesFlag, Force: *forceFlag}
+		if err := newInstaller(ctx, dir, stdout, stderr).Update(ctx, req); err != nil {
+			return skillsError(stderr, "update", err)
+		}
+		return 0
 	default:
 		return usageError(stderr, "skills", "unknown command: "+rest[0])
+	}
+}
+
+// skillsConfig loads the config of the data folder dir for the skills
+// commands. On an error it returns the default config and the error.
+func skillsConfig(dir string) (config.Config, error) {
+	dotenv, err := security.LoadDotEnv(filepath.Join(dir, ".env"))
+	if err != nil {
+		return config.Default(), err
+	}
+	loaded, err := config.Load(filepath.Join(dir, "config.yaml"), security.EnvLookup(dotenv))
+	if err != nil {
+		return config.Default(), err
+	}
+	return *loaded, nil
+}
+
+// cronUsers returns a function that names the cron jobs that use a skill, as
+// `"<job name>" (<job id>)`. It reads the jobs of <dir>/state.db once. The
+// line is only a warning, so a missing state.db or a failed query gives a
+// function that returns nil.
+func cronUsers(dir string) func(name string) []string {
+	none := func(string) []string { return nil }
+	// The gateway can have this database open, and the query only reads, so
+	// the handle neither creates the file nor applies the migrations.
+	d, err := db.OpenReadOnly(filepath.Join(dir, "state.db"))
+	if err != nil {
+		return none
+	}
+	defer d.Close()
+	jobs, err := (&cron.Store{DB: d}).List(context.Background())
+	if err != nil {
+		return none
+	}
+	return func(name string) []string {
+		var lines []string
+		for _, j := range jobs {
+			for _, s := range j.Skills {
+				if s == name {
+					lines = append(lines, fmt.Sprintf("%q (%s)", j.Name, j.ID))
+					break
+				}
+			}
+		}
+		return lines
 	}
 }
 
 // skillsList prints the skills that a session loads. A config error is a
 // warning, because the local skills do not need the config.
 func skillsList(dir, skillsDir string, stdout, stderr io.Writer) int {
-	cfg := config.Default()
-	dotenv, err := security.LoadDotEnv(filepath.Join(dir, ".env"))
-	if err == nil {
-		var loaded *config.Config
-		loaded, err = config.Load(filepath.Join(dir, "config.yaml"), security.EnvLookup(dotenv))
-		if err == nil {
-			cfg = *loaded
-		}
-	}
+	cfg, err := skillsConfig(dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: the config did not load, so the list has no external skills: %v\n", err)
 	}
@@ -488,10 +637,17 @@ func skillsList(dir, skillsDir string, stdout, stderr io.Writer) int {
 	for _, w := range warns {
 		fmt.Fprintf(stderr, "warning: %s: %s\n", w.Path, w.Text)
 	}
+	installed := map[string]skills.LockEntry{}
+	if lock, err := skills.ReadLock(skillsDir); err != nil {
+		fmt.Fprintf(stderr, "warning: the lockfile did not load, so no skill shows as installed: %v\n", err)
+	} else {
+		installed = lock.Installed
+	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "NAME\tSOURCE\tDESCRIPTION")
 	for _, s := range list {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", s.Name, skillSource(s), shortText(s.Description, 100))
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", skills.Sanitize(s.Name), skillSource(s, installed),
+			skills.Sanitize(shortText(s.Description, 100)))
 	}
 	if err := tw.Flush(); err != nil {
 		return 1
@@ -499,16 +655,194 @@ func skillsList(dir, skillsDir string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// skillSource names where a skill comes from.
-func skillSource(s skills.Skill) string {
+// skillsListAvailable prints the curated index, filtered by word when word
+// is not empty.
+func skillsListAvailable(skillsDir, word string, stdout, stderr io.Writer) int {
+	entries, err := skills.LoadIndex()
+	if err != nil {
+		fmt.Fprintf(stderr, "skills list: %v\n", err)
+		return 1
+	}
+	entries = skills.FilterIndex(entries, word)
+	if len(entries) == 0 {
+		fmt.Fprintf(stdout, "No skill in the index matches %q.\n", skills.Sanitize(word))
+		return 0
+	}
+	installed := map[string]skills.LockEntry{}
+	if lock, err := skills.ReadLock(skillsDir); err != nil {
+		fmt.Fprintf(stderr, "warning: the lockfile did not load, so no skill shows as installed: %v\n", err)
+	} else {
+		installed = lock.Installed
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "NAME\tINSTALLED\tREPO\tDESCRIPTION")
+	for _, e := range entries {
+		mark := "-"
+		if _, ok := installed[e.Name]; ok {
+			mark = "yes"
+		}
+		repo, ok := skills.GitHubRepo(e.URL)
+		if !ok {
+			repo = e.URL
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", skills.Sanitize(e.Name), mark, skills.Sanitize(repo),
+			skills.Sanitize(shortText(e.Description, 100)))
+	}
+	if err := tw.Flush(); err != nil {
+		return 1
+	}
+	fmt.Fprint(stdout, "\nInstall one with: tether skills install <name>\n")
+	return 0
+}
+
+// skillSource names where a skill comes from. A skill folder in skills/ that
+// the lockfile lists is "installed", else it is "local".
+func skillSource(s skills.Skill, installed map[string]skills.LockEntry) string {
+	_, inLock := installed[s.Name]
 	switch {
 	case s.Trust == skills.TrustBuiltin:
 		return "builtin"
 	case s.External:
 		return "external"
+	case inLock:
+		return "installed"
 	default:
 		return "local"
 	}
+}
+
+// stdioIsTerminal is true when stdin and stdout are terminals. Tests replace it.
+var stdioIsTerminal = func() bool {
+	return setup.IsTerminal(int(os.Stdin.Fd())) && setup.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// termPrompter asks the skills questions on the terminal. It reads the
+// answers from r and prints the questions to out. When ctx ends, a question
+// that waits for an answer returns ctx.Err(), so an interrupt at the prompt
+// stops the command.
+type termPrompter struct {
+	ctx context.Context
+	r   *bufio.Reader
+	out io.Writer
+}
+
+// Terminal returns true when stdin and stdout are terminals.
+func (p *termPrompter) Terminal() bool { return stdioIsTerminal() }
+
+// Confirm prints the question with " [y/N] " and returns true only for the
+// answer y or yes. An end of input is a no.
+func (p *termPrompter) Confirm(question string) (bool, error) {
+	fmt.Fprint(p.out, question+" [y/N] ")
+	line, err := p.readLine()
+	if err != nil {
+		return false, err
+	}
+	answer := strings.ToLower(line)
+	return answer == "y" || answer == "yes", nil
+}
+
+// Ask prints the question and returns the trimmed answer.
+func (p *termPrompter) Ask(question string) (string, error) {
+	fmt.Fprint(p.out, question+" ")
+	return p.readLine()
+}
+
+// readLine returns the next line without the spaces at its ends. An end of
+// input gives the text before it and no error.
+func (p *termPrompter) readLine() (string, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	// A read from the terminal does not see the context, so it runs apart.
+	// After an interrupt the command returns, so the read that still waits
+	// does no harm.
+	done := make(chan result, 1)
+	go func() {
+		line, err := p.r.ReadString('\n')
+		done <- result{line, err}
+	}()
+	ctx := p.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		fmt.Fprintln(p.out)
+		return "", ctx.Err()
+	case r := <-done:
+		if r.err != nil && !errors.Is(r.err, io.EOF) {
+			return "", r.err
+		}
+		return strings.TrimSpace(r.line), nil
+	}
+}
+
+// newInstaller returns an installer for the data folder dir. It asks its
+// questions on stdin and stdout, and a question stops when ctx ends. A config
+// error is a warning on stderr, because the install needs the config only for
+// the external skill folders.
+func newInstaller(ctx context.Context, dir string, stdout, stderr io.Writer) *skills.Installer {
+	cfg, err := skillsConfig(dir)
+	if err != nil {
+		fmt.Fprintf(stderr, "warning: the config did not load, so the install does not check the external skills: %v\n", err)
+	}
+	return &skills.Installer{
+		SkillsDir: filepath.Join(dir, "skills"),
+		External:  cfg.Skills.ExternalDirs,
+		Prompt:    &termPrompter{ctx: ctx, r: bufio.NewReader(stdin), out: stdout},
+		Out:       stdout,
+		Err:       stderr,
+	}
+}
+
+// skillsError prints err of the skills command cmd and returns the exit
+// code. A usage error gives 2. Every other error gives 1. The text goes
+// through skills.Sanitize, because it can hold text from a skill or a remote.
+func skillsError(stderr io.Writer, cmd string, err error) int {
+	var usage *skills.UsageError
+	var many *skills.ManySkillsError
+	switch {
+	case errors.As(err, &usage):
+		return usageError(stderr, "skills", skills.Sanitize(usage.Msg))
+	case errors.Is(err, skills.ErrCancelled):
+		// The installer has already printed "Cancelled.".
+		return 1
+	case errors.Is(err, context.Canceled):
+		// An interrupt stopped the command, and the installer removed its
+		// staging folder.
+		fmt.Fprintln(stderr, "Cancelled.")
+		return 1
+	case errors.As(err, &many):
+		fmt.Fprintf(stderr, "skills %s: %s\n", cmd, skills.Sanitize(many.Error()))
+		tw := tabwriter.NewWriter(stderr, 0, 0, 2, ' ', 0)
+		for _, f := range many.Found {
+			fmt.Fprintf(tw, "  %s\t%s\n", skills.Sanitize(f.Name), skills.Sanitize(f.RelDir))
+		}
+		_ = tw.Flush()
+		if len(many.Found) > 0 {
+			src := "<source>"
+			if many.Source != "" {
+				src = shellQuote(skills.Sanitize(many.Source))
+			}
+			fmt.Fprintf(stderr, "Example: tether skills install %s --skill %s\n", src, shellQuote(skills.Sanitize(many.Found[0].Name)))
+		}
+		return 1
+	default:
+		fmt.Fprintf(stderr, "skills %s: %s\n", cmd, skills.Sanitize(err.Error()))
+		return 1
+	}
+}
+
+// shellSafe matches a word that a POSIX shell reads as it is.
+var shellSafe = regexp.MustCompile(`^[A-Za-z0-9@%_+=:,./~-]+$`)
+
+// shellQuote returns s in a form that the owner can paste into a shell.
+func shellQuote(s string) string {
+	if shellSafe.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // shortText returns the first line of s, cut to max runes.

@@ -153,22 +153,65 @@ Examples:
 	{
 		Name:    "skills",
 		Group:   "Manage data",
-		Summary: "List the skills, or restore a bootstrap skill.",
+		Summary: "List, install, check, update, and uninstall skills, or restore a bootstrap skill.",
 		Usage:   "tether skills <command> [flags]",
-		Body: `Show the skills, or restore the bootstrap skills that come in the binary.
+		Body: `Show the skills, install a public skill, or restore the bootstrap skills that
+come in the binary. The install scans the skill with the skill guard and asks
+you to confirm. Read the files of a skill before you use it.
 
 Commands:
-  list                 Show each skill with its source: local, external, or
-                       builtin.
+  list                 Show each skill with its source: local, installed,
+                       external, or builtin.
+  list --available [WORD]
+                       Show the skills in the index of the binary. A word
+                       filters by name and description.
+  install <source>     Fetch one skill, scan it, and put it into skills/.
+  uninstall <name>     Remove an installed skill and its lockfile entry.
+  check [name]         Compare the installed skills with their sources. It
+                       changes nothing.
+  update [name...]     Install the new version of the skills. With no name,
+                       update each skill that check reports.
   reset [name]         Restore a bootstrap skill from the binary. With no name,
                        restore all of them.
+
+Exit codes of check:
+  0 = nothing to do · 1 = an update is available · 2 = no skill could be checked
+
+Sources of install:
+  ./my-skills          A local folder. It starts with ., /, or ~.
+  https://gitlab.com/org/repo
+                       A git URL, or git@host:owner/repo.git.
+  https://github.com/<owner>/<repo>/tree/<ref>/<path>
+                       A GitHub tree URL: the repo, the ref, and the folder.
+  openai/skills        A GitHub repo as owner/repo.
+  jupyter-notebook     A skill name from the index.
 
 Flags:
   --data-dir DIR       The data folder. The default is TETHER_HOME, then
                        ~/.tether.
+  --skill NAME         install only: select the skill with this name when the
+                       source has more than one skill.
+  --ref REF            install only: a branch, a tag, or a full commit SHA. The
+                       default is the default branch of the remote.
+  --yes                install, uninstall, and update: confirm with no prompt.
+                       It is necessary when stdin is not a terminal. It never
+                       passes a guard block.
+  --force              install: install a listed skill again. update: replace
+                       a skill that the agent changed, after a backup to
+                       skills/.hub/backup/. install and update: pass a caution
+                       verdict on a community source. It never passes a
+                       dangerous verdict.
+  --available          list only: show the index of the binary.
 
 Examples:
   tether skills list
+  tether skills list --available pdf
+  tether skills install pdf
+  tether skills install openai/skills --skill playwright
+  tether skills install ./my-skills --yes
+  tether skills check
+  tether skills update pdf
+  tether skills uninstall pdf
   tether skills reset tether-memory
 `,
 	},
@@ -356,11 +399,32 @@ func mainHelp(dataDir string) string {
 			b.WriteString(group)
 			b.WriteString(":\n")
 		}
-		fmt.Fprintf(&b, "  %-12s%s\n", h.Name, h.Summary)
+		writeSummary(&b, h.Name, h.Summary)
 	}
 	b.WriteString("\n")
 	fmt.Fprintf(&b, mainHelpTail, dataDir)
 	return b.String()
+}
+
+// writeSummary writes the line of one command in the main help. A summary
+// that is too long for chatHelpWidth wraps under the summary column.
+func writeSummary(b *strings.Builder, name, summary string) {
+	const indent = 14 // two spaces and the name column of 12
+	line := fmt.Sprintf("  %-12s", name)
+	for i, word := range strings.Fields(summary) {
+		if i > 0 && utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) > chatHelpWidth {
+			b.WriteString(line)
+			b.WriteByte('\n')
+			line = strings.Repeat(" ", indent) + word
+			continue
+		}
+		if i > 0 {
+			line += " "
+		}
+		line += word
+	}
+	b.WriteString(line)
+	b.WriteByte('\n')
 }
 
 // commandHelp returns the help of the command name. The chat help gets the commands of

@@ -229,6 +229,35 @@ func TestSkillsResetHelpIsReset(t *testing.T) {
 	}
 }
 
+func TestSkillsHelpInstall(t *testing.T) {
+	text := commandHelp("skills")
+	for _, want := range []string{
+		"install <source>", "--skill NAME", "--ref REF", "--yes", "--force", "--available",
+		// The five source forms.
+		"./my-skills", "https://gitlab.com/org/repo", "https://github.com/<owner>/<repo>/tree/<ref>/<path>",
+		"openai/skills", "jupyter-notebook",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+	if h, _ := findHelp("skills"); h.Summary != "List, install, check, update, and uninstall skills, or restore a bootstrap skill." {
+		t.Errorf("summary %q", h.Summary)
+	}
+}
+
+func TestSkillsHelpLifecycle(t *testing.T) {
+	text := commandHelp("skills")
+	for _, want := range []string{
+		"uninstall <name>", "check [name]", "update [name...]",
+		"0 = nothing to do · 1 = an update is available · 2 = no skill could be checked",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
+		}
+	}
+}
+
 func TestHelpTableMatchesSwitch(t *testing.T) {
 	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
 	if err != nil {

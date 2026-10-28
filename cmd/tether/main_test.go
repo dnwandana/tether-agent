@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,9 +19,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
+	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/telegram"
 )
 
@@ -876,7 +881,7 @@ func TestSubcommandBadUsage(t *testing.T) {
 		args   []string
 		reason string
 	}{
-		{[]string{"skills"}, "a command is needed: list or reset"},
+		{[]string{"skills"}, "a command is needed: list, install, check, update, uninstall, or reset"},
 		{[]string{"skills", "frob"}, "unknown command: frob"},
 		{[]string{"skills", "list", "x"}, "unexpected argument: x"},
 		{[]string{"skills", "reset", "a", "b"}, "unexpected argument: b"},
@@ -900,5 +905,484 @@ func TestSubcommandBadUsage(t *testing.T) {
 		if code := run(c.args, &out, &errb); code != 2 || errb.String() != want {
 			t.Errorf("%v: exit %d %q", c.args, code, errb.String())
 		}
+	}
+}
+
+// withTerminal sets stdioIsTerminal and stdin for one test and restores them.
+func withTerminal(t *testing.T, term bool, input string) {
+	t.Helper()
+	oldTerm, oldIn := stdioIsTerminal, stdin
+	stdioIsTerminal = func() bool { return term }
+	stdin = strings.NewReader(input)
+	t.Cleanup(func() { stdioIsTerminal, stdin = oldTerm, oldIn })
+}
+
+// skillsHome makes a data folder with a minimal config, sets TETHER_HOME to
+// it, and returns it. The config stops the config warning on stderr.
+func skillsHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("TETHER_HOME", home)
+	cfg := "providers:\n  primary:\n    format: openai\n    base_url: http://127.0.0.1:1\n    api_key: x\n    model: m\n"
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
+// writeTestSkill writes dir/SKILL.md for a skill with the given name.
+func writeTestSkill(t *testing.T, dir, name string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: A demo skill. Use when testing.\n---\nSay hello.\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillsInstallLocal(t *testing.T) {
+	home := skillsHome(t)
+	src := t.TempDir()
+	writeTestSkill(t, src, "demo")
+	withTerminal(t, true, "y\n")
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "install", src}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "skills", "demo", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`Install "demo"? [y/N]`, "Installed demo.", "You are about to install a third-party skill."} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing %q in:\n%s", want, out.String())
+		}
+	}
+	if errb.Len() != 0 {
+		t.Fatalf("stderr %q", errb.String())
+	}
+}
+
+func TestSkillsInstallNoTerminalNeedsYes(t *testing.T) {
+	home := skillsHome(t)
+	src := t.TempDir()
+	writeTestSkill(t, src, "demo")
+	withTerminal(t, false, "")
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "install", src}, &out, &errb); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	want := "skills install: no terminal for the confirm prompt. Run the command again with --yes to confirm.\n"
+	if errb.String() != want {
+		t.Fatalf("stderr %q", errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "skills", "demo")); !os.IsNotExist(err) {
+		t.Fatalf("the skill folder must not exist: %v", err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := run([]string{"skills", "install", src, "--yes"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "skills", "demo", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillsInstallCancelled(t *testing.T) {
+	home := skillsHome(t)
+	src := t.TempDir()
+	writeTestSkill(t, src, "demo")
+	withTerminal(t, true, "n\n")
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "install", src}, &out, &errb); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.Contains(out.String(), "Cancelled.") || errb.Len() != 0 {
+		t.Fatalf("stdout %q, stderr %q", out.String(), errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "skills", "demo")); !os.IsNotExist(err) {
+		t.Fatalf("the skill folder must not exist: %v", err)
+	}
+}
+
+func TestSkillsInstallManySkills(t *testing.T) {
+	skillsHome(t)
+	// The space in the folder name needs quotes in the example line.
+	src := filepath.Join(t.TempDir(), "my skills")
+	writeTestSkill(t, filepath.Join(src, "a"), "a")
+	writeTestSkill(t, filepath.Join(src, "b"), "b")
+	withTerminal(t, true, "y\n")
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "install", src}, &out, &errb); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	for _, want := range []string{
+		"skills install: the repository has 2 skills. Select one with --skill\n",
+		"\n  a  a\n",
+		"\n  b  b\n",
+		"Example: tether skills install '" + src + "' --skill a\n",
+	} {
+		if !strings.Contains(errb.String(), want) {
+			t.Fatalf("missing %q in:\n%s", want, errb.String())
+		}
+	}
+}
+
+func TestShellQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"openai/skills":          "openai/skills",
+		"https://github.com/o/r": "https://github.com/o/r",
+		"~/my skills":            "'~/my skills'",
+		"it's":                   `'it'\''s'`,
+		"a;rm -rf x":             "'a;rm -rf x'",
+	} {
+		if got := shellQuote(in); got != want {
+			t.Errorf("shellQuote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSkillsInstallUsageErrors(t *testing.T) {
+	skillsHome(t)
+	withTerminal(t, true, "y\n")
+	for _, c := range []struct {
+		args   []string
+		reason string
+	}{
+		{[]string{"skills", "install"}, "install needs a source"},
+		{[]string{"skills", "install", "x", "y"}, "unexpected argument: y"},
+		{[]string{"skills", "install", "https://github.com/o/r/tree/main/x", "--ref", "dev"}, ""},
+		{[]string{"skills", "list", "--yes"}, "flag --yes is not used by skills list"},
+		{[]string{"skills", "reset", "--force"}, "flag --force is not used by skills reset"},
+		{[]string{"skills", "install", "x", "--available"}, "flag --available is not used by skills install"},
+	} {
+		var out, errb bytes.Buffer
+		if code := run(c.args, &out, &errb); code != 2 {
+			t.Fatalf("%v: exit %d: %s", c.args, code, errb.String())
+		}
+		if !strings.HasPrefix(errb.String(), "skills: "+c.reason) || !strings.Contains(errb.String(), "usage: tether skills") {
+			t.Fatalf("%v: stderr %q", c.args, errb.String())
+		}
+	}
+}
+
+func TestSkillsListAvailable(t *testing.T) {
+	skillsHome(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "list", "--available"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if f := strings.Fields(lines[0]); len(f) != 4 || f[0] != "NAME" || f[1] != "INSTALLED" || f[2] != "REPO" || f[3] != "DESCRIPTION" {
+		t.Fatalf("header %q", lines[0])
+	}
+	found := false
+	for _, l := range lines[1:] {
+		if f := strings.Fields(l); len(f) >= 3 && f[0] == "pdf" {
+			found = f[1] == "-" && f[2] == "anthropics/skills"
+		}
+	}
+	if !found {
+		t.Fatalf("no pdf row in:\n%s", out.String())
+	}
+	if lines[len(lines)-2] != "" || lines[len(lines)-1] != "Install one with: tether skills install <name>" {
+		t.Fatalf("footer in:\n%s", out.String())
+	}
+
+	out.Reset()
+	if code := run([]string{"skills", "list", "--available", "zzz-none"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if out.String() != `No skill in the index matches "zzz-none".`+"\n" {
+		t.Fatalf("stdout %q", out.String())
+	}
+
+	out.Reset()
+	if code := run([]string{"skills", "list", "--available", "PDF"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "\npdf ") {
+		t.Fatalf("the filter must ignore case:\n%s", out.String())
+	}
+
+	errb.Reset()
+	if code := run([]string{"skills", "list", "--available", "a", "b"}, &out, &errb); code != 2 ||
+		!strings.HasPrefix(errb.String(), "skills: unexpected argument: b\n") {
+		t.Fatalf("exit %d: %q", code, errb.String())
+	}
+}
+
+func TestSkillsListShowsInstalled(t *testing.T) {
+	skillsHome(t)
+	src := t.TempDir()
+	writeTestSkill(t, src, "demo")
+	withTerminal(t, false, "")
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "install", src, "--yes"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	out.Reset()
+	if code := run([]string{"skills", "list"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	found := false
+	for _, l := range strings.Split(out.String(), "\n") {
+		if f := strings.Fields(l); len(f) >= 2 && f[0] == "demo" {
+			found = f[1] == "installed"
+		}
+	}
+	if !found {
+		t.Fatalf("no installed demo row in:\n%s", out.String())
+	}
+
+	out.Reset()
+	if code := run([]string{"skills", "list", "--available"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if strings.Contains(out.String(), " yes ") {
+		t.Fatalf("demo is not in the index, so no row is installed:\n%s", out.String())
+	}
+}
+
+func TestTermPrompter(t *testing.T) {
+	for in, want := range map[string]bool{"y\n": true, " YES \n": true, "Yes": true, "n\n": false, "\n": false, "": false, "yep\n": false} {
+		var out bytes.Buffer
+		p := &termPrompter{r: bufio.NewReader(strings.NewReader(in)), out: &out}
+		got, err := p.Confirm("Go?")
+		if err != nil || got != want {
+			t.Errorf("%q: got %v, %v; want %v", in, got, err, want)
+		}
+		if out.String() != "Go? [y/N] " {
+			t.Errorf("%q: prompt %q", in, out.String())
+		}
+	}
+	var out bytes.Buffer
+	p := &termPrompter{r: bufio.NewReader(strings.NewReader("  demo \n")), out: &out}
+	if got, err := p.Ask("Name:"); err != nil || got != "demo" || out.String() != "Name: " {
+		t.Fatalf("got %q, %v; prompt %q", got, err, out.String())
+	}
+}
+
+func TestTermPrompterStopsOnCancel(t *testing.T) {
+	r, w := io.Pipe()
+	defer w.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	var out bytes.Buffer
+	p := &termPrompter{ctx: ctx, r: bufio.NewReader(r), out: &out}
+	cancel()
+	if ok, err := p.Confirm("Go?"); ok || !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, %v", ok, err)
+	}
+	var errb bytes.Buffer
+	if code := skillsError(&errb, "install", fmt.Errorf("stage: %w", context.Canceled)); code != 1 || errb.String() != "Cancelled.\n" {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+}
+
+func TestSkillsErrorSanitizes(t *testing.T) {
+	var errb bytes.Buffer
+	if code := skillsError(&errb, "install", errors.New("bad \x1b[31mred\x1b[0m name")); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if errb.String() != "skills install: bad red name\n" {
+		t.Fatalf("stderr %q", errb.String())
+	}
+	errb.Reset()
+	if code := skillsError(&errb, "install", skills.ErrCancelled); code != 1 || errb.Len() != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
+}
+
+// installDemo installs the skill "demo" from a new local folder with --yes
+// and returns the source folder.
+func installDemo(t *testing.T) string {
+	t.Helper()
+	src := t.TempDir()
+	writeTestSkill(t, src, "demo")
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "install", src, "--yes"}, &out, &errb); code != 0 {
+		t.Fatalf("install: exit %d: %s", code, errb.String())
+	}
+	return src
+}
+
+// changeDemoSource writes a new body into the SKILL.md of the source folder src.
+func changeDemoSource(t *testing.T, src string) {
+	t.Helper()
+	body := "---\nname: demo\ndescription: A demo skill. Use when testing.\n---\nSay hello again.\n"
+	if err := os.WriteFile(filepath.Join(src, "SKILL.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillsUninstallCLI(t *testing.T) {
+	home := skillsHome(t)
+	withTerminal(t, false, "")
+	installDemo(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "uninstall", "demo", "--yes"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "skills", "demo")); !os.IsNotExist(err) {
+		t.Fatalf("the skill folder must not exist: %v", err)
+	}
+	if !strings.Contains(out.String(), "Removed demo.") {
+		t.Fatalf("stdout %q", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "state.db")); !os.IsNotExist(err) {
+		t.Fatalf("the uninstall must not create state.db: %v", err)
+	}
+
+	errb.Reset()
+	if code := run([]string{"skills", "uninstall", "tether-memory", "--yes"}, &out, &errb); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	want := "skills uninstall: \"tether-memory\" is not in the lockfile. Only installed skills can be removed this way.\n"
+	if errb.String() != want {
+		t.Fatalf("stderr %q", errb.String())
+	}
+
+	for _, args := range [][]string{
+		{"skills", "uninstall"},
+		{"skills", "uninstall", "a", "b"},
+		{"skills", "uninstall", "demo", "--force"},
+	} {
+		errb.Reset()
+		if code := run(args, &out, &errb); code != 2 {
+			t.Fatalf("%v: exit %d: %s", args, code, errb.String())
+		}
+	}
+}
+
+func TestSkillsUninstallCronWarning(t *testing.T) {
+	home := skillsHome(t)
+	withTerminal(t, false, "")
+	installDemo(t)
+	d, err := db.Open(filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := cron.Store{DB: d}
+	ctx := context.Background()
+	job, err := store.Create(ctx, cron.Job{Name: "brief", Schedule: "every 2h", Prompt: "p", Skills: []string{"demo"}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(ctx, cron.Job{Name: "other", Schedule: "every 2h", Prompt: "p", Skills: []string{"pdf"}, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "uninstall", "demo", "--yes"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	want := `Cron job "brief" (` + job.ID + `) uses this skill. Its runs will skip it.`
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("missing %q in:\n%s", want, out.String())
+	}
+	if strings.Contains(out.String(), `"other"`) {
+		t.Fatalf("the job that does not use the skill shows:\n%s", out.String())
+	}
+}
+
+func TestCronUsersNoStateDB(t *testing.T) {
+	dir := t.TempDir()
+	if got := cronUsers(dir)("demo"); got != nil {
+		t.Fatalf("got %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.db")); !os.IsNotExist(err) {
+		t.Fatalf("cronUsers must not create state.db: %v", err)
+	}
+}
+
+func TestSkillsCheckCLI(t *testing.T) {
+	skillsHome(t)
+	withTerminal(t, false, "")
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "check"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if out.String() != "No installed skills. Install one with: tether skills install <source>\n" {
+		t.Fatalf("stdout %q", out.String())
+	}
+
+	src := installDemo(t)
+	out.Reset()
+	if code := run([]string{"skills", "check"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "up to date") {
+		t.Fatalf("stdout %q", out.String())
+	}
+
+	changeDemoSource(t, src)
+	out.Reset()
+	if code := run([]string{"skills", "check", "demo"}, &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "source changed") {
+		t.Fatalf("stdout %q", out.String())
+	}
+
+	errb.Reset()
+	if code := run([]string{"skills", "check", "nope"}, &out, &errb); code != 2 {
+		t.Fatalf("exit %d", code)
+	}
+	if !strings.HasPrefix(errb.String(), "skills check: ") || !strings.Contains(errb.String(), "is not in the lockfile") {
+		t.Fatalf("stderr %q", errb.String())
+	}
+
+	for _, args := range [][]string{
+		{"skills", "check", "--yes"},
+		{"skills", "check", "a", "b"},
+	} {
+		errb.Reset()
+		if code := run(args, &out, &errb); code != 2 {
+			t.Fatalf("%v: exit %d: %s", args, code, errb.String())
+		}
+	}
+}
+
+func TestSkillsUpdateCLI(t *testing.T) {
+	home := skillsHome(t)
+	withTerminal(t, false, "")
+	src := installDemo(t)
+	changeDemoSource(t, src)
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "update", "demo"}, &out, &errb); code != 1 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	// The error of each skill goes to stderr, before the summary line.
+	if strings.Contains(out.String(), "--yes") {
+		t.Fatalf("stdout %q", out.String())
+	}
+	if e := errb.String(); !strings.HasPrefix(e, "demo: ") || !strings.Contains(e, "--yes") ||
+		!strings.HasSuffix(e, "\nskills update: 1 skill(s) were not updated\n") {
+		t.Fatalf("stderr %q", e)
+	}
+
+	out.Reset()
+	errb.Reset()
+	if code := run([]string{"skills", "update", "demo", "--yes"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	b, err := os.ReadFile(filepath.Join(home, "skills", "demo", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "Say hello again.") {
+		t.Fatalf("SKILL.md %q", b)
+	}
+
+	errb.Reset()
+	if code := run([]string{"skills", "update", "nope", "--yes"}, &out, &errb); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	errb.Reset()
+	if code := run([]string{"skills", "update", "--skill", "x"}, &out, &errb); code != 2 {
+		t.Fatalf("exit %d: %s", code, errb.String())
 	}
 }

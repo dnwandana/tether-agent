@@ -13,7 +13,8 @@ Run the agent:
 
 Manage data:
   sessions    List the sessions, or export one as JSONL.
-  skills      List the skills, or restore a bootstrap skill.
+  skills      List, install, check, update, and uninstall skills, or restore a
+              bootstrap skill.
   pairing     Approve or revoke the Telegram users.
   usage       Show the calls, the tokens, and the cost of each model.
   backup      Save the state to one archive, without the secrets.
