@@ -51,7 +51,8 @@ func newPattern(id, desc, src string) Pattern {
 }
 
 // HardlinePatterns are always blocked. No mode, cron setting, or "Always"
-// answer allows them. This is Hermes HARDLINE_PATTERNS.
+// answer allows them. This is Hermes HARDLINE_PATTERNS, plus the last rule,
+// which is only in Tether Agent.
 var HardlinePatterns = []Pattern{
 	newPattern("recursive_delete_root_filesystem", "recursive delete of root filesystem", `\brm\s+(-[^\s]*\s+)*(/|/\*|/ \*)(\s|$)`),
 	newPattern("recursive_delete_system_directory", "recursive delete of system directory", `\brm\s+(-[^\s]*\s+)*(/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*)(\s|$)`),
@@ -65,6 +66,10 @@ var HardlinePatterns = []Pattern{
 	newPattern("init_0_6_shutdown_reboot", "init 0/6 (shutdown/reboot)", `(?:^|[;&|\n`+"`"+`]|\$\()\s*(?:sudo\s+(?:-[^\s]+\s+)*)?(?:env\s+(?:\w+=\S*\s+)*)?(?:(?:exec|nohup|setsid|time)\s+)*\s*init\s+[06]\b`),
 	newPattern("systemctl_poweroff_reboot", "systemctl poweroff/reboot", `(?:^|[;&|\n`+"`"+`]|\$\()\s*(?:sudo\s+(?:-[^\s]+\s+)*)?(?:env\s+(?:\w+=\S*\s+)*)?(?:(?:exec|nohup|setsid|time)\s+)*\s*systemctl\s+(poweroff|reboot|halt|kexec)\b`),
 	newPattern("telinit_0_6_shutdown_reboot", "telinit 0/6 (shutdown/reboot)", `(?:^|[;&|\n`+"`"+`]|\$\()\s*(?:sudo\s+(?:-[^\s]+\s+)*)?(?:env\s+(?:\w+=\S*\s+)*)?(?:(?:exec|nohup|setsid|time)\s+)*\s*telinit\s+[06]\b`),
+	// The agent must never change the installed skills, because the loader does not scan them again.
+	// The CLI accepts flags before the command word, so flag tokens and their
+	// values can come between "tether", "skills", and the command.
+	newPattern("tether_skills_change_hardline", "tether skills install/update/uninstall (only the owner runs these, in a terminal)", `\btether(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+skills(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+(install|update|uninstall)\b`),
 }
 
 // DangerousPatterns need an approval before they run. This is Hermes

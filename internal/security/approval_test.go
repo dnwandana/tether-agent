@@ -133,6 +133,43 @@ func TestHardlineIgnoresSessionAndAlways(t *testing.T) {
 	}
 }
 
+func TestSkillsChangeBlockedInEveryMode(t *testing.T) {
+	const cmd = "tether skills install x --yes --force"
+	const want = "BLOCKED (hardline): tether skills install/update/uninstall"
+	check := func(name string, g *Gate, req ApprovalRequest, p Prompter) {
+		t.Helper()
+		reason := blockedReason(t, g.Check(ctx, req, p))
+		if !strings.HasPrefix(reason, want) {
+			t.Fatalf("%s: %q", name, reason)
+		}
+	}
+	for _, mode := range []string{"manual", "smart", "off"} {
+		g := newGate(t, mode, "approve")
+		if mode == "smart" {
+			g.Judge = fixedJudge{risky: false}
+		}
+		check(mode, g, ApprovalRequest{SessionID: "s", Command: cmd}, alwaysApprove{})
+		// The CLI accepts flags before the command word.
+		check(mode+" flags first", g, ApprovalRequest{SessionID: "s", Command: "tether skills --yes --force install x"}, alwaysApprove{})
+	}
+	g := newGate(t, "manual", "approve")
+	check("cron", g, ApprovalRequest{Command: cmd, Kind: "cron"}, alwaysApprove{})
+
+	// Approve every dangerous rule for the session and for always.
+	g = newGate(t, "manual", "approve")
+	for _, d := range DangerousPatterns {
+		g.approveSession("s", d.ID)
+		if err := g.saveAlways(ctx, d.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := &countingPrompter{answer: ScopeAlways}
+	check("always", g, ApprovalRequest{SessionID: "s", Command: cmd}, p)
+	if p.n != 0 {
+		t.Fatal("the gate asked about a hardline command")
+	}
+}
+
 func TestManualAsksForDangerousOnly(t *testing.T) {
 	g := newGate(t, "manual", "deny")
 	p := &countingPrompter{answer: ScopeOnce}

