@@ -12,7 +12,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/update"
 )
 
@@ -84,8 +84,8 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "this is a dev build; the newest release is %s\n", res.Available)
 	case update.StateUpdated:
 		fmt.Fprintf(stdout, "updated tether %s → %s at %s\n", res.Current, res.Available, res.BinPath)
-		// LockHeld opens the file read-only and never creates it. An error gives no hint.
-		held, err := gateway.LockHeld(filepath.Join(updateDataDir(*dir), "gateway.lock"))
+		// gatewaylock.Held opens the file read-only and never creates it. An error gives no hint.
+		held, err := gatewaylock.Held(filepath.Join(updateDataDir(*dir), "gateway.lock"))
 		if err == nil && held {
 			_, statErr := os.Stat(systemUnitPath)
 			fmt.Fprintln(stdout, restartHint(runtime.GOOS, statErr == nil))

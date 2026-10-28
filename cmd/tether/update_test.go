@@ -19,7 +19,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/update"
 )
 
@@ -141,7 +141,7 @@ func TestUpdateInstallsAndHintsRestart(t *testing.T) {
 	bin := writeFakeBinary(t)
 	useUpdater(t, srv, bin, "0.4.0")
 	dir := t.TempDir()
-	rel, err := gateway.AcquireLock(filepath.Join(dir, "gateway.lock"))
+	rel, err := gatewaylock.Acquire(filepath.Join(dir, "gateway.lock"))
 	if err != nil {
 		t.Fatal(err)
 	}

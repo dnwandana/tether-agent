@@ -17,6 +17,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -213,7 +214,7 @@ func TestHousekeepingRemovesOldSpill(t *testing.T) {
 func TestChatDoesNotTakeLock(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, fakeProviderURL(t))
-	release, err := gateway.AcquireLock(filepath.Join(dir, "gateway.lock"))
+	release, err := gatewaylock.Acquire(filepath.Join(dir, "gateway.lock"))
 	if err != nil {
 		t.Fatal(err)
 	}
