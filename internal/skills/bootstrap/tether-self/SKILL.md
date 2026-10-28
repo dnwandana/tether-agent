@@ -24,18 +24,18 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 
 | Toolset | Tools |
 |---|---|
-| `terminal` | `run_command` |
+| `terminal` | `terminal` |
 | `file` | `read_file`, `write_file`, `patch` |
 | `web` | `web_search`, `web_fetch` |
-| `browser` | `browser_navigate`, `browser_click`, `browser_fill`, `browser_read`, `browser_screenshot`, `browser_run_js`, `browser_cookies` |
+| `browser` | `browser_navigate`, `browser_click`, `browser_fill`, `browser_read`, `browser_take_screenshot`, `browser_run_js`, `browser_cookies` |
 | `vision` | `view_image` |
-| `ask` | `ask_user` |
+| `ask` | `clarify` |
 | `memory` | `memory`, `session_search` |
 | `skills` | `skill_view`, `skills_list`, `skill_manage` |
 | `cron` | `cronjob` |
 | `delegation` | `delegate_task` |
-| `code_execution` | `run_script` |
-| `media` | `text_to_speech`, `transcribe_audio`, `image_generate` |
+| `code_execution` | `execute_code` |
+| `media` | `text_to_speech`, `transcribe_audio`, `generate_image` |
 | `mcp_<server>` | the tools of one MCP server |
 
 ## Main config keys
@@ -70,7 +70,7 @@ Use the `cronjob` tool. Always list the jobs first. Never guess a job ID.
 - A script job with a non-zero exit sends an error alert.
 - A relative script path is under `~/.tether/scripts/`.
 - An agent job always delivers its final answer. With `deliver: local`, it saves the answer only.
-- A cron run cannot use `ask_user` and cannot make cron jobs.
+- A cron run cannot use `clarify` and cannot make cron jobs.
 - In a cron run, a dangerous command follows `approvals.cron_mode`.
 
 ## Delegation
@@ -79,14 +79,14 @@ Use `delegate_task` to give a separate task to a child agent.
 
 - Give one `goal`, or a `tasks` list. A list runs in parallel, with a maximum of 5 tasks.
 - A child starts with no history. Put all the facts that it needs into `context`.
-- A child cannot use `delegate_task`, `ask_user`, `memory`, `run_script`, or `cronjob`.
+- A child cannot use `delegate_task`, `clarify`, `memory`, `execute_code`, or `cronjob`.
 - A child stops after 50 tool rounds or 600 seconds.
 - Set `background: true` to continue your turn. The results come back later.
 - You see only the summary of each child.
 
 ## Approvals
 
-The approval gate checks each command from `run_command` and `run_script`.
+The approval gate checks each command from `terminal` and `execute_code`.
 
 - Some commands are always blocked, for example a delete of the root folder.
 - For a dangerous command, the mode `manual` asks the user.
@@ -101,7 +101,7 @@ The approval gate checks each command from `run_command` and `run_script`.
 
 ### API calls
 
-Use `curl` through `run_command`. Show the status code on the last line:
+Use `curl` through `terminal`. Show the status code on the last line:
 
     curl -sS -w '\n%{http_code}' https://api.example.com/v1/items
 

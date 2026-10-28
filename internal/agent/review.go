@@ -50,7 +50,7 @@ const skillDoNotCapture = "  • Environment-dependent failures: missing binarie
 	"unconfigured credentials, uninstalled packages. The user can fix " +
 	"these — they are not durable rules.\n" +
 	"  • Negative claims about tools or features ('browser tools do not " +
-	"work', 'X tool is broken', 'cannot use Y from run_script'). These " +
+	"work', 'X tool is broken', 'cannot use Y from execute_code'). These " +
 	"harden into refusals the agent cites against itself for months " +
 	"after the actual problem was fixed.\n" +
 	"  • Session-specific transient errors that resolved before the " +

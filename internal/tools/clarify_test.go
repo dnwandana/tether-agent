@@ -35,7 +35,7 @@ func (b blockingAsker) Ask(ctx context.Context, _ Question) (Answer, error) {
 func TestAskReturnsAnswerText(t *testing.T) {
 	var seen []Question
 	env := &Env{Ask: fixedAsker{ans: Answer{Text: "blue"}, seen: &seen}}
-	if out := runToolEnv(t, AskUserTool{Timeout: time.Minute}, `{"question":"Color?"}`, env); out != "blue" {
+	if out := runToolEnv(t, ClarifyTool{Timeout: time.Minute}, `{"question":"Color?"}`, env); out != "blue" {
 		t.Fatal(out)
 	}
 	if len(seen) != 1 || seen[0].Text != "Color?" || seen[0].Timeout != time.Minute || seen[0].Multi || len(seen[0].Choices) != 0 {
@@ -46,7 +46,7 @@ func TestAskReturnsAnswerText(t *testing.T) {
 func TestAskChoicesJoined(t *testing.T) {
 	var seen []Question
 	env := &Env{Ask: fixedAsker{ans: Answer{Choices: []string{"a", "c"}}, seen: &seen}}
-	out := runToolEnv(t, AskUserTool{Timeout: time.Minute}, `{"question":"Pick","choices":["a"," b ","","c"],"multi_select":true}`, env)
+	out := runToolEnv(t, ClarifyTool{Timeout: time.Minute}, `{"question":"Pick","choices":["a"," b ","","c"],"multi_select":true}`, env)
 	if out != "a, c" {
 		t.Fatal(out)
 	}
@@ -58,7 +58,7 @@ func TestAskChoicesJoined(t *testing.T) {
 func TestAskTimeout(t *testing.T) {
 	for _, obey := range []bool{true, false} {
 		start := time.Now()
-		out := runToolEnv(t, AskUserTool{Timeout: 50 * time.Millisecond}, `{"question":"x"}`, &Env{Ask: blockingAsker{obey: obey}})
+		out := runToolEnv(t, ClarifyTool{Timeout: 50 * time.Millisecond}, `{"question":"x"}`, &Env{Ask: blockingAsker{obey: obey}})
 		if out != "no answer within 50ms; continue without it" || time.Since(start) > 2*time.Second {
 			t.Fatal(obey, out)
 		}
@@ -73,7 +73,7 @@ func TestAskTimeoutTextUsesDurationString(t *testing.T) {
 
 func TestAskUnavailableInCronAndChildren(t *testing.T) {
 	for _, kind := range []string{"cron", "subagent", "review"} {
-		out := runToolEnvErr(t, AskUserTool{Timeout: time.Second}, `{"question":"x"}`, &Env{Kind: kind, Ask: fixedAsker{}})
+		out := runToolEnvErr(t, ClarifyTool{Timeout: time.Second}, `{"question":"x"}`, &Env{Kind: kind, Ask: fixedAsker{}})
 		if !strings.Contains(out, "no user is present") || !strings.Contains(out, kind) {
 			t.Fatal(kind, out)
 		}
@@ -81,7 +81,7 @@ func TestAskUnavailableInCronAndChildren(t *testing.T) {
 }
 
 func TestAskNoAskerIsError(t *testing.T) {
-	out := runToolEnvErr(t, AskUserTool{Timeout: time.Second}, `{"question":"x"}`, &Env{Kind: "chat"})
+	out := runToolEnvErr(t, ClarifyTool{Timeout: time.Second}, `{"question":"x"}`, &Env{Kind: "chat"})
 	if !strings.Contains(out, "no user is present") {
 		t.Fatal(out)
 	}
@@ -89,25 +89,25 @@ func TestAskNoAskerIsError(t *testing.T) {
 
 func TestAskRejectsBadArgs(t *testing.T) {
 	env := &Env{Ask: fixedAsker{ans: Answer{Text: "x"}}}
-	if out := runToolEnvErr(t, AskUserTool{}, `{"question":"  "}`, env); !strings.Contains(out, "question is required") {
+	if out := runToolEnvErr(t, ClarifyTool{}, `{"question":"  "}`, env); !strings.Contains(out, "question is required") {
 		t.Fatal(out)
 	}
 	many := `{"question":"x","choices":["1","2","3","4","5","6","7","8","9","10","11"]}`
-	if out := runToolEnvErr(t, AskUserTool{}, many, env); !strings.Contains(out, "at most 10 choices") {
+	if out := runToolEnvErr(t, ClarifyTool{}, many, env); !strings.Contains(out, "at most 10 choices") {
 		t.Fatal(out)
 	}
 }
 
 func TestAskEmptyAnswer(t *testing.T) {
-	out := runToolEnv(t, AskUserTool{Timeout: time.Second}, `{"question":"x"}`, &Env{Ask: fixedAsker{}})
+	out := runToolEnv(t, ClarifyTool{Timeout: time.Second}, `{"question":"x"}`, &Env{Ask: fixedAsker{}})
 	if out != "(the user gave an empty answer)" {
 		t.Fatal(out)
 	}
 }
 
 func TestAskToolMeta(t *testing.T) {
-	tool := AskUserTool{}
-	if tool.Name() != "ask_user" || tool.Toolset() != SetAsk || tool.ParallelSafe() || tool.Schema().Name != "ask_user" {
+	tool := ClarifyTool{}
+	if tool.Name() != "clarify" || tool.Toolset() != SetAsk || tool.ParallelSafe() || tool.Schema().Name != "clarify" {
 		t.Fatal("meta")
 	}
 	if tool.timeout() != 600*time.Second {

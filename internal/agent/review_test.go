@@ -17,7 +17,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
-// agentAfterTurn returns an Agent with the memory tool, run_command (a fake), and echo,
+// agentAfterTurn returns an Agent with the memory tool, terminal (a fake), and echo,
 // a session after one turn, and the last request of that turn.
 func agentAfterTurn(t *testing.T) (*Agent, *sessions.Session, provider.Request, namedTool) {
 	t.Helper()
@@ -25,7 +25,7 @@ func agentAfterTurn(t *testing.T) (*Agent, *sessions.Session, provider.Request, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := newNamed("run_command", tools.SetTerminal)
+	cmd := newNamed("terminal", tools.SetTerminal)
 	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), text("Here is the answer."))
 	a, sess := newAgent(t, fp, echoTool{}, tools.MemoryTool{Store: m}, cmd)
 	a.Memory = m
@@ -88,7 +88,7 @@ func TestReviewUsesParentToolsAndSystem(t *testing.T) {
 func TestReviewDispatchWhitelist(t *testing.T) {
 	a, sess, parentReq, cmd := agentAfterTurn(t)
 	fp := a.Prov.(*fakeProv)
-	fp.script = []step{toolCalls(tc("r1", "run_command", `{"command":"rm -rf /tmp/x"}`)), text("done")}
+	fp.script = []step{toolCalls(tc("r1", "terminal", `{"command":"rm -rf /tmp/x"}`)), text("done")}
 	saved, err := a.RunReview(ctx, ReviewRequest{Session: sess, View: reviewView(t, a, sess), System: parentReq.System, Tools: parentReq.Tools, Skills: true})
 	if err != nil || len(saved) != 0 {
 		t.Fatal(saved, err)

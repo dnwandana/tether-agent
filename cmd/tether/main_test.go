@@ -705,7 +705,7 @@ func TestGenToolsDocSubcommand(t *testing.T) {
 	if code := run([]string{"gen-tools-doc"}, &out, &errb); code != 0 {
 		t.Fatalf("exit %d: %s", code, errb.String())
 	}
-	for _, want := range []string{"# Tools", "## terminal", "### run_command", "### run_script", "```json"} {
+	for _, want := range []string{"# Tools", "## terminal", "### terminal", "### execute_code", "```json"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("no %q in the doc", want)
 		}

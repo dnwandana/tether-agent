@@ -46,7 +46,7 @@ const (
 	askNoAnswerLabel = "⏱ No answer."
 )
 
-// Interactions shows the approval buttons and the ask_user prompts in Telegram chats. It
+// Interactions shows the approval buttons and the clarify prompts in Telegram chats. It
 // keeps the pending prompts until a button press, a text, or the end of the context
 // answers them. It is safe for concurrent use.
 type Interactions struct {

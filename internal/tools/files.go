@@ -158,12 +158,12 @@ func (ReadFileTool) Run(_ context.Context, raw json.RawMessage, env *Env) (strin
 		return "", toolErr("cannot read %s: %v", path, err)
 	}
 	if info.IsDir() {
-		return "", toolErr("%s is a folder; use run_command with ls", path)
+		return "", toolErr("%s is a folder; use the terminal tool with ls", path)
 	}
 
 	br := bufio.NewReaderSize(f, 64*1024)
 	if sniff, _ := br.Peek(binarySniffLen); looksBinary(sniff) {
-		return "", toolErr("%s: binary file; use run_command with xxd or file", path)
+		return "", toolErr("%s: binary file; use the terminal tool with xxd or file", path)
 	}
 
 	var b strings.Builder

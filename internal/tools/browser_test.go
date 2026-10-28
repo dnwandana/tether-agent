@@ -109,7 +109,7 @@ func TestScreenshotReturnsMediaPath(t *testing.T) {
 	bt := browserTools(t)
 	runToolEnv(t, bt.Tool("browser_navigate"), fmt.Sprintf(`{"url":%q}`, srv.URL), sessEnv("s:1"))
 	for _, args := range []string{`{}`, `{"full_page":true}`} {
-		out := runToolEnv(t, bt.Tool("browser_screenshot"), args, sessEnv("s:1"))
+		out := runToolEnv(t, bt.Tool("browser_take_screenshot"), args, sessEnv("s:1"))
 		if !strings.Contains(out, "view_image") {
 			t.Fatal(out)
 		}
@@ -126,7 +126,7 @@ func TestScreenshotReturnsMediaPath(t *testing.T) {
 
 func TestScreenshotNeedsShotDir(t *testing.T) {
 	bt := &BrowserTools{M: &browser.Manager{}}
-	if out := runToolEnvErr(t, bt.Tool("browser_screenshot"), `{}`, sessEnv("s1")); !strings.Contains(out, "screenshot") {
+	if out := runToolEnvErr(t, bt.Tool("browser_take_screenshot"), `{}`, sessEnv("s1")); !strings.Contains(out, "screenshot") {
 		t.Fatal(out)
 	}
 }
@@ -283,7 +283,7 @@ func TestNoChromeErrorFromFirstCall(t *testing.T) {
 func TestRegisterBrowserTools(t *testing.T) {
 	r := NewRegistry()
 	RegisterBrowserTools(r, &BrowserTools{M: &browser.Manager{}})
-	want := []string{"browser_click", "browser_cookies", "browser_fill", "browser_navigate", "browser_read", "browser_run_js", "browser_screenshot"}
+	want := []string{"browser_click", "browser_cookies", "browser_fill", "browser_navigate", "browser_read", "browser_run_js", "browser_take_screenshot"}
 	all := r.All()
 	if len(all) != len(want) {
 		t.Fatal(len(all))

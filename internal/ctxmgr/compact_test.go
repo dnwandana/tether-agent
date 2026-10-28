@@ -26,11 +26,11 @@ func plainConversation(n int) []provider.Message {
 func withToolPairAt(msgs []provider.Message, at, n int) []provider.Message {
 	calls := make([]provider.ToolCall, n)
 	for i := range calls {
-		calls[i] = provider.ToolCall{ID: fmt.Sprint("c", at, "_", i), Name: "run_command", Args: "{}"}
+		calls[i] = provider.ToolCall{ID: fmt.Sprint("c", at, "_", i), Name: "terminal", Args: "{}"}
 	}
 	msgs[at] = provider.Message{Role: provider.RoleAssistant, ToolCalls: calls}
 	for i := range n {
-		msgs[at+1+i] = provider.Message{Role: provider.RoleTool, ToolCallID: calls[i].ID, ToolName: "run_command", Content: "ok"}
+		msgs[at+1+i] = provider.Message{Role: provider.RoleTool, ToolCallID: calls[i].ID, ToolName: "terminal", Content: "ok"}
 	}
 	return msgs
 }

@@ -28,8 +28,8 @@ const defaultMaxOutputBytes = 8 << 20
 // bash exits. A child that bash left in the background can hold the pipes open.
 const waitDelay = 2 * time.Second
 
-// ExecTool is the run_command tool.
-type ExecTool struct {
+// TerminalTool is the terminal tool.
+type TerminalTool struct {
 	// DefaultTimeout applies when the call gives no timeout_s.
 	DefaultTimeout time.Duration
 	// DotEnv holds the .env values. ChildEnv removes these names from the child.
@@ -50,19 +50,19 @@ type execArgs struct {
 	Background bool   `json:"background"`
 }
 
-// Name returns "run_command".
-func (t *ExecTool) Name() string { return "run_command" }
+// Name returns "terminal".
+func (t *TerminalTool) Name() string { return "terminal" }
 
 // Toolset returns the terminal toolset.
-func (t *ExecTool) Toolset() string { return SetTerminal }
+func (t *TerminalTool) Toolset() string { return SetTerminal }
 
 // ParallelSafe returns false, because commands can change shared state.
-func (t *ExecTool) ParallelSafe() bool { return false }
+func (t *TerminalTool) ParallelSafe() bool { return false }
 
 // Schema returns the tool schema for the model.
-func (t *ExecTool) Schema() provider.ToolSchema {
+func (t *TerminalTool) Schema() provider.ToolSchema {
 	return provider.ToolSchema{
-		Name: "run_command",
+		Name: "terminal",
 		Description: "Run a shell command with bash -c on the host. The result is stdout and stderr together, " +
 			"followed by the exit code when it is not 0. Set background to true for servers and long jobs: " +
 			"the tool then returns the pid and a log path at once. Read the log with read_file and stop the process with kill.",
@@ -79,7 +79,7 @@ func (t *ExecTool) Schema() provider.ToolSchema {
 	}
 }
 
-func (t *ExecTool) defaultTimeout() time.Duration {
+func (t *TerminalTool) defaultTimeout() time.Duration {
 	if t.DefaultTimeout > 0 {
 		return t.DefaultTimeout
 	}
@@ -87,7 +87,7 @@ func (t *ExecTool) defaultTimeout() time.Duration {
 }
 
 // Run runs the command of the call.
-func (t *ExecTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
+func (t *TerminalTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
 	var a execArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return "", err
@@ -98,7 +98,7 @@ func (t *ExecTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (stri
 	// The gate runs before each start, also in background mode. With no gate, the
 	// command does not run (fail closed).
 	if env == nil || env.Gate == nil {
-		return "", toolErr("approval gate missing: run_command cannot run a command without the approval gate")
+		return "", toolErr("approval gate missing: terminal cannot run a command without the approval gate")
 	}
 	if err := env.Gate.CheckCommand(ctx, env, a.Command); err != nil {
 		return "", toolErr("%s", err.Error())
@@ -120,7 +120,7 @@ func (t *ExecTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (stri
 // and adds "[timed out after Ns]". The exit code is -1 after a timeout or a
 // signal. Exec returns an error when the command cannot start or when ctx
 // ends before the command.
-func (t *ExecTool) Exec(ctx context.Context, env *Env, command, workdir string, timeout time.Duration) (output string, exitCode int, err error) {
+func (t *TerminalTool) Exec(ctx context.Context, env *Env, command, workdir string, timeout time.Duration) (output string, exitCode int, err error) {
 	dir, err := resolveWorkdir(env, workdir)
 	if err != nil {
 		return "", -1, err
@@ -189,7 +189,7 @@ func (t *ExecTool) Exec(ctx context.Context, env *Env, command, workdir string, 
 // startBackground starts command in a new session with its output in
 // SpillDir/bg-<pid>.log, and returns the pid and the log path as JSON. A
 // goroutine reaps the process.
-func (t *ExecTool) startBackground(env *Env, command, workdir string) (string, error) {
+func (t *TerminalTool) startBackground(env *Env, command, workdir string) (string, error) {
 	dir, err := resolveWorkdir(env, workdir)
 	if err != nil {
 		return "", err
@@ -238,7 +238,7 @@ func (t *ExecTool) startBackground(env *Env, command, workdir string) (string, e
 	return string(b), nil
 }
 
-// GateApprover is the Approver of run_command. It checks each command with Gate and asks
+// GateApprover is the Approver of the terminal tool. It checks each command with Gate and asks
 // the user through Prompter. A nil Prompter blocks each dangerous command.
 type GateApprover struct {
 	Gate     *security.Gate
@@ -285,7 +285,7 @@ func childName(env *Env) string {
 const childNameKey = "child_name"
 
 // childEnv returns the environment for a child process, without secrets.
-func (t *ExecTool) childEnv(env *Env) []string {
+func (t *TerminalTool) childEnv(env *Env) []string {
 	var pass []string
 	if t.Passthrough != nil {
 		pass = t.Passthrough(env)

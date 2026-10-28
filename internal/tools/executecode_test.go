@@ -76,9 +76,9 @@ func visEnv(names ...string) *Env {
 	return env
 }
 
-func scriptTool(t *testing.T, reg *Registry) RunScriptTool {
+func scriptTool(t *testing.T, reg *Registry) ExecuteCodeTool {
 	t.Helper()
-	return RunScriptTool{Reg: reg, ScratchRoot: t.TempDir(), TimeoutS: 300, MaxCalls: 50, MaxStdout: 50000, Python: py(t)}
+	return ExecuteCodeTool{Reg: reg, ScratchRoot: t.TempDir(), TimeoutS: 300, MaxCalls: 50, MaxStdout: 50000, Python: py(t)}
 }
 
 func code(src string) string { return mustJSON(map[string]string{"code": src}) }
@@ -119,11 +119,11 @@ func TestScriptStubsOnlyForVisibleCallableTools(t *testing.T) {
 }
 
 func TestTimeoutClampedAndEnforced(t *testing.T) {
-	tool := RunScriptTool{TimeoutS: 300}
+	tool := ExecuteCodeTool{TimeoutS: 300}
 	if tool.timeout(999) != 300*time.Second || tool.timeout(0) != 300*time.Second || tool.timeout(5) != 5*time.Second {
 		t.Fatal("timeout_s above 300 is clamped")
 	}
-	if (RunScriptTool{}).timeout(0) != 300*time.Second {
+	if (ExecuteCodeTool{}).timeout(0) != 300*time.Second {
 		t.Fatal("the default is 300 s")
 	}
 	pythonOrSkip(t)
@@ -164,7 +164,7 @@ for call in (lambda: _call("memory", {}), lambda: web_fetch(urls=["missing"])):
     except ToolError as e:
         print("ToolError:", e)`
 	out := runToolEnv(t, scriptTool(t, reg), code(src), visEnv("web_fetch", "memory"))
-	if !strings.Contains(out, `ToolError: tool "memory" is not callable from run_script`) || !strings.Contains(out, "ToolError: no page missing") {
+	if !strings.Contains(out, `ToolError: tool "memory" is not callable from execute_code`) || !strings.Contains(out, "ToolError: no page missing") {
 		t.Fatalf("%q", out)
 	}
 }
@@ -193,7 +193,7 @@ for i in range(3):
 	}
 }
 
-func TestRunScriptGoesThroughTheGate(t *testing.T) {
+func TestExecuteCodeGoesThroughTheGate(t *testing.T) {
 	pythonOrSkip(t)
 	marker := filepath.Join(t.TempDir(), "ran")
 	src := fmt.Sprintf("open(%q, 'w').write('x')", marker)
@@ -215,10 +215,10 @@ func TestRunScriptGoesThroughTheGate(t *testing.T) {
 
 func TestScriptRunCommandUsesTheGate(t *testing.T) {
 	pythonOrSkip(t)
-	reg := regWith(&ExecTool{DefaultTimeout: 10 * time.Second})
+	reg := regWith(&TerminalTool{DefaultTimeout: 10 * time.Second})
 	var seen []string
-	env := visEnv("run_command")
-	// The script itself passes the gate. Its run_command call is blocked.
+	env := visEnv("terminal")
+	// The script itself passes the gate. Its terminal call is blocked.
 	env.Gate = gateFunc(func(cmd string) error {
 		seen = append(seen, cmd)
 		if strings.HasPrefix(cmd, "rm ") {
@@ -226,9 +226,9 @@ func TestScriptRunCommandUsesTheGate(t *testing.T) {
 		}
 		return nil
 	})
-	src := `from tether_tools import run_command, ToolError
+	src := `from tether_tools import terminal, ToolError
 try:
-    run_command("rm -rf /tmp/nothing-here")
+    terminal("rm -rf /tmp/nothing-here")
 except ToolError as e:
     print(e)`
 	out := runToolEnv(t, scriptTool(t, reg), code(src), env)
@@ -259,9 +259,9 @@ func TestLongScratchRootKeepsTheSocketShort(t *testing.T) {
 	}
 }
 
-func TestRunScriptArgsAndSchema(t *testing.T) {
-	tool := RunScriptTool{Python: "/usr/bin/python3"}
-	if tool.Name() != "run_script" || tool.Toolset() != SetCodeExecution || tool.ParallelSafe() {
+func TestExecuteCodeArgsAndSchema(t *testing.T) {
+	tool := ExecuteCodeTool{Python: "/usr/bin/python3"}
+	if tool.Name() != "execute_code" || tool.Toolset() != SetCodeExecution || tool.ParallelSafe() {
 		t.Fatal("name, toolset, or parallel flag")
 	}
 	if d := tool.Schema().Description; !strings.Contains(d, "tether_tools") || !strings.Contains(d, "web_fetch") {
@@ -270,7 +270,7 @@ func TestRunScriptArgsAndSchema(t *testing.T) {
 	if out := runToolEnvErr(t, tool, `{"code":"  "}`, visEnv()); !strings.Contains(out, "code is required") {
 		t.Fatal(out)
 	}
-	if out := runToolEnvErr(t, RunScriptTool{}, `{"code":"print(1)"}`, visEnv()); !strings.Contains(out, "python3") {
+	if out := runToolEnvErr(t, ExecuteCodeTool{}, `{"code":"print(1)"}`, visEnv()); !strings.Contains(out, "python3") {
 		t.Fatal(out)
 	}
 }

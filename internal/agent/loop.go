@@ -233,7 +233,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	if t.review != nil {
 		visible, schemas, deny = t.review.allow, t.review.schemas, t.review.deny
 	}
-	// delegate_task gives the toolsets to the children, and run_script reads the names.
+	// delegate_task gives the toolsets to the children, and execute_code reads the names.
 	tools.SetTurnTools(env, t.Toolsets, visible)
 	channel := env.Channel
 	if channel == "" {

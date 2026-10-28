@@ -154,11 +154,11 @@ func TestCLIAskOneQuestionAtATime(t *testing.T) {
 	}
 }
 
-// approvalDeps returns test deps with run_command behind a gate that asks the CLI.
+// approvalDeps returns test deps with the terminal tool behind a gate that asks the CLI.
 func approvalDeps(t *testing.T, fp *fakeProv) *Deps {
 	t.Helper()
 	d := testDeps(t, fp)
-	d.Agent.Tools.Register(&tools.ExecTool{DefaultTimeout: time.Minute})
+	d.Agent.Tools.Register(&tools.TerminalTool{DefaultTimeout: time.Minute})
 	ask := &CLIAsk{}
 	gate := &security.Gate{Mode: "manual"}
 	d.CLIAsk = ask
@@ -175,7 +175,7 @@ func TestCLIApprovalPromptSharesInputWithREPL(t *testing.T) {
 	}
 	args, _ := json.Marshal(map[string]string{"command": "rm -rf " + marker})
 	fp := &fakeProv{script: []step{
-		{calls: []provider.ToolCall{{ID: "c1", Name: "run_command", Args: string(args)}}},
+		{calls: []provider.ToolCall{{ID: "c1", Name: "terminal", Args: string(args)}}},
 		{text: "removed"},
 		{text: "second turn"},
 	}}
@@ -200,7 +200,7 @@ func TestCLIApprovalDenyBlocksCommand(t *testing.T) {
 	}
 	args, _ := json.Marshal(map[string]string{"command": "rm -rf " + marker})
 	fp := &fakeProv{script: []step{
-		{calls: []provider.ToolCall{{ID: "c1", Name: "run_command", Args: string(args)}}},
+		{calls: []provider.ToolCall{{ID: "c1", Name: "terminal", Args: string(args)}}},
 		{text: "ok, I stop"},
 	}}
 	d := approvalDeps(t, fp)
@@ -218,7 +218,7 @@ func TestCLIApprovalDenyBlocksCommand(t *testing.T) {
 
 func TestCLICtrlCDuringApprovalStopsTurn(t *testing.T) {
 	args, _ := json.Marshal(map[string]string{"command": "rm -rf /tmp/tether-never"})
-	fp := &fakeProv{script: []step{{calls: []provider.ToolCall{{ID: "c1", Name: "run_command", Args: string(args)}}}}}
+	fp := &fakeProv{script: []step{{calls: []provider.ToolCall{{ID: "c1", Name: "terminal", Args: string(args)}}}}}
 	d := approvalDeps(t, fp)
 	r, w := io.Pipe()
 	ints := make(chan os.Signal, 1)

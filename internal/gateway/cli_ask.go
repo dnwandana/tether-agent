@@ -17,7 +17,7 @@ import (
 // ApprovalPrompt is the input prompt of the CLI approval question.
 const ApprovalPrompt = "[o]nce / [s]ession / [a]lways / [d]eny: "
 
-// CLIAsk asks the user on the terminal. It is the approval Prompter and the ask_user
+// CLIAsk asks the user on the terminal. It is the approval Prompter and the clarify
 // Asker of the CLI. It asks one question at a time. While CLI.Run runs, CLIAsk reads its
 // lines through the input of the REPL, so the two never read the same line.
 type CLIAsk struct {

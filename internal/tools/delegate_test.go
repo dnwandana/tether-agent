@@ -187,7 +187,7 @@ func TestDelegateBadArguments(t *testing.T) {
 func TestProgressLinesPrefixed(t *testing.T) {
 	r := &slowRunner{script: map[string][][2]string{
 		"2/3": {{"browser_navigate", "https://example.com"}},
-		"3/3": {{"run_command", ""}},
+		"3/3": {{"terminal", ""}},
 	}}
 	env := envDepth(0)
 	var mu sync.Mutex
@@ -195,7 +195,7 @@ func TestProgressLinesPrefixed(t *testing.T) {
 	env.Progress = func(line string) { mu.Lock(); lines = append(lines, line); mu.Unlock() }
 	runToolEnv(t, delegateTool(r), `{"tasks":[{"goal":"a"},{"goal":"b"},{"goal":"c"}]}`, env)
 	slices.Sort(lines)
-	want := []string{`🔀 [2/3] browser_navigate "https://example.com"`, `🔀 [3/3] run_command`}
+	want := []string{`🔀 [2/3] browser_navigate "https://example.com"`, `🔀 [3/3] terminal`}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("%q", lines)
 	}

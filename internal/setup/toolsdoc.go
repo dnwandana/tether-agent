@@ -31,7 +31,7 @@ pricing:
 
 // ToolsDocRegistry returns the registry of docs/TOOLS.md. It builds the app of the
 // gateway role in a temporary data folder with a config that turns on every built-in
-// tool. It also adds run_script when python3 is not on PATH, so the doc does not depend
+// tool. It also adds execute_code when python3 is not on PATH, so the doc does not depend
 // on the host. It starts no MCP server. Call done to close the app and to remove the
 // folder.
 func ToolsDocRegistry(ctx context.Context) (r *tools.Registry, done func(), err error) {
@@ -48,9 +48,9 @@ func ToolsDocRegistry(ctx context.Context) (r *tools.Registry, done func(), err 
 		os.RemoveAll(dir)
 		return nil, nil, fmt.Errorf("gen-tools-doc: %w", err)
 	}
-	if _, ok := a.Registry.Get("run_script"); !ok {
+	if _, ok := a.Registry.Get("execute_code"); !ok {
 		c := a.Cfg.CodeExecution
-		a.RegisterTool(tools.RunScriptTool{
+		a.RegisterTool(tools.ExecuteCodeTool{
 			Reg:         a.Registry,
 			ScratchRoot: filepath.Join(dir, "cache"),
 			TimeoutS:    c.TimeoutS,

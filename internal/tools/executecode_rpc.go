@@ -14,9 +14,9 @@ import (
 	"sync"
 )
 
-// ScriptCallableTools holds the tools that a run_script script can call. It
+// ScriptCallableTools holds the tools that an execute_code script can call. It
 // is the Hermes SANDBOX_ALLOWED_TOOLS list with the tether names.
-var ScriptCallableTools = []string{"web_search", "web_fetch", "read_file", "write_file", "patch", "run_command"}
+var ScriptCallableTools = []string{"web_search", "web_fetch", "read_file", "write_file", "patch", "terminal"}
 
 // The limits of the script RPC.
 const (
@@ -25,7 +25,7 @@ const (
 	rpcSockName        = "rpc.sock"
 )
 
-// RPCServer serves the tool calls of one run_script script over a Unix
+// RPCServer serves the tool calls of one execute_code script over a Unix
 // socket. The protocol is one JSON object per line. A request is
 // {"id":N,"tool":"web_fetch","args":{...}}. A response is
 // {"id":N,"ok":true,"result":"..."} or {"id":N,"ok":false,"error":"..."}.
@@ -33,14 +33,14 @@ const (
 // protected paths apply the same as for a model call.
 type RPCServer struct {
 	Reg *Registry
-	// Env is the Env of the run_script call. The script calls use it.
+	// Env is the Env of the execute_code call. The script calls use it.
 	Env *Env
 	// Visible holds the tools of the session. A script can call a tool only
 	// when it is in ScriptCallableTools and in Visible.
 	Visible map[string]bool
 	// MaxCalls limits the calls of one script. Zero or less means 50.
 	MaxCalls int
-	// Ctx is the context of the run_script call. Nil means
+	// Ctx is the context of the execute_code call. Nil means
 	// context.Background. Stop also cancels the calls.
 	Ctx context.Context
 
@@ -67,20 +67,20 @@ type rpcResponse struct {
 // call more than once.
 func (s *RPCServer) Listen(dir string) (sockPath string, stop func(), err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", nil, fmt.Errorf("run_script: cannot create the socket folder %s: %w", dir, err)
+		return "", nil, fmt.Errorf("execute_code: cannot create the socket folder %s: %w", dir, err)
 	}
 	sockPath = filepath.Join(dir, rpcSockName)
 	if err := os.Remove(sockPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return "", nil, fmt.Errorf("run_script: cannot remove the old socket %s: %w", sockPath, err)
+		return "", nil, fmt.Errorf("execute_code: cannot remove the old socket %s: %w", sockPath, err)
 	}
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("run_script: cannot listen on %s: %w", sockPath, err)
+		return "", nil, fmt.Errorf("execute_code: cannot listen on %s: %w", sockPath, err)
 	}
 	if err := os.Chmod(sockPath, 0o600); err != nil {
 		ln.Close()
 		os.Remove(sockPath)
-		return "", nil, fmt.Errorf("run_script: cannot set the mode of %s: %w", sockPath, err)
+		return "", nil, fmt.Errorf("execute_code: cannot set the mode of %s: %w", sockPath, err)
 	}
 
 	parent := s.Ctx
@@ -181,7 +181,7 @@ func (s *RPCServer) call(ctx context.Context, req rpcRequest) rpcResponse {
 	}
 	s.calls++
 	if !slices.Contains(ScriptCallableTools, req.Tool) {
-		resp.Error = fmt.Sprintf("tool %q is not callable from run_script; the callable tools are %v", req.Tool, ScriptCallableTools)
+		resp.Error = fmt.Sprintf("tool %q is not callable from execute_code; the callable tools are %v", req.Tool, ScriptCallableTools)
 		return resp
 	}
 	if s.Reg == nil {
@@ -189,7 +189,7 @@ func (s *RPCServer) call(ctx context.Context, req rpcRequest) rpcResponse {
 		return resp
 	}
 	if err := ctx.Err(); err != nil {
-		resp.Error = "the run_script call ended: " + err.Error()
+		resp.Error = "the execute_code call ended: " + err.Error()
 		return resp
 	}
 	args := req.Args

@@ -31,9 +31,9 @@ func seedSessionWithTool(t *testing.T, s *Store) *Session {
 		meta MessageMeta
 	}{
 		{provider.Message{Role: provider.RoleUser, Content: "read .env"}, MessageMeta{}},
-		{provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c1", Name: "run_command", Args: `{"command":"echo ` + exportSecret + `"}`}}},
+		{provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c1", Name: "terminal", Args: `{"command":"echo ` + exportSecret + `"}`}}},
 			MessageMeta{Usage: provider.Usage{InputTokens: 50, OutputTokens: 7}, Model: "glm-4.7"}},
-		{provider.Message{Role: provider.RoleTool, ToolCallID: "c1", ToolName: "run_command", Content: "TOKEN=" + exportSecret}, MessageMeta{}},
+		{provider.Message{Role: provider.RoleTool, ToolCallID: "c1", ToolName: "terminal", Content: "TOKEN=" + exportSecret}, MessageMeta{}},
 		{provider.Message{Role: provider.RoleAssistant, Content: "done"}, MessageMeta{Usage: provider.Usage{InputTokens: 70, OutputTokens: 1}, Model: "glm-4.7"}},
 	}
 	for _, x := range msgs {
@@ -77,10 +77,10 @@ func TestExportValidJSONL(t *testing.T) {
 		t.Fatal(rows[0])
 	}
 	calls, _ := rows[1]["tool_calls"].([]any)
-	if len(calls) != 1 || calls[0].(map[string]any)["name"] != "run_command" || rows[1]["input_tokens"] != float64(50) || rows[1]["model"] != "glm-4.7" {
+	if len(calls) != 1 || calls[0].(map[string]any)["name"] != "terminal" || rows[1]["input_tokens"] != float64(50) || rows[1]["model"] != "glm-4.7" {
 		t.Fatal(rows[1])
 	}
-	if rows[2]["tool_call_id"] != "c1" || rows[2]["tool_name"] != "run_command" {
+	if rows[2]["tool_call_id"] != "c1" || rows[2]["tool_name"] != "terminal" {
 		t.Fatal(rows[2])
 	}
 	if _, err := time.Parse(time.RFC3339, rows[3]["timestamp"].(string)); err != nil {

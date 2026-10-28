@@ -95,13 +95,13 @@ type BrowserConfig struct {
 	IdleCloseMinutes int    `yaml:"idle_close_minutes"`
 }
 
-// TerminalConfig sets the run_command tool.
+// TerminalConfig sets the terminal tool.
 type TerminalConfig struct {
 	DefaultTimeoutS int      `yaml:"default_timeout_s"`
 	EnvPassthrough  []string `yaml:"env_passthrough"`
 }
 
-// CodeExecConfig sets the run_script tool limits.
+// CodeExecConfig sets the execute_code tool limits.
 type CodeExecConfig struct {
 	TimeoutS       int `yaml:"timeout_s"`
 	MaxToolCalls   int `yaml:"max_tool_calls"`

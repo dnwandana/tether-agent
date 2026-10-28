@@ -342,7 +342,7 @@ func (d *Doctor) HostChecks(cfg *config.Config) []Check {
 	out = append(out, chrome)
 
 	out = append(out,
-		d.program("python3", "run_script is off", "install python3 (apt install python3)"),
+		d.program("python3", "execute_code is off", "install python3 (apt install python3)"),
 		d.program("pdftotext", "the agent cannot read the text of PDF files",
 			"install poppler-utils (apt install poppler-utils)"))
 

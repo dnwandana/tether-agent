@@ -15,7 +15,7 @@ import (
 
 // ChildBlockedTools are the tools that a child never sees: Hermes DELEGATE_BLOCKED_TOOLS
 // plus cronjob.
-var ChildBlockedTools = []string{"delegate_task", "ask_user", "memory", "run_script", "cronjob"}
+var ChildBlockedTools = []string{"delegate_task", "clarify", "memory", "execute_code", "cronjob"}
 
 // The Env.Values keys of a child run.
 const (

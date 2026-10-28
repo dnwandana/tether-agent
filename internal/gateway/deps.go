@@ -34,7 +34,7 @@ type Deps struct {
 	// CancelKey cancels the background work of a key, for example the background
 	// delegate_task children. /stop, /new, and /reset call it. It can be nil.
 	CancelKey func(key string)
-	// CLIAsk is the approval prompt and the ask_user prompt of the CLI. CLI.Run makes it
+	// CLIAsk is the approval prompt and the clarify prompt of the CLI. CLI.Run makes it
 	// read through the REPL input. It can be nil.
 	CLIAsk *CLIAsk
 }

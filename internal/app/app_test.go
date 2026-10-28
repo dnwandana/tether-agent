@@ -74,10 +74,10 @@ func TestNewRegistersCoreToolsAndDirs(t *testing.T) {
 	}
 	defer a.Close()
 	for _, n := range []string{
-		"run_command", "read_file", "write_file", "patch", "web_fetch", "web_search",
-		"memory", "ask_user", "session_search", "skill_view", "skills_list", "skill_manage", "cronjob",
-		"browser_navigate", "browser_click", "browser_fill", "browser_read", "browser_screenshot",
-		"browser_run_js", "browser_cookies", "text_to_speech", "transcribe_audio", "image_generate",
+		"terminal", "read_file", "write_file", "patch", "web_fetch", "web_search",
+		"memory", "clarify", "session_search", "skill_view", "skills_list", "skill_manage", "cronjob",
+		"browser_navigate", "browser_click", "browser_fill", "browser_read", "browser_take_screenshot",
+		"browser_run_js", "browser_cookies", "text_to_speech", "transcribe_audio", "generate_image",
 	} {
 		if _, ok := a.Registry.Get(n); !ok {
 			t.Fatal(n)
@@ -177,10 +177,10 @@ func TestCLIToolsetsComeFromConfig(t *testing.T) {
 	}
 	defer a.Close()
 	names, _ := a.Registry.Visible(a.Deps().Toolsets("cli"), nil)
-	if !names["read_file"] || names["run_command"] {
+	if !names["read_file"] || names["terminal"] {
 		t.Fatal(names)
 	}
-	if _, ok := a.Registry.Get("run_command"); !ok {
+	if _, ok := a.Registry.Get("terminal"); !ok {
 		t.Fatal("the registry keeps all tools")
 	}
 }
@@ -270,18 +270,18 @@ func TestNewEnvSetsGateAndAsk(t *testing.T) {
 func TestRunCommandNeedsApprovalInChat(t *testing.T) {
 	a := newApp(t)
 	env := a.NewEnv(&sessions.Session{ID: "s1", Key: "telegram:dm:1", Kind: "chat"}, "telegram")
-	visible := map[string]bool{"run_command": true}
-	res := a.Registry.Dispatch(ctx, "run_command", []byte(`{"command":"rm -rf /tmp/tether-app-none"}`), env, visible)
+	visible := map[string]bool{"terminal": true}
+	res := a.Registry.Dispatch(ctx, "terminal", []byte(`{"command":"rm -rf /tmp/tether-app-none"}`), env, visible)
 	if !res.IsError || !strings.Contains(res.Text, "BLOCKED") {
 		t.Fatal(res)
 	}
-	res = a.Registry.Dispatch(ctx, "run_command", []byte(`{"command":"echo safe"}`), env, visible)
+	res = a.Registry.Dispatch(ctx, "terminal", []byte(`{"command":"echo safe"}`), env, visible)
 	if res.IsError || !strings.Contains(res.Text, "safe") {
 		t.Fatal(res)
 	}
 }
 
-func TestAskUserTimeoutFromConfig(t *testing.T) {
+func TestClarifyTimeoutFromConfig(t *testing.T) {
 	dir := t.TempDir()
 	writeConfig(t, dir, fakeProviderURL(t), "approvals:\n  timeout_s: 33\n")
 	a, err := New(ctx, Options{DataDir: dir})
@@ -289,8 +289,8 @@ func TestAskUserTimeoutFromConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer a.Close()
-	tool, ok := a.Registry.Get("ask_user")
-	if !ok || tool.(tools.AskUserTool).Timeout != 33*time.Second {
+	tool, ok := a.Registry.Get("clarify")
+	if !ok || tool.(tools.ClarifyTool).Timeout != 33*time.Second {
 		t.Fatal(tool)
 	}
 }
@@ -502,9 +502,9 @@ func TestDelegationAndOptionalTools(t *testing.T) {
 	if _, ok := a.Registry.Get("view_image"); ok {
 		t.Fatal("view_image needs a vision provider")
 	}
-	_, hasRun := a.Registry.Get("run_script")
+	_, hasRun := a.Registry.Get("execute_code")
 	if _, err := exec.LookPath("python3"); (err == nil) != hasRun {
-		t.Fatalf("run_script must exist exactly when python3 exists: %v", hasRun)
+		t.Fatalf("execute_code must exist exactly when python3 exists: %v", hasRun)
 	}
 	if a.Deps().CancelKey == nil {
 		t.Fatal("Deps.CancelKey must be set")

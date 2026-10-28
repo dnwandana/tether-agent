@@ -128,15 +128,15 @@ func TestRPCRefusesNonCallable(t *testing.T) {
 	s := &RPCServer{Reg: regWith(echoAs("memory")), Env: &Env{}, Visible: vis("memory"), MaxCalls: 50}
 	sock := listenRPC(t, s)
 	resp := rpc(t, sock, `{"id":2,"tool":"memory","args":{}}`)
-	if resp.OK || !strings.Contains(resp.Error, "not callable from run_script") {
+	if resp.OK || !strings.Contains(resp.Error, "not callable from execute_code") {
 		t.Fatal(resp)
 	}
 }
 
 func TestRPCRefusesHidden(t *testing.T) {
-	s := &RPCServer{Reg: regWith(echoAs("run_command")), Env: &Env{}, Visible: vis(), MaxCalls: 50}
+	s := &RPCServer{Reg: regWith(echoAs("terminal")), Env: &Env{}, Visible: vis(), MaxCalls: 50}
 	sock := listenRPC(t, s)
-	resp := rpc(t, sock, `{"id":3,"tool":"run_command","args":{"command":"ls"}}`)
+	resp := rpc(t, sock, `{"id":3,"tool":"terminal","args":{"command":"ls"}}`)
 	if resp.OK || resp.Result != "" {
 		t.Fatal(resp)
 	}
@@ -237,7 +237,7 @@ func TestStopClosesOpenConnections(t *testing.T) {
 }
 
 func TestScriptCallableToolsList(t *testing.T) {
-	want := []string{"web_search", "web_fetch", "read_file", "write_file", "patch", "run_command"}
+	want := []string{"web_search", "web_fetch", "read_file", "write_file", "patch", "terminal"}
 	if strings.Join(ScriptCallableTools, ",") != strings.Join(want, ",") {
 		t.Fatal(ScriptCallableTools)
 	}

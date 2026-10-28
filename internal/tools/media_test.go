@@ -118,7 +118,7 @@ func endpointSet(t *testing.T, kind string, srv *httptest.Server) *MediaSet {
 
 func TestImageHiddenByDefault(t *testing.T) {
 	names := toolNames((&MediaSet{Cfg: config.Default().Media}).Tools())
-	if names["image_generate"] || !names["text_to_speech"] || !names["transcribe_audio"] {
+	if names["generate_image"] || !names["text_to_speech"] || !names["transcribe_audio"] {
 		t.Fatal(names)
 	}
 	if len(toolNames((&MediaSet{}).Tools())) != 0 {
@@ -260,7 +260,7 @@ func TestSTTCommandConvertsWithFFmpeg(t *testing.T) {
 func TestImageEndpointReturnsMedia(t *testing.T) {
 	var got []map[string]any
 	m := endpointSet(t, "image", mediaServer(t, &got))
-	out := runTool(t, tool(m, "image_generate"), `{"prompt":"a cat","size":"512x512"}`)
+	out := runTool(t, tool(m, "generate_image"), `{"prompt":"a cat","size":"512x512"}`)
 	if !strings.HasPrefix(out, "MEDIA:") || !strings.HasSuffix(out, ".png") || strings.Contains(out, "audio_as_voice") {
 		t.Fatal(out)
 	}
@@ -270,14 +270,14 @@ func TestImageEndpointReturnsMedia(t *testing.T) {
 	if len(got) != 1 || got[0]["prompt"] != "a cat" || got[0]["size"] != "512x512" {
 		t.Fatal(got)
 	}
-	if out := runToolErr(t, tool(m, "image_generate"), `{}`); !strings.Contains(out, "prompt is required") {
+	if out := runToolErr(t, tool(m, "generate_image"), `{}`); !strings.Contains(out, "prompt is required") {
 		t.Fatal(out)
 	}
 }
 
 func TestImageCommandGetsDefaultSize(t *testing.T) {
 	m := &MediaSet{Cfg: mediaCfg("image", "command", `sh -c 'printf "%s|%s" "$1" "$2" > "$0"' {out} {prompt} {size}`), Dir: t.TempDir()}
-	out := runTool(t, tool(m, "image_generate"), `{"prompt":"a dog"}`)
+	out := runTool(t, tool(m, "generate_image"), `{"prompt":"a dog"}`)
 	if b, _ := os.ReadFile(strings.TrimPrefix(out, "MEDIA:")); string(b) != "a dog|1024x1024" {
 		t.Fatal(string(b))
 	}
@@ -289,7 +289,7 @@ func TestImageURLUsesDownloadClient(t *testing.T) {
 	// The endpoint answers with a URL on its own loopback address. The
 	// guarded download client must refuse it.
 	m.Download = GuardedClient(true, 5*time.Second, 3)
-	out := runToolErr(t, tool(m, "image_generate"), `{"prompt":"url"}`)
+	out := runToolErr(t, tool(m, "generate_image"), `{"prompt":"url"}`)
 	if !strings.Contains(out, "blocked") {
 		t.Fatal(out)
 	}
@@ -311,7 +311,7 @@ func TestEndpointNeedsProvider(t *testing.T) {
 	}
 	// An empty provider uses primary.
 	m.Cfg = mediaCfg("image", "endpoint", "")
-	if names := toolNames(m.Tools()); !names["image_generate"] {
+	if names := toolNames(m.Tools()); !names["generate_image"] {
 		t.Fatal(names)
 	}
 }

@@ -33,7 +33,7 @@ type turnTools struct {
 
 // SetTurnTools records the allowed toolsets and the visible tool names of the current turn
 // in env. The agent loop calls it at the start of each turn. delegate_task gives the
-// toolsets to the children, and run_script uses the names.
+// toolsets to the children, and execute_code uses the names.
 func SetTurnTools(env *Env, sets, names map[string]bool) {
 	if env == nil {
 		return
@@ -196,16 +196,16 @@ func (t DelegateTool) Schema() provider.ToolSchema {
 		"- Tasks that would flood your context with intermediate data\n" +
 		"- Parallel independent workstreams (research A and B simultaneously)\n\n" +
 		"WHEN NOT TO USE:\n" +
-		"- Mechanical multi-step work with no reasoning needed: use run_script\n" +
+		"- Mechanical multi-step work with no reasoning needed: use execute_code\n" +
 		"- Single tool call: call the tool directly\n" +
-		"- Tasks needing user interaction: subagents cannot use ask_user\n\n" +
+		"- Tasks needing user interaction: subagents cannot use clarify\n\n" +
 		"IMPORTANT:\n" +
 		"- Subagents have NO memory of your conversation. Pass all relevant info (file paths, error messages, " +
 		"constraints) in the 'context' field.\n" +
 		"- If the user writes in a language other than English, or asks for a specific language or style, say so in 'context'.\n" +
 		"- Subagent summaries are SELF-REPORTS, not verified facts. For operations with external side effects, " +
 		"require a verifiable handle (URL, ID, absolute path) and verify it yourself before you tell the user it succeeded.\n" +
-		"- Subagents CANNOT call: delegate_task (unless role='orchestrator'), ask_user, memory, run_script, cronjob.\n" +
+		"- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob.\n" +
 		"- Results are always returned as an array, one entry per task."
 	params := map[string]any{
 		"type": "object",

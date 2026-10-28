@@ -60,7 +60,7 @@ type Channel struct {
 	// Bot is the bot user from getMe.
 	Bot User
 	Log *slog.Logger
-	// UI holds the approval buttons and the ask_user prompts. Nil means that no prompt is
+	// UI holds the approval buttons and the clarify prompts. Nil means that no prompt is
 	// shown.
 	UI *Interactions
 
@@ -178,7 +178,7 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 	if n.Kind == KindChannel {
 		return
 	}
-	// A free-text answer to ask_user. It comes before the gate, because the answer in a
+	// A free-text answer to the clarify tool. It comes before the gate, because the answer in a
 	// group does not mention the bot. Only an authorized user can answer.
 	if ch.UI != nil && m.Text != "" && !strings.HasPrefix(m.Text, "/") &&
 		Authorize(ch.Cfg, n, ch.pairApproved(ctx)) == AuthAllow &&

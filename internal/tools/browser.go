@@ -137,7 +137,7 @@ func (bt *BrowserTools) Tools() []Tool {
 		},
 		funcTool{
 			set:  SetBrowser,
-			name: "browser_screenshot",
+			name: "browser_take_screenshot",
 			desc: "Take a PNG screenshot of the current page. Returns MEDIA:<path>. " +
 				"Use view_image with the path to inspect the image. Put the MEDIA:<path> tag in your answer to send the image to the user.",
 			params: `{

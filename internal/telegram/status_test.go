@@ -230,10 +230,10 @@ func statusWithFakeAPI(t *testing.T, mode string) (*Status, *fakeBot, *fakeClock
 func TestCollapsesRepeats(t *testing.T) {
 	s, api, _ := statusWithFakeAPI(t, "all")
 	for i := 0; i < 3; i++ {
-		s.Add(ctx, "run_command", "python scrape.py", "{}")
+		s.Add(ctx, "terminal", "python scrape.py", "{}")
 	}
 	s.Close(ctx, true)
-	if !strings.Contains(api.lastText(), `run_command: "python scrape.py" (×3)`) {
+	if !strings.Contains(api.lastText(), `terminal: "python scrape.py" (×3)`) {
 		t.Fatal(api.lastText())
 	}
 	if strings.Count(api.lastText(), "\n") != 0 {
@@ -291,7 +291,7 @@ func TestRolloverNear4032(t *testing.T) {
 	s, api, clk := statusWithFakeAPI(t, "verbose")
 	long := `{"code":"` + strings.Repeat("x", 900) + `"}`
 	for i := 0; i < 6; i++ {
-		s.Add(ctx, "run_script", "", strings.Replace(long, "x", fmt.Sprint(i), 1))
+		s.Add(ctx, "execute_code", "", strings.Replace(long, "x", fmt.Sprint(i), 1))
 		clk.Advance(2 * time.Second)
 	}
 	s.Close(ctx, true)
@@ -453,19 +453,19 @@ func TestNotModifiedIsSuccess(t *testing.T) {
 }
 
 func TestPreviewCut40(t *testing.T) {
-	line := ToolLine("all", "run_command", strings.Repeat("é", 100), "{}")
+	line := ToolLine("all", "terminal", strings.Repeat("é", 100), "{}")
 	start := strings.Index(line, `"`)
 	preview := strings.Trim(line[start:], `"`)
 	if utf8.RuneCountInString(preview) != 40 || !strings.HasSuffix(preview, "...") {
 		t.Fatal(line)
 	}
-	if got := ToolLine("all", "run_command", "ls -la", "{}"); got != `💻 run_command: "ls -la"` {
+	if got := ToolLine("all", "terminal", "ls -la", "{}"); got != `💻 terminal: "ls -la"` {
 		t.Fatal(got)
 	}
 	if got := ToolLine("all", "unknown_tool", "", "{}"); got != "🔧 unknown_tool..." {
 		t.Fatal(got)
 	}
-	if got := ToolLine("all", "run_command", "a\nb", "{}"); strings.Contains(got, "\n") {
+	if got := ToolLine("all", "terminal", "a\nb", "{}"); strings.Contains(got, "\n") {
 		t.Fatal("preview must be one line:", got)
 	}
 }

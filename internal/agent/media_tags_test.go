@@ -140,8 +140,8 @@ func TestRunTurnCollectsTTSMedia(t *testing.T) {
 }
 
 func TestRunTurnIgnoresMediaOfOtherTools(t *testing.T) {
-	fp := scripted(toolCalls(tc("c1", "browser_screenshot", `{}`)), text("Done."))
-	a, sess := newAgent(t, fp, mediaTool{name: "browser_screenshot", out: "MEDIA:/data/cache/screenshots/s.png\nUse view_image to inspect it."})
+	fp := scripted(toolCalls(tc("c1", "browser_take_screenshot", `{}`)), text("Done."))
+	a, sess := newAgent(t, fp, mediaTool{name: "browser_take_screenshot", out: "MEDIA:/data/cache/screenshots/s.png\nUse view_image to inspect it."})
 	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "look", Toolsets: all()})
 	if err != nil {
 		t.Fatal(err)

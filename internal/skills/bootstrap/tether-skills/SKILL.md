@@ -22,7 +22,7 @@ A skill is a procedure that you can use again. It is a folder under
 - `name` is required. It must be the same as the folder name.
 - `description` is required. The skill index shows the full text, up to 1,024 characters.
 - `required_environment_variables` is optional. It lists the env names that the skill
-  needs. When you load the skill, these names pass to `run_command` for the session.
+  needs. When you load the skill, these names pass to `terminal` for the session.
 
 ## Description style
 
@@ -54,9 +54,9 @@ line that contains a key variable is refused. A declaration in
 1. Write the API call in a script under `~/.tether/scripts/`, for example
    `~/.tether/scripts/helius.sh`. The script reads the key from its environment.
 2. `write_file` and `patch` cannot write in `scripts/`. Ask the user to put the script there,
-   or write it with `run_command`. The approval gate then asks the user.
+   or write it with `terminal`. The approval gate then asks the user.
 3. List the key name in `required_environment_variables` in the frontmatter.
-4. In the skill body, tell the agent to run the script with `run_command`:
+4. In the skill body, tell the agent to run the script with `terminal`:
 
        Run `bash ~/.tether/scripts/helius.sh <wallet>`.
 

@@ -16,9 +16,9 @@ import (
 // limit.
 const askMaxChoices = 10
 
-// AskUserTool is the ask_user tool. It asks the user of the session a
+// ClarifyTool is the clarify tool. It asks the user of the session a
 // question through Env.Ask and waits for the answer.
-type AskUserTool struct {
+type ClarifyTool struct {
 	// Timeout is the wait for an answer (approvals.timeout_s). Zero uses 600 s.
 	Timeout time.Duration
 }
@@ -29,24 +29,24 @@ type askArgs struct {
 	MultiSelect bool     `json:"multi_select"`
 }
 
-// Name returns "ask_user".
-func (AskUserTool) Name() string { return "ask_user" }
+// Name returns "clarify".
+func (ClarifyTool) Name() string { return "clarify" }
 
 // Toolset returns the ask toolset.
-func (AskUserTool) Toolset() string { return SetAsk }
+func (ClarifyTool) Toolset() string { return SetAsk }
 
 // ParallelSafe returns false, because the user answers one question at a time.
-func (AskUserTool) ParallelSafe() bool { return false }
+func (ClarifyTool) ParallelSafe() bool { return false }
 
 // Schema returns the tool schema for the model.
-func (AskUserTool) Schema() provider.ToolSchema {
+func (ClarifyTool) Schema() provider.ToolSchema {
 	return provider.ToolSchema{
-		Name: "ask_user",
+		Name: "clarify",
 		Description: "Ask the user a question and wait for the answer. Use it when the task is ambiguous, " +
 			"when a decision has trade-offs that the user must choose, or to get feedback. " +
 			"Give choices for a multiple-choice question; the user can also type a different answer. " +
 			"Omit choices for an open question. Do not use it to confirm dangerous commands: " +
-			"run_command asks for those itself. When the decision is small, make a reasonable choice yourself.",
+			"the terminal tool asks for those itself. When the decision is small, make a reasonable choice yourself.",
 		Parameters: json.RawMessage(fmt.Sprintf(`{
   "type": "object",
   "properties": {
@@ -59,7 +59,7 @@ func (AskUserTool) Schema() provider.ToolSchema {
 	}
 }
 
-func (t AskUserTool) timeout() time.Duration {
+func (t ClarifyTool) timeout() time.Duration {
 	if t.Timeout > 0 {
 		return t.Timeout
 	}
@@ -68,7 +68,7 @@ func (t AskUserTool) timeout() time.Duration {
 
 // Run asks the question and returns the answer text, or the picked choices joined with
 // ", ". When the user does not answer in time, the result tells the model to continue.
-func (t AskUserTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
+func (t ClarifyTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
 	var a askArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return "", err
@@ -83,17 +83,17 @@ func (t AskUserTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (st
 		}
 	}
 	if len(q.Choices) > askMaxChoices {
-		return "", toolErr("ask_user takes at most %d choices, got %d. Give fewer choices", askMaxChoices, len(q.Choices))
+		return "", toolErr("clarify takes at most %d choices, got %d. Give fewer choices", askMaxChoices, len(q.Choices))
 	}
-	// The toolset policy hides ask_user in these runs. This check is the second defense.
+	// The toolset policy hides clarify in these runs. This check is the second defense.
 	if env != nil {
 		switch env.Kind {
 		case "cron", "subagent", "review":
-			return "", toolErr("ask_user: no user is present in a %s run. Continue without the answer", env.Kind)
+			return "", toolErr("clarify: no user is present in a %s run. Continue without the answer", env.Kind)
 		}
 	}
 	if env == nil || env.Ask == nil {
-		return "", toolErr("ask_user: no user is present in this run. Continue without the answer")
+		return "", toolErr("clarify: no user is present in this run. Continue without the answer")
 	}
 
 	actx, cancel := context.WithTimeout(ctx, q.Timeout)
@@ -120,7 +120,7 @@ func (t AskUserTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (st
 	case errors.Is(r.err, context.DeadlineExceeded) || (r.err != nil && actx.Err() != nil):
 		return askTimeoutText(q.Timeout), nil
 	case r.err != nil:
-		return "", toolErr("ask_user: cannot ask the user: %v", r.err)
+		return "", toolErr("clarify: cannot ask the user: %v", r.err)
 	}
 	if len(r.ans.Choices) > 0 {
 		return strings.Join(r.ans.Choices, ", "), nil

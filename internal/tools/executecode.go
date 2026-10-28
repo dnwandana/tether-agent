@@ -23,7 +23,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
-// The defaults of run_script. They follow the limits of Hermes execute_code.
+// The defaults of execute_code. They follow the limits of the Hermes tool of the same name.
 const (
 	defaultScriptTimeoutS = 300
 	defaultScriptStdout   = 50000
@@ -38,10 +38,10 @@ var tetherToolsTmpl string
 
 var stubTemplate = template.Must(template.New("tether_tools.py").Parse(tetherToolsTmpl))
 
-// RunScriptTool is the run_script tool (like Hermes execute_code). It runs a Python
+// ExecuteCodeTool is the execute_code tool, like the Hermes tool of the same name. It runs a Python
 // script that can call some tools through the tether_tools module. Only the stdout of the
 // script returns to the model.
-type RunScriptTool struct {
+type ExecuteCodeTool struct {
 	Reg *Registry
 	// ScratchRoot is the folder for the scratch folders of the runs (<data>/cache).
 	ScratchRoot string
@@ -56,25 +56,25 @@ type RunScriptTool struct {
 	Passthrough func(env *Env) []string
 }
 
-type runScriptArgs struct {
+type executeCodeArgs struct {
 	Code     string `json:"code"`
 	TimeoutS int    `json:"timeout_s"`
 }
 
-// Name returns "run_script".
-func (t RunScriptTool) Name() string { return "run_script" }
+// Name returns "execute_code".
+func (t ExecuteCodeTool) Name() string { return "execute_code" }
 
 // Toolset returns the code_execution toolset.
-func (t RunScriptTool) Toolset() string { return SetCodeExecution }
+func (t ExecuteCodeTool) Toolset() string { return SetCodeExecution }
 
 // ParallelSafe returns false, because a script can change shared state.
-func (t RunScriptTool) ParallelSafe() bool { return false }
+func (t ExecuteCodeTool) ParallelSafe() bool { return false }
 
 // Schema returns the tool schema for the model.
-func (t RunScriptTool) Schema() provider.ToolSchema {
+func (t ExecuteCodeTool) Schema() provider.ToolSchema {
 	timeout := positiveOr(t.TimeoutS, defaultScriptTimeoutS)
 	return provider.ToolSchema{
-		Name: "run_script",
+		Name: "execute_code",
 		Description: "Run a Python script that calls tools in a loop, and get back only what the script prints. " +
 			"Use it for mechanical multi-step work: many fetches, file edits in a loop, or filtering large tool output. " +
 			"The intermediate tool results never enter your context.\n\n" +
@@ -100,7 +100,7 @@ func (t RunScriptTool) Schema() provider.ToolSchema {
 
 // timeout returns the run time limit for the requested timeout_s. A value above TimeoutS
 // is clamped.
-func (t RunScriptTool) timeout(requested int) time.Duration {
+func (t ExecuteCodeTool) timeout(requested int) time.Duration {
 	limit := positiveOr(t.TimeoutS, defaultScriptTimeoutS)
 	if requested <= 0 || requested > limit {
 		requested = limit
@@ -109,8 +109,8 @@ func (t RunScriptTool) timeout(requested int) time.Duration {
 }
 
 // Run checks the script with the approval gate, then runs it.
-func (t RunScriptTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
-	var a runScriptArgs
+func (t ExecuteCodeTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
+	var a executeCodeArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return "", err
 	}
@@ -118,12 +118,12 @@ func (t RunScriptTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (
 		return "", toolErr("code is required")
 	}
 	if t.Python == "" {
-		return "", toolErr("python3 is not installed, so run_script cannot run. Use the tools directly")
+		return "", toolErr("python3 is not installed, so execute_code cannot run. Use the tools directly")
 	}
-	// A script can start processes without run_command, so the gate checks the whole
+	// A script can start processes without the terminal tool, so the gate checks the whole
 	// script text first. With no gate, the script does not run (fail closed).
 	if env == nil || env.Gate == nil {
-		return "", toolErr("approval gate missing: run_script cannot run a script without the approval gate")
+		return "", toolErr("approval gate missing: execute_code cannot run a script without the approval gate")
 	}
 	if err := env.Gate.CheckCommand(ctx, env, a.Code); err != nil {
 		return "", toolErr("%s", err.Error())
@@ -181,7 +181,7 @@ func socketDir(dir string) (string, func(), error) {
 
 // runPython runs main.py in dir and returns the result text: the stdout, cut at MaxStdout,
 // and notes for a timeout or a failure.
-func (t RunScriptTool) runPython(ctx context.Context, env *Env, dir, sock string, timeout time.Duration) (string, error) {
+func (t ExecuteCodeTool) runPython(ctx context.Context, env *Env, dir, sock string, timeout time.Duration) (string, error) {
 	maxOut := positiveOr(t.MaxStdout, defaultScriptStdout)
 	stdout := &headBuffer{max: maxOut}
 	stderr := &headBuffer{max: scriptStderrMax}
@@ -244,7 +244,7 @@ func (t RunScriptTool) runPython(ctx context.Context, env *Env, dir, sock string
 }
 
 // childEnv returns the environment of the script, without secrets.
-func (t RunScriptTool) childEnv(env *Env) []string {
+func (t ExecuteCodeTool) childEnv(env *Env) []string {
 	var pass []string
 	if t.Passthrough != nil {
 		pass = t.Passthrough(env)
@@ -273,7 +273,7 @@ var pyKeywords = map[string]bool{
 
 // stubModule returns the tether_tools module with one function for each tool that is in
 // ScriptCallableTools, registered, and in visible.
-func (t RunScriptTool) stubModule(visible map[string]bool) ([]byte, error) {
+func (t ExecuteCodeTool) stubModule(visible map[string]bool) ([]byte, error) {
 	var funcs []stubFunc
 	for _, name := range ScriptCallableTools {
 		if !visible[name] || t.Reg == nil {

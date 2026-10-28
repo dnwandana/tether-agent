@@ -17,30 +17,30 @@ import (
 // Tether Agent has a different name for the same tool, the Hermes tool is in
 // the comment. Other tools use defaultToolEmoji.
 var ToolEmoji = map[string]string{
-	"run_command":        "💻", // terminal
-	"read_file":          "📖",
-	"write_file":         "✍️",
-	"patch":              "🔧",
-	"web_search":         "🔍",
-	"web_fetch":          "📄", // web_extract
-	"ask_user":           "❓", // clarify
-	"memory":             "🧠",
-	"session_search":     "🔍",
-	"skills_list":        "📚",
-	"skill_view":         "📚",
-	"skill_manage":       "📝",
-	"delegate_task":      "🔀",
-	"cronjob":            "⏰",
-	"run_script":         "🐍",  // execute_code
-	"view_image":         "👁️", // vision_analyze
-	"text_to_speech":     "🔊",
-	"image_generate":     "🎨",
-	"browser_navigate":   "🌐",
-	"browser_click":      "👆",
-	"browser_fill":       "⌨️", // browser_type
-	"browser_read":       "📸",  // browser_snapshot
-	"browser_screenshot": "👁️", // browser_vision
-	"browser_run_js":     "🖥️", // browser_console
+	"terminal":                "💻",
+	"read_file":               "📖",
+	"write_file":              "✍️",
+	"patch":                   "🔧",
+	"web_search":              "🔍",
+	"web_fetch":               "📄", // web_extract
+	"clarify":                 "❓",
+	"memory":                  "🧠",
+	"session_search":          "🔍",
+	"skills_list":             "📚",
+	"skill_view":              "📚",
+	"skill_manage":            "📝",
+	"delegate_task":           "🔀",
+	"cronjob":                 "⏰",
+	"execute_code":            "🐍",
+	"view_image":              "👁️", // vision_analyze
+	"text_to_speech":          "🔊",
+	"generate_image":          "🎨",
+	"browser_navigate":        "🌐",
+	"browser_click":           "👆",
+	"browser_fill":            "⌨️", // browser_type
+	"browser_read":            "📸",  // browser_snapshot
+	"browser_take_screenshot": "👁️", // browser_vision
+	"browser_run_js":          "🖥️", // browser_console
 }
 
 const (

@@ -15,14 +15,14 @@ import (
 )
 
 func TestRunsAndCombinesOutput(t *testing.T) {
-	out := runExec(t, &ExecTool{DefaultTimeout: 120 * time.Second}, `{"command":"echo out; echo err 1>&2; exit 3"}`)
+	out := runExec(t, &TerminalTool{DefaultTimeout: 120 * time.Second}, `{"command":"echo out; echo err 1>&2; exit 3"}`)
 	if !strings.Contains(out, "out") || !strings.Contains(out, "err") || !strings.Contains(out, "exit code: 3") {
 		t.Fatal(out)
 	}
 }
 
 func TestExitZeroHasNoExitCode(t *testing.T) {
-	out := runExec(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"echo fine"}`)
+	out := runExec(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"echo fine"}`)
 	if out != "fine\n" {
 		t.Fatalf("%q", out)
 	}
@@ -30,7 +30,7 @@ func TestExitZeroHasNoExitCode(t *testing.T) {
 
 func TestTimeoutKillsProcessGroup(t *testing.T) {
 	start := time.Now()
-	out := runExec(t, &ExecTool{DefaultTimeout: 120 * time.Second}, `{"command":"sleep 30 & sleep 30","timeout_s":1}`)
+	out := runExec(t, &TerminalTool{DefaultTimeout: 120 * time.Second}, `{"command":"sleep 30 & sleep 30","timeout_s":1}`)
 	if time.Since(start) > 3*time.Second || !strings.Contains(out, "timed out after 1s") {
 		t.Fatal(out)
 	}
@@ -38,7 +38,7 @@ func TestTimeoutKillsProcessGroup(t *testing.T) {
 
 func TestLeftoverChildDoesNotBlock(t *testing.T) {
 	start := time.Now()
-	out := runExec(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"sleep 30 & echo done"}`)
+	out := runExec(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"sleep 30 & echo done"}`)
 	if time.Since(start) > 10*time.Second || !strings.Contains(out, "done") {
 		t.Fatal(out)
 	}
@@ -46,7 +46,7 @@ func TestLeftoverChildDoesNotBlock(t *testing.T) {
 
 func TestSecretsStripped(t *testing.T) {
 	t.Setenv("OPENAI_API_KEY", "sk-should-not-leak")
-	out := runExec(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"env"}`)
+	out := runExec(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"env"}`)
 	if strings.Contains(out, "sk-should-not-leak") {
 		t.Fatal("secret leaked to child")
 	}
@@ -54,7 +54,7 @@ func TestSecretsStripped(t *testing.T) {
 
 func TestPassthroughKeepsSecret(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp-pass")
-	tool := &ExecTool{DefaultTimeout: time.Minute, Passthrough: func(*Env) []string { return []string{"GITHUB_TOKEN"} }}
+	tool := &TerminalTool{DefaultTimeout: time.Minute, Passthrough: func(*Env) []string { return []string{"GITHUB_TOKEN"} }}
 	out := runExec(t, tool, `{"command":"echo $GITHUB_TOKEN"}`)
 	if !strings.Contains(out, "ghp-pass") {
 		t.Fatal(out)
@@ -63,7 +63,7 @@ func TestPassthroughKeepsSecret(t *testing.T) {
 
 func TestBackgroundReturnsPidAndLog(t *testing.T) {
 	spill := t.TempDir()
-	out := runExec(t, &ExecTool{DefaultTimeout: time.Minute, SpillDir: spill}, `{"command":"echo bg-ok","background":true}`)
+	out := runExec(t, &TerminalTool{DefaultTimeout: time.Minute, SpillDir: spill}, `{"command":"echo bg-ok","background":true}`)
 	var r struct {
 		PID     int    `json:"pid"`
 		LogPath string `json:"log_path"`
@@ -78,7 +78,7 @@ func TestBackgroundReturnsPidAndLog(t *testing.T) {
 }
 
 func TestBackgroundNeedsSpillDir(t *testing.T) {
-	out := runToolEnvErr(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"true","background":true}`, &Env{Gate: allowAll{}})
+	out := runToolEnvErr(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"true","background":true}`, &Env{Gate: allowAll{}})
 	if !strings.Contains(out, "spill") {
 		t.Fatal(out)
 	}
@@ -87,7 +87,7 @@ func TestBackgroundNeedsSpillDir(t *testing.T) {
 func TestWorkdir(t *testing.T) {
 	dir := t.TempDir()
 	want, _ := filepath.EvalSymlinks(dir)
-	out := runExec(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"pwd -P","workdir":`+jsonString(dir)+`}`)
+	out := runExec(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"pwd -P","workdir":`+jsonString(dir)+`}`)
 	if strings.TrimSpace(out) != want {
 		t.Fatalf("%q != %q", out, want)
 	}
@@ -100,28 +100,28 @@ func TestRelativeWorkdirUsesEnvWorkDir(t *testing.T) {
 	}
 	want, _ := filepath.EvalSymlinks(filepath.Join(env.WorkDir, "sub"))
 	env.Gate = allowAll{}
-	out := runToolEnv(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"pwd -P","workdir":"sub"}`, env)
+	out := runToolEnv(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"pwd -P","workdir":"sub"}`, env)
 	if strings.TrimSpace(out) != want {
 		t.Fatalf("%q != %q", out, want)
 	}
 }
 
 func TestMissingWorkdirIsError(t *testing.T) {
-	out := runExecErr(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"pwd","workdir":"/no/such/dir"}`)
+	out := runExecErr(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"pwd","workdir":"/no/such/dir"}`)
 	if !strings.Contains(out, "/no/such/dir") {
 		t.Fatal(out)
 	}
 }
 
 func TestEmptyCommandIsError(t *testing.T) {
-	out := runExecErr(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"  "}`)
+	out := runExecErr(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"  "}`)
 	if !strings.Contains(out, "command is required") {
 		t.Fatal(out)
 	}
 }
 
 func TestBinaryOutputStaysValidUTF8(t *testing.T) {
-	out := runExec(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"printf 'a\\377\\376b\\342\\202'; head -c 4096 /dev/urandom"}`)
+	out := runExec(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"printf 'a\\377\\376b\\342\\202'; head -c 4096 /dev/urandom"}`)
 	if !utf8.ValidString(out) || !strings.HasPrefix(out, "a") {
 		t.Fatalf("%q", out[:10])
 	}
@@ -131,7 +131,7 @@ func TestBinaryOutputStaysValidUTF8(t *testing.T) {
 }
 
 func TestOutputCapKeepsHeadAndTail(t *testing.T) {
-	tool := &ExecTool{DefaultTimeout: time.Minute, MaxOutputBytes: 1000}
+	tool := &TerminalTool{DefaultTimeout: time.Minute, MaxOutputBytes: 1000}
 	out := runExec(t, tool, `{"command":"echo START; head -c 100000 /dev/zero | tr '\\0' x; echo; echo END"}`)
 	if !strings.HasPrefix(out, "START") || !strings.Contains(out, "END") || !strings.Contains(out, "bytes of output omitted") || len(out) > 1200 {
 		t.Fatalf("%d %q", len(out), out)
@@ -181,7 +181,7 @@ func runExecErr(t *testing.T, tool Tool, args string) string {
 func TestExecBlockedByGateReturnsReason(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran")
 	env := &Env{Gate: denyAll{reason: "BLOCKED by user: recursive delete"}}
-	out := runToolEnvErr(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"rm -rf /tmp/x; touch `+marker+`"}`, env)
+	out := runToolEnvErr(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"rm -rf /tmp/x; touch `+marker+`"}`, env)
 	if !strings.Contains(out, "BLOCKED by user: recursive delete") {
 		t.Fatal(out)
 	}
@@ -195,7 +195,7 @@ func TestExecBackgroundBlockedByGate(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran")
 	var seen []string
 	env := &Env{Gate: denyAll{reason: "BLOCKED: no", seen: &seen}}
-	out := runToolEnvErr(t, &ExecTool{DefaultTimeout: time.Minute, SpillDir: spill},
+	out := runToolEnvErr(t, &TerminalTool{DefaultTimeout: time.Minute, SpillDir: spill},
 		`{"command":"touch `+marker+`","background":true}`, env)
 	if !strings.Contains(out, "BLOCKED: no") || len(seen) != 1 || seen[0] != "touch "+marker {
 		t.Fatal(out, seen)
@@ -212,7 +212,7 @@ func TestExecBackgroundBlockedByGate(t *testing.T) {
 func TestExecNoGateFailsClosed(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran")
 	for _, env := range []*Env{{}, nil} {
-		res := dispatch(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"touch `+marker+`"}`, env)
+		res := dispatch(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"touch `+marker+`"}`, env)
 		if !res.IsError || !strings.Contains(res.Text, "approval gate missing") {
 			t.Fatal(res)
 		}
@@ -310,7 +310,7 @@ func TestGateApproverNilGateFailsClosed(t *testing.T) {
 
 func TestExecThroughRealGateCronDeny(t *testing.T) {
 	env := &Env{SessionID: "s1", Kind: "cron", Gate: GateApprover{Gate: &security.Gate{Mode: "manual", CronMode: "deny"}}}
-	out := runToolEnvErr(t, &ExecTool{DefaultTimeout: time.Minute}, `{"command":"rm -rf /tmp/tether-none"}`, env)
+	out := runToolEnvErr(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"rm -rf /tmp/tether-none"}`, env)
 	if !strings.Contains(out, "cron jobs run without a user") {
 		t.Fatal(out)
 	}

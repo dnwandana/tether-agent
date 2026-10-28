@@ -110,7 +110,7 @@ func (m *MediaSet) Tools() []Tool {
 	}
 	add("tts", "text_to_speech", m.Cfg.TTS, m.ttsTool)
 	add("stt", "transcribe_audio", m.Cfg.STT, m.sttTool)
-	add("image", "image_generate", m.Cfg.Image, m.imageTool)
+	add("image", "generate_image", m.Cfg.Image, m.imageTool)
 	return out
 }
 
@@ -266,7 +266,7 @@ func quoteWord(s string) string {
 
 func (m *MediaSet) imageTool(r *mediaRunner) Tool {
 	return funcTool{
-		name: "image_generate",
+		name: "generate_image",
 		set:  SetMedia,
 		desc: "Generate an image from a text prompt. Returns MEDIA:<path>. " +
 			"Put this tag in your answer to send the image to the user.",

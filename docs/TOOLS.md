@@ -15,24 +15,24 @@ the description and the JSON schema of the parameters that the model sees.
 
 | Toolset | Tools |
 | --- | --- |
-| `ask` | `ask_user` |
-| `browser` | `browser_click`, `browser_cookies`, `browser_fill`, `browser_navigate`, `browser_read`, `browser_run_js`, `browser_screenshot` |
-| `code_execution` | `run_script` |
+| `ask` | `clarify` |
+| `browser` | `browser_click`, `browser_cookies`, `browser_fill`, `browser_navigate`, `browser_read`, `browser_run_js`, `browser_take_screenshot` |
+| `code_execution` | `execute_code` |
 | `cron` | `cronjob` |
 | `delegation` | `delegate_task` |
 | `file` | `patch`, `read_file`, `write_file` |
-| `media` | `image_generate`, `text_to_speech`, `transcribe_audio` |
+| `media` | `generate_image`, `text_to_speech`, `transcribe_audio` |
 | `memory` | `memory`, `session_search` |
 | `skills` | `skill_manage`, `skill_view`, `skills_list` |
-| `terminal` | `run_command` |
+| `terminal` | `terminal` |
 | `vision` | `view_image` |
 | `web` | `web_fetch`, `web_search` |
 
 ## ask
 
-### ask_user
+### clarify
 
-Ask the user a question and wait for the answer. Use it when the task is ambiguous, when a decision has trade-offs that the user must choose, or to get feedback. Give choices for a multiple-choice question; the user can also type a different answer. Omit choices for an open question. Do not use it to confirm dangerous commands: run_command asks for those itself. When the decision is small, make a reasonable choice yourself.
+Ask the user a question and wait for the answer. Use it when the task is ambiguous, when a decision has trade-offs that the user must choose, or to get feedback. Give choices for a multiple-choice question; the user can also type a different answer. Omit choices for an open question. Do not use it to confirm dangerous commands: the terminal tool asks for those itself. When the decision is small, make a reasonable choice yourself.
 
 ```json
 {
@@ -208,7 +208,7 @@ Run JavaScript in the current page and return the result as JSON. The value of t
 }
 ```
 
-### browser_screenshot
+### browser_take_screenshot
 
 Take a PNG screenshot of the current page. Returns MEDIA:<path>. Use view_image with the path to inspect the image. Put the MEDIA:<path> tag in your answer to send the image to the user.
 
@@ -228,14 +228,14 @@ Take a PNG screenshot of the current page. Returns MEDIA:<path>. Use view_image 
 
 ## code_execution
 
-### run_script
+### execute_code
 
 Run a Python script that calls tools in a loop, and get back only what the script prints. Use it for mechanical multi-step work: many fetches, file edits in a loop, or filtering large tool output. The intermediate tool results never enter your context.
 
 Import the tools from the tether_tools module, for example:
   from tether_tools import web_fetch, ToolError
   page = web_fetch(urls=['https://example.com'])
-Each function takes the same arguments as the tool, returns the result text, and raises ToolError when the call fails. The callable tools are web_search, web_fetch, read_file, write_file, patch, run_command, when they are available in this session.
+Each function takes the same arguments as the tool, returns the result text, and raises ToolError when the call fails. The callable tools are web_search, web_fetch, read_file, write_file, patch, terminal, when they are available in this session.
 
 LIMITS: 300 s, 50 tool calls, and 50000 bytes of stdout. The script runs in a scratch folder without secrets in its environment. Print only the result that you need.
 
@@ -395,15 +395,15 @@ WHEN TO USE delegate_task:
 - Parallel independent workstreams (research A and B simultaneously)
 
 WHEN NOT TO USE:
-- Mechanical multi-step work with no reasoning needed: use run_script
+- Mechanical multi-step work with no reasoning needed: use execute_code
 - Single tool call: call the tool directly
-- Tasks needing user interaction: subagents cannot use ask_user
+- Tasks needing user interaction: subagents cannot use clarify
 
 IMPORTANT:
 - Subagents have NO memory of your conversation. Pass all relevant info (file paths, error messages, constraints) in the 'context' field.
 - If the user writes in a language other than English, or asks for a specific language or style, say so in 'context'.
 - Subagent summaries are SELF-REPORTS, not verified facts. For operations with external side effects, require a verifiable handle (URL, ID, absolute path) and verify it yourself before you tell the user it succeeded.
-- Subagents CANNOT call: delegate_task (unless role='orchestrator'), ask_user, memory, run_script, cronjob.
+- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob.
 - Results are always returned as an array, one entry per task.
 
 **Needs:** the gateway role for background: true. The chat role runs the tasks in the foreground.
@@ -566,7 +566,7 @@ Write the full content of a file. The tool creates missing parent folders. To re
 
 ## media
 
-### image_generate
+### generate_image
 
 Generate an image from a text prompt. Returns MEDIA:<path>. Put this tag in your answer to send the image to the user.
 
@@ -752,7 +752,7 @@ ACTIONS:
 - write_file: name, file, content. Writes a support file under references/ or scripts/.
 - delete: name.
 
-The skill guard scans each write. It refuses a skill that sends secrets out, for example curl with $API_KEY. Put an API call in a script under ~/.tether/scripts/ (write_file cannot write there: ask the user, or use run_command), and make the skill run that script with run_command. Skills from external folders are read-only.
+The skill guard scans each write. It refuses a skill that sends secrets out, for example curl with $API_KEY. Put an API call in a script under ~/.tether/scripts/ (write_file cannot write there: ask the user, or use the terminal tool), and make the skill run that script with the terminal tool. Skills from external folders are read-only.
 
 ```json
 {
@@ -798,7 +798,7 @@ The skill guard scans each write. It refuses a skill that sends secrets out, for
 
 ### skill_view
 
-Load a skill: its SKILL.md instructions and the list of its support files. Load a skill before you do a task that it covers. To read a support file, pass its path in the skill folder as file, for example references/api.md. When the skill needs environment variables, run_command gets them in this session after the view.
+Load a skill: its SKILL.md instructions and the list of its support files. Load a skill before you do a task that it covers. To read a support file, pass its path in the skill folder as file, for example references/api.md. When the skill needs environment variables, the terminal tool gets them in this session after the view.
 
 ```json
 {
@@ -832,7 +832,7 @@ List the installed skills with their descriptions. Load one with skill_view.
 
 ## terminal
 
-### run_command
+### terminal
 
 Run a shell command with bash -c on the host. The result is stdout and stderr together, followed by the exit code when it is not 0. Set background to true for servers and long jobs: the tool then returns the pid and a log path at once. Read the log with read_file and stop the process with kill.
 

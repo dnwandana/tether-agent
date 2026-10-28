@@ -32,8 +32,8 @@ func (docTool) Run(context.Context, json.RawMessage, *tools.Env) (string, error)
 func TestGeneratedGroupsAndSchemas(t *testing.T) {
 	r := tools.NewRegistry()
 	r.Register(docTool{name: "web_fetch", set: "web"})
-	r.Register(docTool{name: "run_command", set: "terminal"})
-	r.Register(docTool{name: "run_script", set: "code_execution"})
+	r.Register(docTool{name: "terminal", set: "terminal"})
+	r.Register(docTool{name: "execute_code", set: "code_execution"})
 	md := tools.GenerateMarkdown(r)
 	code, term, web := strings.Index(md, "\n## code_execution"), strings.Index(md, "\n## terminal"), strings.Index(md, "\n## web")
 	if code < 0 || !(code < term && term < web) {
@@ -56,8 +56,8 @@ func TestGeneratedDocIsCurrent(t *testing.T) {
 	}
 	defer done()
 	// The registry has every built-in tool, also without python3 and Chrome on this host.
-	for _, name := range []string{"run_script", "view_image", "browser_navigate", "delegate_task",
-		"text_to_speech", "transcribe_audio", "image_generate", "cronjob"} {
+	for _, name := range []string{"execute_code", "view_image", "browser_navigate", "delegate_task",
+		"text_to_speech", "transcribe_audio", "generate_image", "cronjob"} {
 		if _, ok := r.Get(name); !ok {
 			t.Fatalf("the doc registry has no %s", name)
 		}

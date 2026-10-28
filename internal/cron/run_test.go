@@ -145,9 +145,9 @@ func newFixture(t *testing.T, script ...reply) *fixture {
 	gate := gateApprover{g: security.NewGate(cfg.Approvals, d), p: failPrompter{t}}
 	for _, tool := range []tools.Tool{
 		stubTool{name: "cronjob", set: tools.SetCron},
-		stubTool{name: "ask_user", set: tools.SetAsk},
+		stubTool{name: "clarify", set: tools.SetAsk},
 		stubTool{name: "web_search", set: tools.SetWeb},
-		stubTool{name: "run_command", set: tools.SetTerminal, run: func(ctx context.Context, env *tools.Env, args json.RawMessage) string {
+		stubTool{name: "terminal", set: tools.SetTerminal, run: func(ctx context.Context, env *tools.Env, args json.RawMessage) string {
 			var a struct{ Command string }
 			_ = json.Unmarshal(args, &a)
 			if err := env.Gate.CheckCommand(ctx, env, a.Command); err != nil {
@@ -237,11 +237,11 @@ func TestAgentJobAlwaysDelivers(t *testing.T) {
 	}
 }
 
-func TestCronHidesCronjobAndAskUser(t *testing.T) {
+func TestCronHidesCronjobAndClarify(t *testing.T) {
 	r, fp := runner(t, say("done"))
 	r.Run(bg, cron.Job{ID: "j1", Name: "n", Prompt: "p"})
 	names := schemaNames(fp.reqs()[0])
-	if names["cronjob"] || names["ask_user"] || !names["web_search"] || !names["run_command"] {
+	if names["cronjob"] || names["clarify"] || !names["web_search"] || !names["terminal"] {
 		t.Fatal(names)
 	}
 }
@@ -355,7 +355,7 @@ func TestScriptJobFailureStatus(t *testing.T) {
 }
 
 func TestDangerousDeniedInCron(t *testing.T) {
-	r, fp := runner(t, call("run_command", `{"command":"rm -rf /tmp/x"}`), say("could not delete"))
+	r, fp := runner(t, call("terminal", `{"command":"rm -rf /tmp/x"}`), say("could not delete"))
 	o := r.Run(bg, cron.Job{ID: "j1", Name: "n", Prompt: "clean up"})
 	reqs := fp.reqs()
 	if len(reqs) != 2 || o.Text != "could not delete" {

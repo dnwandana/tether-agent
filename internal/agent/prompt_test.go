@@ -90,7 +90,7 @@ func TestDescriptionOnOneLine(t *testing.T) {
 }
 
 func TestToolNotesMentionCurlWhenTerminalVisible(t *testing.T) {
-	n := DefaultToolNotes(map[string]bool{"run_command": true})
+	n := DefaultToolNotes(map[string]bool{"terminal": true})
 	if !containsAny(n, "curl") {
 		t.Fatal(n)
 	}

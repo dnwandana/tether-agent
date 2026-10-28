@@ -30,7 +30,7 @@ func toolNeeds(name string) string {
 	switch {
 	case strings.HasPrefix(name, "browser_"):
 		return "Chrome or Chromium (browser.chrome_path, CHROME_PATH, or PATH). Without it, the tool returns an error."
-	case name == "run_script":
+	case name == "execute_code":
 		return "python3 on PATH. Without it, the tool is not registered."
 	case name == "view_image":
 		return "a vision provider: agent.vision_provider, or vision: true on the primary provider. Without it, the tool is not registered."
@@ -38,7 +38,7 @@ func toolNeeds(name string) string {
 		return "media.tts. The default command needs edge-tts. With an empty backend, the tool is not registered."
 	case name == "transcribe_audio":
 		return "media.stt. The default command needs whisper-cli. With an empty backend, the tool is not registered."
-	case name == "image_generate":
+	case name == "generate_image":
 		return "media.image. It has no default backend, so the tool is not registered until you set one."
 	case name == "delegate_task":
 		return "the gateway role for background: true. The chat role runs the tasks in the foreground."

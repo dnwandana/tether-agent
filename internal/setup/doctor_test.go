@@ -188,7 +188,7 @@ func TestProviderDownFails(t *testing.T) {
 func TestMissingPythonIsWarnNamingFeature(t *testing.T) {
 	d := doctorWithFakes(t, okProvider(t), okTelegram(t), without("python3"))
 	c := find(t, d.Run(ctx), "python3")
-	if c.Status != StatusWarn || !strings.Contains(c.Detail, "run_script is off") || c.Next == "" {
+	if c.Status != StatusWarn || !strings.Contains(c.Detail, "execute_code is off") || c.Next == "" {
 		t.Fatal(c)
 	}
 }

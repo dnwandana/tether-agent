@@ -293,12 +293,12 @@ func TestCLIRunsToolLoopAndShowsProgress(t *testing.T) {
 func TestCLISinkLines(t *testing.T) {
 	var out bytes.Buffer
 	s := &CLISink{W: &out, Line: func(tool, preview string) string { return "💻 " + tool + ": " + preview }}
-	s.ToolStart("run_command", "ls")
+	s.ToolStart("terminal", "ls")
 	s.Delta("abc")
 	s.Notice("compacting")
 	s.Delta("def\n")
 	s.Finish()
-	want := "\x1b[2m💻 run_command: ls\x1b[0m\nabc\n\x1b[2mcompacting\x1b[0m\ndef\n"
+	want := "\x1b[2m💻 terminal: ls\x1b[0m\nabc\n\x1b[2mcompacting\x1b[0m\ndef\n"
 	if out.String() != want {
 		t.Fatalf("%q", out.String())
 	}
@@ -309,14 +309,14 @@ func TestCLISinkStripsControlCharacters(t *testing.T) {
 	// terminal title.
 	var out bytes.Buffer
 	s := &CLISink{W: &out}
-	s.ToolStart("run_command", "ls\x1b[2J\x1b]0;pwned\x07 -la\r\x00")
+	s.ToolStart("terminal", "ls\x1b[2J\x1b]0;pwned\x07 -la\r\x00")
 	s.Delta("red \x1b[31mtext\x1b[0m\tok\b\x7f\u009b1m")
 	s.Delta("\x1b")
 	s.Delta("[Kend\n")
 	s.Notice("note\x1b[1A")
 	s.Finish()
 	got := out.String()
-	want := "\x1b[2m🔧 run_command: \"ls -la\"\x1b[0m\nred text\tok1m[Kend\n\x1b[2mnote\x1b[0m\n"
+	want := "\x1b[2m🔧 terminal: \"ls -la\"\x1b[0m\nred text\tok1m[Kend\n\x1b[2mnote\x1b[0m\n"
 	if got != want {
 		t.Fatalf("%q", got)
 	}

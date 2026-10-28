@@ -63,11 +63,11 @@ func TestValidToolset(t *testing.T) {
 
 func TestVisibleHidesSchemas(t *testing.T) {
 	r := NewRegistry()
-	r.Register(fakeTool{name: "run_command", set: "terminal"})
+	r.Register(fakeTool{name: "terminal", set: "terminal"})
 	r.Register(fakeTool{name: "web_fetch", set: "web"})
 	r.Register(fakeTool{name: "mcp_gh_search", set: "mcp_gh"})
 	names, schemas := r.Visible(Resolve([]string{"web", "mcp"}, nil, nil), nil)
-	if names["run_command"] || !names["web_fetch"] || !names["mcp_gh_search"] || len(schemas) != 2 {
+	if names["terminal"] || !names["web_fetch"] || !names["mcp_gh_search"] || len(schemas) != 2 {
 		t.Fatal(names)
 	}
 }

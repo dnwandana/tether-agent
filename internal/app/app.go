@@ -93,9 +93,9 @@ type App struct {
 	Media *tools.MediaSet
 	// WorkDir is the working folder of the tools: the folder where the process started.
 	WorkDir string
-	// Gate is the approval gate of run_command.
+	// Gate is the approval gate of the terminal tool.
 	Gate *security.Gate
-	// CLIAsk is the approval prompt and the ask_user prompt of the CLI channel.
+	// CLIAsk is the approval prompt and the clarify prompt of the CLI channel.
 	CLIAsk *gateway.CLIAsk
 	// MCP starts the MCP servers on demand.
 	MCP     *mcp.Manager
@@ -443,7 +443,7 @@ func (a *App) registerTools() {
 	cfg := a.Cfg
 	spill := filepath.Join(a.DataDir, "cache", "spill")
 	a.WebClient = tools.GuardedClient(cfg.Web.BlockPrivateNetworks, 30*time.Second, 3)
-	a.RegisterTool(&tools.ExecTool{
+	a.RegisterTool(&tools.TerminalTool{
 		DefaultTimeout: time.Duration(cfg.Terminal.DefaultTimeoutS) * time.Second,
 		DotEnv:         a.DotEnv,
 		// The skill RequiredEnv names of the session reach the child too.
@@ -459,7 +459,7 @@ func (a *App) registerTools() {
 	a.RegisterTool(&tools.WebFetchTool{Client: a.WebClient, MaxURLs: cfg.Web.FetchMaxURLs, MaxBytes: int64(cfg.Web.FetchMaxBytes)})
 	a.RegisterTool(&tools.WebSearchTool{Client: a.WebClient})
 	a.RegisterTool(tools.MemoryTool{Store: a.Memory})
-	a.RegisterTool(tools.AskUserTool{Timeout: time.Duration(cfg.Approvals.TimeoutS) * time.Second})
+	a.RegisterTool(tools.ClarifyTool{Timeout: time.Duration(cfg.Approvals.TimeoutS) * time.Second})
 	a.RegisterTool(tools.SessionSearchTool{Store: a.Store, MaxChars: cfg.Context.ToolOutputMaxChars})
 	a.RegisterTool(tools.SkillViewTool{Catalog: a.Skills})
 	a.RegisterTool(tools.SkillsListTool{Catalog: a.Skills})
@@ -513,9 +513,9 @@ func (a *App) registerTools() {
 	if vp, ok := tools.VisionProvider(cfg, a.Providers); ok {
 		a.RegisterTool(tools.VisionTool{Prov: vp, Client: a.WebClient, MaxBytes: 10 << 20})
 	}
-	// run_script needs python3. Without it, the tool is hidden and doctor reports it.
+	// execute_code needs python3. Without it, the tool is hidden and doctor reports it.
 	if python, err := exec.LookPath("python3"); err == nil {
-		a.RegisterTool(tools.RunScriptTool{
+		a.RegisterTool(tools.ExecuteCodeTool{
 			Reg:         a.Registry,
 			ScratchRoot: filepath.Join(a.DataDir, "cache"),
 			TimeoutS:    cfg.CodeExecution.TimeoutS,
@@ -552,8 +552,8 @@ func (a *App) currentProvider(env *tools.Env) string {
 
 // NewEnv returns the tool context of a session on a channel. The Values map is the same
 // for a session across turns, because the read tracker of the file tools lives there.
-// run_command checks each command with the approval gate. On the CLI, the gate and
-// ask_user ask on the terminal. On Telegram, they ask with buttons in the chat of the
+// The terminal tool checks each command with the approval gate. On the CLI, the gate and
+// the clarify tool ask on the terminal. On Telegram, they ask with buttons in the chat of the
 // session. Other channels, for example cron, have no prompt, so the gate blocks each
 // dangerous command that needs a question.
 func (a *App) NewEnv(sess *sessions.Session, channel string) *tools.Env {

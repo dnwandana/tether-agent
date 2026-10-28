@@ -88,7 +88,7 @@ func TestReadRelativePath(t *testing.T) {
 func TestReadBinaryRefused(t *testing.T) {
 	p := writeFile(t, "\x7fELF\x02\x01\x01\x00\x00\x00binary")
 	out := runToolErr(t, ReadFileTool{}, fmt.Sprintf(`{"path":%q}`, p))
-	if !strings.Contains(out, "binary file; use run_command with xxd or file") {
+	if !strings.Contains(out, "binary file; use the terminal tool with xxd or file") {
 		t.Fatal(out)
 	}
 }

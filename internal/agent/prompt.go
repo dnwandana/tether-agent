@@ -113,7 +113,7 @@ func contextSection(in PromptInput) string {
 
 // The tool notes of DefaultToolNotes.
 const (
-	noteCurl    = "To call an API, use curl through run_command: curl -sS -w '\\n%{http_code}' ...; put JSON bodies in a file and use --data @file."
+	noteCurl    = "To call an API, use curl through the terminal tool: curl -sS -w '\\n%{http_code}' ...; put JSON bodies in a file and use --data @file."
 	notePDF     = "For a PDF, download it with curl and convert it with pdftotext."
 	noteBrowser = "If web_search or web_fetch fails, use the browser tools."
 )
@@ -121,7 +121,7 @@ const (
 // DefaultToolNotes returns the tool notes for the visible tools, in a fixed order.
 func DefaultToolNotes(visible map[string]bool) []string {
 	var out []string
-	if visible["run_command"] {
+	if visible["terminal"] {
 		out = append(out, noteCurl)
 	}
 	if visible["web_fetch"] {

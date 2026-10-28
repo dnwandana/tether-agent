@@ -49,8 +49,8 @@ func newAgentWithHistory(t *testing.T, fp *fakeProv, n int) (*Agent, *sessions.S
 // newAgentAllTools returns an Agent with echo and every tool that a child must not see.
 func newAgentAllTools(t *testing.T, fp *fakeProv) (*Agent, *sessions.Session) {
 	t.Helper()
-	sets := map[string]string{"delegate_task": tools.SetDelegation, "ask_user": tools.SetAsk, "memory": tools.SetMemory,
-		"run_script": tools.SetCodeExecution, "cronjob": tools.SetCron}
+	sets := map[string]string{"delegate_task": tools.SetDelegation, "clarify": tools.SetAsk, "memory": tools.SetMemory,
+		"execute_code": tools.SetCodeExecution, "cronjob": tools.SetCron}
 	var ts []tools.Tool
 	for name, set := range sets {
 		ts = append(ts, newNamed(name, set))
@@ -152,7 +152,7 @@ func TestOrchestratorKeepsDelegateOnlyBelowDepth(t *testing.T) {
 		if got := strings.Contains(req.System, "Orchestrator Role"); got != tc.want {
 			t.Fatalf("%+v: orchestrator note = %v", tc, got)
 		}
-		if schemaNames(req)["memory"] || schemaNames(req)["ask_user"] {
+		if schemaNames(req)["memory"] || schemaNames(req)["clarify"] {
 			t.Fatal("an orchestrator keeps the other blocks")
 		}
 	}

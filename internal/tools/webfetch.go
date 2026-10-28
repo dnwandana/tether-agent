@@ -206,7 +206,7 @@ func (t *WebFetchTool) fetchOne(ctx context.Context, raw string) (finalURL, text
 			return "", "", toolErr("the body is binary data, not text")
 		}
 	default:
-		return "", "", toolErr("content type %s is not text; download it with run_command and curl", mediaType)
+		return "", "", toolErr("content type %s is not text; download it with curl through the terminal tool", mediaType)
 	}
 	text = ctxmgr.SanitizeUTF8(text)
 	if truncated {

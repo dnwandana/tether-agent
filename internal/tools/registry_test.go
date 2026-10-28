@@ -108,8 +108,8 @@ func TestDispatchUnknownTool(t *testing.T) {
 
 func TestDispatchHiddenTool(t *testing.T) {
 	r := NewRegistry()
-	r.Register(fakeTool{name: "run_command", set: "terminal"})
-	res := r.Dispatch(ctx, "run_command", json.RawMessage(`{}`), &Env{}, map[string]bool{"read_file": true})
+	r.Register(fakeTool{name: "terminal", set: "terminal"})
+	res := r.Dispatch(ctx, "terminal", json.RawMessage(`{}`), &Env{}, map[string]bool{"read_file": true})
 	if !res.IsError || !strings.Contains(res.Text, "not available in this session") {
 		t.Fatal(res)
 	}

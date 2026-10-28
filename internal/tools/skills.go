@@ -94,7 +94,7 @@ func addPassthrough(env *Env, names []string) {
 }
 
 // PassthroughFor returns the env names that the skill_view calls of the
-// session of env registered, sorted. ExecTool.Passthrough adds them to
+// session of env registered, sorted. TerminalTool.Passthrough adds them to
 // terminal.env_passthrough, so a child process of this session keeps them.
 func PassthroughFor(env *Env) []string {
 	if env == nil {
@@ -139,7 +139,7 @@ func (SkillViewTool) Schema() provider.ToolSchema {
 		Description: "Load a skill: its SKILL.md instructions and the list of its support files. " +
 			"Load a skill before you do a task that it covers. To read a support file, pass its path " +
 			"in the skill folder as file, for example references/api.md. When the skill needs environment " +
-			"variables, run_command gets them in this session after the view.",
+			"variables, the terminal tool gets them in this session after the view.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -179,7 +179,7 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 		fmt.Fprintf(&b, "\nSupport files (read one with skill_view and file):\n- %s\n", strings.Join(files, "\n- "))
 	}
 	if len(s.RequiredEnv) > 0 {
-		fmt.Fprintf(&b, "\nRequired environment variables (run_command gets them in this session): %s\n",
+		fmt.Fprintf(&b, "\nRequired environment variables (the terminal tool gets them in this session): %s\n",
 			strings.Join(s.RequiredEnv, ", "))
 	}
 	return b.String(), nil
@@ -344,8 +344,8 @@ func (SkillManageTool) Schema() provider.ToolSchema {
 			"- write_file: name, file, content. Writes a support file under references/ or scripts/.\n" +
 			"- delete: name.\n\n" +
 			"The skill guard scans each write. It refuses a skill that sends secrets out, for example curl with " +
-			"$API_KEY. Put an API call in a script under ~/.tether/scripts/ (write_file cannot write there: ask the user, or use run_command), and make " +
-			"the skill run that script with run_command. Skills from external folders are read-only.",
+			"$API_KEY. Put an API call in a script under ~/.tether/scripts/ (write_file cannot write there: ask the user, or use the terminal tool), and make " +
+			"the skill run that script with the terminal tool. Skills from external folders are read-only.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {

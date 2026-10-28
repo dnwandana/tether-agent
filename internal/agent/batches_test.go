@@ -298,8 +298,8 @@ func TestDelegatorSharesTheLimit(t *testing.T) {
 }
 
 func TestHiddenInChildren(t *testing.T) {
-	if !slices.Contains(ChildBlockedTools, tools.RunScriptTool{}.Name()) || !slices.Contains(ChildBlockedTools, tools.DelegateTool{}.Name()) {
-		t.Fatal("a child never sees run_script, and a leaf never sees delegate_task")
+	if !slices.Contains(ChildBlockedTools, tools.ExecuteCodeTool{}.Name()) || !slices.Contains(ChildBlockedTools, tools.DelegateTool{}.Name()) {
+		t.Fatal("a child never sees execute_code, and a leaf never sees delegate_task")
 	}
 }
 

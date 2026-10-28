@@ -21,7 +21,7 @@ const CronPreamble = "[IMPORTANT: You are running as a scheduled cron job. No us
 
 // cronRemovedTools are the tools that a cron run cannot use: no user is present,
 // and a run cannot create cron jobs.
-var cronRemovedTools = []string{"cronjob", "ask_user"}
+var cronRemovedTools = []string{"cronjob", "clarify"}
 
 // CronTurn is the input of the agent turn of one cron run.
 type CronTurn struct {
