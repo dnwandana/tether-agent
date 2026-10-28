@@ -26,6 +26,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/telegram"
+	"github.com/dnwandana/tether-agent/internal/update"
 )
 
 // The values of Check.Status.
@@ -51,8 +52,8 @@ type Check struct {
 }
 
 // Doctor checks the install: the config, .env, the providers, Telegram, state.db, the host
-// programs, the MCP servers, and the disk. It needs no user input, and it does not take
-// the gateway lock, so it can run next to a running gateway.
+// programs, the MCP servers, the disk, and the newest release. It needs no user input, and
+// it does not take the gateway lock, so it can run next to a running gateway.
 type Doctor struct {
 	DataDir    string
 	ConfigPath string
@@ -64,6 +65,10 @@ type Doctor struct {
 	TelegramBase string
 	// Getenv reads the environment for the Chrome detection. Nil uses os.Getenv.
 	Getenv func(string) string
+	// Version is the version of this binary (main.version). It feeds the release check.
+	Version string
+	// ReleaseAPI replaces the GitHub API base of the release check. Empty uses the real API.
+	ReleaseAPI string
 
 	// freeBytes returns the free disk space of a folder. Tests replace it.
 	freeBytes func(dir string) (uint64, error)
@@ -91,6 +96,8 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 		out = append(out, d.checkMCP(ctx, cfg, dotenv)...)
 	}
 	out = append(out, d.checkDisk())
+	// The release check needs no config, so it also runs when the config does not load.
+	out = append(out, d.checkRelease(ctx))
 
 	red := app.NewRedactor(dotenv)
 	for i := range out {
@@ -472,6 +479,43 @@ func (d *Doctor) checkDisk() Check {
 	if n < minFreeBytes {
 		c.Status = StatusWarn
 		c.Next = "free some disk space; the logs, the cache, and state.db need room"
+	}
+	return c
+}
+
+// checkRelease compares Version with the newest release on GitHub. A dev build sends no
+// request. A failure is a warning, because doctor must not fail without the network.
+func (d *Doctor) checkRelease(ctx context.Context) Check {
+	c := Check{Name: "release", Status: StatusOK}
+	if update.IsDev(d.Version) {
+		c.Detail = "dev build; the release check is off"
+		return c
+	}
+	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	defer cancel()
+	cl := update.Client{HC: d.hc(), APIBase: d.ReleaseAPI, UserAgent: "tether-agent/" + d.Version}
+	rel, err := cl.Latest(ctx)
+	if err != nil {
+		c.Status, c.Detail = StatusWarn, "cannot reach GitHub: "+err.Error()
+		c.Next = "check the network, or run tether update --check later"
+		return c
+	}
+	cmp, err := update.Compare(d.Version, rel.Version)
+	if err != nil {
+		c.Status = StatusWarn
+		c.Detail = fmt.Sprintf("cannot compare %s with %s: %v", d.Version, rel.Version, err)
+		return c
+	}
+	switch {
+	case cmp < 0:
+		c.Status = StatusWarn
+		c.Detail = fmt.Sprintf("%s is available; you run %s (released %s)",
+			rel.Version, d.Version, rel.PublishedAt.Format("2006-01-02"))
+		c.Next = "run tether update"
+	case cmp == 0:
+		c.Detail = d.Version + " is the newest release"
+	default:
+		c.Detail = fmt.Sprintf("%s is newer than the newest release, %s", d.Version, rel.Version)
 	}
 	return c
 }

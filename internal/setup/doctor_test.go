@@ -10,7 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // ctx is the context of the calls in the tests.
@@ -292,5 +294,125 @@ func TestFormatSymbols(t *testing.T) {
 	}
 	if !strings.HasPrefix(lines[2], "✗ c") || !strings.Contains(lines[2], "→ do c") {
 		t.Fatal(lines[2])
+	}
+}
+
+// releaseServer is a fake GitHub API. It answers /releases/latest with the tag and the date,
+// and counts the requests.
+func releaseServer(t *testing.T, tag, published string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		if r.URL.Path != "/releases/latest" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": tag, "published_at": published, "assets": []any{}})
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &n
+}
+
+// releaseDoctor returns a doctor whose release check uses the fake GitHub API.
+func releaseDoctor(t *testing.T, version string) (*Doctor, *atomic.Int32) {
+	t.Helper()
+	srv, n := releaseServer(t, "v0.9.0", "2026-10-20T10:00:00Z")
+	return &Doctor{DataDir: t.TempDir(), Version: version, ReleaseAPI: srv.URL, HC: srv.Client()}, n
+}
+
+func TestCheckReleaseNewer(t *testing.T) {
+	d, _ := releaseDoctor(t, "0.4.0")
+	c := d.checkRelease(ctx)
+	if c.Name != "release" || c.Status != StatusWarn ||
+		c.Detail != "0.9.0 is available; you run 0.4.0 (released 2026-10-20)" || c.Next != "run tether update" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestCheckReleaseSame(t *testing.T) {
+	d, _ := releaseDoctor(t, "0.9.0")
+	c := d.checkRelease(ctx)
+	if c.Name != "release" || c.Status != StatusOK || c.Detail != "0.9.0 is the newest release" || c.Next != "" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestCheckReleaseAhead(t *testing.T) {
+	d, _ := releaseDoctor(t, "1.0.0")
+	c := d.checkRelease(ctx)
+	if c.Status != StatusOK || c.Detail != "1.0.0 is newer than the newest release, 0.9.0" || c.Next != "" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestCheckReleaseDev(t *testing.T) {
+	d, n := releaseDoctor(t, "dev")
+	c := d.checkRelease(ctx)
+	if c.Name != "release" || c.Status != StatusOK || c.Detail != "dev build; the release check is off" || c.Next != "" {
+		t.Fatalf("%+v", c)
+	}
+	if got := n.Load(); got != 0 {
+		t.Fatalf("a dev build made %d requests", got)
+	}
+}
+
+func TestCheckReleaseBadVersion(t *testing.T) {
+	d, _ := releaseDoctor(t, "0.4")
+	c := d.checkRelease(ctx)
+	if c.Status != StatusWarn || !strings.HasPrefix(c.Detail, "cannot compare 0.4 with 0.9.0: ") || c.Next != "" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestCheckReleaseUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	api := srv.URL
+	srv.Close()
+	d := &Doctor{DataDir: t.TempDir(), Version: "0.4.0", ReleaseAPI: api}
+	c := d.checkRelease(ctx)
+	if c.Status != StatusWarn || !strings.HasPrefix(c.Detail, "cannot reach GitHub: ") ||
+		c.Next != "check the network, or run tether update --check later" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestCheckReleaseSlowServer(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(2 * time.Second):
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
+	d := &Doctor{DataDir: t.TempDir(), Version: "0.4.0", ReleaseAPI: srv.URL, HC: srv.Client()}
+	cctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	c := d.checkRelease(cctx)
+	if el := time.Since(start); el > time.Second {
+		t.Fatalf("the check waited %s", el)
+	}
+	if c.Status != StatusWarn || !strings.HasPrefix(c.Detail, "cannot reach GitHub: ") {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestRunEndsWithReleaseCheck(t *testing.T) {
+	// The config does not load, but the release check runs.
+	d, n := releaseDoctor(t, "dev")
+	d.freeBytes = func(string) (uint64, error) { return 50 << 30, nil }
+	d.LookPath = allPrograms
+	d.Getenv = func(string) string { return "" }
+	checks := d.Run(ctx)
+	if last := checks[len(checks)-1]; last.Name != "release" || last.Status != StatusOK {
+		t.Fatalf("last check %+v", last)
+	}
+	if got := n.Load(); got != 0 {
+		t.Fatalf("a dev build made %d requests", got)
 	}
 }
