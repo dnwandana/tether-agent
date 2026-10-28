@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +28,14 @@ const (
 	// defaultAlbumWait is the wait for the other parts of an album (Hermes
 	// MEDIA_GROUP_WAIT_SECONDS).
 	defaultAlbumWait = 800 * time.Millisecond
+	// stickerVisionPrompt is the Hermes prompt for a static sticker.
+	stickerVisionPrompt = "Describe this sticker in 1-2 sentences. Focus on what it depicts -- character, action, emotion. Be concise and objective."
 )
+
+// describeTimeout is the limit for the vision call of a sticker. Build runs
+// in the worker of the chat, so a slow call stops the next message. Tests
+// change it.
+var describeTimeout = 30 * time.Second
 
 // supportedDocumentTypes are the document types that the inbox saves. The
 // list is Hermes SUPPORTED_DOCUMENT_TYPES (gateway/platforms/base.py).
@@ -83,6 +92,42 @@ var imageTypes = map[string]string{
 	".gif":  "image/gif",
 }
 
+// videoTypes are the video types that the inbox saves as a video. The list
+// is Hermes SUPPORTED_VIDEO_TYPES (gateway/platforms/base.py).
+var videoTypes = map[string]string{
+	".mp4":  "video/mp4",
+	".mov":  "video/quicktime",
+	".webm": "video/webm",
+	".mkv":  "video/x-matroska",
+	".avi":  "video/x-msvideo",
+}
+
+// videoExtByMime is the reverse of videoTypes. It gives the extension for a
+// video without a file name.
+var videoExtByMime = func() map[string]string {
+	m := make(map[string]string, len(videoTypes))
+	for ext, mime := range videoTypes {
+		m[mime] = ext
+	}
+	return m
+}()
+
+// audioExtByMime gives the extension for an audio file without a file name.
+// An unknown type gets .mp3.
+var audioExtByMime = map[string]string{
+	"audio/mpeg":  ".mp3",
+	"audio/mp4":   ".m4a",
+	"audio/x-m4a": ".m4a",
+	"audio/ogg":   ".ogg",
+	"audio/wav":   ".wav",
+	"audio/x-wav": ".wav",
+	"audio/flac":  ".flac",
+}
+
+// safeExt matches an extension from a file name that is safe in the saved
+// file name.
+var safeExt = regexp.MustCompile(`^\.[a-z0-9]{1,10}$`)
+
 // Inbox turns the media of incoming messages into text, images, and saved
 // files.
 type Inbox struct {
@@ -90,7 +135,12 @@ type Inbox struct {
 	MediaDir string
 	// Transcribe converts a voice note to text. It is nil when speech to
 	// text is not set up.
-	Transcribe  func(ctx context.Context, path string) (string, error)
+	Transcribe func(ctx context.Context, path string) (string, error)
+	// Describe asks the vision model about an image file. It is nil when no vision model
+	// is set up. A static sticker then gets the fallback text.
+	Describe func(ctx context.Context, path, prompt string) (string, error)
+	// Stickers keeps the sticker descriptions. Nil means no cache.
+	Stickers    StickerCache
 	MaxDocBytes int64
 	Log         *slog.Logger
 }
@@ -111,8 +161,20 @@ func (in *Inbox) Build(ctx context.Context, msgs []Message) (text string, images
 			notes = in.addImage(ctx, notes, &images, p.FileID, p.FileUniqueID, p.FileSize, "", "photo")
 		case m.Voice != nil:
 			notes = in.addVoice(ctx, notes, &files, m.Voice)
+		case m.Audio != nil:
+			notes = in.addAudio(ctx, notes, &files, m.Audio)
+		case m.Video != nil:
+			v := m.Video
+			notes = in.addVideo(ctx, notes, &files, v.FileID, v.FileUniqueID, v.FileName, videoExt(v.FileName, v.MimeType), v.FileSize)
+		case m.Sticker != nil:
+			notes = in.addSticker(ctx, notes, m.Sticker)
 		case m.Document != nil:
 			notes = in.addDocument(ctx, notes, &images, &files, m.Document)
+		case m.Venue != nil:
+			// A venue message also has a location, so this case comes first.
+			notes = append(notes, locationNote(m.Venue.Location, m.Venue))
+		case m.Location != nil:
+			notes = append(notes, locationNote(*m.Location, nil))
 		}
 		c := m.Caption
 		if c == "" {
@@ -126,6 +188,27 @@ func (in *Inbox) Build(ctx context.Context, msgs []Message) (text string, images
 		return "", nil, nil, err
 	}
 	return strings.Join(append(notes, captions...), "\n\n"), images, files, nil
+}
+
+// locationNote returns the note for a location pin. v is nil for a plain
+// location. The text is the text of Hermes _handle_location_message.
+func locationNote(loc Location, v *Venue) string {
+	lat := strconv.FormatFloat(loc.Latitude, 'f', -1, 64)
+	lon := strconv.FormatFloat(loc.Longitude, 'f', -1, 64)
+	lines := []string{"[The user shared a location pin.]"}
+	if v != nil && v.Title != "" {
+		lines = append(lines, "Venue: "+v.Title)
+	}
+	if v != nil && v.Address != "" {
+		lines = append(lines, "Address: "+v.Address)
+	}
+	lines = append(lines,
+		"latitude: "+lat,
+		"longitude: "+lon,
+		"Map: https://www.google.com/maps/search/?api=1&query="+lat+","+lon,
+		"Ask what they'd like to find nearby (restaurants, cafes, etc.) and any preferences.",
+	)
+	return strings.Join(lines, "\n")
 }
 
 // largestPhoto returns the size with the most pixels. On a tie, the later
@@ -207,15 +290,16 @@ func (in *Inbox) addDocument(ctx context.Context, notes []string, images *[]prov
 		}
 		return in.addImage(ctx, notes, images, d.FileID, d.FileUniqueID, d.FileSize, imgExt, name)
 	}
+	// A video sent as a file, and every GIF, arrives as a document (Hermes).
+	vidExt := ext
+	if vidExt == "" {
+		vidExt = videoExtByMime[mime]
+	}
+	if videoTypes[vidExt] != "" {
+		return in.addVideo(ctx, notes, files, d.FileID, d.FileUniqueID, d.FileName, vidExt, d.FileSize)
+	}
 	if _, ok := supportedDocumentTypes[ext]; !ok {
-		kind := mime
-		if kind == "" {
-			kind = ext
-		}
-		if kind == "" {
-			kind = "unknown"
-		}
-		return append(notes, "[unsupported file type: "+kind+"]")
+		return append(notes, unsupportedNote(ext))
 	}
 	path, err := in.fetch(ctx, d.FileID, d.FileUniqueID, func(string) string { return ext })
 	if err != nil {
@@ -224,10 +308,173 @@ func (in *Inbox) addDocument(ctx context.Context, notes []string, images *[]prov
 	*files = append(*files, path)
 	if ext == ".md" || ext == ".txt" {
 		if b, err := os.ReadFile(path); err == nil && len(b) <= maxInlineTextBytes && utf8.Valid(b) {
-			return append(notes, fmt.Sprintf("[Content of %s]:\n%s", name, b))
+			return append(notes, savedNote(savedTextDocument, name, path)+"\n\n"+fmt.Sprintf("[Content of %s]:\n%s", name, b))
 		}
 	}
-	return append(notes, "[file: "+path+"]")
+	return append(notes, savedNote(savedDocument, name, path))
+}
+
+// addAudio saves an audio file. It does not transcribe the file, because
+// Hermes transcribes only a voice note.
+func (in *Inbox) addAudio(ctx context.Context, notes []string, files *[]string, a *Audio) []string {
+	ext := strings.ToLower(filepath.Ext(a.FileName))
+	if !safeExt.MatchString(ext) {
+		ext = audioExtByMime[strings.ToLower(a.MimeType)]
+	}
+	if ext == "" {
+		ext = ".mp3"
+	}
+	name := a.FileName
+	if name == "" {
+		name = "audio" + ext
+	}
+	name = displayName(name, ext)
+	if a.FileSize > in.maxBytes() {
+		return append(notes, in.tooLarge(name, a.FileSize))
+	}
+	path, err := in.fetch(ctx, a.FileID, a.FileUniqueID, func(string) string { return ext })
+	if err != nil {
+		return append(notes, in.failed(name, err))
+	}
+	*files = append(*files, path)
+	return append(notes, savedNote(savedAudio, name, path))
+}
+
+// videoExt returns the extension for a video: the extension of fileName
+// when it is in videoTypes, else the extension for mime, else .mp4.
+func videoExt(fileName, mime string) string {
+	if ext := strings.ToLower(filepath.Ext(fileName)); videoTypes[ext] != "" {
+		return ext
+	}
+	if ext := videoExtByMime[strings.ToLower(mime)]; ext != "" {
+		return ext
+	}
+	return ".mp4"
+}
+
+// addVideo saves a video with the extension ext. The video case and the
+// video-document path both use it.
+func (in *Inbox) addVideo(ctx context.Context, notes []string, files *[]string, fileID, uniqueID, fileName, ext string, size int64) []string {
+	name := fileName
+	if name == "" {
+		name = "video" + ext
+	}
+	name = displayName(name, ext)
+	if size > in.maxBytes() {
+		return append(notes, in.tooLarge(name, size))
+	}
+	path, err := in.fetch(ctx, fileID, uniqueID, func(string) string { return ext })
+	if err != nil {
+		return append(notes, in.failed(name, err))
+	}
+	*files = append(*files, path)
+	return append(notes, savedNote(savedVideo, name, path))
+}
+
+// addSticker gives the note for a sticker. The vision model describes a
+// static sticker, and the cache keeps the description. The sticker file does
+// not go to the model and does not go into files (Hermes).
+func (in *Inbox) addSticker(ctx context.Context, notes []string, s *Sticker) []string {
+	if s.IsAnimated || s.IsVideo {
+		return append(notes, animatedStickerNote(s.Emoji))
+	}
+	useCache := in.Stickers != nil && s.FileUniqueID != ""
+	if useCache {
+		if info, ok := in.Stickers.Get(ctx, s.FileUniqueID); ok {
+			return append(notes, stickerNote(info.Description, info.Emoji, info.SetName))
+		}
+	}
+	// The fallback has no set name, like Hermes. It does not go into the
+	// cache, so a later copy of the sticker gets a new vision call.
+	fallback := "a sticker"
+	if s.Emoji != "" {
+		fallback = "a sticker with emoji " + s.Emoji
+	}
+	fallback = stickerNote(fallback, s.Emoji, "")
+	if in.Describe == nil {
+		return append(notes, fallback)
+	}
+	path, err := in.fetch(ctx, s.FileID, s.FileUniqueID, func(string) string { return ".webp" })
+	if err != nil {
+		in.logger().Warn("telegram media download failed", "what", "sticker", "err", err.Error())
+		return append(notes, fallback)
+	}
+	dctx, cancel := context.WithTimeout(ctx, describeTimeout)
+	desc, err := in.Describe(dctx, path, stickerVisionPrompt)
+	cancel()
+	if err != nil {
+		in.logger().Warn("telegram sticker description failed", "err", err.Error())
+		return append(notes, fallback)
+	}
+	if desc = strings.TrimSpace(desc); desc == "" {
+		return append(notes, fallback)
+	}
+	if useCache {
+		in.Stickers.Put(ctx, s.FileUniqueID, StickerInfo{Description: desc, Emoji: s.Emoji, SetName: s.SetName})
+	}
+	return append(notes, stickerNote(desc, s.Emoji, s.SetName))
+}
+
+// stickerNote returns the note for a static sticker. It is the port of
+// Hermes build_sticker_injection.
+func stickerNote(description, emoji, setName string) string {
+	about := ""
+	if emoji != "" && setName != "" {
+		about = " " + emoji + ` from "` + setName + `"`
+	} else if emoji != "" {
+		about = " " + emoji
+	}
+	return "[The user sent a sticker" + about + `~ It shows: "` + description + `" (=^.w.^=)]`
+}
+
+// animatedStickerNote returns the note for an animated or a video sticker.
+// It is the port of Hermes build_animated_sticker_injection.
+func animatedStickerNote(emoji string) string {
+	if emoji != "" {
+		return "[The user sent an animated sticker " + emoji + "~ I can't see animated ones yet, but the emoji suggests: " + emoji + "]"
+	}
+	return "[The user sent an animated sticker~ I can't see animated ones yet]"
+}
+
+// savedKind selects the text of a note for a saved file.
+type savedKind int
+
+const (
+	// savedDocument is a document that the text does not contain.
+	savedDocument savedKind = iota
+	// savedTextDocument is a .md or .txt document that the text contains.
+	savedTextDocument
+	// savedAudio is an audio file, not a voice note.
+	savedAudio
+	// savedVideo is a video, also a video that arrives as a document.
+	savedVideo
+)
+
+// savedNote returns the note for a file that the inbox saved at path. The
+// texts are Hermes texts, and the video text has the shape of the document
+// text. The text-document note says that the content is in
+// the text, so use it only when the content is in the text.
+func savedNote(kind savedKind, name, path string) string {
+	switch kind {
+	case savedTextDocument:
+		return "[The user sent a text document: '" + name + "'. Its content has been included below. The file is also saved at: " + path + "]"
+	case savedAudio:
+		return "[The user sent an audio file attachment: '" + name + "'. It is saved at: " + path + ". Ask the user what they'd like you to do with it, or pass the path to a transcription or media tool.]"
+	case savedVideo:
+		return "[The user sent a video: '" + name + "'. It is saved at: " + path + ". Ask the user what they'd like you to do with it.]"
+	default:
+		return "[The user sent a document: '" + name + "'. The file is saved at: " + path + ". Ask the user what they'd like you to do with it.]"
+	}
+}
+
+// unsupportedNote returns the Hermes text for a document type that is not in
+// supportedDocumentTypes. ext is the extension with its dot, or empty.
+func unsupportedNote(ext string) string {
+	if ext == "" {
+		ext = "unknown"
+	}
+	list := strings.Join(slices.Sorted(maps.Keys(supportedDocumentTypes)), ", ")
+	return "Unsupported document type '" + ext + "'. Supported types: " + list
 }
 
 // errTooLarge is the fetch error for a file over the size limit.

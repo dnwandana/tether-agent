@@ -54,9 +54,15 @@ type APIError struct {
 	Code        int
 	Description string
 	RetryAfter  int
+	// MigrateToChatID is the new chat id of a group that became a
+	// supergroup. It is 0 for other errors.
+	MigrateToChatID int64
 }
 
 func (e *APIError) Error() string {
+	if e.MigrateToChatID != 0 {
+		return fmt.Sprintf("telegram API error %d: the group chat moved to chat id %d. Put the new id in the config, then run /sethome in the new chat.", e.Code, e.MigrateToChatID)
+	}
 	return fmt.Sprintf("telegram API error %d: %s", e.Code, e.Description)
 }
 
@@ -88,6 +94,16 @@ type Message struct {
 	Photo           []PhotoSize     `json:"photo,omitempty"`
 	Document        *Document       `json:"document,omitempty"`
 	Voice           *Voice          `json:"voice,omitempty"`
+	Video           *Video          `json:"video,omitempty"`
+	Audio           *Audio          `json:"audio,omitempty"`
+	Sticker         *Sticker        `json:"sticker,omitempty"`
+	Location        *Location       `json:"location,omitempty"`
+	Venue           *Venue          `json:"venue,omitempty"`
+	// The service fields. A service message has no text and no media.
+	NewChatMembers    []User `json:"new_chat_members,omitempty"`
+	LeftChatMember    *User  `json:"left_chat_member,omitempty"`
+	MigrateToChatID   int64  `json:"migrate_to_chat_id,omitempty"`
+	MigrateFromChatID int64  `json:"migrate_from_chat_id,omitempty"`
 }
 
 // Chat is the chat of a message.
@@ -107,6 +123,9 @@ type User struct {
 	FirstName string `json:"first_name,omitempty"`
 	LastName  string `json:"last_name,omitempty"`
 	Username  string `json:"username,omitempty"`
+	// CanReadAllGroupMessages is false when BotFather privacy mode is on.
+	// Only getMe fills it.
+	CanReadAllGroupMessages bool `json:"can_read_all_group_messages,omitempty"`
 }
 
 // MessageEntity marks a part of the text, for example a mention or a command.
@@ -144,6 +163,49 @@ type Voice struct {
 	Duration     int    `json:"duration,omitempty"`
 	MimeType     string `json:"mime_type,omitempty"`
 	FileSize     int64  `json:"file_size,omitempty"`
+}
+
+// Video is a video file.
+type Video struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int64  `json:"file_size,omitempty"`
+}
+
+// Audio is a music or audio file, not a voice note.
+type Audio struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	FileName     string `json:"file_name,omitempty"`
+	MimeType     string `json:"mime_type,omitempty"`
+	FileSize     int64  `json:"file_size,omitempty"`
+}
+
+// Sticker is a sticker. IsAnimated and IsVideo mark the sticker types that
+// are not a static WEBP image.
+type Sticker struct {
+	FileID       string `json:"file_id"`
+	FileUniqueID string `json:"file_unique_id"`
+	Emoji        string `json:"emoji,omitempty"`
+	SetName      string `json:"set_name,omitempty"`
+	IsAnimated   bool   `json:"is_animated,omitempty"`
+	IsVideo      bool   `json:"is_video,omitempty"`
+	FileSize     int64  `json:"file_size,omitempty"`
+}
+
+// Location is a point on the map.
+type Location struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
+
+// Venue is a named place. A venue message also has a Location field.
+type Venue struct {
+	Location Location `json:"location"`
+	Title    string   `json:"title,omitempty"`
+	Address  string   `json:"address,omitempty"`
 }
 
 // CallbackQuery is a press on an inline keyboard button.
@@ -253,7 +315,8 @@ type envelope struct {
 	ErrorCode   int             `json:"error_code"`
 	Description string          `json:"description"`
 	Parameters  *struct {
-		RetryAfter int `json:"retry_after"`
+		RetryAfter      int   `json:"retry_after"`
+		MigrateToChatID int64 `json:"migrate_to_chat_id"`
 	} `json:"parameters"`
 }
 
@@ -331,6 +394,7 @@ func (c *Client) do(ctx context.Context, method string, out any, timeout time.Du
 		apiErr := &APIError{Code: env.ErrorCode, Description: env.Description}
 		if env.Parameters != nil {
 			apiErr.RetryAfter = env.Parameters.RetryAfter
+			apiErr.MigrateToChatID = env.Parameters.MigrateToChatID
 		}
 		if apiErr.Code != http.StatusTooManyRequests || attempt >= maxRetries429 {
 			return fmt.Errorf("telegram %s: %w", method, apiErr)

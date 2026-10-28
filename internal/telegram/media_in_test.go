@@ -38,6 +38,16 @@ func docMsg(name, mime string, size int64) Message {
 		Document: &Document{FileID: "d-" + name, FileUniqueID: "ud", FileName: name, MimeType: mime, FileSize: size}}
 }
 
+const supportedList = ".cfg, .csv, .docx, .ini, .json, .log, .md, .pdf, .pptx, .py, .sh, .toml, .ts, .txt, .xlsx, .xml, .yaml, .yml, .zip"
+
+func docNote(name, path string) string {
+	return "[The user sent a document: '" + name + "'. The file is saved at: " + path + ". Ask the user what they'd like you to do with it.]"
+}
+
+func textDocNote(name, path string) string {
+	return "[The user sent a text document: '" + name + "'. Its content has been included below. The file is also saved at: " + path + "]"
+}
+
 func TestPhotoLargestSizeSaved(t *testing.T) {
 	in, api := inbox(t)
 	for _, w := range []int{90, 320, 1280} {
@@ -83,8 +93,8 @@ func TestTextDocumentInlined(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(txt, "[Content of notes.md]:\n# Notes\nline\n") || len(files) != 1 {
-		t.Fatal(txt[:40], files)
+	if len(files) != 1 || !strings.HasPrefix(txt, textDocNote("notes.md", files[0])+"\n\n[Content of notes.md]:\n# Notes\nline\n") {
+		t.Fatal(txt[:min(len(txt), 200)], files)
 	}
 }
 
@@ -93,8 +103,8 @@ func TestDocumentContentBeforeCaption(t *testing.T) {
 	api.addFile("d-a.txt", "documents/a.txt", []byte("hello"))
 	m := docMsg("a.txt", "text/plain", 5)
 	m.Caption = "summarize this"
-	txt, _, _, _ := in.Build(ctx, []Message{m})
-	if txt != "[Content of a.txt]:\nhello\n\nsummarize this" {
+	txt, _, files, _ := in.Build(ctx, []Message{m})
+	if len(files) != 1 || txt != textDocNote("a.txt", files[0])+"\n\n[Content of a.txt]:\nhello\n\nsummarize this" {
 		t.Fatalf("%q", txt)
 	}
 }
@@ -104,7 +114,7 @@ func TestLargeTextDocumentSavedNotInlined(t *testing.T) {
 	body := strings.Repeat("x", 200*1024)
 	api.addFile("d-big.txt", "documents/big.txt", []byte(body))
 	txt, _, files, _ := in.Build(ctx, []Message{docMsg("big.txt", "text/plain", int64(len(body)))})
-	if strings.Contains(txt, "[Content of") || len(files) != 1 || !strings.Contains(txt, "[file: "+files[0]+"]") {
+	if len(files) != 1 || txt != docNote("big.txt", files[0]) || strings.Contains(txt, "included below") || strings.Contains(txt, "[Content of") {
 		t.Fatal(txt[:min(len(txt), 80)], files)
 	}
 	if b, err := os.ReadFile(files[0]); err != nil || len(b) != len(body) {
@@ -116,7 +126,7 @@ func TestOtherSupportedDocumentSaved(t *testing.T) {
 	in, api := inbox(t)
 	api.addFile("d-report.pdf", "documents/report.pdf", []byte("%PDF"))
 	txt, imgs, files, _ := in.Build(ctx, []Message{docMsg("report.pdf", "application/pdf", 4)})
-	if len(files) != 1 || !strings.HasSuffix(files[0], ".pdf") || txt != "[file: "+files[0]+"]" || len(imgs) != 0 {
+	if len(files) != 1 || !strings.HasSuffix(files[0], ".pdf") || txt != docNote("report.pdf", files[0]) || len(imgs) != 0 {
 		t.Fatal(txt, files)
 	}
 }
@@ -249,8 +259,35 @@ func TestAlbumBufferPassesSingleMessage(t *testing.T) {
 func TestUnsupportedType(t *testing.T) {
 	in, api := inbox(t)
 	txt, _, files, _ := in.Build(ctx, []Message{docMsg("setup.exe", "application/x-msdownload", 100)})
-	if txt != "[unsupported file type: application/x-msdownload]" || len(files) != 0 || api.count("getFile") != 0 {
+	if txt != "Unsupported document type '.exe'. Supported types: "+supportedList || len(files) != 0 || api.count("getFile") != 0 {
 		t.Fatal(txt, files, api.methods())
+	}
+}
+
+func TestCSVDocumentNotIncludedBelow(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("d-data.csv", "documents/data.csv", []byte("a,b\n1,2\n"))
+	txt, _, files, _ := in.Build(ctx, []Message{docMsg("data.csv", "text/csv", 8)})
+	if len(files) != 1 || txt != docNote("data.csv", files[0]) {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestUnsupportedTypeWithoutExtension(t *testing.T) {
+	in, _ := inbox(t)
+	txt, _, _, _ := in.Build(ctx, []Message{docMsg("", "application/x-foo", 10)})
+	if txt != "Unsupported document type 'unknown'. Supported types: "+supportedList {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestUnsupportedTypeKeepsCaption(t *testing.T) {
+	in, _ := inbox(t)
+	m := docMsg("setup.exe", "application/x-msdownload", 100)
+	m.Caption = "is this safe?"
+	txt, _, _, _ := in.Build(ctx, []Message{m})
+	if txt != "Unsupported document type '.exe'. Supported types: "+supportedList+"\n\nis this safe?" {
+		t.Fatalf("%q", txt)
 	}
 }
 
@@ -291,5 +328,225 @@ func TestVoiceTranscribeErrorIsVisible(t *testing.T) {
 	txt, _, files, _ := in.Build(ctx, []Message{voiceMsg()})
 	if txt != "[The user sent a voice message but I had trouble transcribing it~ (stt endpoint: HTTP 500)]" || len(files) != 1 {
 		t.Fatal(txt, files)
+	}
+}
+
+const mapsPin = "[The user shared a location pin.]\n"
+const nearby = "Ask what they'd like to find nearby (restaurants, cafes, etc.) and any preferences."
+
+func TestLocationNote(t *testing.T) {
+	in, api := inbox(t)
+	m := Message{MessageID: 7, Chat: Chat{ID: 1, Type: "private"}, Location: &Location{Latitude: -6.2088, Longitude: 106.8456}}
+	txt, imgs, files, err := in.Build(ctx, []Message{m})
+	want := mapsPin + "latitude: -6.2088\nlongitude: 106.8456\n" +
+		"Map: https://www.google.com/maps/search/?api=1&query=-6.2088,106.8456\n" + nearby
+	if err != nil || txt != want || len(imgs) != 0 || len(files) != 0 || api.count("getFile") != 0 {
+		t.Fatalf("%q %v", txt, err)
+	}
+}
+
+func TestVenueNote(t *testing.T) {
+	in, _ := inbox(t)
+	loc := Location{Latitude: 1.5, Longitude: 2.25}
+	m := Message{MessageID: 8, Chat: Chat{ID: 1, Type: "private"}, Location: &loc,
+		Venue: &Venue{Location: loc, Title: "Cafe Kopi", Address: "Jl. Sudirman 1"}}
+	txt, _, _, _ := in.Build(ctx, []Message{m})
+	want := mapsPin + "Venue: Cafe Kopi\nAddress: Jl. Sudirman 1\nlatitude: 1.5\nlongitude: 2.25\n" +
+		"Map: https://www.google.com/maps/search/?api=1&query=1.5,2.25\n" + nearby
+	if txt != want {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestVenueWithoutTitleOrAddress(t *testing.T) {
+	in, _ := inbox(t)
+	loc := Location{Latitude: 3, Longitude: -4}
+	txt, _, _, _ := in.Build(ctx, []Message{{Chat: Chat{ID: 1}, Location: &loc, Venue: &Venue{Location: loc}}})
+	want := mapsPin + "latitude: 3\nlongitude: -4\nMap: https://www.google.com/maps/search/?api=1&query=3,-4\n" + nearby
+	if txt != want {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func audioNote(name, path string) string {
+	return "[The user sent an audio file attachment: '" + name + "'. It is saved at: " + path +
+		". Ask the user what they'd like you to do with it, or pass the path to a transcription or media tool.]"
+}
+
+func videoNote(name, path string) string {
+	return "[The user sent a video: '" + name + "'. It is saved at: " + path + ". Ask the user what they'd like you to do with it.]"
+}
+
+// mediaMsg returns a private message without content. (poll_test.go has
+// chatMsg already.)
+func mediaMsg() Message { return Message{MessageID: 9, Chat: Chat{ID: 1, Type: "private"}} }
+
+func TestAudioFileSavedNotTranscribed(t *testing.T) {
+	in, api := inbox(t)
+	in.Transcribe = func(context.Context, string) (string, error) {
+		t.Fatal("an audio file must not be transcribed")
+		return "", nil
+	}
+	api.addFile("a1", "music/file_1.mp3", []byte("ID3"))
+	m := mediaMsg()
+	m.Audio = &Audio{FileID: "a1", FileUniqueID: "ua", FileName: "meeting.mp3", MimeType: "audio/mpeg", FileSize: 3}
+	txt, _, files, _ := in.Build(ctx, []Message{m})
+	if len(files) != 1 || !strings.HasSuffix(files[0], ".mp3") || txt != audioNote("meeting.mp3", files[0]) {
+		t.Fatalf("%q %v", txt, files)
+	}
+}
+
+func TestAudioWithoutFileName(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("a2", "music/file_2", []byte("OggS"))
+	m := mediaMsg()
+	m.Audio = &Audio{FileID: "a2", FileUniqueID: "ub", MimeType: "audio/ogg", FileSize: 4}
+	txt, _, files, _ := in.Build(ctx, []Message{m})
+	if len(files) != 1 || !strings.HasSuffix(files[0], ".ogg") || txt != audioNote("audio.ogg", files[0]) {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestVideoSavedBeforeCaption(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("v1", "videos/file_3.mp4", []byte("mp4"))
+	m := mediaMsg()
+	m.Caption = "what happens here?"
+	m.Video = &Video{FileID: "v1", FileUniqueID: "uv", FileName: "clip.mp4", MimeType: "video/mp4", FileSize: 3}
+	txt, _, files, _ := in.Build(ctx, []Message{m})
+	if len(files) != 1 || txt != videoNote("clip.mp4", files[0])+"\n\nwhat happens here?" {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestVideoTooLargeNotDownloaded(t *testing.T) {
+	in, api := inbox(t)
+	m := mediaMsg()
+	m.Video = &Video{FileID: "v2", FileUniqueID: "uw", FileName: "clip.mp4", FileSize: 30 << 20}
+	txt, _, _, _ := in.Build(ctx, []Message{m})
+	if txt != "[file too large: clip.mp4 has 31457280 bytes; the limit is 20 MB]" || api.count("getFile") != 0 {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestVideoDocuments(t *testing.T) {
+	cases := []struct{ file, mime, name, ext string }{
+		{"animation.gif.mp4", "video/mp4", "animation.gif.mp4", ".mp4"}, // a GIF
+		{"CLIP.MOV", "video/quicktime", "CLIP.MOV", ".mov"},
+		{"", "video/webm", "video.webm", ".webm"},
+	}
+	for _, c := range cases {
+		in, api := inbox(t)
+		api.addFile("d-"+c.file, "documents/x", []byte("vid"))
+		txt, _, files, _ := in.Build(ctx, []Message{docMsg(c.file, c.mime, 3)})
+		if len(files) != 1 || !strings.HasSuffix(files[0], c.ext) || txt != videoNote(c.name, files[0]) {
+			t.Errorf("%s: %q %v", c.file, txt, files)
+		}
+	}
+}
+
+func TestMixedAlbumNotesInOrder(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("p320", "photos/file_4.jpg", []byte("JPEG"))
+	api.addFile("v3", "videos/file_5.mp4", []byte("mp4"))
+	p := photoMsg("", sizes(320))
+	v := mediaMsg()
+	v.Video = &Video{FileID: "v3", FileUniqueID: "ux", FileName: "b.mp4", FileSize: 3}
+	p.MediaGroupID, v.MediaGroupID = "g1", "g1"
+	txt, imgs, files, _ := in.Build(ctx, []Message{p, v})
+	if len(imgs) != 1 || len(files) != 1 || !strings.HasPrefix(txt, "[image: ") ||
+		!strings.HasSuffix(txt, "\n\n"+videoNote("b.mp4", files[0])) {
+		t.Fatalf("%q", txt)
+	}
+}
+
+type mapStickers struct {
+	m    map[string]StickerInfo
+	puts int
+}
+
+func (c *mapStickers) Get(_ context.Context, id string) (StickerInfo, bool) {
+	i, ok := c.m[id]
+	return i, ok
+}
+func (c *mapStickers) Put(_ context.Context, id string, i StickerInfo) { c.m[id] = i; c.puts++ }
+
+func stickerMsg(s Sticker) Message { m := mediaMsg(); m.Sticker = &s; return m }
+
+const duckPrompt = "Describe this sticker in 1-2 sentences. Focus on what it depicts -- character, action, emotion. Be concise and objective."
+
+func TestAnimatedStickerNotes(t *testing.T) {
+	in, api := inbox(t)
+	got, _, _, _ := in.Build(ctx, []Message{stickerMsg(Sticker{FileID: "s1", Emoji: "👍", IsAnimated: true})})
+	if got != "[The user sent an animated sticker 👍~ I can't see animated ones yet, but the emoji suggests: 👍]" {
+		t.Fatalf("%q", got)
+	}
+	got, _, _, _ = in.Build(ctx, []Message{stickerMsg(Sticker{FileID: "s2", IsVideo: true})})
+	if got != "[The user sent an animated sticker~ I can't see animated ones yet]" || api.count("getFile") != 0 {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestStaticStickerDescribedAndCached(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("s3", "stickers/file_6.webp", []byte("RIFF"))
+	cache := &mapStickers{m: map[string]StickerInfo{}}
+	in.Stickers = cache
+	in.Describe = func(_ context.Context, path, prompt string) (string, error) {
+		if prompt != duckPrompt || !strings.HasSuffix(path, ".webp") {
+			t.Errorf("%q %q", path, prompt)
+		}
+		return "A duck laughs and falls over", nil
+	}
+	txt, imgs, files, _ := in.Build(ctx, []Message{stickerMsg(Sticker{FileID: "s3", FileUniqueID: "us3", Emoji: "😂", SetName: "DuckPack"})})
+	want := `[The user sent a sticker 😂 from "DuckPack"~ It shows: "A duck laughs and falls over" (=^.w.^=)]`
+	if txt != want || len(imgs) != 0 || len(files) != 0 || cache.puts != 1 {
+		t.Fatalf("%q imgs=%d files=%d puts=%d", txt, len(imgs), len(files), cache.puts)
+	}
+	if cache.m["us3"] != (StickerInfo{Description: "A duck laughs and falls over", Emoji: "😂", SetName: "DuckPack"}) {
+		t.Fatalf("%+v", cache.m)
+	}
+}
+
+func TestStaticStickerCacheHit(t *testing.T) {
+	in, api := inbox(t)
+	in.Stickers = &mapStickers{m: map[string]StickerInfo{"us4": {Description: "A cat waves", Emoji: "👋"}}}
+	in.Describe = func(context.Context, string, string) (string, error) {
+		t.Fatal("no vision call on a hit")
+		return "", nil
+	}
+	txt, _, _, _ := in.Build(ctx, []Message{stickerMsg(Sticker{FileID: "s4", FileUniqueID: "us4", Emoji: "🙂", SetName: "Cats"})})
+	if txt != `[The user sent a sticker 👋~ It shows: "A cat waves" (=^.w.^=)]` || api.count("getFile") != 0 {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestStaticStickerFallbacks(t *testing.T) {
+	old := describeTimeout
+	describeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { describeTimeout = old })
+	cases := []struct {
+		name     string
+		describe func(context.Context, string, string) (string, error)
+		emoji    string
+		want     string
+	}{
+		{"no vision", nil, "😂", `[The user sent a sticker 😂~ It shows: "a sticker with emoji 😂" (=^.w.^=)]`},
+		{"vision error", func(context.Context, string, string) (string, error) { return "", errors.New("down") }, "",
+			`[The user sent a sticker~ It shows: "a sticker" (=^.w.^=)]`},
+		{"empty answer", func(context.Context, string, string) (string, error) { return "  ", nil }, "",
+			`[The user sent a sticker~ It shows: "a sticker" (=^.w.^=)]`},
+		{"timeout", func(c context.Context, _, _ string) (string, error) { <-c.Done(); return "", c.Err() }, "",
+			`[The user sent a sticker~ It shows: "a sticker" (=^.w.^=)]`},
+	}
+	for _, c := range cases {
+		in, api := inbox(t)
+		api.addFile("s5", "stickers/file_7.webp", []byte("RIFF"))
+		cache := &mapStickers{m: map[string]StickerInfo{}}
+		in.Stickers, in.Describe = cache, c.describe
+		txt, _, _, _ := in.Build(ctx, []Message{stickerMsg(Sticker{FileID: "s5", FileUniqueID: "us5", Emoji: c.emoji, SetName: "P"})})
+		if txt != c.want || cache.puts != 0 {
+			t.Errorf("%s: %q puts=%d", c.name, txt, cache.puts)
+		}
 	}
 }

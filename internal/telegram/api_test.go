@@ -406,3 +406,49 @@ func TestEditMessageTextPlainUnchanged(t *testing.T) {
 		t.Fatalf("plain edit must leave out rich_message: %v", got)
 	}
 }
+
+func TestDecodeMediaFields(t *testing.T) {
+	raw := `{"message_id":1,"chat":{"id":1,"type":"private"},
+	 "video":{"file_id":"v1","file_unique_id":"uv","file_name":"clip.mp4","mime_type":"video/mp4","file_size":10},
+	 "audio":{"file_id":"a1","file_unique_id":"ua","file_name":"meeting.mp3","mime_type":"audio/mpeg","file_size":20},
+	 "sticker":{"file_id":"s1","file_unique_id":"us","emoji":"😂","set_name":"DuckPack","is_animated":true,"is_video":false,"file_size":30},
+	 "location":{"latitude":-6.2088,"longitude":106.8456},
+	 "venue":{"location":{"latitude":1.5,"longitude":2.5},"title":"Cafe","address":"Main St 1"}}`
+	var m Message
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m.Video == nil || m.Video.FileName != "clip.mp4" || m.Video.MimeType != "video/mp4" || m.Video.FileSize != 10 {
+		t.Fatalf("video %+v", m.Video)
+	}
+	if m.Audio == nil || m.Audio.FileUniqueID != "ua" || m.Audio.FileName != "meeting.mp3" {
+		t.Fatalf("audio %+v", m.Audio)
+	}
+	if s := m.Sticker; s == nil || s.Emoji != "😂" || s.SetName != "DuckPack" || !s.IsAnimated || s.IsVideo {
+		t.Fatalf("sticker %+v", s)
+	}
+	if m.Location == nil || m.Location.Latitude != -6.2088 || m.Location.Longitude != 106.8456 {
+		t.Fatalf("location %+v", m.Location)
+	}
+	if v := m.Venue; v == nil || v.Title != "Cafe" || v.Address != "Main St 1" || v.Location.Latitude != 1.5 {
+		t.Fatalf("venue %+v", v)
+	}
+}
+
+func TestAPIErrorMigratedChat(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: group chat was upgraded to a supergroup chat","parameters":{"migrate_to_chat_id":-1004488060068}}`)
+	}))
+	defer srv.Close()
+	_, err := (&Client{Token: "T", BaseURL: srv.URL, HC: srv.Client()}).SendMessage(ctx, SendMessageParams{ChatID: -4488060068, Text: "hi"})
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.MigrateToChatID != -1004488060068 || ae.Code != 400 {
+		t.Fatal(err)
+	}
+	want := "telegram sendMessage: telegram API error 400: the group chat moved to chat id -1004488060068. " +
+		"Put the new id in the config, then run /sethome in the new chat."
+	if err.Error() != want {
+		t.Fatalf("%q", err.Error())
+	}
+}
