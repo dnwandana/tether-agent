@@ -26,6 +26,14 @@ const (
 	TrustAgentCreated Trust = "agent-created"
 	// TrustExternal marks skills from a read-only external folder (Hermes "trusted").
 	TrustExternal Trust = "external"
+	// TrustCommunity marks a skill that the owner installs from a source
+	// outside TRUSTED_REPOS. The loader never gives this level. Only install
+	// and update use it.
+	TrustCommunity Trust = "community"
+	// TrustTrusted marks a skill that the owner installs from a repo in
+	// TRUSTED_REPOS. The loader never gives this level. Only install and
+	// update use it.
+	TrustTrusted Trust = "trusted"
 )
 
 // skillFile is the name of the file that defines a skill.

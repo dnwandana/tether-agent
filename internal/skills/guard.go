@@ -1,8 +1,10 @@
 package skills
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -51,7 +53,24 @@ type Finding struct {
 type ScanResult struct {
 	Verdict  Verdict
 	Findings []Finding
+	// Unscanned holds the sorted relative paths of the files that strict
+	// mode did not pattern-scan, because their content is not text. It is
+	// always nil in ScanCurrent.
+	Unscanned []string
 }
+
+// ScanMode selects which files ScanDirMode reads.
+type ScanMode int
+
+const (
+	// ScanCurrent is the Hermes mode. It honors .skillignore and
+	// .clawhubignore, and it reads only the scannableExt types.
+	ScanCurrent ScanMode = iota
+	// ScanStrict is the mode for skill install and update. It honors no
+	// ignore file, it reads every file that is text by content, and it
+	// checks the first bytes of each file for an executable format.
+	ScanStrict
+)
 
 // Structural limits from Hermes. maxScanBytes also limits how much text one
 // ScanDir call reads.
@@ -131,6 +150,11 @@ func isScannable(rel string) bool {
 // that are not text types are skipped, the same as Hermes. Each pattern gives
 // at most one finding per line.
 func Scan(files map[string]string) ScanResult {
+	return scanFiles(files, isScannable)
+}
+
+// scanFiles scans the files in name order. A nil keep scans every file.
+func scanFiles(files map[string]string, keep func(rel string) bool) ScanResult {
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)
@@ -139,7 +163,7 @@ func Scan(files map[string]string) ScanResult {
 	var findings []Finding
 	for _, name := range names {
 		rel := filepath.ToSlash(name)
-		if !isScannable(rel) {
+		if keep != nil && !keep(rel) {
 			continue
 		}
 		findings = append(findings, scanText(rel, files[name])...)
@@ -211,7 +235,7 @@ func Policy(trust Trust, v Verdict) Action {
 	switch trust {
 	case TrustBuiltin:
 		return ActionAllow
-	case TrustExternal:
+	case TrustTrusted, TrustExternal:
 		if v == VerdictCaution {
 			return ActionAllow
 		}
@@ -221,6 +245,8 @@ func Policy(trust Trust, v Verdict) Action {
 			return ActionAllow
 		}
 		return ActionAsk
+	case TrustCommunity:
+		return ActionBlock
 	default:
 		return ActionBlock
 	}
@@ -240,7 +266,8 @@ var shellVarRe = regexp.MustCompile(`\$\{?[A-Za-z_]`)
 
 // FormatFindings writes the verdict and the findings, critical first. When an
 // exfiltration finding involves an environment variable, the text ends with
-// the hint to put the API call in a script.
+// the hint to put the API call in a script. When strict mode did not scan a
+// file, a "not scanned (binary)" line follows the findings.
 func FormatFindings(r ScanResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Skill guard verdict: %s (%d findings)\n", strings.ToUpper(string(r.Verdict)), len(r.Findings))
@@ -253,6 +280,9 @@ func FormatFindings(r ScanResult) string {
 		if f.Category == "exfiltration" && (envExfilIDs[f.PatternID] || shellVarRe.MatchString(f.Match)) {
 			hint = true
 		}
+	}
+	if len(r.Unscanned) > 0 {
+		fmt.Fprintf(&b, "not scanned (binary): %s\n", strings.Join(r.Unscanned, ", "))
 	}
 	if hint {
 		b.WriteString(scriptsHint)
@@ -285,12 +315,27 @@ var errTooLargeToScan = fmt.Errorf("skill has more than %d KB of text files; the
 // error when the text files are larger than 1 MB, so no text is left
 // unscanned.
 func ScanDir(dir string) (ScanResult, error) {
+	return ScanDirMode(dir, ScanCurrent)
+}
+
+// ScanDirMode scans the skill folder dir in the given mode. ScanCurrent is
+// the ScanDir scan. ScanStrict honors no ignore file, pattern-scans SKILL.md,
+// every scannableExt file, and every other file with no NUL byte, lists the
+// other files in Unscanned, stops at a file that it cannot read, and adds
+// a binary_file finding for each file that starts with an executable magic
+// number. In both modes, more than 1 MB of text gives errTooLargeToScan.
+func ScanDirMode(dir string, mode ScanMode) (ScanResult, error) {
 	root, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return ScanResult{}, fmt.Errorf("scan skill %s: %w", dir, err)
 	}
-	ignore := loadSkillIgnore(root)
+	strict := mode == ScanStrict
+	ignore := func(string) bool { return false }
+	if !strict {
+		ignore = loadSkillIgnore(root)
+	}
 	var structural []Finding
+	var unscanned []string
 	files := map[string]string{}
 	count, total, scanned := 0, int64(0), 0
 	add := func(f Finding) { structural = append(structural, f) }
@@ -354,6 +399,30 @@ func ScanDir(dir string) (ScanResult, error) {
 					Match: "executable bit set", Description: "file has executable permission but is not a recognized script type"})
 			}
 		}
+		if strict {
+			data, complete, err := readHead(readPath, maxScanBytes-scanned)
+			if err != nil {
+				// A file that strict mode cannot read must not pass as safe.
+				return fmt.Errorf("read %s: %w", rel, err)
+			}
+			if format, ok := executableMagic(data); ok {
+				add(Finding{PatternID: "binary_file", Severity: SevCritical, Category: "structural", File: rel,
+					Match:       "binary: " + format,
+					Description: fmt.Sprintf("binary/executable file (%s) should not be in a skill", format)})
+			}
+			// SKILL.md and the script and text types are always scanned, because
+			// the agent and the shell read them whatever their bytes are.
+			if !isScannable(rel) && !looksText(data) {
+				unscanned = append(unscanned, rel)
+				return nil
+			}
+			if !complete {
+				return errTooLargeToScan
+			}
+			scanned += len(data)
+			files[rel] = string(data)
+			return nil
+		}
 		if !isScannable(rel) {
 			return nil
 		}
@@ -383,10 +452,62 @@ func ScanDir(dir string) (ScanResult, error) {
 			Match:       fmt.Sprintf("%dKB total", total/1024),
 			Description: fmt.Sprintf("skill is %dKB total (limit: %dKB)", total/1024, maxTotalSizeKB)})
 	}
-	r := Scan(files)
+	var r ScanResult
+	if strict {
+		r = scanFiles(files, nil)
+		sort.Strings(unscanned)
+	} else {
+		r = Scan(files)
+	}
 	all := append(structural, r.Findings...)
-	return ScanResult{Verdict: verdictOf(all), Findings: all}, nil
+	return ScanResult{Verdict: verdictOf(all), Findings: all, Unscanned: unscanned}, nil
 }
+
+// readHead reads at most budget bytes of text from the file at p. It reads
+// one byte more than budget, so a file that does not fit stops the read
+// early and gives complete false. It reads at least 4 bytes, so that
+// executableMagic always gets the head of a file.
+func readHead(p string, budget int) (data []byte, complete bool, err error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	limit := max(budget, 4) + 1
+	data, err = io.ReadAll(io.LimitReader(f, int64(limit)))
+	if err != nil {
+		return nil, false, err
+	}
+	return data, len(data) <= budget, nil
+}
+
+// looksText reports whether data is text: it has no NUL byte. Invalid UTF-8
+// does not make a file binary, because a shell or an interpreter still runs
+// such a file and the patterns still match its valid parts.
+func looksText(data []byte) bool {
+	return bytes.IndexByte(data, 0) < 0
+}
+
+// executableMagic returns the executable format whose magic number starts
+// head: ELF, PE, or one of the Mach-O forms.
+func executableMagic(head []byte) (format string, ok bool) {
+	switch {
+	case bytes.HasPrefix(head, []byte("\x7fELF")):
+		return "ELF", true
+	case bytes.HasPrefix(head, []byte("MZ")):
+		return "PE", true
+	}
+	for _, m := range machOMagics {
+		if bytes.HasPrefix(head, []byte(m)) {
+			return "Mach-O", true
+		}
+	}
+	return "", false
+}
+
+// machOMagics holds the 32-bit and 64-bit Mach-O magic numbers in both byte
+// orders, and the magic number of a fat (universal) binary.
+var machOMagics = []string{"\xfe\xed\xfa\xce", "\xfe\xed\xfa\xcf", "\xce\xfa\xed\xfe", "\xcf\xfa\xed\xfe", "\xca\xfe\xba\xbe"}
 
 // within reports whether target is root or a path under root.
 func within(root, target string) bool {

@@ -84,6 +84,13 @@ func TestPolicyTable(t *testing.T) {
 		{TrustExternal, VerdictDangerous, ActionBlock}, {TrustAgentCreated, VerdictCaution, ActionAllow},
 		{TrustAgentCreated, VerdictDangerous, ActionAsk},
 		{TrustBuiltin, VerdictSafe, ActionAllow}, {TrustExternal, VerdictSafe, ActionAllow}, {TrustAgentCreated, VerdictSafe, ActionAllow},
+		// Install and update use the Hermes community and trusted rows.
+		{TrustCommunity, VerdictSafe, ActionAllow},
+		{TrustCommunity, VerdictCaution, ActionBlock},
+		{TrustCommunity, VerdictDangerous, ActionBlock},
+		{TrustTrusted, VerdictSafe, ActionAllow},
+		{TrustTrusted, VerdictCaution, ActionAllow},
+		{TrustTrusted, VerdictDangerous, ActionBlock},
 		// An unknown trust level uses the Hermes community row.
 		{Trust("other"), VerdictSafe, ActionAllow}, {Trust("other"), VerdictCaution, ActionBlock}, {Trust("other"), VerdictDangerous, ActionBlock},
 	}
