@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -43,4 +44,29 @@ func AcquireLock(path string) (release func() error, err error) {
 		uerr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		return errors.Join(uerr, f.Close())
 	}, nil
+}
+
+// LockHeld reports if a running gateway holds the lock at path. The update command uses it
+// to find a running gateway without a write to the data folder. It opens the file read-only
+// and never creates it, so a missing file means that no gateway runs. It tries a shared
+// lock and releases that lock at once.
+func LockHeld(path string) (bool, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("gateway: cannot open the lock file %s: %w", path, err)
+	}
+	defer f.Close()
+	fd := int(f.Fd())
+	if err := syscall.Flock(fd, syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return true, nil
+		}
+		return false, fmt.Errorf("gateway: cannot probe the lock %s: %w", path, err)
+	}
+	// The deferred Close also releases the shared lock, so an unlock error changes nothing.
+	_ = syscall.Flock(fd, syscall.LOCK_UN)
+	return false, nil
 }
