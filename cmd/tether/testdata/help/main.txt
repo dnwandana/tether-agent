@@ -16,6 +16,8 @@ Manage data:
   skills      List the skills, or restore a bootstrap skill.
   pairing     Approve or revoke the Telegram users.
   usage       Show the calls, the tokens, and the cost of each model.
+  backup      Save the state to one archive, without the secrets.
+  restore     Put an archive from tether backup back into the data folder.
 
 Maintain:
   update      Replace this binary with the newest release from GitHub.
@@ -30,6 +32,7 @@ Data folder (/home/you/.tether):
   .env              The API keys and the bot token.
   state.db          The sessions, the messages, and the usage.
   logs/tether.log   The log of chat and gateway.
+  backups/          The archives of tether backup.
 
 Environment:
   TETHER_HOME       The data folder, when --data-dir is not set.

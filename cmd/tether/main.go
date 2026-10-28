@@ -26,6 +26,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -77,6 +78,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runPairing(args[1:], stdout, stderr)
 	case "usage":
 		return runUsage(args[1:], stdout, stderr)
+	case "backup":
+		return runBackup(args[1:], stdout, stderr)
+	case "restore":
+		return runRestore(args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(args[1:], stdout, stderr)
 	case "setup":
@@ -205,7 +210,7 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gateway: cannot make the data folder: %v\n", err)
 		return 1
 	}
-	release, err := gateway.AcquireLock(filepath.Join(dir, "gateway.lock"))
+	release, err := gatewaylock.Acquire(filepath.Join(dir, "gateway.lock"))
 	if err != nil {
 		fmt.Fprintf(stderr, "gateway: %v\n", err)
 		return 1

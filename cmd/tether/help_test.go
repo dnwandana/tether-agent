@@ -89,7 +89,7 @@ func TestSuggestCommand(t *testing.T) {
 }
 
 func TestHelpTableOrder(t *testing.T) {
-	want := []string{"setup", "doctor", "chat", "gateway", "sessions", "skills", "pairing", "usage", "update", "version", "help"}
+	want := []string{"setup", "doctor", "chat", "gateway", "sessions", "skills", "pairing", "usage", "backup", "restore", "update", "version", "help"}
 	if len(commandHelps) != len(want) {
 		t.Fatalf("got %d entries, want %d", len(commandHelps), len(want))
 	}

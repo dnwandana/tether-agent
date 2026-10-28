@@ -213,6 +213,49 @@ Examples:
 `,
 	},
 	{
+		Name:    "backup",
+		Group:   "Manage data",
+		Summary: "Save the state to one archive, without the secrets.",
+		Usage:   "tether backup [flags]",
+		Body: `Save state.db, the memory, the skills, the scripts, and config.yaml to one
+.tar.gz archive. The command runs while the gateway runs. The archive never
+holds .env. A literal key in config.yaml becomes a ${NAME} reference, and the
+known secret values are masked. The archive holds your messages, so keep it
+private.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+  --out PATH           Write the archive to PATH. "-" writes it to stdout.
+                       The default is <data dir>/backups/.
+
+Examples:
+  tether backup
+  tether backup --out - | ssh nas 'cat > tether.tar.gz'
+`,
+	},
+	{
+		Name:    "restore",
+		Group:   "Manage data",
+		Summary: "Put an archive from tether backup back into the data folder.",
+		Usage:   "tether restore [flags] FILE",
+		Body: `Put an archive from tether backup back into the data folder. The command
+checks the whole archive first. It moves the current data to
+<data dir>/pre-restore-<time>/, so you can undo the restore by hand. Stop the
+gateway and close tether chat first. FILE "-" reads the archive from stdin and
+needs --yes.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+  --yes                Do not ask for the confirmation.
+
+Examples:
+  tether restore ~/tether-backup-20261028-174210.tar.gz
+  ssh vps tether backup --out - | tether restore --yes -
+`,
+	},
+	{
 		Name:    "update",
 		Group:   "Maintain",
 		Summary: "Replace this binary with the newest release from GitHub.",
@@ -288,6 +331,7 @@ Data folder (%s):
   .env              The API keys and the bot token.
   state.db          The sessions, the messages, and the usage.
   logs/tether.log   The log of chat and gateway.
+  backups/          The archives of tether backup.
 
 Environment:
   TETHER_HOME       The data folder, when --data-dir is not set.

@@ -1,0 +1,17 @@
+usage: tether backup [flags]
+
+Save state.db, the memory, the skills, the scripts, and config.yaml to one
+.tar.gz archive. The command runs while the gateway runs. The archive never
+holds .env. A literal key in config.yaml becomes a ${NAME} reference, and the
+known secret values are masked. The archive holds your messages, so keep it
+private.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+  --out PATH           Write the archive to PATH. "-" writes it to stdout.
+                       The default is <data dir>/backups/.
+
+Examples:
+  tether backup
+  tether backup --out - | ssh nas 'cat > tether.tar.gz'
