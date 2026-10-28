@@ -10,7 +10,7 @@ limits. Read the limits before you give the agent access to a machine that holds
 - Commands run on the host, as the user that runs Tether Agent. There is no container and no
   sandbox.
 - The approval gate checks shell commands only. It does not check the tools of MCP servers.
-- The approval gate checks the full text of each `run_script` script before the script runs. It
+- The approval gate checks the full text of each `execute_code` script before the script runs. It
   finds a dangerous command that is written in the script as literal text. It cannot find a
   command that the script builds while it runs.
 - A cron script job runs with no approval. Only files in `~/.tether/scripts/` can run as
@@ -22,8 +22,8 @@ limits. Read the limits before you give the agent access to a machine that holds
 
 ## Approval gate for commands
 
-The approval gate checks every `run_command` call. It also checks the full text of each
-`run_script` script, and each tool call of the script goes through the same checks as a model
+The approval gate checks every `terminal` call. It also checks the full text of each
+`execute_code` script, and each tool call of the script goes through the same checks as a model
 call. The gate is a port of the Hermes approval flow.
 
 ### The order of the checks
@@ -96,7 +96,7 @@ Each tool belongs to one named toolset, for example `terminal`, `file`, or `web`
   hidden tool.
 - A call to a hidden tool, for example from an old message, gives an error result.
 - A cron job and a child run can only make the toolsets of their channel smaller.
-- A cron run cannot use `cronjob` or `ask_user`.
+- A cron run cannot use `cronjob` or `clarify`.
 
 There is one exception. The background review fork gets the same tool schemas as its parent, so
 the prompt cache hits. The dispatcher permits only the `memory`, `skill_view`, and
@@ -115,8 +115,8 @@ the prompt cache hits. The dispatcher permits only the `memory`, `skill_view`, a
 
 These child processes get an environment with no secrets:
 
-- `run_command`
-- `run_script`
+- `terminal`
+- `execute_code`
 - cron scripts
 - MCP stdio servers
 - media commands
@@ -306,7 +306,7 @@ of groups are exfiltration, injection, obfuscation, and persistence.
 Do not put an API call with a key in a skill. Use this pattern:
 
 1. Put the API call in a script under `~/.tether/scripts/`.
-2. Make the skill tell the agent to run that script with `run_command`.
+2. Make the skill tell the agent to run that script with `terminal`.
 3. Give the key to the script through `required_environment_variables` or
    `terminal.env_passthrough`.
 
@@ -357,9 +357,9 @@ with the permissions of that user.
 - Do not run Tether Agent as root.
 - Keep the approval mode at `manual` or `smart` on a machine with important data.
 
-### run_script
+### execute_code
 
-`run_script` runs Python code on the host. Before the script runs, the approval gate checks the
+`execute_code` runs Python code on the host. Before the script runs, the approval gate checks the
 full text of the script, the same as a shell command. A dangerous command that is in the script
 as literal text, for example in a `subprocess` call, needs approval or is blocked. The gate
 cannot see a command that the script builds while it runs, for example from parts of a string or

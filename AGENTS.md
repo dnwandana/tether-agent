@@ -39,7 +39,7 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   2. `gateway.Gateway` runs one turn per session key. On a busy key, a plain text goes into
      the running turn as a steer (`agent.SteerQueue`), and other messages wait in the queue.
   3. `agent.Agent.RunTurn` runs the loop. It saves each message as soon as the message exists.
-  4. `tools.Registry.Dispatch` runs the tool calls. `run_command` goes through
+  4. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool goes through
      `security.Gate.Check` (the approval gate).
   5. `provider` streams the answer (`openai` or `anthropic` wire format). The fallback
      provider runs only when the primary fails before the first byte.

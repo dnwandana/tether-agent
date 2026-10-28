@@ -116,16 +116,16 @@ no parent.
 
 | Key | Default | Effect |
 |---|---|---|
-| `terminal.default_timeout_s` | `120` | The default timeout of `run_command`, in seconds. |
+| `terminal.default_timeout_s` | `120` | The default timeout of the `terminal` tool, in seconds. |
 | `terminal.env_passthrough` | `[]` | Names of secret environment variables that child processes can see. |
 
 ## code_execution
 
 | Key | Default | Effect |
 |---|---|---|
-| `code_execution.timeout_s` | `300` | The timeout of one `run_script` call, in seconds. |
-| `code_execution.max_tool_calls` | `50` | The maximum number of tool calls from one `run_script` call. |
-| `code_execution.max_stdout_bytes` | `50000` | The maximum stdout of one `run_script` call that goes back to the model. |
+| `code_execution.timeout_s` | `300` | The timeout of one `execute_code` call, in seconds. |
+| `code_execution.max_tool_calls` | `50` | The maximum number of tool calls from one `execute_code` call. |
+| `code_execution.max_stdout_bytes` | `50000` | The maximum stdout of one `execute_code` call that goes back to the model. |
 
 ## delegation
 
@@ -247,9 +247,9 @@ The command templates can use the placeholders `{text}`, `{in}`, `{out}`, `{out_
 | `media.stt.backend` | `command` | The backend of `transcribe_audio`: `command`, `endpoint`, or `""`. |
 | `media.stt.command` | `whisper-cli -m ~/models/ggml-base.bin -f {in} -otxt -of {out_base}` | The command template of `transcribe_audio`. |
 | `media.stt.provider` | `""` | The provider entry for the `endpoint` backend of `transcribe_audio`. |
-| `media.image.backend` | `""` | The backend of `image_generate`. `""` hides the tool. |
-| `media.image.command` | `""` | The command template of `image_generate`. |
-| `media.image.provider` | `""` | The provider entry for the `endpoint` backend of `image_generate`. |
+| `media.image.backend` | `""` | The backend of `generate_image`. `""` hides the tool. |
+| `media.image.command` | `""` | The command template of `generate_image`. |
+| `media.image.provider` | `""` | The provider entry for the `endpoint` backend of `generate_image`. |
 
 ## pricing
 
