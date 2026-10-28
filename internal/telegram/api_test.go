@@ -335,3 +335,74 @@ func TestGetUpdatesAsksForEditedMessages(t *testing.T) {
 		t.Fatalf("%+v", ups[0])
 	}
 }
+
+func TestSendRichMessageBody(t *testing.T) {
+	var gotMethod string
+	var got map[string]any
+	srv := tgServer(t, func(method string, body map[string]any) any {
+		gotMethod, got = method, body
+		return map[string]any{"message_id": 5, "chat": map[string]any{"id": 42}}
+	})
+	c := &Client{Token: "T", BaseURL: srv.URL, HC: srv.Client()}
+	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{{{Text: "Today", CallbackData: "cmd:1:usage today"}}}}
+	m, err := c.SendRichMessage(ctx, SendRichMessageParams{
+		ChatID: 42, MessageThreadID: 7,
+		RichMessage: InputRichMessage{Markdown: "| a |\n|--|\n| 1 |"},
+		ReplyMarkup: kb,
+	})
+	if err != nil || m.MessageID != 5 {
+		t.Fatal(m, err)
+	}
+	if gotMethod != "sendRichMessage" {
+		t.Fatalf("method %q", gotMethod)
+	}
+	if got["chat_id"] != float64(42) || got["message_thread_id"] != float64(7) {
+		t.Fatalf("body %v", got)
+	}
+	if !reflect.DeepEqual(got["rich_message"], map[string]any{"markdown": "| a |\n|--|\n| 1 |"}) {
+		t.Fatalf("rich_message %v", got["rich_message"])
+	}
+	if _, ok := got["reply_markup"]; !ok {
+		t.Fatalf("no reply_markup: %v", got)
+	}
+}
+
+func TestEditMessageTextRich(t *testing.T) {
+	var gotMethod string
+	var got map[string]any
+	srv := tgServer(t, func(method string, body map[string]any) any {
+		gotMethod, got = method, body
+		return map[string]any{"message_id": 9, "chat": map[string]any{"id": 42}}
+	})
+	c := &Client{Token: "T", BaseURL: srv.URL, HC: srv.Client()}
+	if _, err := c.EditMessageText(ctx, EditMessageTextParams{ChatID: 42, MessageID: 9, RichMessage: &InputRichMessage{Markdown: "x"}}); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "editMessageText" {
+		t.Fatalf("method %q", gotMethod)
+	}
+	if !reflect.DeepEqual(got["rich_message"], map[string]any{"markdown": "x"}) {
+		t.Fatalf("rich_message %v", got["rich_message"])
+	}
+	if _, ok := got["text"]; ok {
+		t.Fatalf("rich edit must leave out text: %v", got)
+	}
+}
+
+func TestEditMessageTextPlainUnchanged(t *testing.T) {
+	var got map[string]any
+	srv := tgServer(t, func(method string, body map[string]any) any {
+		got = body
+		return map[string]any{"message_id": 9, "chat": map[string]any{"id": 42}}
+	})
+	c := &Client{Token: "T", BaseURL: srv.URL, HC: srv.Client()}
+	if _, err := c.EditMessageText(ctx, EditMessageTextParams{ChatID: 42, MessageID: 9, Text: "hi", ParseMode: "MarkdownV2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got["text"] != "hi" || got["parse_mode"] != "MarkdownV2" {
+		t.Fatalf("body %v", got)
+	}
+	if _, ok := got["rich_message"]; ok {
+		t.Fatalf("plain edit must leave out rich_message: %v", got)
+	}
+}

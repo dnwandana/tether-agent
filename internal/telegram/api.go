@@ -196,12 +196,29 @@ type SendMessageParams struct {
 	ReplyParameters *ReplyParameters      `json:"reply_parameters,omitempty"`
 }
 
-// EditMessageTextParams are the editMessageText parameters.
+// InputRichMessage is a rich message to send. Tether Agent uses only the
+// Markdown form, which is GitHub Flavored Markdown.
+type InputRichMessage struct {
+	Markdown string `json:"markdown"`
+}
+
+// SendRichMessageParams are the sendRichMessage parameters. A zero
+// MessageThreadID is left out. Use ThreadParam to set it.
+type SendRichMessageParams struct {
+	ChatID          int64                 `json:"chat_id"`
+	MessageThreadID int                   `json:"message_thread_id,omitempty"`
+	RichMessage     InputRichMessage      `json:"rich_message"`
+	ReplyMarkup     *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+}
+
+// EditMessageTextParams are the editMessageText parameters. Set Text for a
+// plain edit, or RichMessage for a rich edit. The empty one is left out.
 type EditMessageTextParams struct {
 	ChatID      int64                 `json:"chat_id"`
 	MessageID   int                   `json:"message_id"`
-	Text        string                `json:"text"`
+	Text        string                `json:"text,omitempty"`
 	ParseMode   string                `json:"parse_mode,omitempty"`
+	RichMessage *InputRichMessage     `json:"rich_message,omitempty"`
 	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }
 
@@ -394,6 +411,13 @@ func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutS int) ([]
 func (c *Client) SendMessage(ctx context.Context, p SendMessageParams) (Message, error) {
 	var m Message
 	err := c.Call(ctx, "sendMessage", p, &m)
+	return m, err
+}
+
+// SendRichMessage sends a rich message, for example a Markdown table.
+func (c *Client) SendRichMessage(ctx context.Context, p SendRichMessageParams) (Message, error) {
+	var m Message
+	err := c.Call(ctx, "sendRichMessage", p, &m)
 	return m, err
 }
 
