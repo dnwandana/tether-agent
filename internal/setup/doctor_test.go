@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/config"
 )
 
 // ctx is the context of the calls in the tests.
@@ -67,7 +69,9 @@ func botServer(t *testing.T, results map[string]func() any) *httptest.Server {
 // okTelegram is a fake Bot API whose getMe works.
 func okTelegram(t *testing.T) *httptest.Server {
 	return botServer(t, map[string]func() any{
-		"getMe": func() any { return map[string]any{"id": 99, "is_bot": true, "username": "tether_test_bot"} },
+		"getMe": func() any {
+			return map[string]any{"id": 99, "is_bot": true, "username": "tether_test_bot", "can_read_all_group_messages": true}
+		},
 	})
 }
 
@@ -414,5 +418,40 @@ func TestRunEndsWithReleaseCheck(t *testing.T) {
 	}
 	if got := n.Load(); got != 0 {
 		t.Fatalf("a dev build made %d requests", got)
+	}
+}
+
+func TestTelegramPrivacyMode(t *testing.T) {
+	const detail = "getMe works for @tether_test_bot, but privacy mode is on. In a group, the bot gets only commands and mentions, but the config needs every group message."
+	const next = "turn off privacy mode with /setprivacy in @BotFather, then remove the bot from each group and add it again"
+	cases := []struct {
+		name    string
+		canRead bool
+		mut     func(*config.TelegramConfig)
+		warn    bool
+	}{
+		{"default config, privacy on", false, nil, true},
+		{"default config, privacy off", true, nil, false},
+		{"mention required, privacy on", false, func(c *config.TelegramConfig) { c.RequireMention = true }, false},
+		{"pattern, privacy on", false, func(c *config.TelegramConfig) { c.RequireMention = true; c.MentionPatterns = []string{"^tether"} }, true},
+		{"free response, privacy on", false, func(c *config.TelegramConfig) { c.RequireMention = true; c.FreeResponseChats = []string{"-100"} }, true},
+		{"observe, privacy on", false, func(c *config.TelegramConfig) { c.RequireMention = true; c.ObserveUnmentionedGroupMessages = true }, true},
+	}
+	for _, c := range cases {
+		srv := botServer(t, map[string]func() any{"getMe": func() any {
+			return map[string]any{"id": 99, "is_bot": true, "username": "tether_test_bot", "can_read_all_group_messages": c.canRead}
+		}})
+		cfg := config.Default()
+		cfg.Telegram.Enabled, cfg.Telegram.BotToken = true, "T"
+		if c.mut != nil {
+			c.mut(&cfg.Telegram)
+		}
+		got := (&Doctor{TelegramBase: srv.URL, HC: srv.Client()}).checkTelegram(ctx, &cfg)
+		switch {
+		case c.warn && (got.Status != StatusWarn || got.Detail != detail || got.Next != next):
+			t.Errorf("%s: %+v", c.name, got)
+		case !c.warn && (got.Status != StatusOK || got.Detail != "getMe works for @tether_test_bot"):
+			t.Errorf("%s: %+v", c.name, got)
+		}
 	}
 }

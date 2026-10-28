@@ -295,8 +295,22 @@ func (d *Doctor) checkTelegram(ctx context.Context, cfg *config.Config) Check {
 		c.Next = "check the bot token with @BotFather, then set TELEGRAM_BOT_TOKEN in .env"
 		return c
 	}
+	if needsAllGroupMessages(tg) && !me.CanReadAllGroupMessages {
+		c.Status = StatusWarn
+		c.Detail = "getMe works for @" + me.Username + ", but privacy mode is on. In a group, the bot gets only commands and mentions, but the config needs every group message."
+		c.Next = "turn off privacy mode with /setprivacy in @BotFather, then remove the bot from each group and add it again"
+		return c
+	}
 	c.Detail = "getMe works for @" + me.Username
 	return c
+}
+
+// needsAllGroupMessages reports whether the config needs the plain group messages that
+// BotFather privacy mode blocks. A text that matches a mention pattern is plain text, not a
+// mention, so privacy mode also blocks it.
+func needsAllGroupMessages(tg config.TelegramConfig) bool {
+	return !tg.RequireMention || len(tg.FreeResponseChats) > 0 ||
+		tg.ObserveUnmentionedGroupMessages || len(tg.MentionPatterns) > 0
 }
 
 // checkStateDB opens state.db, which also applies the missing migrations. A missing file
