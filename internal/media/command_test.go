@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/hostos"
 )
 
 // ctx is the context for the media calls in the tests.
@@ -170,6 +172,25 @@ func TestMissingProgramHint(t *testing.T) {
 	b.Template = "edge-tts-missing-tether --text {text}"
 	if err := b.Run(ctx, nil); err == nil || !strings.Contains(err.Error(), "install it") {
 		t.Fatal(err)
+	}
+
+	// The hint gives the command of the host system only.
+	t.Cleanup(hostos.Set(hostos.Ubuntu))
+	cases := []struct {
+		sys      hostos.System
+		template string
+		want     string
+	}{
+		{hostos.Ubuntu, "/nonexistent-tether/ffmpeg -i {in}", "ffmpeg not found; install it (for example: sudo apt install ffmpeg) or change media.*.command"},
+		{hostos.Ubuntu, "/nonexistent-tether/whisper-cli {in}", "whisper-cli not found; build whisper-cli from whisper.cpp and put it on PATH or change media.*.command"},
+		{hostos.MacOS, "/nonexistent-tether/ffmpeg -i {in}", "ffmpeg not found; install it (for example: brew install ffmpeg) or change media.*.command"},
+	}
+	for _, tc := range cases {
+		hostos.Set(tc.sys) // The first Cleanup restores the system.
+		b.Template = tc.template
+		if err := b.Run(ctx, map[string]string{"in": "x"}); err == nil || err.Error() != tc.want {
+			t.Errorf("%s, %s: got %v, want %q", tc.sys, tc.template, err, tc.want)
+		}
 	}
 }
 

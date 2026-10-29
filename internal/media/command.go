@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/hostos"
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
@@ -32,13 +33,6 @@ const (
 
 // placeholders are the names that Expand replaces, as {name}.
 var placeholders = []string{"text", "in", "out", "out_base", "prompt", "size"}
-
-// installHints gives an install example for the default programs.
-var installHints = map[string]string{
-	"edge-tts":    "pipx install edge-tts",
-	"whisper-cli": "build whisper.cpp, or brew install whisper-cpp",
-	"ffmpeg":      "apt install ffmpeg, or brew install ffmpeg",
-}
 
 // SplitTemplate splits a command template into argv. It reads the quoting
 // like a POSIX shell: single quotes, double quotes, and backslash. It does
@@ -158,6 +152,21 @@ type CommandBackend struct {
 	Env      []string
 }
 
+// missingHint tells how to install prog on the host system. It gives the
+// command of that system only.
+func missingHint(prog string) string {
+	sys := hostos.Current()
+	name, command := hostos.Install(sys, prog)
+	switch {
+	case name == "":
+		return "install it"
+	case command != "":
+		return "install it (for example: " + command + ")"
+	default:
+		return hostos.HintFor(sys, prog)
+	}
+}
+
 // Run expands the template with vals and runs the program directly, with no
 // shell. It returns an error with the tail of stderr when the program fails.
 func (b *CommandBackend) Run(ctx context.Context, vals map[string]string) error {
@@ -169,11 +178,7 @@ func (b *CommandBackend) Run(ctx context.Context, vals map[string]string) error 
 	prog := filepath.Base(argv[0])
 	path, err := exec.LookPath(argv[0])
 	if err != nil {
-		hint := "install it"
-		if h, ok := installHints[prog]; ok {
-			hint = "install it (for example: " + h + ")"
-		}
-		return fmt.Errorf("%s not found; %s or change media.*.command", prog, hint)
+		return fmt.Errorf("%s not found; %s or change media.*.command", prog, missingHint(prog))
 	}
 	if b.WorkDir != "" {
 		if err := os.MkdirAll(b.WorkDir, 0o700); err != nil {
