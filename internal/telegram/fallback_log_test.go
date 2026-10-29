@@ -12,11 +12,20 @@ import (
 const fallbackMsg = `msg="telegram: Telegram rejected the MarkdownV2 text, sent it as plain text"`
 
 // captureLog returns a logger that writes text lines at the Debug level and above to the
-// returned buffer.
+// returned buffer. The lines have no time, so a check of the text does not depend on the clock.
 func captureLog(t *testing.T) (*slog.Logger, *bytes.Buffer) {
 	t.Helper()
 	buf := &bytes.Buffer{}
-	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})), buf
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	}
+	return slog.New(slog.NewTextHandler(buf, opts)), buf
 }
 
 // logLines returns the lines in buf that are not empty.
