@@ -255,7 +255,7 @@ func Default() Config {
 	return Config{
 		Providers: map[string]Provider{},
 		Agent: AgentConfig{
-			MaxTurns:        40,
+			MaxTurns:        90,
 			ToolConcurrency: 4,
 		},
 		Context: ContextConfig{

@@ -46,7 +46,7 @@ Other keys can refer to any entry by its name.
 
 | Key | Default | Effect |
 |---|---|---|
-| `agent.max_turns` | `40` | The maximum number of tool rounds in one turn. |
+| `agent.max_turns` | `90` | The maximum number of tool rounds in one turn. |
 | `agent.tool_concurrency` | `4` | The maximum number of tool calls that run at the same time in one round. |
 | `agent.vision_provider` | `""` | The provider for `view_image`. `""` uses the primary provider when it has `vision: true`. Else the agent has no `view_image` tool. |
 | `agent.delegation_provider` | `""` | The provider for child runs of `delegate_task`. `""` uses the provider of the parent. |

@@ -41,7 +41,7 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 ## Main config keys
 
 - `providers.primary` and `providers.fallback`: `format`, `base_url`, `api_key`, and `model`.
-- `agent.max_turns`: 40 tool rounds in one turn.
+- `agent.max_turns`: 90 tool rounds in one turn.
 - `context.compact_threshold`: 0.50. `context.tool_output_max_chars`: 50000.
 - `memory.memory_char_limit`: 2200. `memory.user_char_limit`: 1375.
 - `skills.external_dirs`: read-only skill folders. `skills.guard`: true.

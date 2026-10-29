@@ -15,7 +15,7 @@ func eq[T comparable](t *testing.T, got, want T) {
 
 func TestDefaultsMatchSpec(t *testing.T) {
 	c := Default()
-	eq(t, c.Agent.MaxTurns, 40)
+	eq(t, c.Agent.MaxTurns, 90)
 	eq(t, c.Agent.ToolConcurrency, 4)
 	eq(t, c.Context.CompactThreshold, 0.50)
 	eq(t, c.Context.ProtectFirstN, 3)
