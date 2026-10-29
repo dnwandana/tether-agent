@@ -42,7 +42,46 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	code := run(os.Args[1:], os.Stdout, os.Stderr)
+	if code == exitExecRestart {
+		// execSelf returns only when the exec fails.
+		err := execSelf()
+		fmt.Fprintf(os.Stderr, "gateway: cannot start the gateway again: %v. Start it again by hand.\n", err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+// exitServiceRestart is the exit code of a restart under systemd. The unit lists it in
+// RestartForceExitStatus and SuccessExitStatus (EX_TEMPFAIL, as in Hermes).
+const exitServiceRestart = 75
+
+// exitExecRestart is the value that run returns when the gateway must start itself again
+// without a service manager. Only main acts on it.
+const exitExecRestart = -75
+
+// restartExitCode returns the exit code for a stop reason. A plain signal exits with 0.
+// A reload or a restart exits with 75 under systemd (INVOCATION_ID is set). Else it asks
+// main to exec the binary again.
+func restartExitCode(reason string, getenv func(string) string) int {
+	if reason != "reload" && reason != "restart" {
+		return 0
+	}
+	if getenv("INVOCATION_ID") != "" {
+		return exitServiceRestart
+	}
+	return exitExecRestart
+}
+
+// execSelf replaces the process with a new copy of the same binary. It returns only on
+// failure. Hermes starts a detached copy here, and an exec is the simple form in Go. The
+// lock file has close-on-exec, and runGateway already released it.
+func execSelf() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	return syscall.Exec(exe, os.Args, os.Environ())
 }
 
 // run executes the subcommand in args and returns the process exit code. Bare tether prints
@@ -170,9 +209,15 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 // gateway without a signal.
 var gatewayContext = context.Background
 
-// shutdownWait is the maximum time that the gateway waits for the running turns at a stop.
+// drainOf returns the maximum time that the gateway waits for the running turns at a stop.
 // The turns that still run after it are cancelled.
-const shutdownWait = 10 * time.Second
+func drainOf(cfg *config.Config) time.Duration {
+	return time.Duration(cfg.Agent.RestartDrainTimeoutS) * time.Second
+}
+
+// gatewayUnitPaths replaces the unit files that the boot check reads. Tests set it. Nil
+// uses the default unit paths.
+var gatewayUnitPaths []string
 
 // shutdownGrace is the maximum time that the gateway waits for the cancelled work at a
 // stop. Hermes also waits 5 s after it interrupts the running agents.
@@ -180,6 +225,13 @@ const shutdownGrace = 5 * time.Second
 
 // notifyContext is signal.NotifyContext. Tests replace it.
 var notifyContext = signal.NotifyContext
+
+// notifySignal is signal.Notify for SIGUSR1, the reload signal of the unit. Tests replace it.
+var notifySignal = signal.Notify
+
+// stopStepLimit is the maximum time of the notify step and of the stopping step. Each step
+// has its own limit, so it takes no time from the drain.
+const stopStepLimit = 5 * time.Second
 
 // turnContextSetter is a channel that runs its turns under a separate context. The Run
 // context of such a channel stops only its receive loop, so the running turns can end at a
@@ -220,6 +272,11 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	defer release()
 	ctx, stop := notifyContext(gatewayContext(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// SIGUSR1 restarts the gateway. Keep the handler until the return: the default action
+	// of SIGUSR1 ends the process at once.
+	reload := make(chan os.Signal, 1)
+	notifySignal(reload, syscall.SIGUSR1)
+	defer signal.Stop(reload)
 	// Only the gateway role builds the cron scheduler and polls Telegram.
 	a, err := app.New(ctx, app.Options{DataDir: dir, LogStderr: *logStderr, LogLevel: *logLevel, LogWriter: stderr,
 		Gateway: true, TelegramBaseURL: telegramBaseURL})
@@ -239,6 +296,7 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	} else {
 		log.Info("telegram is disabled, so a cron job cannot deliver to a chat", "setting", "telegram.enabled")
 	}
+	warnOldUnit(log, a.Cfg)
 	if addr := os.Getenv("TETHER_PPROF"); addr != "" {
 		srv, err := startPprof(addr)
 		if err != nil {
@@ -261,6 +319,8 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		a.Batches.Ctx = workCtx
 	}
 	a.Agent.Background = workCtx
+	// The restart line goes out before the replies of the resumed turns.
+	a.BootNotice(workCtx, version)
 	a.Housekeeping(workCtx)
 	a.Prices.Start(workCtx)
 	gw := a.Gateway()
@@ -289,10 +349,23 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	}()
 	log.Info("gateway started", "pid", os.Getpid(), "channels", len(gw.Channels))
 
-	<-ctx.Done()
+	// reason is the stop reason: "signal", "reload", or "restart". skipKey is the key that
+	// sent /restart. Its command reply already tells the chat, so it gets no stop notice.
+	var reason, skipKey string
+	select {
+	case <-ctx.Done():
+		reason = "signal"
+	case <-reload:
+		reason = "reload"
+	case req := <-a.Restarts():
+		reason, skipKey = req.Reason, req.Key
+	}
+	// From now on, a /restart starts no new stop, and a SIGUSR1 has no effect.
+	a.MarkStopping()
 	// Restore the default signal action now, so that a second Ctrl-C ends the process.
 	stop()
-	log.Info("gateway stopping")
+	drain := drainOf(a.Cfg)
+	log.Info("gateway stopping", "reason", reason, "busy_keys", len(gw.BusyKeys()), "drain", drain.String())
 	waits := []stopWait{
 		{name: "channels", wait: waitChan(channelsDone)},
 		{name: "cron", wait: waitChan(schedDone)},
@@ -302,17 +375,50 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		waits = append(waits, stopWait{name: "background delegations", wait: a.Batches.Wait})
 	}
 	gatewayStop{
-		drain:       shutdownWait,
-		grace:       shutdownGrace,
+		drain: drain,
+		grace: shutdownGrace,
+		begin: func() {
+			gw.StopStarted()
+			a.WriteAliveAt(base)
+		},
 		stopReceive: stopRecv,
-		waitTurns:   gw.Wait,
-		stopWork:    stopWork,
-		waits:       waits,
-		log:         log,
+		notify: func() {
+			nctx, cancel := context.WithTimeout(base, stopStepLimit)
+			defer cancel()
+			gw.NotifyStopping(nctx, gateway.StopNotice(reason, drain), skipKey)
+		},
+		stopping: func() {
+			sctx, cancel := context.WithTimeout(base, stopStepLimit)
+			defer cancel()
+			gw.BeginStopping(sctx)
+		},
+		waitTurns: gw.Wait,
+		stopWork:  stopWork,
+		waits:     waits,
+		log:       log,
 	}.run()
 	// The deferred a.Close closes MCP, Chrome, and the database last.
 	log.Info("gateway stopped")
-	return 0
+	return restartExitCode(reason, os.Getenv)
+}
+
+// warnOldUnit logs one warning when the gateway runs under systemd with a unit file that
+// is too old for the restart. It does nothing outside systemd or when no unit file exists.
+func warnOldUnit(log *slog.Logger, cfg *config.Config) {
+	if os.Getenv("INVOCATION_ID") == "" {
+		return
+	}
+	path, text, ok := setup.FindUnit(gatewayUnitPaths)
+	if !ok {
+		return
+	}
+	problems := setup.UnitProblems(text, cfg.Agent.RestartDrainTimeoutS)
+	if len(problems) == 0 {
+		return
+	}
+	system := strings.HasPrefix(path, "/etc/systemd/system/")
+	log.Warn("gateway: the systemd unit is old", "path", path,
+		"problems", strings.Join(problems, " "), "next", setup.UnitNext(system))
 }
 
 // gatewayStop holds the steps of a gateway stop.
@@ -320,8 +426,15 @@ type gatewayStop struct {
 	// drain is the maximum time for the running turns. grace is the maximum time for the
 	// cancelled work.
 	drain, grace time.Duration
+	// begin marks the start of the stop, before the receive loops stop. A nil field is skipped.
+	begin func()
 	// stopReceive stops the receive loops of the channels.
 	stopReceive func()
+	// notify tells the busy chats that the gateway stops. A nil field is skipped.
+	notify func()
+	// stopping runs when the drain time ends and some turns still run. A nil field is
+	// skipped.
+	stopping func()
 	// waitTurns waits for the running turns. It returns false at the timeout.
 	waitTurns func(timeout time.Duration) bool
 	// stopWork cancels the turns, the background work, and the cron scheduler.
@@ -342,9 +455,21 @@ type stopWait struct {
 // messages, so no new turn starts. Then the running turns get the drain time to end.
 // Then the remaining work is cancelled, and each part gets the rest of the grace time.
 func (s gatewayStop) run() {
+	if s.begin != nil {
+		s.begin()
+	}
 	s.stopReceive()
-	if !s.waitTurns(s.drain) {
+	if s.notify != nil {
+		s.notify()
+	}
+	start := time.Now()
+	if s.waitTurns(s.drain) {
+		s.log.Info("gateway: all turns ended", "wait", time.Since(start).Round(time.Millisecond).String())
+	} else {
 		s.log.Warn("gateway: some turns did not end in time, so the gateway cancels them", "wait", s.drain.String())
+		if s.stopping != nil {
+			s.stopping()
+		}
 	}
 	s.stopWork()
 	end := time.Now().Add(s.grace)
@@ -739,6 +864,54 @@ func (p *termPrompter) Confirm(question string) (bool, error) {
 	}
 	answer := strings.ToLower(line)
 	return answer == "y" || answer == "yes", nil
+}
+
+// ConfirmYes prints the question with " [Y/n] " and returns true for an empty answer, y, or
+// yes, and false for n or no. Another answer asks again. An end of input or an interrupt is
+// a no.
+func (p *termPrompter) ConfirmYes(question string) (bool, error) {
+	type result struct {
+		line string
+		err  error
+	}
+	ctx := p.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		fmt.Fprint(p.out, question+" [Y/n] ")
+		// The read runs apart, like readLine, because a terminal read does not see ctx.
+		// readLine is not used here: it gives "" at an end of input, and "" is a yes here.
+		done := make(chan result, 1)
+		go func() {
+			line, err := p.r.ReadString('\n')
+			done <- result{line, err}
+		}()
+		var line string
+		var err error
+		select {
+		case <-ctx.Done():
+			fmt.Fprintln(p.out)
+			return false, nil
+		case r := <-done:
+			line, err = r.line, r.err
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return false, err
+		}
+		if err != nil && strings.TrimSpace(line) == "" {
+			return false, nil
+		}
+		switch strings.ToLower(strings.TrimSpace(line)) {
+		case "", "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		}
+		if err != nil {
+			return false, nil
+		}
+	}
 }
 
 // Ask prints the question and returns the trimmed answer.

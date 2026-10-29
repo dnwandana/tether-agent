@@ -16,9 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/provider"
@@ -420,6 +422,8 @@ func writeChatConfig(t *testing.T, dir, url string) {
 }
 
 func TestGatewaySubcommandLockAndChat(t *testing.T) {
+	// An INVOCATION_ID from the environment turns on the unit check and the exit code 75.
+	t.Setenv("INVOCATION_ID", "")
 	sse, err := os.ReadFile("../../internal/provider/testdata/openai_text_stream.sse")
 	if err != nil {
 		t.Fatal(err)
@@ -557,6 +561,8 @@ func TestGatewayTelegramNeedsToken(t *testing.T) {
 }
 
 func TestGatewayStartsTelegramAndCron(t *testing.T) {
+	// An INVOCATION_ID from the environment turns on the unit check and the exit code 75.
+	t.Setenv("INVOCATION_ID", "")
 	var (
 		mu    sync.Mutex
 		calls []string
@@ -790,7 +796,115 @@ func TestStopGatewayCancelsTurnsAfterTheDrain(t *testing.T) {
 	}
 }
 
+func TestStopGatewayLogsTheRealWait(t *testing.T) {
+	var logb bytes.Buffer
+	s := gatewayStop{drain: time.Second, grace: 10 * time.Millisecond,
+		stopReceive: func() {}, stopWork: func() {},
+		waitTurns: func(time.Duration) bool { time.Sleep(20 * time.Millisecond); return true },
+		log:       slog.New(slog.NewTextHandler(&logb, nil))}
+	s.run()
+	if !strings.Contains(logb.String(), `msg="gateway: all turns ended"`) || !strings.Contains(logb.String(), "wait=") {
+		t.Fatal(logb.String())
+	}
+}
+
+func TestDrainOf(t *testing.T) {
+	cfg := config.Default()
+	if got := drainOf(&cfg); got != 180*time.Second {
+		t.Fatal(got)
+	}
+	cfg.Agent.RestartDrainTimeoutS = 1
+	if got := drainOf(&cfg); got != time.Second {
+		t.Fatal(got)
+	}
+	cfg.Agent.RestartDrainTimeoutS = 0
+	if got := drainOf(&cfg); got != 0 {
+		t.Fatal(got)
+	}
+}
+
+// runGatewayForLog starts the gateway on a data folder with the extra config text, waits
+// for the start, stops the gateway, and returns the log text.
+func runGatewayForLog(t *testing.T, extraConfig string) string {
+	t.Helper()
+	t.Setenv("TETHER_HOME", t.TempDir())
+	t.Setenv("TETHER_PPROF", "")
+	dir := t.TempDir()
+	writeChatConfig(t, dir, "http://127.0.0.1:1")
+	if extraConfig != "" {
+		f, err := os.OpenFile(filepath.Join(dir, "config.yaml"), os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = f.WriteString(extraConfig)
+		f.Close()
+	}
+	gctx, cancel := context.WithCancel(context.Background())
+	gatewayContext = func() context.Context { return gctx }
+	t.Cleanup(func() { gatewayContext = context.Background })
+	exit := make(chan int, 1)
+	var gout, gerr bytes.Buffer
+	go func() { exit <- run([]string{"gateway", "--data-dir", dir}, &gout, &gerr) }()
+	logPath := filepath.Join(dir, "logs", "tether.log")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		b, _ := os.ReadFile(logPath)
+		if strings.Contains(string(b), "gateway started") {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("the gateway did not start: ", gerr.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case code := <-exit:
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, gerr.String())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the gateway did not stop")
+	}
+	b, _ := os.ReadFile(logPath)
+	return string(b)
+}
+
+func TestGatewayStoppingLogsTheDrain(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "")
+	got := runGatewayForLog(t, "agent:\n  restart_drain_timeout_s: 1\n")
+	if !strings.Contains(got, `"msg":"gateway stopping"`) || !strings.Contains(got, `"drain":"1s"`) {
+		t.Fatal(got)
+	}
+}
+
+func TestGatewayBootWarnsAboutAnOldUnit(t *testing.T) {
+	unit := filepath.Join(t.TempDir(), "tether.service")
+	if err := os.WriteFile(unit, []byte("[Service]\nExecStart=x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := gatewayUnitPaths
+	gatewayUnitPaths = []string{unit}
+	t.Cleanup(func() { gatewayUnitPaths = old })
+
+	t.Setenv("INVOCATION_ID", "x")
+	got := runGatewayForLog(t, "")
+	if !strings.Contains(got, "gateway: the systemd unit is old") ||
+		!strings.Contains(got, "The unit has no TimeoutStopSec, so systemd stops the gateway after 90 s. The drain is 180 s.") {
+		t.Fatal(got)
+	}
+
+	t.Setenv("INVOCATION_ID", "")
+	got = runGatewayForLog(t, "")
+	if strings.Contains(got, "the systemd unit is old") {
+		t.Fatal("no warning is expected outside systemd: ", got)
+	}
+}
+
 func TestGatewayFirstSignalRestoresTheDefault(t *testing.T) {
+	// An INVOCATION_ID from the environment turns on the unit check and the exit code 75.
+	t.Setenv("INVOCATION_ID", "")
 	t.Setenv("TETHER_HOME", t.TempDir())
 	t.Setenv("TETHER_PPROF", "")
 	dir := t.TempDir()
@@ -1384,5 +1498,123 @@ func TestSkillsUpdateCLI(t *testing.T) {
 	errb.Reset()
 	if code := run([]string{"skills", "update", "--skill", "x"}, &out, &errb); code != 2 {
 		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+}
+
+func TestStopGatewayStepOrder(t *testing.T) {
+	for _, c := range []struct {
+		turnsEnd bool
+		want     string
+	}{
+		{false, "begin receive notify drain stopping work"},
+		{true, "begin receive notify drain work"},
+	} {
+		ev := &stopEvents{}
+		s := gatewayStop{
+			drain:       time.Millisecond,
+			grace:       time.Millisecond,
+			begin:       func() { ev.add("begin") },
+			stopReceive: func() { ev.add("receive") },
+			notify:      func() { ev.add("notify") },
+			waitTurns:   func(time.Duration) bool { ev.add("drain"); return c.turnsEnd },
+			stopping:    func() { ev.add("stopping") },
+			stopWork:    func() { ev.add("work") },
+			log:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		}
+		s.run()
+		if got := ev.list(); got != c.want {
+			t.Fatalf("turnsEnd %v: got %q, want %q", c.turnsEnd, got, c.want)
+		}
+	}
+}
+
+func TestGatewayReloadSignalStops(t *testing.T) {
+	t.Setenv("TETHER_HOME", t.TempDir())
+	t.Setenv("TETHER_PPROF", "")
+	t.Setenv("INVOCATION_ID", "")
+	dir := t.TempDir()
+	writeChatConfig(t, dir, "http://127.0.0.1:1")
+	// The fake sends SIGUSR1 at once. No real signal goes to the test process.
+	notifySignal = func(c chan<- os.Signal, _ ...os.Signal) { c <- syscall.SIGUSR1 }
+	t.Cleanup(func() { notifySignal = signal.Notify })
+	exit := make(chan int, 1)
+	var gout, gerr bytes.Buffer
+	go func() { exit <- run([]string{"gateway", "--data-dir", dir}, &gout, &gerr) }()
+	select {
+	case code := <-exit:
+		if code != exitExecRestart {
+			t.Fatalf("exit %d: %s", code, gerr.String())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the gateway did not stop at SIGUSR1")
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "logs", "tether.log"))
+	got := string(b)
+	if !strings.Contains(got, `"msg":"gateway stopping"`) || !strings.Contains(got, `"reason":"reload"`) ||
+		!strings.Contains(got, `"busy_keys":0`) {
+		t.Fatal(got)
+	}
+}
+
+func TestGatewaySignalStopReason(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "")
+	got := runGatewayForLog(t, "")
+	if !strings.Contains(got, `"msg":"gateway stopping"`) || !strings.Contains(got, `"reason":"signal"`) {
+		t.Fatal(got)
+	}
+}
+
+func TestRestartExitCode(t *testing.T) {
+	sd := func(k string) string {
+		if k == "INVOCATION_ID" {
+			return "abc"
+		}
+		return ""
+	}
+	none := func(string) string { return "" }
+	for _, c := range []struct {
+		reason string
+		env    func(string) string
+		want   int
+	}{
+		{"signal", sd, 0}, {"signal", none, 0},
+		{"reload", sd, 75}, {"restart", sd, 75},
+		{"reload", none, exitExecRestart}, {"restart", none, exitExecRestart},
+	} {
+		if got := restartExitCode(c.reason, c.env); got != c.want {
+			t.Fatalf("%s: %d, want %d", c.reason, got, c.want)
+		}
+	}
+}
+
+func TestGatewayReloadReturns75UnderSystemd(t *testing.T) {
+	t.Setenv("TETHER_HOME", t.TempDir())
+	t.Setenv("TETHER_PPROF", "")
+	t.Setenv("INVOCATION_ID", "x")
+	old := gatewayUnitPaths
+	gatewayUnitPaths = []string{filepath.Join(t.TempDir(), "no-unit.service")}
+	t.Cleanup(func() { gatewayUnitPaths = old })
+	dir := t.TempDir()
+	writeChatConfig(t, dir, "http://127.0.0.1:1")
+	notifySignal = func(c chan<- os.Signal, _ ...os.Signal) { c <- syscall.SIGUSR1 }
+	t.Cleanup(func() { notifySignal = signal.Notify })
+	exit := make(chan int, 1)
+	var gout, gerr bytes.Buffer
+	go func() { exit <- run([]string{"gateway", "--data-dir", dir}, &gout, &gerr) }()
+	select {
+	case code := <-exit:
+		if code != 75 {
+			t.Fatalf("exit %d: %s", code, gerr.String())
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the gateway did not stop at SIGUSR1")
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "logs", "tether.log"))
+	if !strings.Contains(string(b), `"msg":"gateway stopped"`) {
+		t.Fatal(string(b))
+	}
+	// The unit check must read no unit file of the host.
+	if strings.Contains(string(b), "the systemd unit is old") {
+		t.Fatal("the test read a unit file of the host: ", string(b))
 	}
 }

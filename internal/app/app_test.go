@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -370,9 +372,27 @@ func fakeBotAPI(t *testing.T, getMeOK bool) (string, *[]string, *sync.Mutex) {
 	return srv.URL, &calls, &mu
 }
 
+// keepCommandTable restores the global command table at the end of t. The gateway role
+// registers /restart in it.
+func keepCommandTable(t *testing.T) {
+	t.Helper()
+	saved := gateway.Commands()
+	t.Cleanup(func() {
+		for name := range gateway.Commands() {
+			if _, ok := saved[name]; !ok {
+				gateway.Unregister(name)
+			}
+		}
+		for _, c := range saved {
+			gateway.Register(c)
+		}
+	})
+}
+
 // gatewayApp returns an App of the gateway role with the Telegram config in extra.
 func gatewayApp(t *testing.T, botURL string, extra string) *App {
 	t.Helper()
+	keepCommandTable(t)
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	dir := t.TempDir()
 	writeConfig(t, dir, fakeProviderURL(t), extra)
@@ -726,5 +746,277 @@ func TestCronChatIDs(t *testing.T) {
 	}
 	if got := cronChatIDs(jobs); !slices.Equal(got, []string{"-100", "-200", "-300", "-400"}) {
 		t.Fatal(got)
+	}
+}
+
+func TestGateInGatewayOnlyForGatewayRole(t *testing.T) {
+	keepCommandTable(t)
+	for _, role := range []bool{true, false} {
+		dir := t.TempDir()
+		writeConfig(t, dir, fakeProviderURL(t))
+		a, err := New(ctx, Options{DataDir: dir, Gateway: role})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a.Gate.InGateway != role {
+			t.Fatalf("gateway role %v: Gate.InGateway %v", role, a.Gate.InGateway)
+		}
+		a.Close()
+	}
+}
+
+func TestGatewayToolsGetInGateway(t *testing.T) {
+	keepCommandTable(t)
+	for _, role := range []bool{true, false} {
+		dir := t.TempDir()
+		writeConfig(t, dir, fakeProviderURL(t))
+		a, err := New(ctx, Options{DataDir: dir, Gateway: role})
+		if err != nil {
+			t.Fatal(err)
+		}
+		term, ok := a.Registry.Get("terminal")
+		if !ok || term.(*tools.TerminalTool).InGateway != role {
+			t.Fatalf("terminal, gateway role %v", role)
+		}
+		if code, ok := a.Registry.Get("execute_code"); ok && code.(tools.ExecuteCodeTool).InGateway != role {
+			t.Fatalf("execute_code, gateway role %v", role)
+		}
+		a.Close()
+	}
+}
+
+// fakeChannel is a "telegram" channel that drops each message.
+type fakeChannel struct{}
+
+func (fakeChannel) Name() string                                                 { return "telegram" }
+func (fakeChannel) Run(context.Context, *gateway.Gateway) error                  { return nil }
+func (fakeChannel) Send(context.Context, gateway.Target, gateway.Outbound) error { return nil }
+
+// userTexts returns the user texts of a session in order.
+func userTexts(t *testing.T, a *App, sessionID string) []string {
+	t.Helper()
+	msgs, err := a.Store.Messages(ctx, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, m := range msgs {
+		if m.Msg.Role == "user" {
+			out = append(out, m.Msg.Content)
+		}
+	}
+	return out
+}
+
+// resumeApp returns a gateway-role App with a fake channel, an active session on key, and
+// a fresh marker of the key with one queued text.
+func resumeApp(t *testing.T, key string) (*App, *sessions.Session) {
+	t.Helper()
+	a := gatewayApp(t, "", "")
+	a.Gateway().Channels["telegram"] = fakeChannel{}
+	sess, err := a.Store.ActiveOrCreate(ctx, key, sessions.Session{Source: "telegram", ChatID: "5", Kind: "chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Store.UpsertMarker(ctx, key, sess.ID, []sessions.QueuedText{{Text: "queued one"}}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	return a, sess
+}
+
+func TestHousekeepingResumesBeforeLostBatches(t *testing.T) {
+	const key = "telegram:dm:5"
+	a, sess := resumeApp(t, key)
+	if _, err := a.DB.ExecContext(ctx, `INSERT INTO delegation_batches (id, parent_session_key, parent_session_id, background, status, tasks, created_at)
+		VALUES ('bg_1', ?, ?, 1, 'running', '[]', 1)`, key, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.Housekeeping(hctx)
+	want := []string{agent.ResumeNote, "queued one", agent.FormatBatchLost("bg_1")}
+	end := time.Now().Add(5 * time.Second)
+	for len(userTexts(t, a, sess.ID)) < len(want) && time.Now().Before(end) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !a.Gateway().Wait(5 * time.Second) {
+		t.Fatal("wait")
+	}
+	if got := userTexts(t, a, sess.ID); !slices.Equal(got, want) {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestHousekeepingReadsAliveAtBeforeTheHeartbeat(t *testing.T) {
+	const key = "telegram:dm:5"
+	a, sess := resumeApp(t, key)
+	// The last gateway was alive 2 h ago. The marker time is new, but the cut decides.
+	if err := a.DB.KVSet(ctx, "gateway.alive_at", strconv.FormatInt(time.Now().Add(-2*time.Hour).UnixMilli(), 10)); err != nil {
+		t.Fatal(err)
+	}
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.Housekeeping(hctx)
+	if !a.Gateway().Wait(5 * time.Second) {
+		t.Fatal("wait")
+	}
+	if got := userTexts(t, a, sess.ID); len(got) != 0 {
+		t.Fatalf("an old cut must not resume: %q", got)
+	}
+	if ms, err := a.Store.Markers(ctx); err != nil || len(ms) != 0 {
+		t.Fatal(ms, err)
+	}
+}
+
+func TestHeartbeatWritesAliveAt(t *testing.T) {
+	old := heartbeatEvery
+	heartbeatEvery = 20 * time.Millisecond
+	t.Cleanup(func() { heartbeatEvery = old })
+	a := newApp(t)
+	if _, ok := a.AliveAt(ctx); ok {
+		t.Fatal("AliveAt must be false before any write")
+	}
+	if err := a.DB.KVSet(ctx, "gateway.alive_at", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if at, ok := a.AliveAt(ctx); ok || !at.IsZero() {
+		t.Fatal("an unparsable value must give false:", at)
+	}
+	start := time.Now().Add(-time.Millisecond)
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.Housekeeping(hctx)
+	first, ok := a.AliveAt(ctx)
+	if !ok || first.Before(start) {
+		t.Fatal("Housekeeping must write alive_at:", first, ok)
+	}
+	end := time.Now().Add(5 * time.Second)
+	for {
+		if at, _ := a.AliveAt(ctx); at.After(first) {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("the heartbeat did not write alive_at again")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// ackRenderer keeps the command replies of a turn.
+type ackRenderer struct {
+	mu   sync.Mutex
+	acks []string
+}
+
+func (*ackRenderer) Delta(string)             {}
+func (*ackRenderer) ToolStart(string, string) {}
+func (*ackRenderer) ToolEnd(string, bool)     {}
+func (*ackRenderer) Boundary()                {}
+func (*ackRenderer) Notice(string)            {}
+func (*ackRenderer) Done(string, error)       {}
+func (r *ackRenderer) Ack(text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.acks = append(r.acks, text)
+}
+
+// handleCommand runs text on key through the gateway of a and returns the replies.
+func handleCommand(t *testing.T, a *App, key, text string) []string {
+	t.Helper()
+	r := &ackRenderer{}
+	in := gateway.Inbound{Key: key, Source: "telegram", ChatID: "42", ThreadID: "7", Text: text, IsText: true}
+	if err := a.Gateway().Handle(ctx, in, func() gateway.Renderer { return r }); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.acks)
+}
+
+func TestRestartRequestWritesTargetAndSignals(t *testing.T) {
+	a := gatewayApp(t, "", "")
+	a.Gateway().Channels["telegram"] = fakeChannel{}
+	const key = "telegram:group:42:7"
+	if _, err := a.Store.ActiveOrCreate(ctx, key, sessions.Session{Source: "telegram", ChatID: "42", ThreadID: "7", Kind: "chat"}); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Add(-time.Millisecond)
+	if got := handleCommand(t, a, key, "/restart"); !slices.Equal(got, []string{"♻ **Restarting**\nThe gateway restarts now."}) {
+		t.Fatalf("%q", got)
+	}
+	v, ok, err := a.DB.KVGet(ctx, RestartNotifyKey)
+	if err != nil || !ok {
+		t.Fatal("no restart notify:", ok, err)
+	}
+	var got struct {
+		Source   string `json:"source"`
+		ChatID   string `json:"chat_id"`
+		ThreadID string `json:"thread_id"`
+		At       *int64 `json:"at"`
+	}
+	if err := json.Unmarshal([]byte(v), &got); err != nil {
+		t.Fatal(err, v)
+	}
+	if got.Source != "telegram" || got.ChatID != "42" || got.ThreadID != "7" || got.At == nil {
+		t.Fatal(v)
+	}
+	if at := time.UnixMilli(*got.At); at.Before(start) || at.After(time.Now()) {
+		t.Fatal("at is not now:", v)
+	}
+	select {
+	case req := <-a.Restarts():
+		if req != (StopRequest{Reason: "restart", Key: key}) {
+			t.Fatalf("%+v", req)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no stop request")
+	}
+	if a.MarkStopping() {
+		t.Fatal("the restart must mark the stop")
+	}
+	if got := handleCommand(t, a, key, "/restart"); !slices.Equal(got, []string{"⏳ **Restart in progress**\nThe gateway already stops. Wait for it."}) {
+		t.Fatalf("%q", got)
+	}
+	select {
+	case req := <-a.Restarts():
+		t.Fatalf("a second restart must send nothing: %+v", req)
+	default:
+	}
+}
+
+func TestMarkStoppingFirstCallerOnly(t *testing.T) {
+	a := newApp(t)
+	if !a.MarkStopping() || a.MarkStopping() {
+		t.Fatal("only the first call must return true")
+	}
+}
+
+func TestNoRestartCommandInChatRole(t *testing.T) {
+	// The command table is global. A gateway-role test can leave /restart in it, so a
+	// marker command must stay the same.
+	prev, had := gateway.Commands()["restart"]
+	if had {
+		gateway.Register(gateway.Command{Name: "restart", Help: "marker", Run: func(context.Context, *gateway.CommandCtx, string) error { return nil }})
+		t.Cleanup(func() { gateway.Register(prev) })
+	}
+	newApp(t)
+	cmd, ok := gateway.Commands()["restart"]
+	if had && cmd.Help != "marker" || !had && ok {
+		t.Fatalf("the chat role must not register /restart: %+v", cmd)
+	}
+}
+
+// TestGatewayAppRestoresTheCommandTable checks that a gateway-role test leaves no
+// /restart in the global command table.
+func TestGatewayAppRestoresTheCommandTable(t *testing.T) {
+	_, had := gateway.Commands()["restart"]
+	t.Run("gateway role", func(t *testing.T) {
+		gatewayApp(t, "", "")
+		if _, ok := gateway.Commands()["restart"]; !ok {
+			t.Fatal("the gateway role must register /restart")
+		}
+	})
+	if _, ok := gateway.Commands()["restart"]; ok != had {
+		t.Fatalf("/restart in the table: %v, before the test: %v", ok, had)
 	}
 }

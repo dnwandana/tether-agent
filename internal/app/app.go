@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/agent"
@@ -123,6 +125,10 @@ type App struct {
 	values   map[string]map[string]any
 	// clock gives the time of the session retention. Nil uses time.Now. Tests set it.
 	clock func() time.Time
+	// restarts carries the stop request of /restart to the gateway loop.
+	restarts chan StopRequest
+	// stopping is true after the first stop request.
+	stopping atomic.Bool
 }
 
 // New builds the app. It loads .env and the config, opens the log and the database,
@@ -138,7 +144,8 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("app: cannot make the data folder %s: %w", dir, err)
 	}
-	a := &App{DataDir: dir, values: map[string]map[string]any{}, telegramBaseURL: opts.TelegramBaseURL}
+	a := &App{DataDir: dir, values: map[string]map[string]any{}, telegramBaseURL: opts.TelegramBaseURL,
+		restarts: make(chan StopRequest, 1)}
 	defer func() {
 		if err != nil {
 			a.Close()
@@ -192,6 +199,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	// The judge runs only in smart mode.
 	a.Gate.Judge = security.ProviderJudge{Prov: a.Prov}
 	a.Gate.Log = a.Log
+	a.Gate.InGateway = opts.Gateway
 	// CLI.Run attaches the prompt to the REPL input. With no CLI, a question gets no answer.
 	a.CLIAsk = &gateway.CLIAsk{}
 	a.Prices = pricing.NewService(a.Cfg, filepath.Join(dir, "cache"), a.HTTP, a.DB, a.Log)
@@ -209,8 +217,13 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	}
 
 	a.Registry = tools.NewRegistry()
-	a.registerTools()
+	a.registerTools(opts.Gateway)
 	a.startMCP(ctx, cfgPath)
+	if opts.Gateway {
+		// Only the gateway can restart itself. The chat role has no /restart.
+		drain := time.Duration(a.Cfg.Agent.RestartDrainTimeoutS) * time.Second
+		gateway.Register(gateway.RestartCommand(a.requestRestart, drain))
+	}
 
 	a.Agent = &agent.Agent{
 		Prov:      a.Prov,
@@ -476,7 +489,7 @@ func (a *App) openLog(opts Options) error {
 
 // registerTools registers the built-in tools that need no channel. registerDelegation
 // adds delegate_task.
-func (a *App) registerTools() {
+func (a *App) registerTools(gatewayRole bool) {
 	cfg := a.Cfg
 	spill := filepath.Join(a.DataDir, "cache", "spill")
 	a.WebClient = tools.GuardedClient(cfg.Web.BlockPrivateNetworks, 30*time.Second, 3)
@@ -487,7 +500,8 @@ func (a *App) registerTools() {
 		Passthrough: func(env *tools.Env) []string {
 			return append(slices.Clone(cfg.Terminal.EnvPassthrough), tools.PassthroughFor(env)...)
 		},
-		SpillDir: spill,
+		SpillDir:  spill,
+		InGateway: gatewayRole,
 	})
 	a.RegisterTool(tools.ReadFileTool{})
 	// With Protected nil, the file tools refuse the protected paths of env.DataDir.
@@ -563,6 +577,7 @@ func (a *App) registerTools() {
 			Passthrough: func(env *tools.Env) []string {
 				return append(slices.Clone(cfg.Terminal.EnvPassthrough), tools.PassthroughFor(env)...)
 			},
+			InGateway: gatewayRole,
 		})
 	}
 }
@@ -696,21 +711,131 @@ func (a *App) Gateway() *gateway.Gateway {
 	return a.gw
 }
 
+// StopRequest asks the gateway loop to stop.
+type StopRequest struct {
+	// Reason is the stop reason: "signal", "reload", or "restart".
+	Reason string
+	// Key is the session key that sent /restart. That chat gets no stop notice, because
+	// the command reply tells it already.
+	Key string
+}
+
+// RestartNotifyKey is the kv key of the chat that sent /restart. The value is the JSON of
+// restartNotify. The next gateway tells that chat that it is back.
+const RestartNotifyKey = "gateway.restart_notify"
+
+// restartNotify is the value of RestartNotifyKey.
+type restartNotify struct {
+	Source   string `json:"source"`
+	ChatID   string `json:"chat_id"`
+	ThreadID string `json:"thread_id"`
+	// At is the time of the request, in Unix ms.
+	At int64 `json:"at"`
+}
+
+// Restarts returns the channel of the /restart requests. It has a buffer of one request.
+func (a *App) Restarts() <-chan StopRequest { return a.restarts }
+
+// MarkStopping marks the start of a stop. It returns true for the first caller only. After
+// it, a /restart starts no new stop.
+func (a *App) MarkStopping() bool { return a.stopping.CompareAndSwap(false, true) }
+
+// requestRestart is the RestartRequest of /restart. It saves the chat of key for the next
+// gateway and counts the busy keys. The returned start func sends the stop request.
+func (a *App) requestRestart(ctx context.Context, key string, to gateway.Target) (gateway.RestartState, func()) {
+	if a.stopping.Load() {
+		return gateway.RestartState{Already: true}, nil
+	}
+	b, err := json.Marshal(restartNotify{Source: to.Source, ChatID: to.ChatID, ThreadID: to.ThreadID, At: time.Now().UnixMilli()})
+	if err == nil {
+		err = a.DB.KVSet(ctx, RestartNotifyKey, string(b))
+	}
+	if err != nil {
+		a.Log.Warn("gateway: cannot save the chat of /restart, so it gets no message after the restart",
+			"key", key, "err", err.Error())
+	}
+	st := gateway.RestartState{Busy: len(a.Gateway().BusyKeys())}
+	return st, func() {
+		// A second /restart at the same time sends nothing.
+		if !a.MarkStopping() {
+			return
+		}
+		select {
+		case a.restarts <- StopRequest{Reason: "restart", Key: key}:
+		default:
+		}
+	}
+}
+
 // housekeepingEvery is the time between two housekeeping runs.
 const housekeepingEvery = 24 * time.Hour
 
+// aliveAtKey is the kv key of the gateway heartbeat, in Unix ms.
+const aliveAtKey = "gateway.alive_at"
+
+// heartbeatEvery is the time between two writes of the gateway heartbeat. Tests change it.
+var heartbeatEvery = 60 * time.Second
+
+// AliveAt returns the last heartbeat of a gateway. It returns false when no gateway wrote
+// a heartbeat, or when the value is not a number.
+func (a *App) AliveAt(ctx context.Context) (time.Time, bool) {
+	v, ok, err := a.DB.KVGet(ctx, aliveAtKey)
+	if err != nil || !ok {
+		return time.Time{}, false
+	}
+	ms, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(ms), true
+}
+
+// WriteAliveAt writes the current time as the gateway heartbeat. The next gateway uses the
+// last heartbeat as the time of the cut, so a turn marker of a long stop does not resume.
+func (a *App) WriteAliveAt(ctx context.Context) {
+	if err := a.DB.KVSet(ctx, aliveAtKey, strconv.FormatInt(time.Now().UnixMilli(), 10)); err != nil {
+		a.Log.Warn("gateway: cannot save the heartbeat", "err", err.Error())
+	}
+}
+
 // Housekeeping removes the spill files that are older than context.spill_retention_days,
 // and the automatic sessions that are older than sessions.retention_days. It runs at once,
-// and then each day in a goroutine until ctx ends.
+// and then each day in a goroutine until ctx ends. At once, it also resumes the turns that
+// a restart cut and reports the lost background delegations. Then it writes the gateway
+// heartbeat, and again each heartbeatEvery until ctx ends.
 func (a *App) Housekeeping(ctx context.Context) {
 	a.cleanSpill()
 	a.pruneSessions(ctx)
+	// Read the heartbeat of the last gateway before this process writes its first one.
+	cut, _ := a.AliveAt(ctx)
+	// The cut turns resume before the lost batches are reported. The turn of a lost-batch
+	// notice writes the marker of its key, so it replaces the queued texts of the marker.
+	freshness := time.Duration(a.Cfg.Agent.ResumeFreshnessS) * time.Second
+	if err := a.Gateway().ResumeInterrupted(ctx, cut, freshness); err != nil {
+		a.Log.Warn("housekeeping: cannot resume the cut turns", "err", err.Error())
+	}
 	// A restart loses the running background children. Each parent key gets a notice turn.
 	if a.Batches != nil {
 		if err := a.Batches.RecoverLost(ctx); err != nil {
 			a.Log.Warn("housekeeping: cannot report all lost background delegations", "err", err.Error())
 		}
 	}
+	a.WriteAliveAt(ctx)
+	every := heartbeatEvery
+	go func() {
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if ctx.Err() == nil {
+					a.WriteAliveAt(ctx)
+				}
+			}
+		}
+	}()
 	go func() {
 		t := time.NewTicker(housekeepingEvery)
 		defer t.Stop()
