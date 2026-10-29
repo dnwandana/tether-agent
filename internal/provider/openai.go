@@ -130,7 +130,7 @@ func (p *openAI) Stream(ctx context.Context, req Request) (<-chan Event, error) 
 	go func() {
 		defer close(ch)
 		defer resp.Body.Close()
-		e := &emitter{ctx: ctx, ch: ch}
+		e := &emitter{ctx: ctx, ch: ch, provider: p.name, model: body.Model}
 		if err := p.parse(e, resp, start); err != nil {
 			e.fail(err)
 		}

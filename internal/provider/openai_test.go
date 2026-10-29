@@ -250,3 +250,52 @@ func TestOpenAICancelClosesChannel(t *testing.T) {
 		t.Fatal("the channel did not close after cancel")
 	}
 }
+
+// checkStamp reads all events from ch and checks the stamp of each event.
+func checkStamp(t *testing.T, ch <-chan Event, name, model string) {
+	t.Helper()
+	n := 0
+	for ev := range ch {
+		n++
+		if ev.Provider != name || ev.Model != model {
+			t.Fatalf("event %d: provider %q, model %q, want %q, %q", n, ev.Provider, ev.Model, name, model)
+		}
+	}
+	if n == 0 {
+		t.Fatal("no events")
+	}
+}
+
+func TestOpenAIStampsEveryEvent(t *testing.T) {
+	srv := fixtureServer(t, "testdata/openai_text_stream.sse")
+	p := NewOpenAI("primary", srv.URL, "k", "m", srv.Client())
+	ch, err := p.Stream(ctx, Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkStamp(t, ch, "primary", "m")
+	ch, err = p.Stream(ctx, Request{Model: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkStamp(t, ch, "primary", "x")
+}
+
+func TestOpenAIStampsMidStreamError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"half\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		hj, _, _ := w.(http.Hijacker).Hijack()
+		hj.Close()
+	}))
+	defer srv.Close()
+	ch, err := NewOpenAI("p", srv.URL, "k", "m", srv.Client()).Stream(ctx, Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := Collect(ch, nil)
+	if err == nil || r.Text != "half" || r.Provider != "p" || r.Model != "m" {
+		t.Fatal(r, err)
+	}
+}

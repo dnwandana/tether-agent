@@ -27,7 +27,8 @@ const finalSendWait = 2 * time.Second
 // postJSON sends body as JSON to url and returns the response when the
 // status is 2xx. A connection error, an HTTP 5xx, or an HTTP 429 wraps
 // ErrBeforeFirstByte. Another status gives an error with a short body.
-// apiKey is removed from the error text.
+// An error for a bad status also wraps an HTTPStatusError. apiKey is
+// removed from the error text.
 func postJSON(ctx context.Context, hc *http.Client, name, url string, header http.Header, body any, apiKey string) (*http.Response, error) {
 	if hc == nil {
 		hc = http.DefaultClient
@@ -59,10 +60,11 @@ func postJSON(ctx context.Context, hc *http.Client, name, url string, header htt
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4*maxErrorBody))
 	msg := shortBody(redact(string(b), apiKey))
+	status := &HTTPStatusError{Code: resp.StatusCode}
 	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		return nil, fmt.Errorf("provider %s: %w: HTTP %d: %s", name, ErrBeforeFirstByte, resp.StatusCode, msg)
+		return nil, fmt.Errorf("provider %s: %w: %w: %s", name, ErrBeforeFirstByte, status, msg)
 	}
-	return nil, fmt.Errorf("provider %s: HTTP %d: %s", name, resp.StatusCode, msg)
+	return nil, fmt.Errorf("provider %s: %w: %s", name, status, msg)
 }
 
 // redact removes the API key from s.
@@ -88,14 +90,18 @@ func shortBody(s string) string {
 }
 
 // emitter sends the events of one stream. It stops a send when the
-// context is cancelled, so the goroutine never blocks for ever.
+// context is cancelled, so the goroutine never blocks for ever. It stamps
+// each event with provider and model, so the caller knows which provider
+// served the stream.
 type emitter struct {
-	ctx context.Context
-	ch  chan Event
+	ctx             context.Context
+	ch              chan Event
+	provider, model string
 }
 
 // send delivers ev. It returns false when the context is cancelled.
 func (e *emitter) send(ev Event) bool {
+	ev.Provider, ev.Model = e.provider, e.model
 	select {
 	case e.ch <- ev:
 		return true
@@ -114,7 +120,7 @@ func (e *emitter) fail(err error) {
 	t := time.NewTimer(finalSendWait)
 	defer t.Stop()
 	select {
-	case e.ch <- Event{Type: EventError, Err: err}:
+	case e.ch <- Event{Type: EventError, Err: err, Provider: e.provider, Model: e.model}:
 	case <-t.C:
 	}
 }

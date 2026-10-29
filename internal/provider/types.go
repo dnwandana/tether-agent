@@ -71,7 +71,9 @@ const (
 
 // Event is one item of the internal event stream. EventText sets Delta.
 // EventToolCall sets ToolCall. EventDone sets FinishReason and Usage.
-// EventError sets Err.
+// EventError sets Err. An event of each type can carry the stamp: Provider
+// is the config entry name and Model is the model of the request that
+// served the stream.
 type Event struct {
 	Type         EventType
 	Delta        string
@@ -79,6 +81,8 @@ type Event struct {
 	FinishReason string
 	Usage        *Usage
 	Err          error
+	Provider     string
+	Model        string
 }
 
 // Request is one model call. An empty Model uses the model of the
@@ -91,10 +95,14 @@ type Request struct {
 	MaxTokens int
 }
 
-// Result is the assembled result of one stream.
+// Result is the assembled result of one stream. Provider and Model name
+// the provider that served the stream. They are empty when no event
+// carries a stamp.
 type Result struct {
 	Text         string
 	ToolCalls    []ToolCall
 	FinishReason string
 	Usage        Usage
+	Provider     string
+	Model        string
 }

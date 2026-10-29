@@ -216,3 +216,12 @@ func TestAnthropicBaseURLWithV1(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAnthropicStampsEveryEvent(t *testing.T) {
+	srv := fixtureServer(t, "testdata/anthropic_tool_stream.sse")
+	ch, err := NewAnthropic("an", srv.URL, "k", "m", srv.Client()).Stream(ctx, Request{Messages: []Message{{Role: RoleUser, Content: "x"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkStamp(t, ch, "an", "m")
+}

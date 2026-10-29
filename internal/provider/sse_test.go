@@ -108,3 +108,47 @@ func TestCollectKeepsAdapterTimes(t *testing.T) {
 		t.Fatal(r.Usage)
 	}
 }
+
+func TestCollectCopiesStamp(t *testing.T) {
+	ch := make(chan Event, 2)
+	ch <- Event{Type: EventText, Delta: "a", Provider: "fallback", Model: "m2"}
+	ch <- Event{Type: EventDone, Provider: "fallback", Model: "m2"}
+	close(ch)
+	r, err := Collect(ch, nil)
+	if err != nil || r.Provider != "fallback" || r.Model != "m2" {
+		t.Fatal(r, err)
+	}
+}
+
+func TestCollectStampWithNoLastEvent(t *testing.T) {
+	// A /stop or a stall closes the channel with no EventDone.
+	ch := make(chan Event, 1)
+	ch <- Event{Type: EventText, Delta: "a", Provider: "fallback", Model: "m2"}
+	close(ch)
+	r, err := Collect(ch, nil)
+	if err != nil || r.Text != "a" || r.Provider != "fallback" || r.Model != "m2" {
+		t.Fatal(r, err)
+	}
+}
+
+func TestCollectStampFromError(t *testing.T) {
+	errBoom := errors.New("boom")
+	ch := make(chan Event, 1)
+	ch <- Event{Type: EventError, Err: errBoom, Provider: "primary", Model: "m1"}
+	close(ch)
+	r, err := Collect(ch, nil)
+	if !errors.Is(err, errBoom) || r.Provider != "primary" || r.Model != "m1" {
+		t.Fatal(r, err)
+	}
+}
+
+func TestCollectNoStamp(t *testing.T) {
+	ch := make(chan Event, 2)
+	ch <- Event{Type: EventText, Delta: "a"}
+	ch <- Event{Type: EventDone}
+	close(ch)
+	r, err := Collect(ch, nil)
+	if err != nil || r.Provider != "" || r.Model != "" {
+		t.Fatal(r, err)
+	}
+}

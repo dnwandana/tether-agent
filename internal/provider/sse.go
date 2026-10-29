@@ -91,6 +91,8 @@ func readLine(br *bufio.Reader) (string, error) {
 // It calls onDelta for each text delta when onDelta is not nil. When an
 // EventError arrives, Collect keeps the partial result and returns the error.
 // Collect sets FirstTokenMS and TotalMS when the adapter does not set them.
+// Collect takes the stamp from the first event that has one, of any type,
+// because a stream can stop before its EventDone.
 func Collect(ch <-chan Event, onDelta func(string)) (Result, error) {
 	var (
 		res     Result
@@ -105,6 +107,9 @@ func Collect(ch <-chan Event, onDelta func(string)) (Result, error) {
 		}
 	}
 	for ev := range ch {
+		if res.Provider == "" && ev.Provider != "" {
+			res.Provider, res.Model = ev.Provider, ev.Model
+		}
 		switch ev.Type {
 		case EventText:
 			mark()
