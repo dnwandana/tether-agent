@@ -17,7 +17,7 @@ func fixedTZ(t *testing.T, tz string) {
 
 func TestUnitText(t *testing.T) {
 	fixedTZ(t, "Asia/Jakarta")
-	u := UnitText("/usr/local/bin/tether", "/home/user/.tether")
+	u := UnitText("/usr/local/bin/tether", "/home/user/.tether", 180)
 	for _, want := range []string{
 		"ExecStart=/usr/local/bin/tether gateway --data-dir /home/user/.tether --log-stderr",
 		"Restart=on-failure", "RestartSec=5", "Environment=TZ=Asia/Jakarta", "[Install]", "WantedBy=default.target",
@@ -30,7 +30,7 @@ func TestUnitText(t *testing.T) {
 
 func TestUnitTextQuotesPaths(t *testing.T) {
 	fixedTZ(t, "UTC")
-	u := UnitText("/opt/my tools/tether", "/home/user/100%/data")
+	u := UnitText("/opt/my tools/tether", "/home/user/100%/data", 180)
 	if !strings.Contains(u, `ExecStart="/opt/my tools/tether" gateway --data-dir /home/user/100%%/data --log-stderr`) {
 		t.Fatal(u)
 	}
@@ -47,7 +47,7 @@ func TestWriteUserUnitWithBak(t *testing.T) {
 	fixedTZ(t, "UTC")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	path, err := WriteUnit(false, "/usr/local/bin/tether", "/data/one")
+	path, err := WriteUnit(false, "/usr/local/bin/tether", "/data/one", 180)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestWriteUserUnitWithBak(t *testing.T) {
 		t.Fatal(path)
 	}
 	first, _ := os.ReadFile(path)
-	if _, err := WriteUnit(false, "/usr/local/bin/tether", "/data/two"); err != nil {
+	if _, err := WriteUnit(false, "/usr/local/bin/tether", "/data/two", 180); err != nil {
 		t.Fatal(err)
 	}
 	bak, err := os.ReadFile(path + ".bak")
@@ -73,7 +73,7 @@ func TestWriteSystemUnitNeedsRoot(t *testing.T) {
 	old := geteuid
 	geteuid = func() int { return 1000 }
 	t.Cleanup(func() { geteuid = old })
-	if _, err := WriteUnit(true, "/usr/local/bin/tether", "/data"); err == nil || !strings.Contains(err.Error(), "run with sudo") {
+	if _, err := WriteUnit(true, "/usr/local/bin/tether", "/data", 180); err == nil || !strings.Contains(err.Error(), "run with sudo") {
 		t.Fatal(err)
 	}
 }
@@ -96,7 +96,7 @@ func TestExampleUnitMatchesGenerator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != UnitText("/usr/local/bin/tether", "/home/YOUR_USER/.tether") {
+	if string(b) != UnitText("/usr/local/bin/tether", "/home/YOUR_USER/.tether", 180) {
 		t.Fatal("docs/tether.service is out of date")
 	}
 }
@@ -134,5 +134,60 @@ func TestWizardStep5(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(home, ".config", "systemd")); err == nil {
 			t.Fatal(goos, "unit written")
 		}
+	}
+}
+
+func TestUnitTextRestartLines(t *testing.T) {
+	fixedTZ(t, "UTC")
+	u := UnitText("/usr/local/bin/tether", "/home/user/.tether", 180)
+	for _, want := range []string{
+		"ExecReload=/bin/kill -USR1 $MAINPID\n", // not escaped to $$MAINPID
+		"Restart=on-failure\n", "RestartSec=5\n",
+		"RestartForceExitStatus=75\n", "SuccessExitStatus=75\n", "TimeoutStopSec=210\nKillMode=mixed\n",
+	} {
+		if !strings.Contains(u, want) {
+			t.Fatalf("no %q in\n%s", want, u)
+		}
+	}
+}
+
+func TestStopTimeoutS(t *testing.T) {
+	for drain, want := range map[int]int{0: 90, 30: 90, 180: 210, 600: 630} {
+		if got := StopTimeoutS(drain); got != want {
+			t.Fatalf("StopTimeoutS(%d) = %d, want %d", drain, got, want)
+		}
+	}
+}
+
+func TestServiceStepUsesConfigDrain(t *testing.T) {
+	fixedTZ(t, "UTC")
+	for _, tc := range []struct{ name, extra, want string }{
+		{"key set", "agent:\n  restart_drain_timeout_s: 45\n", "TimeoutStopSec=90\n"},
+		{"key missing", "", "TimeoutStopSec=210\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			prov := newFakeProvider(t)
+			w, out := wizard(t, dir, answers("openai", prov.URL, "sk-test-123", "m", "n", "n", "n"))
+			w.GOOS = "linux"
+			if err := w.Run(ctx); err != nil {
+				t.Fatal(err, out.String())
+			}
+			path := filepath.Join(dir, "config.yaml")
+			b, _ := os.ReadFile(path)
+			if err := os.WriteFile(path, append(b, tc.extra...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			w, out = wizard(t, dir, answers("", "", "", "", "", "", "y"))
+			w.GOOS = "linux"
+			if err := w.Run(ctx); err != nil {
+				t.Fatal(err, out.String())
+			}
+			home, _ := os.UserHomeDir()
+			unit, err := os.ReadFile(filepath.Join(home, ".config", "systemd", "user", "tether.service"))
+			if err != nil || !strings.Contains(string(unit), tc.want) {
+				t.Fatal(string(unit), err, out.String())
+			}
+		})
 	}
 }

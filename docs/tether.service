@@ -7,8 +7,13 @@ After=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/tether gateway --data-dir /home/YOUR_USER/.tether --log-stderr
+ExecReload=/bin/kill -USR1 $MAINPID
 Restart=on-failure
 RestartSec=5
+RestartForceExitStatus=75
+SuccessExitStatus=75
+TimeoutStopSec=210
+KillMode=mixed
 Environment=TZ=UTC
 
 [Install]

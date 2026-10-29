@@ -71,6 +71,9 @@ type Doctor struct {
 	Version string
 	// ReleaseAPI replaces the GitHub API base of the release check. Empty uses the real API.
 	ReleaseAPI string
+	// UnitPaths are the unit files that the unit check reads. Nil uses the user unit path, then
+	// the system unit path.
+	UnitPaths []string
 
 	// freeBytes returns the free disk space of a folder. Tests replace it.
 	freeBytes func(dir string) (uint64, error)
@@ -94,6 +97,9 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 		hostCfg = &def
 	}
 	out = append(out, d.HostChecks(hostCfg)...)
+	if c, ok := d.checkUnit(hostCfg.Agent.RestartDrainTimeoutS); ok {
+		out = append(out, c)
+	}
 	if cfg != nil {
 		out = append(out, d.checkMCP(ctx, cfg, dotenv)...)
 	}

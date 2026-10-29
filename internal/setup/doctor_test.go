@@ -120,6 +120,7 @@ func doctorWithFakes(t *testing.T, prov, tg *httptest.Server, look func(string) 
 		LookPath:     look,
 		TelegramBase: tg.URL,
 		Getenv:       func(string) string { return "" },
+		UnitPaths:    []string{filepath.Join(dir, "no-unit.service")},
 		freeBytes:    func(string) (uint64, error) { return 50 << 30, nil },
 	}
 }
@@ -575,5 +576,39 @@ func TestLastAnswerNoRow(t *testing.T) {
 		if c.Name == "last answer" {
 			t.Fatalf("no stored answer must give no check: %+v", c)
 		}
+	}
+}
+
+func TestDoctorUnitCheck(t *testing.T) {
+	fixedTZ(t, "UTC")
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing.service")
+	path := filepath.Join(dir, "tether.service")
+
+	d.UnitPaths = []string{missing, path}
+	for _, c := range d.Run(ctx) {
+		if c.Name == "systemd unit" {
+			t.Fatalf("unit check without a unit: %+v", c)
+		}
+	}
+
+	old := "[Service]\nExecStart=/bin/tether gateway\n"
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := find(t, d.Run(ctx), "systemd unit")
+	wantDetail := strings.Join(UnitProblems(old, 180), " ")
+	wantNext := `run "tether setup" and answer yes at "Write the systemd unit?". Then run "systemctl --user daemon-reload".`
+	if c.Status != StatusWarn || c.Detail != wantDetail || c.Next != wantNext {
+		t.Fatalf("%+v", c)
+	}
+
+	if err := os.WriteFile(path, []byte(UnitText("/bin/tether", "/d", 180)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c = find(t, d.Run(ctx), "systemd unit")
+	if c.Status != StatusOK || c.Next != "" {
+		t.Fatalf("%+v", c)
 	}
 }

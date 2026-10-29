@@ -7,7 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+
+	"github.com/dnwandana/tether-agent/internal/config"
 )
 
 // unitName is the file name of the systemd unit.
@@ -44,15 +47,21 @@ func detectTZ() string {
 	return "UTC"
 }
 
+// StopTimeoutS returns the stop timeout of the unit in seconds. It is the larger of 60 s
+// and the drain time, plus 30 s for the steps after the drain.
+func StopTimeoutS(drainS int) int {
+	return max(60, drainS) + 30
+}
+
 // UnitText returns the systemd unit that runs the gateway. The logs go to stderr, so
 // journald keeps them. TZ comes from the host, because the cron schedules use
-// the local time.
-func UnitText(binPath, dataDir string) string {
-	return unitText(binPath, dataDir, hostTZ(), "")
+// the local time. drainS is the drain time in seconds, and it sets the stop timeout.
+func UnitText(binPath, dataDir string, drainS int) string {
+	return unitText(binPath, dataDir, hostTZ(), "", drainS)
 }
 
 // unitText returns the unit. A user that is not empty adds a User= line.
-func unitText(binPath, dataDir, tz, user string) string {
+func unitText(binPath, dataDir, tz, user string, drainS int) string {
 	var b strings.Builder
 	b.WriteString("# tether gateway: the Telegram channel and the cron scheduler.\n")
 	b.WriteString("# tether setup writes this file. TZ sets the time zone of the cron schedules.\n")
@@ -65,8 +74,15 @@ func unitText(binPath, dataDir, tz, user string) string {
 		fmt.Fprintf(&b, "User=%s\n", user)
 	}
 	fmt.Fprintf(&b, "ExecStart=%s gateway --data-dir %s --log-stderr\n", systemdArg(binPath), systemdArg(dataDir))
+	// $MAINPID is a systemd variable, so it must not go through systemdArg.
+	b.WriteString("ExecReload=/bin/kill -USR1 $MAINPID\n")
 	b.WriteString("Restart=on-failure\n")
 	b.WriteString("RestartSec=5\n")
+	b.WriteString("RestartForceExitStatus=75\n")
+	b.WriteString("SuccessExitStatus=75\n")
+	fmt.Fprintf(&b, "TimeoutStopSec=%d\n", StopTimeoutS(drainS))
+	// Mixed sends SIGTERM to the gateway only, so the tool commands live through the drain.
+	b.WriteString("KillMode=mixed\n")
 	fmt.Fprintf(&b, "Environment=TZ=%s\n\n", systemdArg(tz))
 	b.WriteString("[Install]\n")
 	b.WriteString("WantedBy=default.target\n")
@@ -98,7 +114,7 @@ func unitPath(system bool) (string, error) {
 // WriteUnit writes the systemd unit and returns its path. The default is a user unit in
 // ~/.config/systemd/user. With system, it writes a system unit, which needs root. Before
 // it replaces a unit, it copies the old unit to a .bak file.
-func WriteUnit(system bool, binPath, dataDir string) (path string, err error) {
+func WriteUnit(system bool, binPath, dataDir string, drainS int) (path string, err error) {
 	user := ""
 	if system {
 		if geteuid() != 0 {
@@ -124,7 +140,7 @@ func WriteUnit(system bool, binPath, dataDir string) (path string, err error) {
 	case !errors.Is(err, fs.ErrNotExist):
 		return "", fmt.Errorf("setup: cannot read %s for the backup: %w", path, err)
 	}
-	if err := atomicWrite(path, []byte(unitText(binPath, dataDir, hostTZ(), user)), 0o644); err != nil {
+	if err := atomicWrite(path, []byte(unitText(binPath, dataDir, hostTZ(), user, drainS)), 0o644); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -163,7 +179,11 @@ func (w *Wizard) serviceStep() error {
 	if bin == "" {
 		bin = "/usr/local/bin/tether"
 	}
-	path, err := WriteUnit(w.System, bin, w.DataDir)
+	drainS := config.Default().Agent.RestartDrainTimeoutS
+	if n, err := strconv.Atoi(w.cfg.get("agent", "restart_drain_timeout_s")); err == nil && n >= 0 {
+		drainS = n
+	}
+	path, err := WriteUnit(w.System, bin, w.DataDir, drainS)
 	if err != nil {
 		return err
 	}
