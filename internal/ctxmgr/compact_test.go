@@ -143,3 +143,22 @@ func TestRangeKeepsPairsWhole(t *testing.T) {
 		}
 	}
 }
+
+// TestRangeIDsSkipsRepairMessage checks that a synthetic tool result with id 0 does not
+// count as the previous summary. Only the summary gives the start of the old compaction.
+func TestRangeIDsSkipsRepairMessage(t *testing.T) {
+	comps := []Compaction{{FromMessageID: 2, UptoMessageID: 4}}
+	repair := provider.Message{Role: provider.RoleTool, ToolCallID: "c1", Content: "the tool call did not end"}
+	part := []StoredView{
+		{ID: 5, Msg: provider.Message{Role: provider.RoleAssistant}},
+		{ID: 0, Msg: repair},
+		{ID: 7, Msg: provider.Message{Role: provider.RoleUser, Content: "u"}},
+	}
+	if from, upto := rangeIDs(part, comps); from != 5 || upto != 7 {
+		t.Fatalf("repair: from %d upto %d, want 5 7", from, upto)
+	}
+	summary := StoredView{ID: 0, Msg: provider.Message{Role: provider.RoleUser, Content: SummaryPrefix + "old"}}
+	if from, upto := rangeIDs(append([]StoredView{summary}, part...), comps); from != 2 || upto != 7 {
+		t.Fatalf("summary: from %d upto %d, want 2 7", from, upto)
+	}
+}

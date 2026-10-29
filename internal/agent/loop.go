@@ -392,7 +392,8 @@ func plain(stored []sessions.StoredMessage) []provider.Message {
 
 // viewStored returns the messages of the model view, with their stored ids. The latest
 // compaction replaces the messages that it covers with one summary message, which has id 0.
-// Meta.Observed is the only metadata that each message keeps.
+// Meta.Observed is the only metadata that each message keeps. A tool call with no result
+// gets a synthetic result with id 0.
 func (a *Agent) viewStored(ctx context.Context, sessionID string) ([]sessions.StoredMessage, error) {
 	msgs, err := a.Store.Messages(ctx, sessionID)
 	if err != nil {
@@ -403,7 +404,7 @@ func (a *Agent) viewStored(ctx context.Context, sessionID string) ([]sessions.St
 		return nil, fmt.Errorf("agent: read the history: %w", err)
 	}
 	if len(comps) == 0 {
-		return msgs, nil
+		return repairToolCalls(msgs), nil
 	}
 	observed := map[int64]bool{}
 	for _, m := range msgs {
@@ -416,7 +417,7 @@ func (a *Agent) viewStored(ctx context.Context, sessionID string) ([]sessions.St
 	for i, v := range view {
 		out[i] = sessions.StoredMessage{ID: v.ID, Msg: v.Msg, Meta: sessions.MessageMeta{Observed: observed[v.ID]}}
 	}
-	return out, nil
+	return repairToolCalls(out), nil
 }
 
 // compact runs the compactor before a model call. It returns true when the

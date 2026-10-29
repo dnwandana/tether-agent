@@ -312,11 +312,13 @@ func summaryIndex(view []StoredView) int {
 }
 
 // rangeIDs returns the first and the last stored message id that part covers. When part
-// holds the previous summary, the range starts where the previous compaction started.
+// holds the previous summary, the range starts where the previous compaction started. Other
+// messages with id 0, for example a synthetic tool result, do not change the range.
 func rangeIDs(part []StoredView, comps []Compaction) (from, upto int64) {
 	for _, v := range part {
 		if v.ID == 0 {
-			if len(comps) > 0 && (from == 0 || comps[len(comps)-1].FromMessageID < from) {
+			isSummary := strings.HasPrefix(v.Msg.Content, SummaryPrefix)
+			if isSummary && len(comps) > 0 && (from == 0 || comps[len(comps)-1].FromMessageID < from) {
 				from = comps[len(comps)-1].FromMessageID
 			}
 			continue
