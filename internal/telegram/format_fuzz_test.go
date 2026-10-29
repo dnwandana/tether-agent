@@ -38,6 +38,67 @@ func FuzzMarkdownV2(f *testing.F) {
 	})
 }
 
+// FuzzSplitMarkdownV2 feeds random markdown to ToMarkdownV2 and splits the
+// output with SplitMarkdownV2. Each part must not be empty, must be valid
+// UTF-8, and must fit in the limit. When no entity is longer than a quarter
+// of the limit, a split with no open entity is possible, so checkMDV2 must
+// also accept each part.
+func FuzzSplitMarkdownV2(f *testing.F) {
+	f.Add(strings.Repeat("a", 90)+" [LinkSwift](https://github.com/x/y) end", 100)
+	f.Add("```go\n"+strings.Repeat("x := f(1)\n", 40)+"```", 120)
+	f.Add(strings.Repeat("a", 150)+" [LinkSwift](https://github.com/x/y) end", 160)
+	f.Add("**> a\n**> b||\n"+strings.Repeat("c ", 80), 64)
+	f.Add(strings.Repeat("d ", 40)+"\n**> hidden text here||\n"+strings.Repeat("c ", 40), 96)
+	f.Add(strings.Repeat("> quote line\n", 30)+"**bold** `code` ~~s~~ ||sp||", 80)
+	f.Add("```\n"+strings.Repeat("    indented \\ `x`\n", 20)+"```\n😀😀 \\. end", 64)
+	f.Fuzz(func(t *testing.T, s string, limit int) {
+		if !utf8.ValidString(s) || limit < 64 || limit > 512 {
+			return
+		}
+		md := ToMarkdownV2(s)
+		parts := SplitMarkdownV2(md, limit)
+		if len(parts) == 0 {
+			t.Fatal("no parts")
+		}
+		for i, p := range parts {
+			if p == "" && md != "" {
+				t.Fatalf("part %d is empty\noutput: %q", i, md)
+			}
+			if !utf8.ValidString(p) {
+				t.Fatalf("part %d is not valid UTF-8: %q", i, p)
+			}
+			if n := UTF16Len(p); n > limit {
+				t.Fatalf("part %d has %d units, limit %d\noutput: %q", i, n, limit, md)
+			}
+		}
+		if checkMDV2(md) != nil || longestEntity(md) > limit/4 {
+			return
+		}
+		for i, p := range parts {
+			if err := checkMDV2(p); err != nil {
+				t.Fatalf("part %d: %v\npart:   %q\noutput: %q", i, err, p, md)
+			}
+		}
+	})
+}
+
+// longestEntity returns the longest run of s, in UTF-16 units, between two
+// cut offsets with no open entity. A code block alone does not count,
+// because the split closes it and opens it again at a cut.
+func longestEntity(s string) int {
+	longest, units, prev, closed := 0, 0, 0, 0
+	scanMDV2(s, func(i int, st mdv2State) bool {
+		units += UTF16Len(s[prev:i])
+		prev = i
+		if st.Open == 0 {
+			longest = max(longest, units-closed)
+			closed = units
+		}
+		return true
+	})
+	return max(longest, units-closed)
+}
+
 // mdv2Reserved holds the characters that MarkdownV2 reserves outside entities.
 const mdv2Reserved = "_*[]()~`>#+-=|{}.!"
 

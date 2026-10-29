@@ -395,3 +395,38 @@ func TestFormatEscapedTilde(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestNumberPartsAfterQuoteMark(t *testing.T) {
+	got := NumberParts([]string{"**>a\n>b||", "c"}, true)
+	if got[0] != "**>a\n>b||\n\\(1/2\\)" || got[1] != `c \(2/2\)` {
+		t.Fatalf("%q", got)
+	}
+	// An escaped "||" is text, not the quote mark.
+	if got := NumberParts([]string{`x \|\|`, "y"}, true); got[0] != `x \|\| \(1/2\)` {
+		t.Fatalf("%q", got[0])
+	}
+	// The mark on an earlier line does not move the suffix.
+	if got := NumberParts([]string{"**>a||\nb", "y"}, true); got[0] != "**>a||\nb \\(1/2\\)" {
+		t.Fatalf("%q", got[0])
+	}
+	if got := NumberParts([]string{"**>a||", "b"}, false); got[0] != "**>a|| (1/2)" {
+		t.Fatalf("%q", got[0])
+	}
+}
+
+func TestCutMarkdownV2(t *testing.T) {
+	if got := cutMarkdownV2("*a*", 100); got != "*a*" {
+		t.Fatalf("%q", got)
+	}
+	s := ToMarkdownV2(strings.Repeat("a", 90) + " [link](https://x.y) end")
+	got := cutMarkdownV2(s, 100)
+	if n := UTF16Len(got); n > 100 {
+		t.Fatalf("got %d units", n)
+	}
+	if err := checkMDV2(got); err != nil {
+		t.Fatalf("%v: %q", err, got)
+	}
+	if strings.Contains(got, "[link") {
+		t.Fatalf("the cut keeps a part of the link: %q", got)
+	}
+}

@@ -512,7 +512,10 @@ func splitPoint(s string, limit int) int {
 }
 
 // NumberParts adds a " (i/n)" suffix to each part when there are two or more
-// parts. With escaped set, the brackets get MarkdownV2 escapes.
+// parts. With escaped set, the brackets get MarkdownV2 escapes, and a part
+// that ends with the mark of an expandable quote gets the suffix on its own
+// line. Text after that mark on the same line makes tdlib read the mark as
+// a spoiler that does not close.
 func NumberParts(parts []string, escaped bool) []string {
 	out := make([]string, len(parts))
 	copy(out, parts)
@@ -524,9 +527,47 @@ func NumberParts(parts []string, escaped bool) []string {
 		format = ` \(%d/%d\)`
 	}
 	for i := range out {
-		out[i] += fmt.Sprintf(format, i+1, len(parts))
+		f := format
+		if escaped && endsWithQuoteMark(out[i]) {
+			f = "\n" + strings.TrimPrefix(format, " ")
+		}
+		out[i] += fmt.Sprintf(f, i+1, len(parts))
 	}
 	return out
+}
+
+// endsWithQuoteMark reports whether the formatted MarkdownV2 part ends with
+// the "||" mark of an expandable quote: the "||" has no escape, and the last
+// line is in a quote whose first line starts with "**>".
+func endsWithQuoteMark(part string) bool {
+	if !strings.HasSuffix(part, "||") {
+		return false
+	}
+	n := 0
+	for j := len(part) - 3; j >= 0 && part[j] == '\\'; j-- {
+		n++
+	}
+	if n%2 == 1 {
+		return false
+	}
+	for rest := part; ; {
+		i := strings.LastIndexByte(rest, '\n')
+		line := rest[i+1:]
+		if strings.HasPrefix(line, "**>") {
+			return true
+		}
+		if i < 0 || !strings.HasPrefix(line, ">") {
+			return false
+		}
+		rest = rest[:i]
+	}
+}
+
+// cutMarkdownV2 returns formatted MarkdownV2 text cut to one message of at
+// most limit UTF-16 units. The cut keeps each entity whole and closes an
+// open code block.
+func cutMarkdownV2(s string, limit int) string {
+	return SplitMarkdownV2(s, limit)[0]
 }
 
 // wrapMarkdownTables rewrites pipe tables as a bold heading and a bullet list

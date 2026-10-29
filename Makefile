@@ -24,7 +24,8 @@ FUZZ_TARGETS := \
 	./internal/tools:FuzzParseDDG \
 	./internal/provider:FuzzReadSSE \
 	./internal/telegram:FuzzMarkdownV2 \
-	./internal/telegram:FuzzSplitUTF16
+	./internal/telegram:FuzzSplitUTF16 \
+	./internal/telegram:FuzzSplitMarkdownV2
 FUZZTIME ?= 30s
 
 # The soak length in minutes. For the full release soak, run
