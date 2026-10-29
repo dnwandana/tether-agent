@@ -442,3 +442,23 @@ func TestCallbackUpdateRouted(t *testing.T) {
 		t.Fatal(sc)
 	}
 }
+
+func TestPromptLongTextKeepsEntities(t *testing.T) {
+	it, api := interactions(t)
+	p := it.add(approvalPrefix, 42, "")
+	text := strings.Repeat("a", 4090) + " [link](https://x.y) end"
+	if err := it.send(context.Background(), p, text, nil); err != nil {
+		t.Fatal(err)
+	}
+	body := api.lastCall("sendMessage").Body
+	got, _ := body["text"].(string)
+	if n := UTF16Len(got); n > maxMessageLen {
+		t.Fatalf("got %d units", n)
+	}
+	if err := checkMDV2(got); err != nil {
+		t.Fatalf("%v: %q", err, tail(got, 40))
+	}
+	if body["parse_mode"] != "MarkdownV2" {
+		t.Fatalf("parse_mode = %v, want MarkdownV2", body["parse_mode"])
+	}
+}

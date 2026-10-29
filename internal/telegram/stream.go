@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -348,13 +349,13 @@ func (s *Streamer) freshFinalDue() bool {
 }
 
 // finalParts converts text to MarkdownV2 and splits it at the message limit,
-// with escaped part numbers.
+// with escaped part numbers. The split keeps each entity whole.
 func finalParts(text string) []string {
 	formatted := ToMarkdownV2(text)
 	if UTF16Len(formatted) <= maxMessageLen {
 		return []string{formatted}
 	}
-	return NumberParts(SplitUTF16(formatted, maxMessageLen-numberRoom), true)
+	return NumberParts(SplitMarkdownV2(formatted, maxMessageLen-numberRoom), true)
 }
 
 // editFinal edits the open message with the first final part and sends the
@@ -370,6 +371,7 @@ func (s *Streamer) editFinal(ctx context.Context, text string) error {
 	p := EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: parts[0], ParseMode: "MarkdownV2"}
 	_, err := c.EditMessageText(ctx, p)
 	if err != nil && !isNotModified(err) && isBadRequest(err) {
+		logPlainFallback(s.logger(), "edit_final", s.ChatID, s.ThreadID, 1, len(parts), err)
 		p.Text, p.ParseMode = plain, ""
 		_, err = noWaitClient(s.C).EditMessageText(ctx, p)
 	}
@@ -403,6 +405,8 @@ func (s *Streamer) sendFinal(ctx context.Context, text string) error {
 func (s *Streamer) sendPart(ctx context.Context, part string) error {
 	_, err := s.sendNew(ctx, part, true)
 	if err != nil && isBadRequest(err) {
+		// sendPart does not know the part number, so the line has no part field.
+		logPlainFallback(s.logger(), "send_part", s.ChatID, s.ThreadID, 0, 0, err)
 		p := SendMessageParams{ChatID: s.ChatID, Text: StripMarkdownV2(part)}
 		if id, ok := ThreadParam(s.ThreadID, false); ok {
 			p.MessageThreadID = id
@@ -499,4 +503,19 @@ func (s *Streamer) logger() *slog.Logger {
 func isBadRequest(err error) bool {
 	var ae *APIError
 	return errors.As(err, &ae) && ae.Code == 400
+}
+
+// logPlainFallback records that Telegram rejected MarkdownV2 text and that the
+// text went out as plain text. part is 1-based. The line has no part field when
+// parts is less than 2. Do not give the message text to this function.
+func logPlainFallback(log *slog.Logger, op string, chatID int64, threadID string, part, parts int, err error) {
+	attrs := []any{"op", op, "chat", chatID}
+	if threadID != "" {
+		attrs = append(attrs, "thread", threadID)
+	}
+	if parts >= 2 {
+		attrs = append(attrs, "part", fmt.Sprintf("%d/%d", part, parts))
+	}
+	attrs = append(attrs, "err", err.Error())
+	log.Warn("telegram: Telegram rejected the MarkdownV2 text, sent it as plain text", attrs...)
 }

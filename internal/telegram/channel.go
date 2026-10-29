@@ -676,6 +676,7 @@ func (ch *Channel) sendText(ctx context.Context, chatID int64, threadID, text st
 		}
 		m, err := ch.C.SendMessage(ctx, p)
 		if err != nil && isBadRequest(err) {
+			logPlainFallback(ch.logger(), "send", chatID, threadID, i+1, len(parts), err)
 			p.Text, p.ParseMode = StripMarkdownV2(part), ""
 			m, err = ch.C.SendMessage(ctx, p)
 		}
@@ -977,6 +978,7 @@ func (r *tgRenderer) editReply(rep gateway.Reply, kb *InlineKeyboardMarkup) bool
 	p.Text, p.ParseMode = parts[0], "MarkdownV2"
 	_, err := r.ch.C.EditMessageText(r.ctx, p)
 	if err != nil && isBadRequest(err) && !isNotModified(err) {
+		logPlainFallback(r.ch.logger(), "edit_reply", r.chatID, r.threadID, 1, 1, err)
 		p.Text, p.ParseMode = StripMarkdownV2(parts[0]), ""
 		_, err = r.ch.C.EditMessageText(r.ctx, p)
 	}

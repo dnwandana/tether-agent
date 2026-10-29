@@ -394,12 +394,13 @@ func (it *Interactions) deliverLocked(id string, r promptReply) bool {
 // send sends the prompt message as MarkdownV2, or as plain text when Telegram rejects the
 // markup.
 func (it *Interactions) send(ctx context.Context, p *prompt, text string, kb *InlineKeyboardMarkup) error {
-	params := SendMessageParams{ChatID: p.chatID, Text: cutUTF16(ToMarkdownV2(text), maxMessageLen), ParseMode: "MarkdownV2", ReplyMarkup: kb}
+	params := SendMessageParams{ChatID: p.chatID, Text: cutMarkdownV2(ToMarkdownV2(text), maxMessageLen), ParseMode: "MarkdownV2", ReplyMarkup: kb}
 	if id, ok := ThreadParam(p.threadID, false); ok {
 		params.MessageThreadID = id
 	}
 	m, err := it.C.SendMessage(ctx, params)
 	if err != nil && isBadRequest(err) {
+		logPlainFallback(it.logger(), "prompt_send", p.chatID, p.threadID, 1, 1, err)
 		params.Text, params.ParseMode = cutUTF16(text, maxMessageLen), ""
 		m, err = it.C.SendMessage(ctx, params)
 	}
@@ -421,10 +422,11 @@ func (it *Interactions) editMarkdown(ctx context.Context, p *prompt, md string) 
 	if msgID == 0 {
 		return
 	}
-	formatted := cutUTF16(ToMarkdownV2(md), maxMessageLen)
+	formatted := cutMarkdownV2(ToMarkdownV2(md), maxMessageLen)
 	params := EditMessageTextParams{ChatID: p.chatID, MessageID: msgID, Text: formatted, ParseMode: "MarkdownV2"}
 	_, err := it.C.EditMessageText(ctx, params)
 	if err != nil && isBadRequest(err) && !isNotModified(err) {
+		logPlainFallback(it.logger(), "prompt_edit", p.chatID, p.threadID, 1, 1, err)
 		params.Text, params.ParseMode = StripMarkdownV2(formatted), ""
 		_, err = it.C.EditMessageText(ctx, params)
 	}

@@ -169,11 +169,12 @@ func TestLongAnswerSplitAndNumbered(t *testing.T) {
 			t.Fatal(i, UTF16Len(txt), txt[len(txt)-20:])
 		}
 	}
-	var joined strings.Builder
-	for _, txt := range sends {
-		joined.WriteString(txt[:strings.LastIndex(txt, ` \(`)])
+	// The split cuts at a newline and drops it, so join the parts with one.
+	texts := make([]string, len(sends))
+	for i, txt := range sends {
+		texts[i] = txt[:strings.LastIndex(txt, ` \(`)]
 	}
-	if StripMarkdownV2(joined.String()) != final {
+	if StripMarkdownV2(strings.Join(texts, "\n")) != final {
 		t.Fatal("text lost in the split")
 	}
 }
@@ -655,4 +656,35 @@ func TestCleanForDisplay(t *testing.T) {
 	if got := cleanForDisplay("Before\n\n\nMEDIA:/tmp/file.png\n\n\nAfter"); strings.Contains(got, "\n\n\n") {
 		t.Fatal(got)
 	}
+}
+
+func TestFinalPartsKeepEntities(t *testing.T) {
+	check := func(t *testing.T, parts []string) {
+		t.Helper()
+		for i, p := range parts {
+			if n := UTF16Len(p); n > maxMessageLen {
+				t.Errorf("part %d has %d units", i, n)
+			}
+			if err := checkMDV2(p); err != nil {
+				t.Errorf("part %d: %v", i, err)
+			}
+		}
+	}
+	t.Run("link", func(t *testing.T) {
+		parts := finalParts(strings.Repeat("a", 4070) + " see [LinkSwift](https://github.com/x/y) end")
+		check(t, parts)
+		if len(parts) != 2 || !strings.HasPrefix(parts[1], "[LinkSwift](https://github.com/x/y)") {
+			t.Fatalf("got %d parts, part 2 starts with %q", len(parts), head(parts[len(parts)-1], 40))
+		}
+	})
+	t.Run("code block", func(t *testing.T) {
+		parts := finalParts(strings.Repeat("line\n", 700) + "```go\n" + strings.Repeat("x := f(1)\n", 300) + "```\n")
+		check(t, parts)
+		if len(parts) != 2 {
+			t.Fatalf("got %d parts", len(parts))
+		}
+		if !strings.HasSuffix(parts[0], "```"+` \(1/2\)`) || !strings.HasPrefix(parts[1], "```go\n") {
+			t.Fatalf("part 1 ends with %q, part 2 starts with %q", tail(parts[0], 20), head(parts[1], 20))
+		}
+	})
 }
