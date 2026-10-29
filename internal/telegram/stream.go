@@ -28,6 +28,16 @@ const (
 	// with the cursor. A shorter text waits, so a lone cursor never stays
 	// on screen (Hermes _MIN_NEW_MSG_CHARS).
 	minNewMessageChars = 4
+	// maxStripTries is the number of later tries to remove the cursor after
+	// a flood failure. Each try uses the flood budget of the chat, which the
+	// next turn also uses.
+	maxStripTries = 3
+	// maxStripWait is the longest time after the first strip during which
+	// a later try can run.
+	maxStripWait = 2 * time.Minute
+	// stripRetryPad is added to each flood wait. Telegram rounds retry_after
+	// to whole seconds, so a try at the exact time can fail again.
+	stripRetryPad = time.Second
 )
 
 // draftSeq gives each streamed answer segment its own draft id. Telegram
@@ -54,6 +64,9 @@ type Streamer struct {
 	// new status message below the answer.
 	OnFirstMessage func()
 	Log            *slog.Logger
+	// AfterFunc runs f after d for a later strip of the cursor. Nil means
+	// time.AfterFunc. Tests replace it.
+	AfterFunc func(d time.Duration, f func())
 
 	mu       sync.Mutex
 	started  bool
@@ -63,6 +76,9 @@ type Streamer struct {
 	editsOff bool  // no more stream sends: one final send per segment
 	interval time.Duration
 	strikes  int
+	// floodUntil is the time when the current flood wait ends. A strip
+	// before this time cannot work.
+	floodUntil time.Time
 
 	// The current segment.
 	acc        string    // the raw text of the segment
@@ -235,6 +251,7 @@ func (s *Streamer) sendOrEdit(ctx context.Context, text string) {
 			p.MessageThreadID = id
 		}
 		err := noWaitClient(s.C).SendMessageDraft(ctx, p)
+		s.noteFlood(err)
 		if err == nil {
 			s.lastSent = text
 			return
@@ -258,6 +275,7 @@ func (s *Streamer) sendOrEdit(ctx context.Context, text string) {
 // stream edits. s.mu is held.
 func (s *Streamer) editStream(ctx context.Context, text string) bool {
 	_, err := noWaitClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: text})
+	s.noteFlood(err)
 	if err == nil || isNotModified(err) {
 		s.lastSent = text
 		s.strikes = 0
@@ -273,23 +291,180 @@ func (s *Streamer) editStream(ctx context.Context, text string) bool {
 	}
 	s.logger().Info("telegram stream edit failed, send the final text only", "err", err.Error())
 	s.editsOff = true
-	s.stripCursor(ctx)
+	// A strip under flood control fails. finalize cleans the preview later.
+	if !s.now().Before(s.floodUntil) {
+		s.stripCursor(ctx)
+	}
 	return false
 }
 
 // stripCursor removes the cursor from the open message. It is best effort.
 func (s *Streamer) stripCursor(ctx context.Context) {
-	if s.msgID == 0 || s.Cfg.Cursor == "" || !strings.HasSuffix(s.lastSent, s.Cfg.Cursor) {
+	pc, ok := s.savePreview("")
+	if !ok {
 		return
 	}
-	text := strings.TrimSuffix(s.lastSent, s.Cfg.Cursor)
-	if strings.TrimSpace(text) == "" {
-		return
-	}
-	_, err := noWaitClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: text})
+	err := stripTry(ctx, s.C, s.ChatID, pc, s.logger())
+	s.noteFlood(err)
 	if err == nil {
-		s.lastSent = text
+		s.lastSent = pc.plain
 	}
+}
+
+// previewClean is a preview message that still needs a clean after a stream
+// failure. plain is the preview text without the cursor. mdv2 is the final
+// MarkdownV2 text, or empty.
+type previewClean struct {
+	msgID int
+	plain string
+	mdv2  string
+}
+
+// stripTry makes one strip edit of the preview. It sends the MarkdownV2 text
+// first when there is one, and the plain text when Telegram rejects it. It
+// reads no Streamer field, so a timer goroutine can call it. It returns nil
+// on success or on "not modified", else the error of the last edit.
+func stripTry(ctx context.Context, c *Client, chatID int64, pc previewClean, log *slog.Logger) error {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	// One client for both edits, so a try waits inline at most once.
+	nc := noWaitClient(c)
+	p := EditMessageTextParams{ChatID: chatID, MessageID: pc.msgID, Text: pc.plain}
+	if pc.mdv2 != "" {
+		p.Text, p.ParseMode = pc.mdv2, "MarkdownV2"
+		_, err := nc.EditMessageText(ctx, p)
+		// "not modified" is also a 400, so check it first.
+		if err == nil || isNotModified(err) {
+			return nil
+		}
+		if !isBadRequest(err) {
+			return err
+		}
+		logPlainFallback(log, "strip_cursor", chatID, "", 0, 0, err)
+		p.Text, p.ParseMode = pc.plain, ""
+	}
+	_, err := nc.EditMessageText(ctx, p)
+	if isNotModified(err) {
+		return nil
+	}
+	return err
+}
+
+// startStripRetry starts a chain of timers that remove the cursor from the
+// preview after a flood failure. The first try runs after wait. The chain
+// gets copies of the values that it needs and reads no Streamer field, so it
+// does not need s.mu. A turn cancel does not stop it. s.mu is held.
+func (s *Streamer) startStripRetry(pc previewClean, wait time.Duration) {
+	c, chatID, log, now := s.C, s.ChatID, s.logger(), s.Now
+	runCtx := s.runCtx
+	if runCtx == nil {
+		runCtx = context.Background()
+	}
+	afterFunc := s.AfterFunc
+	if afterFunc == nil {
+		afterFunc = func(d time.Duration, f func()) { time.AfterFunc(d, f) }
+	}
+	clock := func() time.Time {
+		if now == nil {
+			return time.Now()
+		}
+		return now()
+	}
+	deadline := clock().Add(maxStripWait)
+	var schedule func(try int, wait time.Duration, last error)
+	schedule = func(try int, wait time.Duration, last error) {
+		if clock().Add(wait).After(deadline) {
+			stripStopped(log, "max wait", last)
+			return
+		}
+		log.Info("telegram cursor strip failed, retry later", "retry_after_s", wait.Seconds(), "try", try)
+		afterFunc(wait, func() {
+			ctx, cancel := context.WithTimeout(runCtx, flushTimeout)
+			defer cancel()
+			err := stripTry(ctx, c, chatID, pc, log)
+			if err == nil {
+				return
+			}
+			d, ok := floodWait(err)
+			switch {
+			case !ok:
+				stripStopped(log, "error", err)
+			case try >= maxStripTries:
+				stripStopped(log, "max tries", err)
+			default:
+				schedule(try+1, d+stripRetryPad, err)
+			}
+		})
+	}
+	schedule(1, wait, nil)
+}
+
+// stripStopped records that no more tries remove the cursor. err is the last
+// error, or nil.
+func stripStopped(log *slog.Logger, reason string, err error) {
+	if err == nil {
+		log.Info("telegram cursor strip stopped", "reason", reason)
+		return
+	}
+	log.Info("telegram cursor strip stopped", "reason", reason, "err", err.Error())
+}
+
+// noteFlood records the end of the flood wait when err is a flood error.
+// s.mu is held.
+func (s *Streamer) noteFlood(err error) {
+	if d, ok := floodWait(err); ok {
+		s.floodUntil = s.now().Add(d)
+	}
+}
+
+// savePreview copies the open preview before a send, because a send moves
+// s.msgID and s.lastSent to the new message. ok is true when the preview
+// shows the cursor or when mdv2 is set. s.mu is held.
+func (s *Streamer) savePreview(mdv2 string) (previewClean, bool) {
+	cursor := s.Cfg.Cursor
+	hasCursor := cursor != "" && strings.HasSuffix(s.lastSent, cursor)
+	pc := previewClean{msgID: s.msgID, plain: s.lastSent, mdv2: mdv2}
+	if hasCursor {
+		pc.plain = strings.TrimSuffix(s.lastSent, cursor)
+	}
+	ok := s.msgID != 0 && strings.TrimSpace(pc.plain) != "" && (hasCursor || mdv2 != "")
+	return pc, ok
+}
+
+// cleanPreview removes the cursor from a saved preview at finish. Under flood
+// control, or on a flood error, a timer chain tries again later, so the
+// method never waits. s.mu is held.
+func (s *Streamer) cleanPreview(ctx context.Context, pc previewClean) {
+	if now := s.now(); now.Before(s.floodUntil) {
+		s.startStripRetry(pc, s.floodUntil.Sub(now)+stripRetryPad)
+		return
+	}
+	err := stripTry(ctx, s.C, s.ChatID, pc, s.logger())
+	s.noteFlood(err)
+	if err == nil {
+		if s.msgID == pc.msgID {
+			s.lastSent = pc.plain
+		}
+		return
+	}
+	if d, ok := floodWait(err); ok {
+		s.startStripRetry(pc, d+stripRetryPad)
+		return
+	}
+	stripStopped(s.logger(), "error", err)
+}
+
+// deleteStale deletes a preview that the full final text replaced. It uses
+// noWaitClient, because the chat is under flood control and s.C can wait for
+// a long time. s.mu is held.
+func (s *Streamer) deleteStale(ctx context.Context, msgID int) error {
+	err := noWaitClient(s.C).DeleteMessage(ctx, s.ChatID, msgID)
+	s.noteFlood(err)
+	if err != nil {
+		s.logger().Info("telegram preview delete failed", "err", err.Error())
+	}
+	return err
 }
 
 // visiblePrefix returns the text that the user sees in the open message.
@@ -312,31 +487,28 @@ func (s *Streamer) continuation(text string) string {
 func (s *Streamer) finalize(ctx context.Context) error {
 	text := s.view()
 	if strings.TrimSpace(text) == "" {
-		s.stripCursor(ctx)
+		if pc, ok := s.savePreview(""); ok {
+			s.cleanPreview(ctx, pc)
+		}
 		return nil
 	}
 	if s.editsOff {
-		// After an edit failure, send only the text that the user did not
-		// see (Hermes _send_fallback_final).
-		cont := s.continuation(text)
-		if strings.TrimSpace(cont) == "" {
-			s.stripCursor(ctx)
-			return nil
-		}
-		return s.sendFinal(ctx, cont)
+		return s.sendRest(ctx, text, s.continuation(text))
 	}
 	if s.msgID == 0 {
 		return s.sendFinal(ctx, text)
 	}
 	if s.freshFinalDue() {
-		old := s.msgID
+		old, oldSent, oldCreated := s.msgID, s.lastSent, s.msgCreated
 		if err := s.sendFinal(ctx, text); err == nil {
 			if err := s.C.DeleteMessage(ctx, s.ChatID, old); err != nil {
 				s.logger().Info("telegram preview delete failed", "err", err.Error())
 			}
 			return nil
 		}
-		s.msgID = old
+		// A send of more than one part can fail after part 1, and opened has
+		// then moved all three fields to part 1. Restore the preview.
+		s.msgID, s.lastSent, s.msgCreated = old, oldSent, oldCreated
 	}
 	return s.editFinal(ctx, text)
 }
@@ -370,16 +542,16 @@ func (s *Streamer) editFinal(ctx context.Context, text string) error {
 	c := noWaitClient(s.C)
 	p := EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: parts[0], ParseMode: "MarkdownV2"}
 	_, err := c.EditMessageText(ctx, p)
+	s.noteFlood(err)
 	if err != nil && !isNotModified(err) && isBadRequest(err) {
 		logPlainFallback(s.logger(), "edit_final", s.ChatID, s.ThreadID, 1, len(parts), err)
 		p.Text, p.ParseMode = plain, ""
 		_, err = noWaitClient(s.C).EditMessageText(ctx, p)
+		s.noteFlood(err)
 	}
 	if err != nil && !isNotModified(err) {
 		s.logger().Info("telegram final edit failed, send the rest", "err", err.Error())
-		cont := s.continuation(text)
-		s.stripCursor(ctx)
-		return s.sendFinal(ctx, cont)
+		return s.sendRest(ctx, text, s.continuation(text))
 	}
 	s.lastSent = parts[0]
 	for _, part := range parts[1:] {
@@ -388,6 +560,47 @@ func (s *Streamer) editFinal(ctx context.Context, text string) error {
 		}
 	}
 	return nil
+}
+
+// sendRest sends cont, the part of the final text that the user did not see,
+// after an edit failure (Hermes _send_fallback_final). It sends no empty
+// message. Then it cleans the preview. s.mu is held.
+func (s *Streamer) sendRest(ctx context.Context, text, cont string) error {
+	// Save the preview first, because sendFinal moves s.msgID to the new
+	// message.
+	old := s.msgID
+	pc, dirty := s.savePreview(s.finalMarkdown(text))
+	if strings.TrimSpace(cont) == "" {
+		if dirty {
+			s.cleanPreview(ctx, pc)
+		}
+		return nil
+	}
+	err := s.sendFinal(ctx, cont)
+	// Delete the preview only when the full final went out again. Else the
+	// preview is the head of the answer, and it stays (Hermes).
+	if err == nil && old != 0 && cont == text {
+		if s.deleteStale(ctx, old) == nil {
+			return nil
+		}
+	}
+	if dirty {
+		s.cleanPreview(ctx, pc)
+	}
+	return err
+}
+
+// finalMarkdown returns the final MarkdownV2 text for a strip edit of the
+// open message. It is set only when the message shows all of text and the
+// text fits in one part. Else it is empty. s.mu is held.
+func (s *Streamer) finalMarkdown(text string) string {
+	if strings.TrimSpace(s.continuation(text)) != "" {
+		return ""
+	}
+	if parts := finalParts(text); len(parts) == 1 {
+		return parts[0]
+	}
+	return ""
 }
 
 // sendFinal sends text as new MarkdownV2 messages. s.mu is held.
@@ -436,6 +649,9 @@ func (s *Streamer) sendNew(ctx context.Context, text string, final bool) (Messag
 	}
 	m, err := c.SendMessage(ctx, p)
 	if err != nil {
+		if !final {
+			s.noteFlood(err)
+		}
 		return m, err
 	}
 	s.opened(m.MessageID, text)
