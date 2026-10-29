@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -272,5 +273,20 @@ func TestExecuteCodeArgsAndSchema(t *testing.T) {
 	}
 	if out := runToolEnvErr(t, ExecuteCodeTool{}, `{"code":"print(1)"}`, visEnv()); !strings.Contains(out, "python3") {
 		t.Fatal(out)
+	}
+}
+
+func TestExecuteCodeChildEnvInGateway(t *testing.T) {
+	t.Setenv("TETHER_GATEWAY", "")
+	tt := ExecuteCodeTool{InGateway: true}
+	has := func(env []string) bool { return slices.Contains(env, GatewayEnv) }
+	if !has(tt.childEnv(&Env{Kind: "chat"})) {
+		t.Fatal("a chat turn in the gateway must give the script TETHER_GATEWAY=1")
+	}
+	if has(tt.childEnv(&Env{Kind: "cron"})) || has(tt.childEnv(&Env{Kind: "child", RootKind: "cron"})) {
+		t.Fatal("a cron run keeps the usual environment")
+	}
+	if has(ExecuteCodeTool{}.childEnv(&Env{Kind: "chat"})) {
+		t.Fatal("outside the gateway, no TETHER_GATEWAY")
 	}
 }

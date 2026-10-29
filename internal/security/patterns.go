@@ -156,6 +156,23 @@ func noWhereOnLine(s string, loc []int) bool {
 // sudoStdinRe is Hermes _SUDO_STDIN_RE.
 var sudoStdinRe = regexp.MustCompile("(?i)(?:^|[;&|`\\n]|&&|\\|\\||\\$\\()\\s*sudo\\s+-S\\b")
 
+// GatewaySelfPatterns are the commands that stop or restart the gateway process
+// that runs them. The stop of the gateway waits for the running turn, so such a
+// command can never finish. The gate applies them only inside the gateway.
+var GatewaySelfPatterns = []Pattern{
+	newPattern("gateway_self_systemctl", "stop/restart own gateway via systemctl",
+		`\bsystemctl\b[^\n;&|]*\b(?:stop|restart|kill)\b[^\n;&|]*\btether(?:\.service)?(?:[\s;&|)"'`+"`"+`]|$)`),
+	newPattern("gateway_self_tether_gateway", "stop/restart own gateway via tether gateway", `\btether\s+gateway\s+(?:stop|restart)\b`),
+	newPattern("gateway_self_kill", "kill own gateway process",
+		`\b(?:pkill|killall)\b[^\n;&|]*\btether\b|\bkill\b[^\n]*(?:\$\(|`+"`"+`)\s*pgrep\b[^\n)`+"`"+`]*\btether\b`),
+	newPattern("gateway_self_update_restart", "tether update --restart inside the gateway", `\btether\s+update\b[^\n;&|]*\s--restart\b`),
+}
+
+// MatchGatewaySelf returns the first self-kill rule that matches cmd.
+func MatchGatewaySelf(cmd string) (Pattern, bool) {
+	return matchFirst(GatewaySelfPatterns, prepare(cmd))
+}
+
 // MatchHardline returns the first hardline rule that matches cmd.
 func MatchHardline(cmd string) (Pattern, bool) {
 	return matchFirst(HardlinePatterns, prepare(cmd))

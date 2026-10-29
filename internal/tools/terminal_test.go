@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -313,5 +314,20 @@ func TestExecThroughRealGateCronDeny(t *testing.T) {
 	out := runToolEnvErr(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"rm -rf /tmp/tether-none"}`, env)
 	if !strings.Contains(out, "cron jobs run without a user") {
 		t.Fatal(out)
+	}
+}
+
+func TestTerminalChildEnvInGateway(t *testing.T) {
+	t.Setenv("TETHER_GATEWAY", "")
+	tt := &TerminalTool{InGateway: true}
+	has := func(env []string) bool { return slices.Contains(env, GatewayEnv) }
+	if !has(tt.childEnv(&Env{Kind: "chat"})) {
+		t.Fatal("a chat turn in the gateway must give the child TETHER_GATEWAY=1")
+	}
+	if has(tt.childEnv(&Env{Kind: "cron"})) || has(tt.childEnv(&Env{Kind: "child", RootKind: "cron"})) {
+		t.Fatal("a cron run keeps the usual environment")
+	}
+	if has((&TerminalTool{}).childEnv(&Env{Kind: "chat"})) {
+		t.Fatal("outside the gateway, no TETHER_GATEWAY")
 	}
 }

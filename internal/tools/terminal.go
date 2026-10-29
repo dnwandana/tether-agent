@@ -41,7 +41,15 @@ type TerminalTool struct {
 	// MaxOutputBytes limits the captured output. Zero uses 8 MiB. Exec keeps
 	// the head and the tail and drops the middle.
 	MaxOutputBytes int
+	// InGateway is true in the gateway process. The child then gets GatewayEnv,
+	// except in a run that cron started.
+	InGateway bool
 }
+
+// GatewayEnv is the environment line that a child of the gateway gets. A script
+// can restart the gateway out of sight of the block rules, and "tether update"
+// reads this variable to refuse.
+const GatewayEnv = "TETHER_GATEWAY=1"
 
 type execArgs struct {
 	Command    string `json:"command"`
@@ -290,7 +298,11 @@ func (t *TerminalTool) childEnv(env *Env) []string {
 	if t.Passthrough != nil {
 		pass = t.Passthrough(env)
 	}
-	return security.ChildEnv(os.Environ(), t.DotEnv, pass)
+	out := security.ChildEnv(os.Environ(), t.DotEnv, pass)
+	if t.InGateway && env.RunRootKind() != "cron" {
+		out = append(out, GatewayEnv)
+	}
+	return out
 }
 
 // resolveWorkdir returns the folder for a command. A relative workdir starts

@@ -472,3 +472,42 @@ func TestNoDBStillWorks(t *testing.T) {
 		t.Fatal(err, p.n)
 	}
 }
+
+// countPrompter counts the approval prompts.
+type countPrompter struct{ n *int }
+
+func (p countPrompter) PromptApproval(context.Context, ApprovalRequest) (Scope, error) {
+	*p.n++
+	return ScopeDeny, nil
+}
+
+func TestGateBlocksSelfRestartInGateway(t *testing.T) {
+	n := 0
+	g := &Gate{Mode: "manual", InGateway: true}
+	err := g.Check(ctx, ApprovalRequest{Command: "systemctl --user restart tether", Kind: "chat"}, countPrompter{&n})
+	var be *BlockedError
+	if !errors.As(err, &be) || be.Reason != GatewaySelfBlocked || n != 0 {
+		t.Fatal(err, n)
+	}
+}
+
+func TestGateSelfRuleSkipsCronAndCLI(t *testing.T) {
+	cmd := "systemctl --user restart tether"
+	for _, req := range []ApprovalRequest{
+		{Command: cmd, Kind: "cron"},
+		{Command: cmd, Kind: "child", RootKind: "cron"},
+	} {
+		g := &Gate{Mode: "manual", CronMode: "deny", InGateway: true}
+		err := g.Check(ctx, req, nil)
+		var be *BlockedError
+		if !errors.As(err, &be) || be.Reason == GatewaySelfBlocked || !strings.Contains(be.Reason, "cron") {
+			t.Fatalf("%+v: %v", req, err)
+		}
+	}
+	n := 0
+	g := &Gate{Mode: "manual", InGateway: false}
+	_ = g.Check(ctx, ApprovalRequest{Command: cmd, Kind: "chat"}, countPrompter{&n})
+	if n != 1 {
+		t.Fatalf("prompts: %d", n)
+	}
+}

@@ -83,6 +83,12 @@ const noConsent = "The user has NOT consented to this action. Do NOT retry this 
 	"Stop the current workflow and wait for the user to respond before taking any " +
 	"further destructive or irreversible action."
 
+// GatewaySelfBlocked is the text for the model when a command would stop the
+// gateway that runs it.
+const GatewaySelfBlocked = "BLOCKED (gateway): this command stops or restarts the gateway that runs it. " +
+	"The stop waits for this turn, so the command cannot finish. " +
+	"Ask the user to send /restart in the chat, or to run \"systemctl --user restart tether\" from a separate shell."
+
 // Gate is the approval gate for shell commands. Mode is "manual", "smart",
 // or "off". CronMode is "deny" or "approve". A zero Timeout uses
 // DefaultApprovalTimeout. A nil DB keeps "Always" answers for the session
@@ -94,7 +100,10 @@ type Gate struct {
 	DB              *db.DB
 	Judge           Judge
 	SudoPasswordSet bool
-	Log             *slog.Logger
+	// InGateway is true in the gateway process. The gate then blocks a command
+	// that stops or restarts the gateway, except in a run that cron started.
+	InGateway bool
+	Log       *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[string]map[string]bool
@@ -112,7 +121,7 @@ func NewGate(cfg config.ApprovalsConfig, d *db.DB) *Gate {
 
 // Check returns nil when the command may run. Otherwise it returns a
 // *BlockedError with the text for the model. The order is the hardline
-// list, the sudo guard, then the dangerous rules. No mode and no
+// list, the sudo guard, the gateway self-kill rules, then the dangerous rules. No mode and no
 // earlier answer can skip the first two steps.
 func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error {
 	if pat, ok := MatchHardline(req.Command); ok {
@@ -124,6 +133,11 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 		return blocked("BLOCKED: sudo password guessing via stdin (sudo -S). " +
 			"Do not pipe passwords to 'sudo -S'. Set SUDO_PASSWORD in the .env file " +
 			"if the agent needs sudo, or run the sudo command in your own terminal.")
+	}
+	if g.InGateway && !isCron(req) {
+		if _, ok := MatchGatewaySelf(req.Command); ok {
+			return blocked("%s", GatewaySelfBlocked)
+		}
 	}
 	pat, ok := MatchDangerous(req.Command)
 	if !ok {

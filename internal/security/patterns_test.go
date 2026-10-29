@@ -528,3 +528,40 @@ var hermesCommandCases = []hermesCase{
 	{"git reset --hard", "", false, "git reset --hard (destroys uncommitted changes)"},
 	{"git push --force", "", false, "git force push (rewrites remote history)"},
 }
+
+func TestGatewaySelfPatterns(t *testing.T) {
+	hit := map[string]string{
+		"systemctl --user restart tether":                   "gateway_self_systemctl",
+		"systemctl restart --user tether.service":           "gateway_self_systemctl",
+		"sudo systemctl stop tether":                        "gateway_self_systemctl",
+		"cd /srv && systemctl --user kill tether":           "gateway_self_systemctl",
+		"systemctl --user try-restart tether":               "gateway_self_systemctl",
+		"systemctl --user reload-or-restart tether.service": "gateway_self_systemctl",
+		`bash -c "systemctl --user restart tether"`:         "gateway_self_systemctl",
+		`sh -c 'systemctl --user restart tether'`:           "gateway_self_systemctl",
+		`systemctl --user restart "tether"`:                 "gateway_self_systemctl",
+		"systemctl --user restart 'tether.service'":         "gateway_self_systemctl",
+		"echo `systemctl --user restart tether`":            "gateway_self_systemctl",
+		"tether gateway restart":                            "gateway_self_tether_gateway",
+		"tether gateway stop":                               "gateway_self_tether_gateway",
+		"pkill -f tether":                                   "gateway_self_kill",
+		"killall tether":                                    "gateway_self_kill",
+		"kill $(pgrep tether)":                              "gateway_self_kill",
+		"kill `pgrep -f tether`":                            "gateway_self_kill",
+		"tether update --restart":                           "gateway_self_update_restart",
+	}
+	for cmd, id := range hit {
+		if p, ok := MatchGatewaySelf(cmd); !ok || p.ID != id {
+			t.Fatalf("%q: %v %v", cmd, p.ID, ok)
+		}
+	}
+	for _, cmd := range []string{
+		"systemctl --user reload tether", "systemctl restart nginx", "systemctl --user restart tether-backup",
+		"tether update", "tether update --no-restart", "systemctl --user status tether",
+		`bash -c "systemctl --user reload tether"`, `systemctl --user restart "tether-backup"`,
+	} {
+		if p, ok := MatchGatewaySelf(cmd); ok {
+			t.Fatalf("%q matched %s", cmd, p.ID)
+		}
+	}
+}

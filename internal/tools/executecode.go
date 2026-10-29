@@ -54,6 +54,9 @@ type ExecuteCodeTool struct {
 	DotEnv map[string]string
 	// Passthrough returns the secret names that the script may keep. It may be nil.
 	Passthrough func(env *Env) []string
+	// InGateway is true in the gateway process. The script then gets GatewayEnv,
+	// except in a run that cron started.
+	InGateway bool
 }
 
 type executeCodeArgs struct {
@@ -249,7 +252,11 @@ func (t ExecuteCodeTool) childEnv(env *Env) []string {
 	if t.Passthrough != nil {
 		pass = t.Passthrough(env)
 	}
-	return security.ChildEnv(os.Environ(), t.DotEnv, pass)
+	out := security.ChildEnv(os.Environ(), t.DotEnv, pass)
+	if t.InGateway && env.RunRootKind() != "cron" {
+		out = append(out, GatewayEnv)
+	}
+	return out
 }
 
 // stubFunc is one function of the tether_tools module.
