@@ -204,6 +204,7 @@ func TestBotCommandsMenu(t *testing.T) {
 		{Command: "deny", Description: "Deny the waiting command"},
 		{Command: "sethome", Description: "Send cron results here"},
 		{Command: "reload_mcp", Description: "Reload the MCP servers"},
+		{Command: "restart", Description: "Restart the gateway"},
 	}
 	if got := BotCommands(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
@@ -425,4 +426,16 @@ func TestPollerHandleCtxOutlivesTheRunContext(t *testing.T) {
 	if got := hctx.Err(); got != nil || len(bad) != 0 {
 		t.Fatal(got, bad)
 	}
+}
+
+func TestBotMenuHasRestart(t *testing.T) {
+	for _, c := range BotCommands() {
+		if c.Command == "restart" {
+			if c.Description != "Restart the gateway" {
+				t.Fatal(c)
+			}
+			return
+		}
+	}
+	t.Fatal("no restart command in the menu")
 }

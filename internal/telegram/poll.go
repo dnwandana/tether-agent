@@ -198,6 +198,7 @@ func BotCommands() []BotCommand {
 		{Command: "deny", Description: "Deny the waiting command"},
 		{Command: "sethome", Description: "Send cron results here"},
 		{Command: "reload_mcp", Description: "Reload the MCP servers"},
+		{Command: "restart", Description: "Restart the gateway"},
 	}
 }
 

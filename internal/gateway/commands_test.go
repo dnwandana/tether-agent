@@ -537,7 +537,7 @@ func TestHelpTelegram(t *testing.T) {
 		"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/delete · delete a session\n\n" +
 		"**This session**\n/model · change the model\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n" +
-		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers"
+		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 	run(t, c, "/help")
 	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
 		t.Fatalf("got:\n%s", r.Text)

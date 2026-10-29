@@ -103,6 +103,14 @@ func Register(cmd Command) {
 	commands[cmd.Name] = cmd
 }
 
+// Unregister removes the command name from the command table. Tests use it to restore the
+// table after a test that registers a command.
+func Unregister(name string) {
+	commandsMu.Lock()
+	defer commandsMu.Unlock()
+	delete(commands, name)
+}
+
 // Commands returns a copy of the command table.
 func Commands() map[string]Command {
 	commandsMu.RLock()
@@ -692,7 +700,7 @@ const helpTelegram = "📖 **Commands**\n\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n" +
 	"/approve · /deny · answer an approval\n\n" +
-	"**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers"
+	"**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 
 // helpCLI is the reply to /help on a text-only channel. It does not have the Telegram
 // commands, and it has /exit.
