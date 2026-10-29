@@ -919,6 +919,83 @@ func TestNewReplyFormat(t *testing.T) {
 	}
 }
 
+// statusProv is a primary provider that reports a fallback state.
+type statusProv struct {
+	*fakeProv
+	st provider.FallbackStatus
+}
+
+func (s statusProv) Model() string                           { return "glm-5.3" }
+func (s statusProv) FallbackStatus() provider.FallbackStatus { return s.st }
+
+// namedProv is a provider with the config entry name and the model.
+type namedProv struct {
+	*fakeProv
+	name, model string
+}
+
+func (n namedProv) Name() string  { return n.name }
+func (n namedProv) Model() string { return n.model }
+
+// fallbackNow is the fixed clock of the fallback tests.
+var fallbackNow = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+
+// activeStatus returns a fallback state where glm-5.3 failed 2 minutes before fallbackNow.
+func activeStatus() provider.FallbackStatus {
+	return provider.FallbackStatus{Active: true, PrimaryModel: "glm-5.3", FallbackName: "fallback",
+		FallbackModel: "deepseek/deepseek-v4.1-flash-1017", FailedAt: fallbackNow.Add(-2 * time.Minute), Cause: "HTTP 503"}
+}
+
+// fallbackWarningText is the warning for activeStatus at fallbackNow.
+const fallbackWarningText = "⚠️ The primary model glm-5.3 failed 2 min ago (HTTP 503). " +
+	"Calls go to the fallback until the primary answers again."
+
+func TestNewReplyFallback(t *testing.T) {
+	fixTip(t, "T")
+	setNow(t, fallbackNow)
+	c, sent := interactiveCtx(t)
+	c.Deps.Agent.Prov = statusProv{fakeProv: &fakeProv{}, st: activeStatus()}
+	c.Deps.Agent.Providers["fallback"] = namedProv{fakeProv: &fakeProv{}, name: "fallback", model: "deepseek/deepseek-v4.1-flash-1017"}
+	pc := c.Deps.Cfg.Providers["fallback"]
+	pc.ContextWindow = 64000
+	c.Deps.Cfg.Providers["fallback"] = pc
+	want := "✨ Starting new session.\nSend a message to begin.\n\n" +
+		"Model: deepseek/deepseek-v4.1-flash-1017 (fallback)\nContext: 64K tokens\n" +
+		fallbackWarningText + "\n\n" +
+		"💡 Tip: T"
+	run(t, c, "/new")
+	if r := lastSent(t, sent); r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+func TestNewReplyEscapesModel(t *testing.T) {
+	fixTip(t, "T")
+	setNow(t, fallbackNow)
+	c, sent := interactiveCtx(t)
+	c.Deps.Agent.Prov = modelProv{fakeProv: &fakeProv{}, model: "glm_5*3"}
+	run(t, c, "/new")
+	if r := lastSent(t, sent); !strings.Contains(r.Text, "Model: glm\\_5\\*3\n") {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	st := activeStatus()
+	st.PrimaryModel = "glm_5"
+	c.Deps.Agent.Prov = statusProv{fakeProv: &fakeProv{}, st: st}
+	run(t, c, "/new")
+	if r := lastSent(t, sent); !strings.Contains(r.Text, "primary model glm\\_5 failed") {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+func TestFallbackWarningInactive(t *testing.T) {
+	if got := fallbackWarning(provider.FallbackStatus{}, fallbackNow); got != "" {
+		t.Fatalf("got %q", got)
+	}
+	if got := fallbackWarning(activeStatus(), fallbackNow); got != fallbackWarningText {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // modelCtx returns an interactive command context with the providers openrouter, primary,
 // and zai. The model of primary is anthropic/claude-sonnet-5.
 func modelCtx(t *testing.T) (*CommandCtx, *[]Reply) {
@@ -950,6 +1027,65 @@ func TestModelShowWithButtons(t *testing.T) {
 	}
 	if r.Buttons[0][2].Text != "✓ zai" || r.Buttons[0][1].Text != "primary" {
 		t.Fatalf("%+v", r.Buttons)
+	}
+}
+
+// fallbackModelCtx returns modelCtx with a primary that calls its fallback now.
+func fallbackModelCtx(t *testing.T) (*CommandCtx, *[]Reply) {
+	t.Helper()
+	setNow(t, fallbackNow)
+	c, sent := modelCtx(t)
+	c.Deps.Providers["primary"] = statusProv{fakeProv: &fakeProv{}, st: activeStatus()}
+	return c, sent
+}
+
+func TestModelShowFallback(t *testing.T) {
+	c, sent := fallbackModelCtx(t)
+	run(t, c, "/model")
+	r := lastSent(t, sent)
+	want := "🧠 **Model: default**\n`fallback` · deepseek/deepseek-v4.1-flash-1017\n" + fallbackWarningText + "\nSelect a provider for this session:"
+	if r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	want2 := [][]Button{{{Text: "openrouter", Data: "/model openrouter"}, {Text: "✓ primary", Data: "/model primary"}, {Text: "zai", Data: "/model zai"}}}
+	if !reflect.DeepEqual(r.Buttons, want2) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+}
+
+func TestModelShowFallbackPinnedPrimary(t *testing.T) {
+	c, sent := fallbackModelCtx(t)
+	run(t, c, "/model primary:glm-4.7")
+	run(t, c, "/model")
+	r := lastSent(t, sent)
+	want := "🧠 **Model: primary:glm-4.7**\n`fallback` · deepseek/deepseek-v4.1-flash-1017\n" + fallbackWarningText + "\n"
+	if !strings.HasPrefix(r.Text, want) {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if r.Buttons[0][1].Text != "✓ primary" {
+		t.Fatalf("%+v", r.Buttons)
+	}
+}
+
+func TestModelShowNoWarningForOtherEntry(t *testing.T) {
+	c, sent := fallbackModelCtx(t)
+	run(t, c, "/model zai")
+	run(t, c, "/model")
+	r := lastSent(t, sent)
+	if strings.Contains(r.Text, "⚠️") || !strings.Contains(r.Text, "`zai`") {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+func TestModelShowFallbackCLI(t *testing.T) {
+	setNow(t, fallbackNow)
+	c, out := cmdCtx(t, "cli:t")
+	c.Deps.Providers["primary"] = statusProv{fakeProv: &fakeProv{}, st: activeStatus()}
+	run(t, c, "/model")
+	want := "🧠 **Model: default**\n`fallback` · deepseek/deepseek-v4.1-flash-1017\n" + fallbackWarningText +
+		"\nSend /model <provider> to change it. The providers are: cheap, primary.\n"
+	if out.String() != want {
+		t.Fatalf("got:\n%s", out)
 	}
 }
 

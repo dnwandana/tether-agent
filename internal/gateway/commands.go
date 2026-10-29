@@ -12,6 +12,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/obs"
+	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -321,14 +322,33 @@ func cmdNew(ctx context.Context, c *CommandCtx, _ string) error {
 }
 
 // newReply returns the reply to /new and /reset. With no agent, the reply has no model
-// and no context lines.
+// and no context lines. When the primary failed, the reply names the fallback model and
+// adds the warning.
 func newReply(d *Deps) string {
 	text := "✨ Starting new session.\nSend a message to begin.\n\n"
 	if d.Agent != nil {
-		model, window := d.Agent.DefaultModel()
-		text += fmt.Sprintf("Model: %s\nContext: %s\n\n", model, formatContext(window))
+		ms := d.Agent.CurrentModel()
+		mark := ""
+		if ms.Fallback.Active {
+			mark = " (fallback)"
+		}
+		text += fmt.Sprintf("Model: %s%s\nContext: %s\n", EscapeMarkdown(ms.Model), mark, formatContext(ms.ContextWindow))
+		if w := fallbackWarning(ms.Fallback, nowFunc()); w != "" {
+			text += w + "\n"
+		}
+		text += "\n"
 	}
 	return text + "💡 Tip: " + pickTip()
+}
+
+// fallbackWarning returns the warning line for a primary that failed, or "" when the
+// primary answers.
+func fallbackWarning(st provider.FallbackStatus, now time.Time) string {
+	if !st.Active {
+		return ""
+	}
+	return fmt.Sprintf("⚠️ The primary model %s failed %s (%s). Calls go to the fallback until the primary answers again.",
+		EscapeMarkdown(st.PrimaryModel), obs.Ago(now.Sub(st.FailedAt)), EscapeMarkdown(st.Cause))
 }
 
 func cmdRename(ctx context.Context, c *CommandCtx, args string) error {
@@ -492,9 +512,20 @@ func (c *CommandCtx) modelReply(s *sessions.Session) Reply {
 		head = EscapeMarkdown(s.ModelOverride)
 	}
 	name, model := c.modelInUse(s)
-	text := fmt.Sprintf("🧠 **Model: %s**\n`%s`", head, name)
+	// The buttons mark the entry that the session chose. The text names the entry that
+	// answers now, which is the fallback when the primary failed.
+	shown, warning := name, ""
+	if name == "primary" {
+		if st, _ := provider.StatusOf(c.Deps.Providers["primary"]); st.Active {
+			shown, model, warning = st.FallbackName, st.FallbackModel, fallbackWarning(st, nowFunc())
+		}
+	}
+	text := fmt.Sprintf("🧠 **Model: %s**\n`%s`", head, shown)
 	if model != "" {
 		text += " · " + EscapeMarkdown(model)
+	}
+	if warning != "" {
+		text += "\n" + warning
 	}
 	names := c.providerNames()
 	if !c.interactive() {
