@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/browser"
+	"github.com/dnwandana/tether-agent/internal/hostos"
 )
 
 // chromeOrSkip returns the path of a local Chrome, or skips the test.
@@ -256,14 +257,15 @@ func TestCookiesSetGetClear(t *testing.T) {
 }
 
 func TestNoChromeErrorFromFirstCall(t *testing.T) {
+	t.Cleanup(hostos.Set(hostos.Ubuntu))
 	calls := 0
 	bt := &BrowserTools{M: &browser.Manager{}, ShotDir: t.TempDir(), DetectErr: func() error {
 		calls++
-		return browser.ErrNoChrome
+		return browser.NoChromeError()
 	}}
 	for _, name := range bt.names() {
 		out := runToolEnvErr(t, bt.Tool(name), `{"url":"https://example.com","selector":"a","text":"x","code":"1","action":"get"}`, sessEnv("s1"))
-		if !strings.Contains(out, "browser.chrome_path") || !strings.Contains(out, "apt install chromium") {
+		if !strings.Contains(out, "browser.chrome_path") || !strings.Contains(out, "sudo apt install chromium-browser") {
 			t.Fatalf("%s: %s", name, out)
 		}
 	}

@@ -109,7 +109,7 @@ no parent.
 
 | Key | Default | Effect |
 |---|---|---|
-| `browser.chrome_path` | `""` | The path of the Chrome program. `""` uses the `CHROME_PATH` environment variable, then finds Chrome in `PATH`. |
+| `browser.chrome_path` | `""` | The path of the Chrome program. `""` uses the `CHROME_PATH` environment variable, then finds Chrome or Chromium in `PATH`. Then it tries `/snap/bin/chromium` on Linux, and the Chrome and Chromium apps on macOS. |
 | `browser.idle_close_minutes` | `10` | The program stops Chrome after this number of minutes with no browser call. |
 
 ## terminal

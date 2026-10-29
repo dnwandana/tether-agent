@@ -11,13 +11,29 @@ import (
 	"time"
 
 	"github.com/chromedp/chromedp"
+
+	"github.com/dnwandana/tether-agent/internal/hostos"
 )
 
-// macChromePath is the Chrome binary of the macOS app.
-const macChromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+// The paths of the Chrome and Chromium programs that are not in PATH.
+const (
+	// macChromePath is the Chrome binary of the macOS app.
+	macChromePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+	// macChromiumPath is the Chromium binary of the macOS app.
+	macChromiumPath = "/Applications/Chromium.app/Contents/MacOS/Chromium"
+	// snapChromiumPath is the Chromium of the snap package. The default PATH of systemd
+	// does not have /snap/bin.
+	snapChromiumPath = "/snap/bin/chromium"
+)
 
-// ErrNoChrome is the error when no Chrome or Chromium is found.
-var ErrNoChrome = errors.New("no Chrome or Chromium found; install chromium (apt install chromium) or set browser.chrome_path")
+// ErrNoChrome is the error when no Chrome or Chromium is found. Use NoChromeError to give
+// it with the install hint.
+var ErrNoChrome = errors.New("no Chrome or Chromium found")
+
+// NoChromeError returns ErrNoChrome with the install hint for the current system.
+func NoChromeError() error {
+	return fmt.Errorf("%w; %s or set browser.chrome_path", ErrNoChrome, hostos.Hint("chrome"))
+}
 
 // reapInterval is the time between two automatic calls of Reap.
 const reapInterval = time.Minute
@@ -27,7 +43,9 @@ const closeTimeout = 10 * time.Second
 
 // DetectChrome returns the path of the Chrome binary. The order is the config
 // value, then CHROME_PATH, then google-chrome, chromium, and chromium-browser
-// in PATH, then the macOS app path on darwin.
+// in PATH. Then it tries /snap/bin/chromium on linux, because the default PATH
+// of systemd does not have /snap/bin. On darwin, it tries the Chrome app in
+// /Applications, the Chrome app in ~/Applications, and then the Chromium app.
 func DetectChrome(configPath string, lookPath func(string) (string, error), getenv func(string) string, goos string) (string, error) {
 	if configPath != "" {
 		return configPath, nil
@@ -36,15 +54,22 @@ func DetectChrome(configPath string, lookPath func(string) (string, error), gete
 		return p, nil
 	}
 	candidates := []string{"google-chrome", "chromium", "chromium-browser"}
-	if goos == "darwin" {
+	switch goos {
+	case "linux":
+		candidates = append(candidates, snapChromiumPath)
+	case "darwin":
 		candidates = append(candidates, macChromePath)
+		if home := getenv("HOME"); home != "" {
+			candidates = append(candidates, home+macChromePath)
+		}
+		candidates = append(candidates, macChromiumPath)
 	}
 	for _, name := range candidates {
 		if p, err := lookPath(name); err == nil && p != "" {
 			return p, nil
 		}
 	}
-	return "", ErrNoChrome
+	return "", NoChromeError()
 }
 
 // tab is the browser tab of one session.
@@ -131,7 +156,7 @@ func (m *Manager) Tab(ctx context.Context, sessionID string) (context.Context, e
 // startLocked starts the Chrome process. The caller holds m.mu.
 func (m *Manager) startLocked(ctx context.Context) error {
 	if m.ChromePath == "" {
-		return ErrNoChrome
+		return NoChromeError()
 	}
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(m.ChromePath),

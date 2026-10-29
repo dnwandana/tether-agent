@@ -12,6 +12,8 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+
+	"github.com/dnwandana/tether-agent/internal/hostos"
 )
 
 var ctx = context.Background()
@@ -101,6 +103,54 @@ func TestDetectDarwinAppPath(t *testing.T) {
 	// The macOS app path is not a candidate on linux.
 	if _, err := DetectChrome("", look, envWith("", ""), "linux"); err == nil {
 		t.Fatal("the macOS path must not be used on linux")
+	}
+}
+
+func TestNoChromeErrorPerSystem(t *testing.T) {
+	t.Cleanup(hostos.Set(hostos.Ubuntu))
+	err := NoChromeError()
+	if !errors.Is(err, ErrNoChrome) {
+		t.Fatal("NoChromeError must wrap ErrNoChrome:", err)
+	}
+	want := "no Chrome or Chromium found; install Chromium (sudo apt install chromium-browser) or set browser.chrome_path"
+	if err.Error() != want {
+		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
+}
+
+func TestDetectChromeSnapPath(t *testing.T) {
+	look := fakeLook(map[string]string{"/snap/bin/chromium": "/snap/bin/chromium"})
+	if p, err := DetectChrome("", look, envWith("", ""), "linux"); err != nil || p != "/snap/bin/chromium" {
+		t.Fatal(p, err)
+	}
+	// The snap path is not a candidate on darwin.
+	if _, err := DetectChrome("", look, envWith("", ""), "darwin"); !errors.Is(err, ErrNoChrome) {
+		t.Fatal("the snap path must not be used on darwin:", err)
+	}
+}
+
+func TestDetectChromeMacPaths(t *testing.T) {
+	const (
+		userChrome = "/Users/u/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+		chromium   = "/Applications/Chromium.app/Contents/MacOS/Chromium"
+	)
+	env := envWith("HOME", "/Users/u")
+	look := fakeLook(map[string]string{userChrome: userChrome})
+	if p, err := DetectChrome("", look, env, "darwin"); err != nil || p != userChrome {
+		t.Fatal(p, err)
+	}
+	look = fakeLook(map[string]string{chromium: chromium})
+	if p, err := DetectChrome("", look, env, "darwin"); err != nil || p != chromium {
+		t.Fatal(p, err)
+	}
+	look = fakeLook(map[string]string{macChromePath: macChromePath, userChrome: userChrome, chromium: chromium})
+	if p, err := DetectChrome("", look, env, "darwin"); err != nil || p != macChromePath {
+		t.Fatal("the app in /Applications comes first:", p, err)
+	}
+	// With no HOME, the path in the home folder is not a candidate.
+	look = fakeLook(map[string]string{userChrome: userChrome})
+	if _, err := DetectChrome("", look, envWith("", ""), "darwin"); !errors.Is(err, ErrNoChrome) {
+		t.Fatal("no HOME must give no home path:", err)
 	}
 }
 
