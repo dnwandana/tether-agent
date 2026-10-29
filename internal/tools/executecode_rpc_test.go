@@ -242,3 +242,22 @@ func TestScriptCallableToolsList(t *testing.T) {
 		t.Fatal(ScriptCallableTools)
 	}
 }
+
+func TestRPCUnknownArgsNoNoteOnSuccess(t *testing.T) {
+	s := &RPCServer{Reg: regWith(fakeTool{name: "web_fetch", out: "ok", params: abSchema}), Env: &Env{}, Visible: vis("web_fetch"), MaxCalls: 50}
+	resp := rpc(t, listenRPC(t, s), `{"id":1,"tool":"web_fetch","args":{"x":1}}`)
+	if !resp.OK || resp.Result != "ok" {
+		t.Fatalf("response = %+v", resp)
+	}
+	if s.Env.ScriptCall {
+		t.Fatal("the RPC server changed the shared Env")
+	}
+}
+
+func TestRPCUnknownArgsNoteOnError(t *testing.T) {
+	s := &RPCServer{Reg: regWith(fakeTool{name: "web_fetch", err: toolErr("boom"), params: abSchema}), Env: &Env{}, Visible: vis("web_fetch"), MaxCalls: 50}
+	resp := rpc(t, listenRPC(t, s), `{"id":1,"tool":"web_fetch","args":{"x":1}}`)
+	if resp.OK || !strings.Contains(resp.Error, "Tether ignored these unknown arguments: x.") {
+		t.Fatalf("response = %+v", resp)
+	}
+}

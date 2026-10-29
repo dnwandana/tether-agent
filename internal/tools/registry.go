@@ -53,6 +53,9 @@ type Env struct {
 	Progress func(line string)
 	// Values holds per-session tool state, for example the read tracker.
 	Values map[string]any
+	// ScriptCall is true for a call from an execute_code script. The script reads a
+	// successful result as data, so the result gets no note.
+	ScriptCall bool
 }
 
 // RunRootKind returns the kind of the top-level run of env: RootKind, or Kind for a
@@ -204,11 +207,45 @@ func (r *Registry) Dispatch(ctx context.Context, name string, args json.RawMessa
 			res = Result{Text: fmt.Sprintf("tool %s failed: internal error", name), IsError: true}
 		}
 	}()
+	// The check runs under the recover. A panic result replaces the whole
+	// result, so it gets no note.
+	note := argsNote(name, t, args, env)
 	out, err := t.Run(ctx, args, env)
 	if err != nil {
-		return Result{Text: errorText(name, err), IsError: true}
+		return Result{Text: ctxmgr.SanitizeUTF8(withNote(errorText(name, err), note)), IsError: true}
 	}
-	return Result{Text: ctxmgr.SanitizeUTF8(out)}
+	if env.ScriptCall {
+		note = ""
+	}
+	return Result{Text: ctxmgr.SanitizeUTF8(withNote(out, note))}
+}
+
+// argsNote checks the top-level keys of args against the schema of t. For
+// unknown keys, it writes a Warn line with the key names and returns the note
+// for the model. The Warn line never holds an argument value.
+func argsNote(name string, t Tool, args json.RawMessage, env *Env) string {
+	unknown, known, ok := unknownArgs(args, t.Schema().Parameters)
+	if !ok || len(unknown) == 0 {
+		return ""
+	}
+	log := env.Log
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn("tools: the call has unknown arguments", "tool", name, "keys", strings.Join(unknown, ","))
+	return unknownArgsNote(unknown, known)
+}
+
+// withNote adds note to text after one blank line. An empty text gets the note
+// alone.
+func withNote(text, note string) string {
+	switch {
+	case note == "":
+		return text
+	case text == "":
+		return note
+	}
+	return text + "\n\n" + note
 }
 
 // errorText returns the model text for err from the tool name.

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,13 +25,19 @@ type fakeTool struct {
 	panics bool
 	err    error
 	out    string
+	// params is the JSON schema of the arguments. Empty means {"type":"object"}.
+	params string
 }
 
 func (f fakeTool) Name() string       { return f.name }
 func (f fakeTool) Toolset() string    { return f.set }
 func (f fakeTool) ParallelSafe() bool { return true }
 func (f fakeTool) Schema() provider.ToolSchema {
-	return provider.ToolSchema{Name: f.name, Description: "fake", Parameters: json.RawMessage(`{"type":"object"}`)}
+	params := f.params
+	if params == "" {
+		params = `{"type":"object"}`
+	}
+	return provider.ToolSchema{Name: f.name, Description: "fake", Parameters: json.RawMessage(params)}
 }
 func (f fakeTool) Run(_ context.Context, _ json.RawMessage, _ *Env) (string, error) {
 	if f.panics {
@@ -309,5 +316,94 @@ func TestRegistryConcurrentChanges(t *testing.T) {
 		if err := <-done; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// bufEnv returns an Env whose log goes to a text handler on the returned buffer.
+func bufEnv() (*Env, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return &Env{Log: slog.New(slog.NewTextHandler(&buf, nil))}, &buf
+}
+
+func TestDispatchUnknownArgsNoteOnSuccess(t *testing.T) {
+	env, buf := bufEnv()
+	res := dispatch(t, fakeTool{name: "f", out: "done", params: abSchema}, `{"a":"x","x":"secret-value"}`, env)
+	want := "done\n\n" + unknownArgsNote([]string{"x"}, []string{"a", "b"})
+	if res.IsError || res.Text != want {
+		t.Fatalf("result = %+v, want text %q", res, want)
+	}
+	log := buf.String()
+	for _, s := range []string{"level=WARN", `msg="tools: the call has unknown arguments"`, "tool=f", "keys=x"} {
+		if !strings.Contains(log, s) {
+			t.Fatalf("log %q does not contain %q", log, s)
+		}
+	}
+	if strings.Contains(log, "secret-value") {
+		t.Fatalf("log %q contains an argument value", log)
+	}
+}
+
+func TestDispatchUnknownArgsKeysAreSorted(t *testing.T) {
+	env, buf := bufEnv()
+	res := dispatch(t, fakeTool{name: "f", out: "done", params: abSchema}, `{"z":1,"a":"x","y":2}`, env)
+	if !strings.HasSuffix(res.Text, unknownArgsNote([]string{"y", "z"}, []string{"a", "b"})) {
+		t.Fatalf("result = %+v", res)
+	}
+	if !strings.Contains(buf.String(), "keys=y,z") {
+		t.Fatalf("log = %q", buf.String())
+	}
+}
+
+func TestDispatchUnknownArgsNoteOnError(t *testing.T) {
+	env, _ := bufEnv()
+	res := dispatch(t, fakeTool{name: "f", err: toolErr("boom"), params: abSchema}, `{"args":{"a":"x"}}`, env)
+	want := "boom\n\n" + unknownArgsNote([]string{"args"}, []string{"a", "b"})
+	if !res.IsError || res.Text != want {
+		t.Fatalf("result = %+v, want text %q", res, want)
+	}
+}
+
+func TestDispatchUnknownArgsEmptyTextGetsNoteAlone(t *testing.T) {
+	env, _ := bufEnv()
+	res := dispatch(t, fakeTool{name: "f", params: abSchema}, `{"x":1}`, env)
+	if want := unknownArgsNote([]string{"x"}, []string{"a", "b"}); res.IsError || res.Text != want {
+		t.Fatalf("result = %+v, want text %q", res, want)
+	}
+}
+
+func TestDispatchNoNoteForCleanOrEmptyArgs(t *testing.T) {
+	for _, args := range []string{`{"a":"x"}`, ""} {
+		env, buf := bufEnv()
+		res := dispatch(t, fakeTool{name: "f", out: "done", params: abSchema}, args, env)
+		if res.IsError || res.Text != "done" {
+			t.Fatalf("args %q: result = %+v", args, res)
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("args %q: log = %q", args, buf.String())
+		}
+	}
+}
+
+func TestDispatchNoNoteForPanic(t *testing.T) {
+	env, _ := bufEnv()
+	res := dispatch(t, fakeTool{name: "f", panics: true, params: abSchema}, `{"x":1}`, env)
+	if !res.IsError || res.Text != "tool f failed: internal error" {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
+func TestDispatchScriptCallNoteOnlyOnError(t *testing.T) {
+	env, buf := bufEnv()
+	env.ScriptCall = true
+	res := dispatch(t, fakeTool{name: "f", out: "done", params: abSchema}, `{"x":1}`, env)
+	if res.IsError || res.Text != "done" {
+		t.Fatalf("result = %+v", res)
+	}
+	if !strings.Contains(buf.String(), `msg="tools: the call has unknown arguments"`) {
+		t.Fatalf("log = %q", buf.String())
+	}
+	res = dispatch(t, fakeTool{name: "f", err: toolErr("boom"), params: abSchema}, `{"x":1}`, env)
+	if !res.IsError || !strings.HasSuffix(res.Text, "\n\n"+unknownArgsNote([]string{"x"}, []string{"a", "b"})) {
+		t.Fatalf("result = %+v", res)
 	}
 }

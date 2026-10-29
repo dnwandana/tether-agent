@@ -196,7 +196,14 @@ func (s *RPCServer) call(ctx context.Context, req rpcRequest) rpcResponse {
 	if len(args) == 0 || string(args) == "null" {
 		args = json.RawMessage(`{}`)
 	}
-	res := s.Reg.Dispatch(ctx, req.Tool, args, s.Env, s.Visible)
+	// Mark the call on a copy, because other calls share s.Env. The copy keeps the
+	// same Values map, so the read tracker still works.
+	var env Env
+	if s.Env != nil {
+		env = *s.Env
+	}
+	env.ScriptCall = true
+	res := s.Reg.Dispatch(ctx, req.Tool, args, &env, s.Visible)
 	if res.IsError {
 		resp.Error = res.Text
 		return resp

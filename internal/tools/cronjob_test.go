@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -253,5 +254,20 @@ func TestDescriptionHasNoSilent(t *testing.T) {
 	}
 	if (CronJobTool{}).Toolset() != SetCron || (CronJobTool{}).Name() != "cronjob" {
 		t.Fatal("bad tool metadata")
+	}
+}
+
+func TestCronjobWrappedCreateGetsNote(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(cronTool(t))
+	args := json.RawMessage(`{"action":"create","args":{"schedule":"0 1 * * *","prompt":"p"}}`)
+	res := reg.Dispatch(ctx, "cronjob", args, newEnv(t), map[string]bool{"cronjob": true})
+	if !res.IsError || !strings.HasPrefix(res.Text, "cron: schedule is required") {
+		t.Fatalf("result = %+v", res)
+	}
+	for _, s := range []string{"Tether ignored these unknown arguments: args.", "The known arguments are: action, job_id, prompt, schedule,"} {
+		if !strings.Contains(res.Text, s) {
+			t.Fatalf("result %q does not contain %q", res.Text, s)
+		}
 	}
 }
