@@ -126,6 +126,12 @@ func (c *Config) Validate() error {
 	if c.Sessions.RetentionDays < 0 {
 		errs = append(errs, fmt.Errorf("config: sessions.retention_days is %d, which is negative. Use 0 to keep all sessions, or a number of days", c.Sessions.RetentionDays))
 	}
+	if c.Agent.RestartDrainTimeoutS < 0 {
+		errs = append(errs, fmt.Errorf("config: agent.restart_drain_timeout_s is %d, which is negative. Use 0 to cancel the running turns at once, or a number of seconds", c.Agent.RestartDrainTimeoutS))
+	}
+	if c.Agent.ResumeFreshnessS < 0 {
+		errs = append(errs, fmt.Errorf("config: agent.resume_freshness_s is %d, which is negative. Use 0 to turn off the resume, or a number of seconds", c.Agent.ResumeFreshnessS))
+	}
 	errs = append(errs,
 		oneOf("approvals.mode", c.Approvals.Mode, "manual", "smart", "off"),
 		oneOf("approvals.cron_mode", c.Approvals.CronMode, "deny", "approve"),

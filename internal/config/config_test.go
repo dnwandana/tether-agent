@@ -111,3 +111,32 @@ func TestValidateRetentionDays(t *testing.T) {
 		t.Fatalf("a negative value must name the key, got %v", err)
 	}
 }
+
+func TestDefaultRestartKeys(t *testing.T) {
+	d := Default()
+	if d.Agent.RestartDrainTimeoutS != 180 || d.Agent.ResumeFreshnessS != 3600 {
+		t.Fatal(d.Agent)
+	}
+}
+
+func TestValidateRejectsNegativeRestartKeys(t *testing.T) {
+	c := Default()
+	c.Providers["primary"] = Provider{Format: "openai"}
+	c.Agent.RestartDrainTimeoutS = -5
+	c.Agent.ResumeFreshnessS = -1
+	err := c.Validate()
+	want1 := "config: agent.restart_drain_timeout_s is -5, which is negative. Use 0 to cancel the running turns at once, or a number of seconds"
+	want2 := "config: agent.resume_freshness_s is -1, which is negative. Use 0 to turn off the resume, or a number of seconds"
+	if err == nil || !strings.Contains(err.Error(), want1) || !strings.Contains(err.Error(), want2) {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateAcceptsZeroRestartKeys(t *testing.T) {
+	c := Default()
+	c.Providers["primary"] = Provider{Format: "openai"}
+	c.Agent.RestartDrainTimeoutS, c.Agent.ResumeFreshnessS = 0, 0
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

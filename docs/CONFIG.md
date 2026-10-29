@@ -50,6 +50,8 @@ Other keys can refer to any entry by its name.
 | `agent.tool_concurrency` | `4` | The maximum number of tool calls that run at the same time in one round. |
 | `agent.vision_provider` | `""` | The provider for `view_image`. `""` uses the primary provider when it has `vision: true`. Else the agent has no `view_image` tool. |
 | `agent.delegation_provider` | `""` | The provider for child runs of `delegate_task`. `""` uses the provider of the parent. |
+| `agent.restart_drain_timeout_s` | `180` | The maximum time in seconds that a stop or a restart waits for the running turns. The turns that still run after it are cancelled, and they continue after the restart. `tether setup` writes `TimeoutStopSec` from this value. |
+| `agent.resume_freshness_s` | `3600` | A turn that a restart or a crash cut continues at the next start when the cut is not older than this time, in seconds. `0` turns off the resume. |
 
 ## context
 

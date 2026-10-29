@@ -48,6 +48,10 @@ type AgentConfig struct {
 	ToolConcurrency    int    `yaml:"tool_concurrency"`
 	VisionProvider     string `yaml:"vision_provider"`
 	DelegationProvider string `yaml:"delegation_provider"`
+	// RestartDrainTimeoutS is the time in seconds that a stop waits for the running turns.
+	RestartDrainTimeoutS int `yaml:"restart_drain_timeout_s"`
+	// ResumeFreshnessS is the age in seconds up to which a cut turn continues at the next start.
+	ResumeFreshnessS int `yaml:"resume_freshness_s"`
 }
 
 // ContextConfig sets the compaction and the tool output limits.
@@ -255,8 +259,10 @@ func Default() Config {
 	return Config{
 		Providers: map[string]Provider{},
 		Agent: AgentConfig{
-			MaxTurns:        90,
-			ToolConcurrency: 4,
+			MaxTurns:             90,
+			ToolConcurrency:      4,
+			RestartDrainTimeoutS: 180,
+			ResumeFreshnessS:     3600,
 		},
 		Context: ContextConfig{
 			CompactThreshold:   0.50,
