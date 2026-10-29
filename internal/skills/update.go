@@ -131,8 +131,12 @@ func formatChanges(changes []FileChange) string {
 	return b.String()
 }
 
-//lint:ignore ST1005 the text gives the next step as a full sentence.
-var errNoGitUpdate = errors.New("the git program is not on PATH. Install git (apt install git), then run the update again.")
+// noGitUpdateError returns ErrNoGit with the install hint for the current
+// system and the next step of an update.
+func noGitUpdateError() error {
+	//lint:ignore ST1005 the text gives the next step as a full sentence.
+	return fmt.Errorf("%w. %s, then run the update again.", ErrNoGit, installGit())
+}
 
 // Update installs the new version of each target skill. It goes on with the
 // next skill when one fails or the owner cancels it. It returns an error when
@@ -245,7 +249,7 @@ func (in *Installer) updateOne(ctx context.Context, name string, entry LockEntry
 	s, err := in.stage(ctx, src, "")
 	if errors.Is(err, ErrNoGit) {
 		// The install text offers a local folder, which an update cannot use.
-		return errNoGitUpdate
+		return noGitUpdateError()
 	}
 	if err != nil {
 		return err

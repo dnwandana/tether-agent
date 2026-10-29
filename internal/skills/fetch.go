@@ -9,13 +9,25 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/hostos"
 )
 
-// ErrNoGit tells that the git program is not on PATH. The CLI prints the text
-// as two full sentences, so it ends with a period.
-//
-//lint:ignore ST1005 the text is a fixed user message with two sentences.
-var ErrNoGit = errors.New("the git program is not on PATH. Install git (apt install git), or give a local folder.")
+// ErrNoGit tells that the git program is not on PATH. FindGit gives it with the
+// install hint for the current system.
+var ErrNoGit = errors.New("the git program is not on PATH")
+
+// noGitError returns ErrNoGit with the install hint for the current system. The
+// CLI prints the text as two full sentences, so it ends with a period.
+func noGitError() error {
+	//lint:ignore ST1005 the text is a fixed user message with two sentences.
+	return fmt.Errorf("%w. %s, or give a local folder.", ErrNoGit, installGit())
+}
+
+// installGit returns the install hint for git as the start of a sentence.
+func installGit() string {
+	return "Install" + strings.TrimPrefix(hostos.Hint("git"), "install")
+}
 
 // gitTimeout is the time limit for each git call.
 const gitTimeout = 120 * time.Second
@@ -38,11 +50,12 @@ type Git struct {
 }
 
 // FindGit returns a Git for the git program on PATH, with the production
-// timeout and protocols. It returns ErrNoGit when git is not on PATH.
+// timeout and protocols. When git is not on PATH, it returns an error that
+// wraps ErrNoGit.
 func FindGit() (Git, error) {
 	p, err := exec.LookPath("git")
 	if err != nil {
-		return Git{}, ErrNoGit
+		return Git{}, noGitError()
 	}
 	return Git{Path: p, Timeout: gitTimeout, Protocols: defaultProtocols}, nil
 }

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/hostos"
 )
 
 // pdfSkill returns a SKILL.md with the frontmatter name "pdf" and body.
@@ -182,6 +184,7 @@ func TestUpdateReportsUncheckedSkills(t *testing.T) {
 }
 
 func TestUpdateNoGitTextAndErrWriter(t *testing.T) {
+	t.Cleanup(hostos.Set(hostos.Ubuntu))
 	url, _, _ := makeRemote(t, "main")
 	in := gitInstaller(t, &fakePrompt{}, url)
 	in.FindGit = noGit
@@ -190,7 +193,7 @@ func TestUpdateNoGitTextAndErrWriter(t *testing.T) {
 	if err := in.Update(context.Background(), UpdateRequest{Names: []string{"pdf"}}); err == nil {
 		t.Fatal("Update returned no error")
 	}
-	want := "pdf: the git program is not on PATH. Install git (apt install git), then run the update again.\n"
+	want := "pdf: the git program is not on PATH. Install git (sudo apt install git), then run the update again.\n"
 	if errb.String() != want {
 		t.Fatalf("stderr = %q", errb.String())
 	}

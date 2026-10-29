@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/hostos"
 )
 
 // gitEnv isolates the helper git calls from the git config of the user, so the
@@ -237,6 +239,21 @@ func TestFindGitMissing(t *testing.T) {
 	_, err := FindGit()
 	if !errors.Is(err, ErrNoGit) {
 		t.Fatalf("err = %v, want ErrNoGit", err)
+	}
+}
+
+func TestNoGitErrorText(t *testing.T) {
+	t.Cleanup(hostos.Set(hostos.MacOS))
+	err := noGitError()
+	want := "the git program is not on PATH. Install git (xcode-select --install), or give a local folder."
+	if err.Error() != want {
+		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
+	if !errors.Is(err, ErrNoGit) {
+		t.Fatal("noGitError must wrap ErrNoGit")
+	}
+	if !errors.Is(noGitUpdateError(), ErrNoGit) {
+		t.Fatal("noGitUpdateError must wrap ErrNoGit")
 	}
 }
 
