@@ -304,7 +304,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			if ctx.Err() != nil {
 				return res, ctx.Err()
 			}
-			return res, fmt.Errorf("agent: the model call to %s failed: %w", prov.Name(), cerr)
+			return res, fmt.Errorf("agent: the model call to %s failed: %w", meta.Provider, cerr)
 		}
 		answer := provider.Message{Role: provider.RoleAssistant, Content: out.Text, ToolCalls: out.ToolCalls}
 		if _, err := a.save(dbCtx, ts, answer, meta); err != nil {
@@ -484,12 +484,46 @@ func (a *Agent) DefaultModel() (model string, contextWindow int) {
 	return model, a.contextWindow(a.Prov)
 }
 
+// ModelState is the model that answers now for the default provider.
+type ModelState struct {
+	Model         string
+	ContextWindow int
+	// Fallback.Active is false when the primary answers.
+	Fallback provider.FallbackStatus
+}
+
+// CurrentModel returns the model that answers now. When the default provider calls its
+// fallback, the result names the fallback model and its context window. Else it is the
+// same as DefaultModel.
+func (a *Agent) CurrentModel() ModelState {
+	if a.Prov == nil {
+		return ModelState{}
+	}
+	st, _ := provider.StatusOf(a.Prov)
+	if !st.Active {
+		model, window := a.DefaultModel()
+		return ModelState{Model: model, ContextWindow: window, Fallback: st}
+	}
+	var window int
+	if p, ok := a.Providers[st.FallbackName]; ok {
+		window = a.contextWindow(p)
+	} else {
+		window = a.modelWindow(st.FallbackName, st.FallbackModel)
+	}
+	return ModelState{Model: st.FallbackModel, ContextWindow: window, Fallback: st}
+}
+
 // contextWindow returns the context window of the model of prov.
 func (a *Agent) contextWindow(prov provider.Provider) int {
-	name := prov.Name()
+	return a.modelWindow(prov.Name(), prov.Model())
+}
+
+// modelWindow returns the context window of model in the config entry name. An empty
+// model uses the model of the entry.
+func (a *Agent) modelWindow(name, model string) int {
 	pc := a.config().Providers[name]
-	if m := prov.Model(); m != "" {
-		pc.Model = m
+	if model != "" {
+		pc.Model = model
 	}
 	if a.Prices != nil {
 		return a.Prices.ContextWindow(name, pc)
@@ -604,19 +638,29 @@ func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provi
 	case ctx.Err() != nil:
 		err = ctx.Err()
 	case stalled.Load():
-		err = fmt.Errorf("provider %s: the stream sent no data for %s", prov.Name(), streamIdleTimeout)
+		// The stamp names the fallback when the fallback served the stream.
+		name := prov.Name()
+		if res.Provider != "" {
+			name = res.Provider
+		}
+		err = fmt.Errorf("provider %s: the stream sent no data for %s", name, streamIdleTimeout)
 	}
 	return res, err
 }
 
-// meta returns the stored data of one model response. The cost is stamped now, so a
-// later price change does not change the stored row.
+// meta returns the stored data of one model response. The row names the provider that
+// served the call, which can be the fallback of prov. The adapter stamps that provider on
+// the stream. With no stamp, the row names prov. The cost is stamped now, so a later price
+// change does not change the stored row.
 func (a *Agent) meta(prov provider.Provider, out provider.Result) sessions.MessageMeta {
 	m := sessions.MessageMeta{
 		Usage:        out.Usage,
 		Model:        prov.Model(),
 		Provider:     prov.Name(),
 		FinishReason: out.FinishReason,
+	}
+	if out.Provider != "" {
+		m.Provider, m.Model = out.Provider, out.Model
 	}
 	if a.Prices == nil {
 		return m

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +42,9 @@ type step struct {
 // fakeProv is a scripted provider.Provider. It records each request.
 type fakeProv struct {
 	name, model string
+	// stamp puts the name and the request model (else model) on every event, like an
+	// adapter does.
+	stamp bool
 
 	mu        sync.Mutex
 	script    []step
@@ -70,7 +75,22 @@ func (f *fakeProv) Stream(ctx context.Context, req provider.Request) (<-chan pro
 	if hook != nil {
 		hook(i)
 	}
-	ch := make(chan provider.Event, 8+len(s.calls))
+	out := make(chan provider.Event, 8+len(s.calls))
+	ch := out
+	if f.stamp {
+		served := req.Model
+		if served == "" {
+			served = f.model
+		}
+		ch = make(chan provider.Event, 8+len(s.calls))
+		go func() {
+			defer close(out)
+			for ev := range ch {
+				ev.Provider, ev.Model = f.name, served
+				out <- ev
+			}
+		}()
+	}
 	go func() {
 		if s.text != "" {
 			ch <- provider.Event{Type: provider.EventText, Delta: s.text}
@@ -99,7 +119,7 @@ func (f *fakeProv) Stream(ctx context.Context, req provider.Request) (<-chan pro
 		}
 		ch <- provider.Event{Type: provider.EventDone, FinishReason: finish, Usage: &u}
 	}()
-	return ch, nil
+	return out, nil
 }
 
 // reqCount returns the number of requests so far.
@@ -582,6 +602,98 @@ func TestPinnedModelPricedByOverrideModel(t *testing.T) {
 	}
 }
 
+// deadPrimary is a primary provider that fails before the first byte.
+type deadPrimary struct{}
+
+func (deadPrimary) Name() string  { return "primary" }
+func (deadPrimary) Model() string { return "glm-5.3" }
+func (deadPrimary) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	return nil, fmt.Errorf("HTTP 503: %w", provider.ErrBeforeFirstByte)
+}
+
+// fallbackAgent returns an Agent whose primary fails, so the fallback with the steps s
+// serves each call. edit changes the config before the price service reads it.
+func fallbackAgent(t *testing.T, edit func(*config.Config), s ...step) (*Agent, *sessions.Session) {
+	t.Helper()
+	sec := &fakeProv{name: "fallback", model: "deepseek/deepseek-v4.1-flash-1017", stamp: true, script: s}
+	a, sess := newAgent(t, scripted())
+	a.Prov = provider.NewFallback(deadPrimary{}, sec, slog.New(slog.DiscardHandler))
+	a.Providers = map[string]provider.Provider{"primary": a.Prov, "fallback": sec}
+	a.Cfg.Providers = map[string]config.Provider{
+		"primary":  {Model: "glm-5.3"},
+		"fallback": {Model: "deepseek/deepseek-v4.1-flash-1017"},
+	}
+	a.Cfg.Pricing.Overrides = map[string]config.PriceOverride{
+		"glm-5.3":                           {Input: 0.30, Output: 1.20},
+		"deepseek/deepseek-v4.1-flash-1017": {Input: 0.05, Output: 0.20},
+	}
+	if edit != nil {
+		edit(a.Cfg)
+	}
+	a.Prices = pricing.NewService(a.Cfg, t.TempDir(), nil, nil, nil)
+	return a, sess
+}
+
+// fallbackStep is one fallback answer with 1M input and 10k output tokens. At the
+// fallback price, it costs 0.05 + 0.002 = 0.052 USD.
+var fallbackStep = step{text: "hi", usage: provider.Usage{InputTokens: 1_000_000, OutputTokens: 10_000}}
+
+func TestFallbackRowNamesFallback(t *testing.T) {
+	a, sess := fallbackAgent(t, nil, fallbackStep)
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}}); err != nil {
+		t.Fatal(err)
+	}
+	row := messages(t, a, sess.ID)[1].Meta
+	if row.Provider != "fallback" || row.Model != "deepseek/deepseek-v4.1-flash-1017" {
+		t.Fatal(row)
+	}
+	if got := row.CostUSD; got < 0.052-1e-9 || got > 0.052+1e-9 {
+		t.Fatal(got)
+	}
+}
+
+// A flat-rate primary does not hide the cost of a paid fallback call.
+func TestFallbackRowPricedWhenPrimaryFlat(t *testing.T) {
+	flat := func(c *config.Config) { c.Providers["primary"] = config.Provider{Model: "glm-5.3", FlatRate: true} }
+	a, sess := fallbackAgent(t, flat, fallbackStep)
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := messages(t, a, sess.ID)[1].Meta.CostUSD; got < 0.052-1e-9 || got > 0.052+1e-9 {
+		t.Fatal(got)
+	}
+}
+
+// A pin names a model of the primary. The fallback uses its own model, and the row says so.
+func TestPinnedPrimaryFallbackRow(t *testing.T) {
+	a, sess := fallbackAgent(t, nil, fallbackStep)
+	sess.ModelOverride = "primary:glm-4.7"
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}}); err != nil {
+		t.Fatal(err)
+	}
+	if row := messages(t, a, sess.ID)[1].Meta; row.Provider != "fallback" || row.Model != "deepseek/deepseek-v4.1-flash-1017" {
+		t.Fatal(row)
+	}
+}
+
+// A partial answer from a fallback stream that stops sending data names the fallback.
+func TestStalledFallbackRowNamesFallback(t *testing.T) {
+	old := streamIdleTimeout
+	streamIdleTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { streamIdleTimeout = old })
+	a, sess := fallbackAgent(t, nil, step{text: "half", noClose: true})
+	_, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}})
+	// The error names the provider that stalled, not the primary that failed before it.
+	want := "agent: the model call to fallback failed: provider fallback: the stream sent no data for 50ms"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	msgs := messages(t, a, sess.ID)
+	if len(msgs) != 2 || msgs[1].Msg.Content != "half" || msgs[1].Meta.Provider != "fallback" {
+		t.Fatal(msgs)
+	}
+}
+
 // pngMarkerFile writes a small PNG file and returns its path.
 func pngMarkerFile(t *testing.T) string {
 	t.Helper()
@@ -701,5 +813,67 @@ func TestDefaultModel(t *testing.T) {
 	a.Prov = &fakeProv{name: "primary"}
 	if m, w := a.DefaultModel(); m != "test-model" || w != 200000 {
 		t.Fatal(m, w)
+	}
+}
+
+// statusProv is a fakeProv that reports a fallback state.
+type statusProv struct {
+	*fakeProv
+	status provider.FallbackStatus
+}
+
+func (s statusProv) FallbackStatus() provider.FallbackStatus { return s.status }
+
+// activeStatus is the state of a fallback wrapper after a primary failure.
+var activeStatus = provider.FallbackStatus{
+	Active: true, PrimaryModel: "glm-5.3", FallbackName: "fallback",
+	FallbackModel: "deepseek/deepseek-v4.1-flash-1017", Cause: "HTTP 503",
+}
+
+func TestCurrentModelPrimary(t *testing.T) {
+	a, _ := newAgent(t, scripted())
+	a.Prov = statusProv{fakeProv: &fakeProv{name: "primary", model: "glm-5.3"}}
+	a.Cfg.Providers["primary"] = config.Provider{Model: "glm-5.3", ContextWindow: 200000}
+	got := a.CurrentModel()
+	if got.Model != "glm-5.3" || got.ContextWindow != 200000 || got.Fallback.Active {
+		t.Fatal(got)
+	}
+	if m, w := a.DefaultModel(); got.Model != m || got.ContextWindow != w {
+		t.Fatal(got, m, w)
+	}
+	// A provider with no fallback state gives the default model.
+	a.Prov = &fakeProv{name: "primary", model: "glm-5.3"}
+	if got := a.CurrentModel(); got.Model != "glm-5.3" || got.ContextWindow != 200000 || got.Fallback.Active {
+		t.Fatal(got)
+	}
+	a.Prov = nil
+	if got := a.CurrentModel(); got != (ModelState{}) {
+		t.Fatal(got)
+	}
+}
+
+func TestCurrentModelFallback(t *testing.T) {
+	a, _ := newAgent(t, scripted())
+	a.Prov = statusProv{fakeProv: &fakeProv{name: "primary", model: "glm-5.3"}, status: activeStatus}
+	a.Providers["fallback"] = &fakeProv{name: "fallback", model: "deepseek/deepseek-v4.1-flash-1017"}
+	a.Cfg.Providers["primary"] = config.Provider{Model: "glm-5.3", ContextWindow: 200000}
+	a.Cfg.Providers["fallback"] = config.Provider{Model: "deepseek/deepseek-v4.1-flash-1017", ContextWindow: 64000}
+	got := a.CurrentModel()
+	if got.Model != "deepseek/deepseek-v4.1-flash-1017" || got.ContextWindow != 64000 ||
+		!got.Fallback.Active || got.Fallback.Cause != "HTTP 503" {
+		t.Fatal(got)
+	}
+}
+
+func TestCurrentModelFallbackNoEntry(t *testing.T) {
+	a, _ := newAgent(t, scripted())
+	a.Prov = statusProv{fakeProv: &fakeProv{name: "primary", model: "glm-5.3"}, status: activeStatus}
+	a.Cfg.Providers["fallback"] = config.Provider{Model: "deepseek/deepseek-v4.1-flash-1017", ContextWindow: 64000}
+	if got := a.CurrentModel(); got.Model != "deepseek/deepseek-v4.1-flash-1017" || got.ContextWindow != 64000 {
+		t.Fatal(got)
+	}
+	delete(a.Cfg.Providers, "fallback")
+	if got := a.CurrentModel(); got.Model != "deepseek/deepseek-v4.1-flash-1017" || got.ContextWindow != pricing.DefaultContextWindow {
+		t.Fatal(got)
 	}
 }
