@@ -119,7 +119,7 @@ func TestMigrationsIdempotent(t *testing.T) {
 	if err := d2.QueryRow("SELECT count(*), max(version) FROM schema_version").Scan(&n, &v); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 || v != 1 {
+	if n != LatestVersion() || v != LatestVersion() {
 		t.Fatal(n, v)
 	}
 }
@@ -268,5 +268,35 @@ func TestFTSTriggersInsertUpdateDelete(t *testing.T) {
 	}
 	if count("cherry") != 0 {
 		t.Fatal("delete trigger")
+	}
+}
+
+func TestMigrationTurnMarkers(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	rows, err := d.QueryContext(context.Background(), `PRAGMA table_info(turn_markers)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cols []string
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			t.Fatal(err)
+		}
+		cols = append(cols, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	want := []string{"session_key", "session_id", "updated_at", "resumes", "queued"}
+	if fmt.Sprint(cols) != fmt.Sprint(want) {
+		t.Fatalf("columns = %v, want %v", cols, want)
 	}
 }

@@ -20,6 +20,7 @@ var freeTextColumns = map[string][]string{
 	"sessions":           {"title", "prompt_override"},
 	"cron_jobs":          {"prompt", "last_output"},
 	"delegation_batches": {"tasks", "results"},
+	"turn_markers":       {"queued"},
 }
 
 // stateColumns lists every other TEXT column of the schema. maskDB never masks these columns.
@@ -36,6 +37,7 @@ var stateColumns = map[string][]string{
 	"approvals_always":   {"pattern_id"},
 	"pairing":            {"platform", "user_id", "user_name", "code", "status"},
 	"active_session":     {"session_key", "session_id"},
+	"turn_markers":       {"session_key", "session_id"},
 	"delegation_batches": {"id", "parent_session_key", "parent_session_id", "status"},
 	"kv":                 {"key", "value"},
 	"schema_version":     {"name"},
