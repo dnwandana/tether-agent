@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/hostos"
 )
 
 // ctx is the context of the calls in the tests.
@@ -198,10 +200,16 @@ func TestMissingPythonIsWarnNamingFeature(t *testing.T) {
 }
 
 func TestMissingChromeIsWarn(t *testing.T) {
-	d := doctorWithFakes(t, okProvider(t), okTelegram(t), without("google-chrome", "chromium", "chromium-browser"))
+	t.Cleanup(hostos.Set(hostos.MacOS))
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), without("google-chrome", "chromium", "chromium-browser",
+		"/snap/bin/chromium", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+		"/Applications/Chromium.app/Contents/MacOS/Chromium"))
 	c := find(t, d.Run(ctx), "chrome")
-	if c.Status != StatusWarn || !strings.Contains(c.Detail, "browser_") || !strings.Contains(c.Next, "browser.chrome_path") {
+	if c.Status != StatusWarn || !strings.Contains(c.Detail, "browser_") {
 		t.Fatal(c)
+	}
+	if want := "install Google Chrome (brew install --cask google-chrome), or set browser.chrome_path"; c.Next != want {
+		t.Fatalf("Next = %q, want %q", c.Next, want)
 	}
 }
 
@@ -457,12 +465,13 @@ func TestTelegramPrivacyMode(t *testing.T) {
 }
 
 func TestHostChecksGit(t *testing.T) {
+	t.Cleanup(hostos.Set(hostos.Ubuntu))
 	cfg := config.Default()
 	d := &Doctor{LookPath: without("git"), Getenv: func(string) string { return "" }}
 	got := find(t, d.HostChecks(&cfg), "git")
 	want := Check{Name: "git", Status: StatusWarn,
 		Detail: "not found, so skills install and update cannot fetch from a git URL",
-		Next:   "install git (apt install git)"}
+		Next:   "install git (sudo apt install git)"}
 	if got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
@@ -471,5 +480,100 @@ func TestHostChecksGit(t *testing.T) {
 	got = find(t, d.HostChecks(&cfg), "git")
 	if want := (Check{Name: "git", Status: StatusOK, Detail: "/usr/bin/git"}); got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestHostChecksHintsOnMac(t *testing.T) {
+	t.Cleanup(hostos.Set(hostos.MacOS))
+	cfg := config.Default()
+	cfg.Telegram.Enabled = true // voice on, so a missing ffmpeg is a warning
+	d := &Doctor{LookPath: without("python3", "pdftotext", "ffmpeg", "edge-tts", "whisper-cli"),
+		Getenv: func(string) string { return "" }}
+	checks := d.HostChecks(&cfg)
+	for name, want := range map[string]string{
+		"python3":     "install python3 (xcode-select --install)",
+		"pdftotext":   "install poppler (brew install poppler)",
+		"ffmpeg":      "install ffmpeg (brew install ffmpeg)",
+		"edge-tts":    "install edge-tts (pipx install edge-tts), or change media.tts",
+		"whisper-cli": "install whisper-cpp (brew install whisper-cpp), or change media.stt",
+	} {
+		if c := find(t, checks, name); c.Status != StatusWarn || c.Next != want {
+			t.Errorf("%s: got %+v, want Next %q", name, c, want)
+		}
+	}
+}
+
+// answerRow is one stored assistant row for the "last answer" check.
+type answerRow struct {
+	session, pin, provider, model string
+	age                           time.Duration
+}
+
+// seedStateDB makes state.db in the data dir of d with the session and the assistant rows.
+func seedStateDB(t *testing.T, d *Doctor, rows ...answerRow) {
+	t.Helper()
+	sdb, err := db.Open(filepath.Join(d.DataDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sdb.Close()
+	now := time.Now()
+	for _, r := range rows {
+		if _, err := sdb.Exec(`INSERT OR IGNORE INTO sessions (id, model_override) VALUES (?, ?)`, r.session, r.pin); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sdb.Exec(`INSERT INTO messages (session_id, role, content, model, provider, timestamp)
+			VALUES (?, 'assistant', 'x', ?, ?, ?)`, r.session, r.model, r.provider, now.Add(-r.age).UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLastAnswerPrimaryOK(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	seedStateDB(t, d, answerRow{session: "s1", provider: "primary", model: "glm-5.3", age: 5 * time.Minute})
+	got := find(t, d.Run(ctx), "last answer")
+	want := Check{Name: "last answer", Status: StatusOK, Detail: "primary · glm-5.3, 5 min ago"}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestLastAnswerFallbackWarn(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	seedStateDB(t, d, answerRow{session: "s1", provider: "fallback",
+		model: "deepseek/deepseek-v4.1-flash-1017", age: 2 * time.Minute})
+	got := find(t, d.Run(ctx), "last answer")
+	want := Check{Name: "last answer", Status: StatusWarn,
+		Detail: "fallback · deepseek/deepseek-v4.1-flash-1017, 2 min ago",
+		Next:   `the primary failed at that time; see "provider fallback" in the gateway log`}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestLastAnswerPinnedFallbackOK(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	seedStateDB(t, d, answerRow{session: "s1", pin: "fallback", provider: "fallback",
+		model: "deepseek/deepseek-v4.1-flash-1017", age: 2 * time.Minute})
+	got := find(t, d.Run(ctx), "last answer")
+	want := Check{Name: "last answer", Status: StatusOK,
+		Detail: "fallback · deepseek/deepseek-v4.1-flash-1017, 2 min ago (the session pins the fallback)"}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestLastAnswerNoRow(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	seedStateDB(t, d)
+	checks := d.Run(ctx)
+	if c := find(t, checks, "state.db"); c.Status != StatusOK {
+		t.Fatal(c)
+	}
+	for _, c := range checks {
+		if c.Name == "last answer" {
+			t.Fatalf("no stored answer must give no check: %+v", c)
+		}
 	}
 }

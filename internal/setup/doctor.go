@@ -22,7 +22,9 @@ import (
 	"github.com/dnwandana/tether-agent/internal/browser"
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/hostos"
 	"github.com/dnwandana/tether-agent/internal/mcp"
+	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/telegram"
@@ -85,7 +87,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 		out = append(out, d.checkProviders(ctx, cfg)...)
 		out = append(out, d.checkTelegram(ctx, cfg))
 	}
-	out = append(out, d.checkStateDB(ctx))
+	out = append(out, d.checkStateDB(ctx)...)
 	hostCfg := cfg
 	if hostCfg == nil {
 		def := config.Default()
@@ -314,28 +316,51 @@ func needsAllGroupMessages(tg config.TelegramConfig) bool {
 }
 
 // checkStateDB opens state.db, which also applies the missing migrations. A missing file
-// is valid: the first run makes it.
-func (d *Doctor) checkStateDB(ctx context.Context) Check {
+// is valid: the first run makes it. When a stored model answer exists, it also gives the
+// "last answer" check.
+func (d *Doctor) checkStateDB(ctx context.Context) []Check {
 	c := Check{Name: "state.db", Status: StatusOK}
 	path := filepath.Join(d.DataDir, "state.db")
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
 		c.Detail = "does not exist yet; the first chat or gateway run makes it"
-		return c
+		return []Check{c}
 	}
 	sdb, err := db.Open(path)
 	if err != nil {
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Next = "stop the gateway, keep a copy of " + path + ", and run tether doctor again"
-		return c
+		return []Check{c}
 	}
 	defer sdb.Close()
 	var version int
 	if err := sdb.QueryRowContext(ctx, "SELECT coalesce(max(version), 0) FROM schema_version").Scan(&version); err != nil {
 		c.Status, c.Detail = StatusFail, "cannot read schema_version: "+err.Error()
 		c.Next = "keep a copy of " + path + " and report the problem"
-		return c
+		return []Check{c}
 	}
 	c.Detail = fmt.Sprintf("opens; the migrations are current (schema version %d)", version)
+	out := []Check{c}
+	// A failed read does not fail doctor. The check is only information.
+	if l, ok, err := obs.ReadLastAnswer(ctx, sdb); err == nil && ok {
+		out = append(out, lastAnswerCheck(l, time.Since(l.At)))
+	}
+	return out
+}
+
+// lastAnswerCheck shows the provider and the model of the newest stored answer. An answer
+// from the fallback is a warning, because the primary failed at that time, but not when the
+// session pins the fallback.
+func lastAnswerCheck(l obs.LastAnswer, age time.Duration) Check {
+	c := Check{Name: "last answer", Status: StatusOK,
+		Detail: l.Provider + " · " + l.Model + ", " + obs.Ago(age)}
+	switch {
+	case l.Provider != "fallback":
+	case l.PinsFallback():
+		c.Detail += " (the session pins the fallback)"
+	default:
+		c.Status = StatusWarn
+		c.Next = `the primary failed at that time; see "provider fallback" in the gateway log`
+	}
 	return c
 }
 
@@ -349,45 +374,32 @@ func (d *Doctor) HostChecks(cfg *config.Config) []Check {
 	if p, err := browser.DetectChrome(cfg.Browser.ChromePath, d.lookPath, d.getenv, runtime.GOOS); err != nil {
 		chrome.Status = StatusWarn
 		chrome.Detail = "not found, so the browser_* tools fail"
-		chrome.Next = "install chromium (apt install chromium), or set browser.chrome_path"
+		chrome.Next = hostos.Hint("chrome") + ", or set browser.chrome_path"
 	} else {
 		chrome.Detail = p
 	}
 	out = append(out, chrome)
 
 	out = append(out,
-		d.program("python3", "execute_code is off", "install python3 (apt install python3)"),
-		d.program("pdftotext", "the agent cannot read the text of PDF files",
-			"install poppler-utils (apt install poppler-utils)"),
-		d.program("git", "skills install and update cannot fetch from a git URL", "install git (apt install git)"))
+		d.program("python3", "execute_code is off", hostos.Hint("python3")),
+		d.program("pdftotext", "the agent cannot read the text of PDF files", hostos.Hint("pdftotext")),
+		d.program("git", "skills install and update cannot fetch from a git URL", hostos.Hint("git")))
 
 	ffmpeg := d.program("ffmpeg", "Telegram voice replies go as audio files, and whisper-cli cannot convert voice notes",
-		"install ffmpeg (apt install ffmpeg)")
+		hostos.Hint("ffmpeg"))
 	if ffmpeg.Status != StatusOK && !voiceOn(cfg) {
 		ffmpeg = Check{Name: "ffmpeg", Status: StatusOK, Detail: "not found; Telegram voice is off, so nothing needs it"}
 	}
 	out = append(out, ffmpeg)
 
 	if prog := commandProgram(cfg.Media.TTS); prog != "" {
-		out = append(out, d.program(prog, "text_to_speech fails", installHint(prog)+", or change media.tts"))
+		out = append(out, d.program(prog, "text_to_speech fails", hostos.Hint(filepath.Base(prog))+", or change media.tts"))
 	}
 	if prog := commandProgram(cfg.Media.STT); prog != "" {
 		out = append(out, d.program(prog, "transcribe_audio and the voice note transcripts fail",
-			installHint(prog)+", or change media.stt"))
+			hostos.Hint(filepath.Base(prog))+", or change media.stt"))
 	}
 	return out
-}
-
-// installHint returns the install action for the program of a media command.
-func installHint(prog string) string {
-	switch filepath.Base(prog) {
-	case "edge-tts":
-		return "install edge-tts (pipx install edge-tts)"
-	case "whisper-cli":
-		return "build whisper-cli from whisper.cpp and put it on PATH"
-	default:
-		return "install " + prog
-	}
 }
 
 // program checks one host program. lost names the feature that a missing program stops.
