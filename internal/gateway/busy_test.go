@@ -318,6 +318,25 @@ func TestDebounceMerges(t *testing.T) {
 	}
 }
 
+// TestWaitCountsTheDebouncedText checks that Wait waits for a busy text in the debouncer.
+// After the drain, the work context ends, so a text that flushes then is lost.
+func TestWaitCountsTheDebouncedText(t *testing.T) {
+	g := &Gateway{debounce: NewDebouncer(100*time.Millisecond, time.Second)}
+	inFlush, release := make(chan struct{}), make(chan struct{})
+	g.debouncer().Add("k", "x", func(string) { close(inFlush); <-release })
+	if g.Wait(30 * time.Millisecond) {
+		t.Fatal("Wait returned true while the text waits in the debouncer")
+	}
+	<-inFlush
+	if g.Wait(30 * time.Millisecond) {
+		t.Fatal("Wait returned true while the flush runs")
+	}
+	close(release)
+	if !g.Wait(time.Second) {
+		t.Fatal("Wait returned false after the flush")
+	}
+}
+
 func TestDebounceHardCap(t *testing.T) {
 	flushed := make(chan string, 4)
 	d := NewDebouncer(100*time.Millisecond, 300*time.Millisecond)

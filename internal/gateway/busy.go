@@ -93,14 +93,15 @@ func cmdSteer(_ context.Context, c *CommandCtx, args string) error {
 
 // onBusy puts the text of in into the running turn rs as a steer and sends the steer
 // ack to r. It returns false when the steer cannot run: in is not plain text, the text is
-// empty, the agent did not start yet (no steer queue), or the run ended or stopped. The
-// caller then queues in for the next turn. The caller must not hold g.mu.
+// empty, the agent did not start yet (no steer queue), the run ended or stopped, or the
+// gateway stops. The caller then queues in for the next turn. The caller must not hold g.mu.
 func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer) (handled bool) {
 	if rs == nil || !steerable(in) {
 		return false
 	}
 	g.mu.Lock()
-	ok := rs.Steer != nil && !rs.ended && !rs.stopped && rs.Steer.Push(in.Text)
+	// BeginStopping saved the steer queue already, so a later steer would be lost.
+	ok := !g.stopping.Load() && rs.Steer != nil && !rs.ended && !rs.stopped && rs.Steer.Push(in.Text)
 	g.mu.Unlock()
 	if !ok {
 		return false
@@ -113,6 +114,9 @@ func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer
 // or queues it for the next turn. When the key is free again, it starts a turn.
 func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer func() Renderer) {
 	g.mu.Lock()
+	if g.stoppingLocked(in.Key) {
+		return
+	}
 	ks := g.key(in.Key)
 	if !ks.busy {
 		p := &pendingTurn{in: in, newRenderer: newRenderer}
@@ -128,6 +132,9 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 		return
 	}
 	g.mu.Lock()
+	if g.stoppingLocked(in.Key) {
+		return
+	}
 	if !ks.busy {
 		p := &pendingTurn{in: in, newRenderer: newRenderer}
 		ks.busy, ks.current = true, p
@@ -137,7 +144,9 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 	}
 	ks.queue = append(ks.queue, &pendingTurn{in: in, newRenderer: newRenderer})
 	rs = ks.running
+	op := g.markerUpsertOp(ks, in.Key)
 	g.mu.Unlock()
+	g.sendMarker(op)
 	g.ack(rs, in.Key, QueueAck, queuedStopButton, r)
 }
 
@@ -154,13 +163,19 @@ func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func
 		g.mu.Unlock()
 		return g.acceptMessage(ctx, m, newRenderer)
 	}
-	if rs := ks.running; rs != nil && rs.Steer != nil && !rs.ended && !rs.stopped && rs.Steer.Push(text) {
+	if rs := ks.running; !g.stopping.Load() && rs != nil && rs.Steer != nil && !rs.ended && !rs.stopped && rs.Steer.Push(text) {
 		g.mu.Unlock()
 		ackReply(r, Reply{Text: withDetail(SteerAck, BusyAckDetail(rs, g.clock())), Buttons: [][]Button{stopButton}})
 		return rest
 	}
+	if g.stopping.Load() {
+		g.mu.Unlock()
+		return func() error { return ErrStopping }
+	}
 	ks.queue = append(ks.queue, &pendingTurn{in: m, newRenderer: newRenderer})
+	op := g.markerUpsertOp(ks, in.Key)
 	g.mu.Unlock()
+	g.sendMarker(op)
 	r.Ack(SteerStartingReply)
 	return rest
 }
@@ -184,7 +199,10 @@ func (g *Gateway) stopKey(key string) bool {
 	for _, p := range dropped {
 		p.discard = true
 	}
+	// A stopped turn does not continue after a restart.
+	op := g.markerRemoveOp(ks, key)
 	g.mu.Unlock()
+	g.sendMarker(op)
 	for _, p := range dropped {
 		if p.ready != nil {
 			close(p.ready)
@@ -225,7 +243,10 @@ func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
 			waiting++
 		}
 	}
+	// The next queued turn writes the marker again when it starts.
+	op := g.markerRemoveOp(ks, key)
 	g.mu.Unlock()
+	g.sendMarker(op)
 	if rs != nil {
 		rs.Cancel()
 	}
@@ -320,6 +341,11 @@ func (g *Gateway) clock() time.Time {
 func (g *Gateway) debouncer() *Debouncer {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	return g.debouncerLocked()
+}
+
+// debouncerLocked is debouncer for a caller that holds g.mu.
+func (g *Gateway) debouncerLocked() *Debouncer {
 	if g.debounce == nil {
 		g.debounce = NewDebouncer(debounceWindow, debounceHardCap)
 	}
@@ -365,6 +391,8 @@ type Debouncer struct {
 
 	mu      sync.Mutex
 	pending map[string]*debounceEntry
+	// flushing counts the flush functions that run now.
+	flushing int
 }
 
 type debounceEntry struct {
@@ -415,6 +443,20 @@ func (d *Debouncer) Drop(key string) {
 	}
 }
 
+// Take returns the merged waiting text of key and forgets it, with no flush. It returns ""
+// when no text waits.
+func (d *Debouncer) Take(key string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	e := d.pending[key]
+	if e == nil {
+		return ""
+	}
+	e.timer.Stop()
+	delete(d.pending, key)
+	return strings.Join(e.texts, "\n")
+}
+
 func (d *Debouncer) fire(key string, e *debounceEntry, gen int) {
 	d.mu.Lock()
 	if d.pending[key] != e || e.gen != gen {
@@ -422,7 +464,20 @@ func (d *Debouncer) fire(key string, e *debounceEntry, gen int) {
 		return
 	}
 	delete(d.pending, key)
+	d.flushing++
 	merged, flush := strings.Join(e.texts, "\n"), e.flush
 	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		d.flushing--
+		d.mu.Unlock()
+	}()
 	flush(merged)
+}
+
+// Pending reports whether a text waits or a flush function runs.
+func (d *Debouncer) Pending() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.pending) > 0 || d.flushing > 0
 }

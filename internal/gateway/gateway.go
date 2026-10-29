@@ -95,6 +95,8 @@ type Gateway struct {
 	Channels map[string]Channel
 	Log      *slog.Logger
 
+	// mu guards keys. A holder of mu can take Debouncer.mu, but the Debouncer never takes
+	// mu, so the two locks cannot deadlock.
 	mu   sync.Mutex
 	keys map[string]*keyState
 	// active counts the turns that run or are about to run, for a graceful stop.
@@ -105,6 +107,12 @@ type Gateway struct {
 	debounce *Debouncer
 	// lastAck holds the time of the last busy ack per session.
 	lastAck map[string]time.Time
+	// markers writes the turn markers of the busy keys. Use markerW.
+	markers    *markerWriter
+	markerOnce sync.Once
+	// stopping is set by BeginStopping, under mu. Then the gateway takes no new work, and
+	// no queued turn starts.
+	stopping atomic.Bool
 }
 
 // keyState is the state of one session key. Gateway.mu guards it.
@@ -120,6 +128,11 @@ type keyState struct {
 	// last is the newest message of the key and its renderer factory, for Enqueue.
 	last         Inbound
 	lastRenderer func() Renderer
+	// markerSession is the session id of the marker of the key. It is empty until the turn
+	// has its session, and again after the marker is removed. markerSeq counts the marker
+	// ops of the key, so the writer can skip an old op.
+	markerSession string
+	markerSeq     uint64
 }
 
 // pendingTurn is one queued message. ready is closed when the message can run. A
@@ -151,8 +164,15 @@ func (g *Gateway) Handle(ctx context.Context, in Inbound, newRenderer func() Ren
 // the message is in the queue of the key, or its turn owns the key. The wait in the queue
 // and the turn go on in a new goroutine, and then done (when not nil) gets the result of
 // Handle. A channel that calls Submit for the messages of one chat one after the other
-// keeps their order, and a long turn does not block the next message.
+// keeps their order, and a long turn does not block the next message. While the gateway
+// stops, done gets ErrStopping at once.
 func (g *Gateway) Submit(ctx context.Context, in Inbound, newRenderer func() Renderer, done func(error)) {
+	if g.stopping.Load() {
+		if done != nil {
+			done(ErrStopping)
+		}
+		return
+	}
 	g.active.Add(1)
 	rest := g.accept(ctx, in, newRenderer)
 	go func() {
@@ -176,9 +196,14 @@ func (g *Gateway) accept(ctx context.Context, in Inbound, newRenderer func() Ren
 }
 
 // acceptMessage takes in: it gives the free key to in, steers in into the busy key, or
-// queues in. It returns the rest, which waits in the queue and runs the turn.
+// queues in. It returns the rest, which waits in the queue and runs the turn. While the
+// gateway stops, the rest returns ErrStopping.
 func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer func() Renderer) (rest func() error) {
 	g.mu.Lock()
+	if g.stopping.Load() {
+		g.mu.Unlock()
+		return func() error { return ErrStopping }
+	}
 	ks := g.key(in.Key)
 	ks.last, ks.lastRenderer = in, newRenderer
 	if !ks.busy {
@@ -194,19 +219,22 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 		}
 	}
 	if steerable(in) {
-		g.mu.Unlock()
-		// Several texts in a short time become one steer (Hermes debounce).
-		g.debouncer().Add(in.Key, in.Text, func(merged string) {
+		// Several texts in a short time become one steer (Hermes debounce). The text goes
+		// in under g.mu, so BeginStopping either takes it or refuses it.
+		g.debouncerLocked().Add(in.Key, in.Text, func(merged string) {
 			m := in
 			m.Text = merged
 			g.flushBusyText(ctx, m, newRenderer)
 		})
+		g.mu.Unlock()
 		return func() error { return nil }
 	}
 	p := &pendingTurn{in: in, newRenderer: newRenderer, ready: make(chan struct{})}
 	ks.queue = append(ks.queue, p)
 	rs := ks.running
+	op := g.markerUpsertOp(ks, in.Key)
 	g.mu.Unlock()
+	g.sendMarker(op)
 	// A slash text is dropped when it leaves the queue, so it gets no ack.
 	if !isCommandText(in) {
 		g.ack(rs, in.Key, QueueAck, queuedStopButton, newRenderer())
@@ -219,7 +247,9 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 			for i, q := range ks.queue {
 				if q == p {
 					ks.queue = append(ks.queue[:i], ks.queue[i+1:]...)
+					op := g.markerUpsertOp(ks, in.Key)
 					g.mu.Unlock()
+					g.sendMarker(op)
 					return ctx.Err()
 				}
 			}
@@ -245,10 +275,14 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 // Enqueue adds a turn with text for key, for example a synthetic turn or a queued
 // follow-up. It runs after the current turn and the turns that wait before it. Enqueue
 // does not wait for the turn. The answer goes to the channel of the newest message of the
-// key, or else to the channel and the chat of the active session of the key.
+// key, or else to the channel and the chat of the active session of the key. While the
+// gateway stops, it returns ErrStopping.
 func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("gateway: enqueue: the text is empty")
+	}
+	if g.stopping.Load() {
+		return ErrStopping
 	}
 	g.mu.Lock()
 	ks := g.key(key)
@@ -263,13 +297,20 @@ func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
 	in.Key, in.Text, in.Images, in.Files, in.IsText = key, text, nil, nil, true
 	p := &pendingTurn{in: in, newRenderer: newRenderer}
 	g.mu.Lock()
-	defer g.mu.Unlock()
+	if g.stopping.Load() {
+		g.mu.Unlock()
+		return ErrStopping
+	}
 	if ks.busy {
 		ks.queue = append(ks.queue, p)
+		op := g.markerUpsertOp(ks, key)
+		g.mu.Unlock()
+		g.sendMarker(op)
 		return nil
 	}
 	ks.busy, ks.current = true, p
 	g.start(ctx, p)
+	g.mu.Unlock()
 	return nil
 }
 
@@ -283,12 +324,13 @@ func (g *Gateway) Running(key string) (*RunState, bool) {
 	return nil, false
 }
 
-// Wait waits until no turn runs and no submitted message waits for its turn, or until
-// timeout. It returns false at the timeout. A busy text in the steer debouncer does not
-// count.
+// Wait waits until no turn runs, no submitted message waits for its turn, and no busy text
+// waits in the steer debouncer, or until timeout. It returns false at the timeout.
 func (g *Gateway) Wait(timeout time.Duration) bool {
 	end := time.Now().Add(timeout)
-	for g.active.Load() > 0 {
+	// The debouncer comes first: a flush starts its turn before it stops to count, so the
+	// active count that Wait reads next includes that turn.
+	for g.debouncer().Pending() || g.active.Load() > 0 {
 		if time.Now().After(end) {
 			return false
 		}
@@ -324,30 +366,44 @@ func (g *Gateway) start(ctx context.Context, p *pendingTurn) {
 func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 	g.active.Add(1)
 	defer g.active.Add(-1)
-	pending := g.turn(ctx, p)
+	g.turn(ctx, p)
 	g.mu.Lock()
 	ks := g.key(p.in.Key)
+	var pending string
 	if rs := ks.running; rs != nil {
 		rs.ended = true
-		// A steer that came after the last check of the agent is not lost.
-		if late := rs.Steer.Drain(); late != "" {
-			pending = strings.TrimSpace(pending + "\n" + late)
-		}
+		// The steer that the turn did not deliver is in the queue of the run. A steer that
+		// came after the last check of the agent is there too, so it is not lost.
+		pending = rs.Steer.Drain()
 	}
 	ks.running = nil
+	if pending != "" && !p.discard && g.stopping.Load() {
+		// BeginStopping saved the steer that was in the queue of the run. Only a steer that
+		// the agent drained at the same time can come here.
+		g.logger().Warn("gateway: a steer text is lost in the stop", "key", p.in.Key)
+	}
 	if pending != "" && !p.discard {
 		// The steer that the turn did not deliver becomes the next turn, before the queue.
 		in := p.in
 		in.Text, in.Images, in.Files, in.IsText = pending, nil, nil, true
 		ks.queue = append([]*pendingTurn{{in: in, newRenderer: p.newRenderer}}, ks.queue...)
 	}
-	g.next(ctx, ks)
+	g.next(ctx, p.in.Key, ks)
 }
 
 // next gives the key to the next message in the queue, or frees the key. A queued slash
-// command is dropped. The caller holds g.mu, and next unlocks it.
-func (g *Gateway) next(ctx context.Context, ks *keyState) {
+// command is dropped. The caller holds g.mu, and next unlocks it. A free key loses its
+// marker. While the gateway stops, next does nothing: BeginStopping saved the queue in the
+// marker, and the key stays busy, so the marker stays.
+func (g *Gateway) next(ctx context.Context, key string, ks *keyState) {
+	var op markerOp
+	// Deferred calls run in reverse order, so the marker op is sent after the unlock.
+	defer func() { g.sendMarker(op) }()
 	defer g.mu.Unlock()
+	if g.stopping.Load() {
+		// The waiters stay in the queue and leave at the end of their context.
+		return
+	}
 	for len(ks.queue) > 0 {
 		nx := ks.queue[0]
 		ks.queue = ks.queue[1:]
@@ -372,17 +428,20 @@ func (g *Gateway) next(ctx context.Context, ks *keyState) {
 		return
 	}
 	ks.busy, ks.current = false, nil
+	op = g.markerRemoveOp(ks, key)
 }
 
-// turn runs one agent turn and returns the steer text that the turn did not deliver. A
-// panic in the turn becomes an error of the turn, so the queue of the key goes on. A
-// message that /stop dropped before its start runs no turn.
-func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (pendingSteer string) {
+// turn runs one agent turn. The steer text that the turn did not deliver stays in the
+// steer queue of the run, and run drains it. A panic in the turn becomes an error of the
+// turn, so the queue of the key goes on. A message that /stop dropped before its start
+// runs no turn. While the gateway stops, no agent starts: BeginStopping saved the text of
+// the message in the marker.
+func (g *Gateway) turn(ctx context.Context, p *pendingTurn) {
 	g.mu.Lock()
-	discarded := p.discard
+	skip := p.discard || g.stopping.Load()
 	g.mu.Unlock()
-	if discarded {
-		return ""
+	if skip {
+		return
 	}
 	r := p.newRenderer()
 	tctx, cancel := context.WithCancel(ctx)
@@ -399,7 +458,6 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (pendingSteer string
 		if v := recover(); v != nil {
 			g.logger().Error("gateway: the turn panicked", "key", p.in.Key, "panic", fmt.Sprint(v), "stack", string(debug.Stack()))
 			r.Done("", errors.New("internal error in the turn"))
-			pendingSteer = rs.Steer.Drain()
 		}
 	}()
 	sess, err := g.Deps.Store.ActiveOrCreate(tctx, p.in.Key, sessions.Session{
@@ -408,28 +466,35 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (pendingSteer string
 	if err != nil {
 		g.logger().Error("gateway: cannot get the session", "key", p.in.Key, "err", err.Error())
 		r.Done("", err)
-		return ""
+		return
 	}
 	rs.SessionID = sess.ID
 	g.mu.Lock()
-	if p.discard {
-		// /stop came while the turn started.
+	if p.discard || g.stopping.Load() {
+		// /stop or the stop of the gateway came while the turn started.
 		g.mu.Unlock()
 		r.Done("", context.Canceled)
-		return ""
+		return
 	}
-	g.key(p.in.Key).running = rs
+	ks := g.key(p.in.Key)
+	ks.running = rs
+	// From now on the key has a marker, so a restart can continue the turn.
+	ks.markerSession = sess.ID
+	op := g.markerUpsertOp(ks, p.in.Key)
 	g.mu.Unlock()
+	g.sendMarker(op)
 	// A review notice goes out as its own message after the answer.
 	notify, release := agent.HoldNotices(r.Ack)
 	res, err := g.Deps.Turn(tctx, sess, TurnInput{
 		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, Sink: tr, Steer: rs.Steer, Notify: notify,
 	})
+	// Put the steer that the turn did not deliver back before the answer goes out. The send
+	// can take long, and BeginStopping in that time saves the steer queue in the marker.
+	rs.Steer.Push(res.PendingSteer)
 	// The renderer sends the files of the MEDIA tags. A TTS file goes out also when the
 	// model left out its tag (Hermes _collect_auto_append_media_tags).
 	r.Done(agent.AppendMediaTags(res.Final, res.Media), err)
 	release()
-	return res.PendingSteer
 }
 
 // BusyCommandReply is the reply to a command that cannot run while the key is busy. %s is

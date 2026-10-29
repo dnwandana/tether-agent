@@ -403,7 +403,7 @@ func TestQueuedTurnCountsAsActiveFromItsHandoff(t *testing.T) {
 	rest := g.acceptMessage(ctx, in, f.new)
 	g.mu.Lock()
 	p := ks.queue[0]
-	g.next(ctx, ks) // the end of the first turn: next unlocks g.mu
+	g.next(ctx, "k", ks) // the end of the first turn: next unlocks g.mu
 	<-p.ready
 	if n := g.active.Load(); n != 1 {
 		t.Fatal("active after the handoff:", n)
@@ -429,7 +429,7 @@ func TestStopAfterHandoffFreesTheKey(t *testing.T) {
 	g.mu.Unlock()
 	rest := g.acceptMessage(ctx, in, f.new)
 	g.mu.Lock()
-	g.next(ctx, ks)
+	g.next(ctx, "k", ks)
 	g.stopKey("k")
 	_ = rest()
 	g.mu.Lock()

@@ -274,6 +274,10 @@ func FormatBatchLost(id string) string {
 	return "[Background delegation " + id + " was lost in a restart]"
 }
 
+// ResumeNote is the synthetic user turn that continues a turn that a gateway restart cut.
+// The model must not run the old tool calls again, because they can have side effects.
+const ResumeNote = "[System note: A gateway restart cut your previous turn in this session. The conversation history is intact. Do not run the old tool calls again. If the history has tool results that you did not answer, summarize them first. Then tell the user that the session continues, say where you stopped, and ask how to continue.]"
+
 func newBatchID() (string, error) {
 	var b [6]byte
 	if _, err := rand.Read(b[:]); err != nil {
