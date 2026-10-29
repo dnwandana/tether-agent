@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -42,13 +44,17 @@ func TestFallbackOn503ThenSucceeds(t *testing.T) {
 	defer bad.Close()
 	good := fixtureServer(t, "testdata/openai_text_stream.sse")
 	var logBuf bytes.Buffer
-	f := NewFallback(NewOpenAI("primary", bad.URL, "k", "m", bad.Client()), NewOpenAI("fallback", good.URL, "k", "m", good.Client()), slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	f := NewFallback(NewOpenAI("primary", bad.URL, "k", "m", bad.Client()), NewOpenAI("fallback", good.URL, "k", "m2", good.Client()), slog.New(slog.NewJSONHandler(&logBuf, nil)))
 	ch, err := f.Stream(ctx, Request{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r, _ := Collect(ch, nil); r.Text == "" {
+	r, _ := Collect(ch, nil)
+	if r.Text == "" {
 		t.Fatal("no text")
+	}
+	if r.Provider != "fallback" || r.Model != "m2" {
+		t.Fatal(r.Provider, r.Model)
 	}
 	if !strings.Contains(logBuf.String(), "primary") || !strings.Contains(logBuf.String(), "fallback") {
 		t.Fatal(logBuf.String())
@@ -219,4 +225,159 @@ func TestFromConfigWithoutFallback(t *testing.T) {
 	if _, _, err := FromConfig(&cfg, nil, nil); err == nil {
 		t.Fatal("want an error without a primary provider")
 	}
+}
+
+// switchServer starts a fake server that answers 503 while bad is true,
+// else the text fixture.
+func switchServer(t *testing.T, bad *atomic.Bool) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if bad.Load() {
+			w.WriteHeader(503)
+			return
+		}
+		serveFile(w, "testdata/openai_text_stream.sse")
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// streamAll calls p one time and reads the stream to the end.
+func streamAll(t *testing.T, p Provider) error {
+	t.Helper()
+	ch, err := p.Stream(ctx, Request{})
+	if err != nil {
+		return err
+	}
+	_, err = Collect(ch, nil)
+	return err
+}
+
+func TestFallbackStatusTransitions(t *testing.T) {
+	var bad atomic.Bool
+	prim := switchServer(t, &bad)
+	good := fixtureServer(t, "testdata/openai_text_stream.sse")
+	f := NewFallback(NewOpenAI("primary", prim.URL, "k", "glm-5.3", prim.Client()), NewOpenAI("fallback", good.URL, "k", "deepseek", good.Client()), nil)
+	st, ok := StatusOf(f)
+	if !ok || st.Active {
+		t.Fatal(st, ok)
+	}
+	bad.Store(true)
+	if err := streamAll(t, f); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = StatusOf(f)
+	if !st.Active || st.Cause != "HTTP 503" || st.FailedAt.IsZero() {
+		t.Fatal(st)
+	}
+	if st.PrimaryModel != "glm-5.3" || st.FallbackName != "fallback" || st.FallbackModel != "deepseek" {
+		t.Fatal(st)
+	}
+	failedAt := st.FailedAt
+	bad.Store(false)
+	if err := streamAll(t, f); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = StatusOf(f)
+	if st.Active || st.Cause != "HTTP 503" || !st.FailedAt.Equal(failedAt) {
+		t.Fatal(st)
+	}
+}
+
+func TestFallbackStatusBothFail(t *testing.T) {
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }))
+	defer bad.Close()
+	f := NewFallback(NewOpenAI("primary", bad.URL, "k", "m", bad.Client()), NewOpenAI("fallback", bad.URL, "k", "m2", bad.Client()), slog.Default())
+	if _, err := f.Stream(ctx, Request{}); err == nil {
+		t.Fatal("want an error when both providers fail")
+	}
+	st, _ := StatusOf(f)
+	if st.Active || st.Cause != "" || !st.FailedAt.IsZero() {
+		t.Fatal(st)
+	}
+}
+
+func TestFallbackStatus400NoChange(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(400) }))
+	defer srv.Close()
+	f := NewFallback(NewOpenAI("primary", srv.URL, "k", "m", srv.Client()), stubProvider(nil), slog.Default())
+	if _, err := f.Stream(ctx, Request{}); err == nil {
+		t.Fatal("want an error for HTTP 400")
+	}
+	st, _ := StatusOf(f)
+	if st.Active || st.Cause != "" {
+		t.Fatal(st)
+	}
+}
+
+func TestFallbackStatusClearedByOtherPrimaryError(t *testing.T) {
+	var code atomic.Int32
+	code.Store(503)
+	prim := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(int(code.Load())) }))
+	defer prim.Close()
+	good := fixtureServer(t, "testdata/openai_text_stream.sse")
+	f := NewFallback(NewOpenAI("primary", prim.URL, "k", "m", prim.Client()), NewOpenAI("fallback", good.URL, "k", "m2", good.Client()), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := streamAll(t, f); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := StatusOf(f)
+	if !before.Active {
+		t.Fatal(before)
+	}
+	// A 401 does not go to the fallback, so the fallback is not active after it.
+	code.Store(401)
+	if _, err := f.Stream(ctx, Request{}); err == nil {
+		t.Fatal("want an error for HTTP 401")
+	}
+	st, _ := StatusOf(f)
+	if st.Active || st.Cause != "HTTP 503" || !st.FailedAt.Equal(before.FailedAt) {
+		t.Fatal(st)
+	}
+}
+
+func TestFallbackStatusKeptOnCancel(t *testing.T) {
+	var bad atomic.Bool
+	bad.Store(true)
+	prim := switchServer(t, &bad)
+	good := fixtureServer(t, "testdata/openai_text_stream.sse")
+	f := NewFallback(NewOpenAI("primary", prim.URL, "k", "m", prim.Client()), NewOpenAI("fallback", good.URL, "k", "m2", good.Client()), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := streamAll(t, f); err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := f.Stream(cctx, Request{}); err == nil {
+		t.Fatal("want an error for a canceled context")
+	}
+	if st, _ := StatusOf(f); !st.Active {
+		t.Fatal(st)
+	}
+}
+
+func TestStatusOfPlainProvider(t *testing.T) {
+	if _, ok := StatusOf(NewOpenAI("p", "http://127.0.0.1:1", "k", "m", nil)); ok {
+		t.Fatal("a plain adapter must not report a fallback state")
+	}
+}
+
+func TestFallbackStatusParallel(t *testing.T) {
+	var bad atomic.Bool
+	prim := switchServer(t, &bad)
+	good := fixtureServer(t, "testdata/openai_text_stream.sse")
+	f := NewFallback(NewOpenAI("primary", prim.URL, "k", "m", prim.Client()), NewOpenAI("fallback", good.URL, "k", "m2", good.Client()), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i%3 == 0 {
+				bad.Store(i%2 == 0)
+			}
+			if ch, err := f.Stream(ctx, Request{}); err == nil {
+				_, _ = Collect(ch, nil)
+			}
+			_, _ = StatusOf(f)
+		}()
+	}
+	wg.Wait()
 }
