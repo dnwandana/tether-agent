@@ -300,3 +300,12 @@ func TestHelpTableMatchesSwitch(t *testing.T) {
 		t.Errorf("case %q of run has no help entry", name)
 	}
 }
+
+func TestUpdateHelpHasRestartFlags(t *testing.T) {
+	h := commandHelp("update")
+	for _, want := range []string{"--restart", "--no-restart"} {
+		if !strings.Contains(h, want) {
+			t.Fatalf("update help lacks %s:\n%s", want, h)
+		}
+	}
+}

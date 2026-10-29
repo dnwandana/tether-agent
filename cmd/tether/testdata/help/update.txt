@@ -3,12 +3,15 @@ usage: tether update [flags]
 Replace this binary with the newest release from GitHub. The command downloads
 the archive for this platform, checks its SHA-256 against checksums.txt, runs
 the new binary once, and then replaces the old file in one step. A running
-gateway keeps the old version until you restart it.
+gateway keeps the old version until you restart it. On a terminal, the command
+asks if it should restart the running gateway with systemctl.
 
 Flags:
   --check              Report a newer release. Do not download.
   --tag vX.Y.Z         Install this release instead of the newest one.
   --force              Install also when the version is the same or a dev build.
+  --restart            Restart the running gateway with no question.
+  --no-restart         Do not restart the gateway. Print the restart command.
   --data-dir DIR       The data folder. Used only to find a running gateway.
 
 Examples:

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/update"
@@ -323,5 +325,293 @@ func TestDefaultUpdater(t *testing.T) {
 	}
 	if u.Client == nil || u.Client.UserAgent != "tether-agent/"+version || u.Client.APIBase != "" {
 		t.Fatalf("client %+v", u.Client)
+	}
+}
+
+const restartQuestion = "Restart the gateway now? The running turns get time to end first. [Y/n] "
+
+// restartEnv is the setup of a restart test: a held gateway.lock, unit files that the test
+// controls, and a recorder in place of systemctl.
+type restartEnv struct {
+	dir   string
+	calls [][]string
+	err   error
+}
+
+// setupRestart prepares runUpdate for a restart test. sysUnit and userUnit say which unit
+// files exist. uid is the effective user ID.
+func setupRestart(t *testing.T, sysUnit, userUnit bool, uid int) *restartEnv {
+	t.Helper()
+	srv, _ := fakeReleaseServer(t, "0.9.0")
+	useUpdater(t, srv, writeFakeBinary(t), "0.4.0")
+	t.Setenv("TETHER_GATEWAY", "")
+	env := &restartEnv{dir: t.TempDir()}
+	rel, err := gatewaylock.Acquire(filepath.Join(env.dir, "gateway.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rel() })
+	unitDir := t.TempDir()
+	sysPath := filepath.Join(unitDir, "system.service")
+	userPath := filepath.Join(unitDir, "user.service")
+	if sysUnit {
+		if err := os.WriteFile(sysPath, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if userUnit {
+		if err := os.WriteFile(userPath, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldSys, oldUser, oldRun, oldUID := systemUnitPath, userUnitPath, runSystemctl, geteuid
+	systemUnitPath = sysPath
+	userUnitPath = func() string { return userPath }
+	runSystemctl = func(_ context.Context, _, _ io.Writer, args ...string) error {
+		env.calls = append(env.calls, args)
+		return env.err
+	}
+	geteuid = func() int { return uid }
+	t.Cleanup(func() {
+		systemUnitPath, userUnitPath, runSystemctl, geteuid = oldSys, oldUser, oldRun, oldUID
+	})
+	return env
+}
+
+func (e *restartEnv) update(args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	code := run(append([]string{"update", "--data-dir", e.dir}, args...), &out, &errb)
+	return code, out.String(), errb.String()
+}
+
+func TestUpdateAsksAndRestartsUserUnit(t *testing.T) {
+	env := setupRestart(t, false, true, 1000)
+	withTerminal(t, true, "\n")
+	code, out, errs := env.update()
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	want := restartQuestion + "restarting the gateway: systemctl --user restart tether\n" +
+		"the gateway restarted with tether 0.9.0\n"
+	if !strings.HasSuffix(out, want) {
+		t.Fatal(out)
+	}
+	if !slices.Equal(env.calls[0], []string{"--user", "restart", "tether"}) || len(env.calls) != 1 {
+		t.Fatalf("calls %v", env.calls)
+	}
+}
+
+func TestUpdateAnswers(t *testing.T) {
+	tests := []struct {
+		input     string
+		restart   bool
+		questions int
+	}{
+		{"y\n", true, 1},
+		{"yes\n", true, 1},
+		{"n\n", false, 1},
+		{"no\n", false, 1},
+		{"maybe\ny\n", true, 2},
+		{"", false, 1},
+	}
+	for _, tt := range tests {
+		t.Run(strings.TrimSpace(tt.input), func(t *testing.T) {
+			env := setupRestart(t, false, true, 1000)
+			withTerminal(t, true, tt.input)
+			code, out, errs := env.update()
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, errs)
+			}
+			if n := strings.Count(out, restartQuestion); n != tt.questions {
+				t.Fatalf("question asked %d times: %s", n, out)
+			}
+			if tt.restart != (len(env.calls) == 1) {
+				t.Fatalf("calls %v", env.calls)
+			}
+			if hint := restartHint(runtime.GOOS, false); tt.restart == strings.Contains(out, hint) {
+				t.Fatalf("hint mismatch: %s", out)
+			}
+		})
+	}
+}
+
+// TestUpdateAnswerInterrupt checks that an interrupt at the question is a no. The Enter
+// after the interrupt must not count as a yes.
+func TestUpdateAnswerInterrupt(t *testing.T) {
+	env := setupRestart(t, false, true, 1000)
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	withTerminal(t, true, "")
+	stdin = pr
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_, _ = pw.Write([]byte("\n"))
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var out, errb bytes.Buffer
+	if code := restartGateway(ctx, &out, &errb, "0.9.0", false, false); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if len(env.calls) != 0 || !strings.HasSuffix(out.String(), restartHint(runtime.GOOS, false)+"\n") {
+		t.Fatalf("out %q calls %v", out.String(), env.calls)
+	}
+}
+
+func TestUpdateRestartFlags(t *testing.T) {
+	t.Run("restart without terminal", func(t *testing.T) {
+		env := setupRestart(t, false, true, 1000)
+		withTerminal(t, false, "")
+		code, out, errs := env.update("--restart")
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, errs)
+		}
+		if strings.Contains(out, "[Y/n]") || len(env.calls) != 1 {
+			t.Fatalf("out %q calls %v", out, env.calls)
+		}
+	})
+	t.Run("no-restart on terminal", func(t *testing.T) {
+		env := setupRestart(t, false, true, 1000)
+		withTerminal(t, true, "y\n")
+		code, out, errs := env.update("--no-restart")
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, errs)
+		}
+		if strings.Contains(out, "[Y/n]") || len(env.calls) != 0 ||
+			!strings.HasSuffix(out, restartHint(runtime.GOOS, false)+"\n") {
+			t.Fatalf("out %q calls %v", out, env.calls)
+		}
+	})
+	t.Run("both flags", func(t *testing.T) {
+		env := setupRestart(t, false, true, 1000)
+		code, _, errs := env.update("--restart", "--no-restart")
+		if code != 2 {
+			t.Fatalf("exit %d", code)
+		}
+		if !strings.HasPrefix(errs, "update: --restart and --no-restart cannot be used together\n") {
+			t.Fatal(errs)
+		}
+		if len(env.calls) != 0 {
+			t.Fatalf("calls %v", env.calls)
+		}
+	})
+}
+
+func TestUpdateNoTerminalKeepsTheHint(t *testing.T) {
+	env := setupRestart(t, false, true, 1000)
+	withTerminal(t, false, "")
+	code, out, errs := env.update()
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	if strings.Contains(out, "[Y/n]") || len(env.calls) != 0 ||
+		!strings.HasSuffix(out, restartHint(runtime.GOOS, false)+"\n") {
+		t.Fatalf("out %q calls %v", out, env.calls)
+	}
+}
+
+func TestUpdateUnitCases(t *testing.T) {
+	t.Run("system unit as root", func(t *testing.T) {
+		env := setupRestart(t, true, false, 0)
+		code, _, errs := env.update("--restart")
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, errs)
+		}
+		if len(env.calls) != 1 || !slices.Equal(env.calls[0], []string{"restart", "tether"}) {
+			t.Fatalf("calls %v", env.calls)
+		}
+	})
+	t.Run("system unit as user", func(t *testing.T) {
+		env := setupRestart(t, true, false, 1000)
+		code, out, errs := env.update("--restart")
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, errs)
+		}
+		if len(env.calls) != 0 || !strings.HasSuffix(out, restartHint("linux", true)+"\n") {
+			t.Fatalf("out %q calls %v", out, env.calls)
+		}
+	})
+	t.Run("no unit", func(t *testing.T) {
+		env := setupRestart(t, false, false, 1000)
+		code, out, errs := env.update("--restart")
+		if code != 0 {
+			t.Fatalf("exit %d: %s", code, errs)
+		}
+		want := "the gateway does not run under systemd; stop it and start it again\n"
+		if len(env.calls) != 0 || !strings.HasSuffix(out, want) {
+			t.Fatalf("out %q calls %v", out, env.calls)
+		}
+	})
+}
+
+func TestUpdateInsideTheGateway(t *testing.T) {
+	env := setupRestart(t, false, true, 1000)
+	withTerminal(t, true, "y\n")
+	t.Setenv("TETHER_GATEWAY", "1")
+	code, out, errs := env.update("--restart")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	want := "the gateway runs this command, so it cannot restart itself. Send /restart in the chat.\n"
+	if !strings.Contains(out, "updated tether 0.4.0 → 0.9.0") || !strings.HasSuffix(out, want) ||
+		strings.Contains(out, "[Y/n]") || len(env.calls) != 0 {
+		t.Fatalf("out %q calls %v", out, env.calls)
+	}
+}
+
+func TestUpdateRestartFails(t *testing.T) {
+	env := setupRestart(t, false, true, 1000)
+	env.err = errors.New("unit not found")
+	code, out, errs := env.update("--restart")
+	if code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	want := "update: the binary is updated, but the restart failed: unit not found. Run: systemctl --user restart tether\n"
+	if errs != want {
+		t.Fatalf("stderr %q", errs)
+	}
+	if !strings.Contains(out, "updated tether 0.4.0 → 0.9.0") {
+		t.Fatal(out)
+	}
+}
+
+func TestUpdateSudoWithUserUnit(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		args  []string
+		input string
+	}{
+		{"terminal", nil, "y\n"},
+		{"restart flag", []string{"--restart"}, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := setupRestart(t, false, false, 0)
+			withTerminal(t, true, tt.input)
+			home := t.TempDir()
+			unitDir := filepath.Join(home, ".config", "systemd", "user")
+			if err := os.MkdirAll(unitDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(unitDir, "tether.service"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			oldLookup := lookupHome
+			lookupHome = func(name string) (string, error) {
+				if name != "alice" {
+					return "", errors.New("no user")
+				}
+				return home, nil
+			}
+			t.Cleanup(func() { lookupHome = oldLookup })
+			t.Setenv("SUDO_USER", "alice")
+			code, out, errs := env.update(tt.args...)
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, errs)
+			}
+			if strings.Contains(out, "[Y/n]") || len(env.calls) != 0 ||
+				!strings.HasSuffix(out, restartHint(runtime.GOOS, false)+"\n") {
+				t.Fatalf("out %q calls %v", out, env.calls)
+			}
+		})
 	}
 }

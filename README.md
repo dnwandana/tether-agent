@@ -51,7 +51,9 @@ stop when they are idle. These parts are the browser, the MCP servers, and the m
    ```
 
 6. Later, get the newest release with `tether update`. Run `tether update --check` to only see
-   if there is one.
+   if there is one. On a terminal, the command asks to restart the gateway. After the update to
+   v0.7.0, run `tether setup` once and answer yes at "Write the systemd unit?", so the gateway
+   gets the new stop settings.
 
    ```sh
    tether update
