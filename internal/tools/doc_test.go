@@ -68,3 +68,29 @@ func TestGeneratedDocIsCurrent(t *testing.T) {
 		t.Fatal("docs/TOOLS.md is out of date: run go run ./cmd/tether gen-tools-doc > docs/TOOLS.md")
 	}
 }
+
+// A rename of a tool argument must not break the preview of the tool without a test failure.
+func TestPreviewKeysInSchemas(t *testing.T) {
+	t.Cleanup(func() { security.AddProtectedPathPatterns(nil) })
+	r, done, err := setup.ToolsDocRegistry(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer done()
+	for tool, key := range tools.PreviewKeys {
+		tl, ok := r.Get(tool)
+		if !ok {
+			t.Errorf("PreviewKeys has %s, but the registry has no such tool", tool)
+			continue
+		}
+		var schema struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if err := json.Unmarshal(tl.Schema().Parameters, &schema); err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		if _, ok := schema.Properties[key]; !ok {
+			t.Errorf("the schema of %s has no property %q", tool, key)
+		}
+	}
+}
