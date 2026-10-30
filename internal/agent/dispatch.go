@@ -37,7 +37,7 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 			results[i] = tools.Result{Text: cancelledText, IsError: true}
 			return
 		}
-		ls.ToolStart(c.Name, argPreview(c.Args))
+		ls.ToolStart(c.Name, tools.ArgPreview(c.Name, c.Args))
 		if deny != "" && !visible[c.Name] {
 			results[i] = tools.Result{Text: deny, IsError: true}
 		} else {

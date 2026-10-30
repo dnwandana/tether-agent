@@ -4,7 +4,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
@@ -31,9 +29,6 @@ const NoteMaxTurns = "Stop calling tools and give your final answer now."
 // NoteStopped ends the final text when the turn used all its tool rounds.
 const NoteStopped = "[stopped: max tool rounds reached]"
 
-// previewMax is the maximum number of characters in a tool preview.
-const previewMax = 40
-
 // streamIdleTimeout ends a model call when its stream sends no event for this time. A
 // connection can stay open and send nothing. That connection must not hang the turn.
 // Hermes uses 180 s for small contexts and up to 300 s for large contexts. Tests change it.
@@ -44,7 +39,8 @@ var streamIdleTimeout = 300 * time.Second
 type Sink interface {
 	// Delta receives a part of the streamed answer text.
 	Delta(text string)
-	// ToolStart tells that a tool call starts. preview is the first string argument.
+	// ToolStart tells that a tool call starts. preview is the main argument of the call,
+	// from tools.ArgPreview. It can be empty.
 	ToolStart(name, preview string)
 	// ToolEnd tells that a tool call ended.
 	ToolEnd(name string, isError bool)
@@ -850,34 +846,6 @@ func joinNote(text, note string) string {
 		return note
 	}
 	return text + "\n\n" + note
-}
-
-// argPreview returns the first string argument of the JSON object args, on one line and
-// cut to previewMax characters. It returns "" when args has no string argument.
-func argPreview(args string) string {
-	dec := json.NewDecoder(strings.NewReader(args))
-	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
-		return ""
-	}
-	for dec.More() {
-		if _, err := dec.Token(); err != nil { // the key
-			return ""
-		}
-		var v json.RawMessage
-		if err := dec.Decode(&v); err != nil {
-			return ""
-		}
-		var s string
-		if json.Unmarshal(v, &s) != nil {
-			continue
-		}
-		s = strings.Join(strings.Fields(s), " ")
-		if utf8.RuneCountInString(s) > previewMax {
-			s = string([]rune(s)[:previewMax-3]) + "..."
-		}
-		return s
-	}
-	return ""
 }
 
 // nopSink ignores all output.

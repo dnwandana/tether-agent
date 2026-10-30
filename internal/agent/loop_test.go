@@ -430,18 +430,17 @@ func TestImagesGoToTheTurnRequestOnly(t *testing.T) {
 	}
 }
 
-func TestToolArgsPreview(t *testing.T) {
-	cases := map[string]string{
-		`{"n":3,"command":"ls -la","x":"y"}`:         "ls -la",
-		`{"path":"` + strings.Repeat("a", 60) + `"}`: strings.Repeat("a", 37) + "...",
-		`{"a":"line1\nline2"}`:                       "line1 line2",
-		`{"n":1}`:                                    "",
-		`not json`:                                   "",
+// The status line of a tool shows the argument of its key, not only the first string
+// argument. ToolStart runs before the dispatch, so web_fetch needs no registration.
+func TestToolStartPreviewUsesToolKey(t *testing.T) {
+	fp := scripted(toolCalls(tc("c1", "web_fetch", `{"max_chars":500,"urls":["https://go.dev","https://x.org"]}`)), text("done"))
+	a, sess := newAgent(t, fp, echoTool{})
+	sink := &recSink{}
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: sink, System: "SYS"}); err != nil {
+		t.Fatal(err)
 	}
-	for in, want := range cases {
-		if got := argPreview(in); got != want {
-			t.Errorf("argPreview(%q) = %q, want %q", in, got, want)
-		}
+	if len(sink.starts) != 1 || sink.starts[0] != "web_fetch:https://go.dev +1" {
+		t.Fatal(sink.starts)
 	}
 }
 
