@@ -191,6 +191,7 @@ func TestBotCommandsMenu(t *testing.T) {
 		{Command: "sessions", Description: "See and resume sessions"},
 		{Command: "stop", Description: "Stop the current task"},
 		{Command: "steer", Description: "Send a note to the current task"},
+		{Command: "now", Description: "Do my waiting message now"},
 		{Command: "model", Description: "Change the model"},
 		{Command: "usage", Description: "See tokens and cost"},
 		{Command: "help", Description: "See all commands"},
