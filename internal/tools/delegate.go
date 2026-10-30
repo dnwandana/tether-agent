@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
@@ -17,6 +18,15 @@ const DelegateDepthKey = "delegate_depth"
 
 // turnToolsKey is the Env.Values key of the tools of the current turn.
 const turnToolsKey = "turn_tools"
+
+// delegateBatches counts the foreground delegate_task calls of the process. Each call takes
+// the next number, and the first number is 1.
+var delegateBatches atomic.Uint64
+
+// ProgressFunc receives one tool start of a delegate_task child as data. The batch number
+// and the child name, for example "2/3", identify the source. The preview is empty when
+// the call has no main argument. ChildProgressLine makes the text line from these values.
+type ProgressFunc func(batch uint64, child, tool, preview string)
 
 // The defaults of the delegation limits, for a config value that is not positive.
 const (
@@ -81,6 +91,9 @@ type ChildSpecLite struct {
 	Depth int
 	// Name names the child in the progress lines and the approval prompts, for example "2/3".
 	Name string
+	// Batch is the number of the foreground delegate_task call of the child. All children of
+	// one call have the same number. It is 0 for a background child.
+	Batch uint64
 	// OnToolStart receives each tool start of the child. It can be nil.
 	OnToolStart func(name, preview string)
 	// ParentEnv is the Env of the delegate_task call.
@@ -315,21 +328,23 @@ func normalizeRole(r string) string {
 }
 
 // runForeground runs the children with at most MaxConcurrent at the same time, and returns
-// the results in task order. The progress lines of the children go to env.Progress one at a
-// time.
+// the results in task order. The tool starts of the children go to env.Progress one at a
+// time. All children of the call get one new batch number.
 func (t DelegateTool) runForeground(ctx context.Context, env *Env, specs []ChildSpecLite) []ChildResultLite {
 	var progressMu sync.Mutex
 	results := make([]ChildResultLite, len(specs))
 	sem := make(chan struct{}, t.maxChildren())
 	var wg sync.WaitGroup
+	batch := delegateBatches.Add(1)
 	for i := range specs {
 		spec := specs[i]
+		spec.Batch = batch
 		if env != nil && env.Progress != nil {
 			progress := env.Progress
 			spec.OnToolStart = func(name, preview string) {
 				progressMu.Lock()
 				defer progressMu.Unlock()
-				progress(ChildProgressLine(spec.Name, name, preview))
+				progress(spec.Batch, spec.Name, name, preview)
 			}
 		}
 		wg.Add(1)

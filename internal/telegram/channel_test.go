@@ -525,7 +525,7 @@ func (progressTool) Schema() provider.ToolSchema {
 	return provider.ToolSchema{Name: "delegate_task", Description: "d", Parameters: json.RawMessage(`{"type":"object"}`)}
 }
 func (progressTool) Run(_ context.Context, _ json.RawMessage, env *tools.Env) (string, error) {
-	env.Progress(tools.ChildProgressLine("1/2", "read_file", "notes.txt"))
+	env.Progress(1, "1/2", "read_file", "notes.txt")
 	return "ok", nil
 }
 
@@ -538,7 +538,7 @@ func TestChildProgressLinesInStatus(t *testing.T) {
 	h.gw.Deps.Agent.Tools.Register(progressTool{})
 	h.gw.Deps.NewEnv = func(sess *sessions.Session, _ string) *tools.Env {
 		return &tools.Env{SessionID: sess.ID, SessionKey: sess.Key, Values: map[string]any{},
-			Progress: func(line string) { h.ch.Progress(sess.Key, line) }}
+			Progress: func(b uint64, c, tl, p string) { h.ch.Progress(sess.Key, b, c, tl, p) }}
 	}
 	h.update(dmText(5, "split the work"))
 	h.waitIdle()
@@ -548,7 +548,7 @@ func TestChildProgressLinesInStatus(t *testing.T) {
 	if !strings.Contains(strings.Join(all, "\n"), `🔀 [1/2] read_file "notes.txt"`) {
 		t.Fatal(all)
 	}
-	h.ch.Progress("telegram:dm:5", "late line")
+	h.ch.Progress("telegram:dm:5", 1, "1/2", "read_file", "late line")
 	if strings.Contains(h.sentTexts(), "late line") {
 		t.Fatal("a line after the turn must not show")
 	}

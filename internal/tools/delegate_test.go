@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -192,12 +194,48 @@ func TestProgressLinesPrefixed(t *testing.T) {
 	env := envDepth(0)
 	var mu sync.Mutex
 	var lines []string
-	env.Progress = func(line string) { mu.Lock(); lines = append(lines, line); mu.Unlock() }
+	env.Progress = func(batch uint64, child, tool, preview string) {
+		mu.Lock()
+		lines = append(lines, fmt.Sprintf("%d|%s|%s|%s", batch, child, tool, preview))
+		mu.Unlock()
+	}
 	runToolEnv(t, delegateTool(r), `{"tasks":[{"goal":"a"},{"goal":"b"},{"goal":"c"}]}`, env)
+	if r.specs[0].Batch == 0 {
+		t.Fatal("the batch number must be above 0")
+	}
+	b := strconv.FormatUint(r.specs[0].Batch, 10)
 	slices.Sort(lines)
-	want := []string{`🔀 [2/3] browser_navigate "https://example.com"`, `🔀 [3/3] terminal`}
+	want := []string{b + "|2/3|browser_navigate|https://example.com", b + "|3/3|terminal|"}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("%q", lines)
+	}
+}
+
+// batchesOf returns the Batch of each spec that r recorded, and clears the record.
+func batchesOf(r *slowRunner) []uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []uint64
+	for _, s := range r.specs {
+		out = append(out, s.Batch)
+	}
+	r.specs = nil
+	return out
+}
+
+// Two batches in one status bubble both name their children 1/n, 2/n, and so on. The batch
+// number keeps their lines apart.
+func TestForegroundBatchNumbers(t *testing.T) {
+	r := &slowRunner{}
+	runToolEnv(t, delegateTool(r), `{"tasks":[{"goal":"a"},{"goal":"b"}]}`, envDepth(0))
+	first := batchesOf(r)
+	runToolEnv(t, delegateTool(r), `{"tasks":[{"goal":"c"},{"goal":"d"}]}`, envDepth(0))
+	second := batchesOf(r)
+	if len(first) != 2 || first[0] != first[1] || first[0] == 0 {
+		t.Fatalf("all children of one call share one number above 0: %v", first)
+	}
+	if len(second) != 2 || second[0] != second[1] || second[0] <= first[0] {
+		t.Fatalf("the next call takes a higher number: %v, then %v", first, second)
 	}
 }
 

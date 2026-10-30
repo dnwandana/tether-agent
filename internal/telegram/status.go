@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
 // ToolEmoji maps a tool name to the emoji of its status line. The values come
@@ -46,8 +48,6 @@ var ToolEmoji = map[string]string{
 const (
 	// defaultToolEmoji is the emoji of a tool that is not in ToolEmoji.
 	defaultToolEmoji = "🔧"
-	// childPrefix starts the tool name of a delegate_task child line.
-	childPrefix = "🔀 "
 	// previewMax is the longest preview in "all" and "new" mode (Hermes).
 	previewMax = 40
 	// statusTextLimit is the longest status message: 4,096 less 64 (Hermes).
@@ -59,6 +59,9 @@ const (
 	maxInlineFloodWait = 5 * time.Second
 	// flushTimeout limits a flush that a timer starts.
 	flushTimeout = 30 * time.Second
+	// maxClosedEditTries is the number of tries for the last edit of a
+	// closed bubble, the first try included.
+	maxClosedEditTries = 3
 )
 
 // ToolLine returns the status line for one tool call.
@@ -67,17 +70,8 @@ const (
 //     cut to 40 characters, or `{emoji} {tool}...` with no preview.
 //   - "verbose" gives `{emoji} {tool}({keys})` and the JSON arguments on the
 //     next line. Empty arguments give the short form with the full preview.
-//
-// A child line from delegate_task has a tool that starts with "🔀 [i/n] ".
-// It gets no emoji, and the preview follows in quotes.
 func ToolLine(mode, tool, preview, argsJSON string) string {
-	preview = strings.Join(strings.Fields(preview), " ")
-	if strings.HasPrefix(tool, childPrefix) {
-		if preview == "" {
-			return tool
-		}
-		return fmt.Sprintf("%s %q", tool, cutPreview(preview))
-	}
+	preview = oneLine(preview)
 	emoji := defaultToolEmoji
 	if e, ok := ToolEmoji[tool]; ok {
 		emoji = e
@@ -93,6 +87,11 @@ func ToolLine(mode, tool, preview, argsJSON string) string {
 		return emoji + " " + tool + "..."
 	}
 	return fmt.Sprintf("%s %s: \"%s\"", emoji, tool, preview)
+}
+
+// oneLine replaces each run of white space in s with one space.
+func oneLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // cutPreview cuts s to previewMax characters, with "..." at the end of a cut.
@@ -131,6 +130,33 @@ func argKeys(argsJSON string) (keys []string, compact string, ok bool) {
 	return keys, buf.String(), len(keys) > 0
 }
 
+// Source is the origin of a tool call. The zero value is the main agent of
+// the turn. A delegate_task child has the number of its batch and its name.
+type Source struct {
+	Batch uint64
+	Child string
+}
+
+// groupKey identifies one line of the open bubble in "all" mode.
+type groupKey struct {
+	src  Source
+	tool string
+}
+
+// statusGroup is the line of one group key and the number of its calls.
+type statusGroup struct {
+	idx   int // the index in Status.lines
+	count int
+}
+
+// closedEdit is the last text of a closed bubble. The edit that closed the
+// bubble failed for a short time, so the timer tries it again.
+type closedEdit struct {
+	msgID int
+	text  string
+	tries int
+}
+
 // Status is the tool progress message of one run. All lines go
 // into one message that is edited in place, at most once per Interval. A
 // timer sends a pending edit when no new line arrives. The methods are safe
@@ -146,13 +172,15 @@ type Status struct {
 	Log      *slog.Logger
 
 	mu         sync.Mutex
-	lines      []string // the lines of the open bubble
-	msgID      int      // the open bubble, 0 before its first send
-	shown      string   // the text that the open bubble shows
-	lastTool   string
-	lastLine   string
-	repeat     int
-	noEdit     bool // set after a permanent edit error: send each line alone
+	lines      []string                 // the lines of the open bubble
+	msgID      int                      // the open bubble, 0 before its first send
+	shown      string                   // the text that the open bubble shows
+	groups     map[groupKey]statusGroup // the lines of the open bubble in "all" mode
+	lastKey    groupKey                 // the key of the last call, for "new" mode
+	lastLine   string                   // the line of the last call, with no count
+	noEdit     bool                     // set after a permanent edit error: send each line alone
+	splitting  bool                     // set while split closes the full bubble
+	waiting    []closedEdit             // the edits of closed bubbles to try again, oldest first
 	lastEdit   time.Time
 	floodUntil time.Time
 	ids        []int // every status message, for the cleanup
@@ -161,14 +189,15 @@ type Status struct {
 	closed     bool
 }
 
-// Add adds the line for one tool call. Identical consecutive lines collapse
-// to one line with "(×N)". "new" mode adds a line only when the tool name
-// changes, and "off" mode does nothing.
-func (s *Status) Add(ctx context.Context, tool, preview, args string) {
-	mode := s.Mode
-	if mode == "" {
-		mode = "all"
-	}
+// Add adds the line for one tool call from src. The main agent gets the
+// ToolLine form. A delegate_task child gets `🔀 [i/n] tool "preview"` in all
+// modes, with the preview cut to 40 characters and no arguments. In "all"
+// mode, each source and tool has one line in the open bubble. A new call
+// replaces that line with its own preview and the count "(×N)". "new" mode
+// adds a line only when the source or the tool changes, and "off" mode does
+// nothing.
+func (s *Status) Add(ctx context.Context, src Source, tool, preview, args string) {
+	mode := s.mode()
 	if mode == "off" {
 		return
 	}
@@ -177,34 +206,70 @@ func (s *Status) Add(ctx context.Context, tool, preview, args string) {
 	if s.closed {
 		return
 	}
-	if mode == "new" && tool == s.lastTool {
+	key := groupKey{src: src, tool: tool}
+	if mode == "new" && key == s.lastKey {
 		return
 	}
-	s.lastTool = tool
+	s.lastKey = key
 	s.flushCtx = context.WithoutCancel(ctx)
-	line := cutUTF16(ToolLine(mode, tool, preview, args), statusTextLimit)
+	var line string
+	if src.Child != "" {
+		line = tools.ChildProgressLine(src.Child, tool, cutPreview(oneLine(preview)))
+	} else {
+		line = ToolLine(mode, tool, preview, args)
+	}
+	line = cutUTF16(line, statusTextLimit)
 
-	if mode != "verbose" && line == s.lastLine && len(s.lines) > 0 {
-		s.repeat++
-		s.lines[len(s.lines)-1] = fmt.Sprintf("%s (×%d)", line, s.repeat+1)
-		if s.noEdit {
+	if s.noEdit {
+		// No line can change: send each new line once, with no groups.
+		if mode != "verbose" && line == s.lastLine {
 			return
 		}
-		s.flush(ctx, false)
-		return
-	}
-	s.lastLine, s.repeat = line, 0
-	if s.noEdit {
+		s.lastLine = line
 		s.sendLine(ctx, line)
 		return
 	}
-	if len(s.lines) > 0 && UTF16Len(strings.Join(s.lines, "\n")+"\n"+line) > statusTextLimit {
-		// Close the full bubble with its last lines, and start a new one.
-		s.flush(ctx, true)
-		s.openBubble()
+	s.lastLine = line
+	if g, ok := s.groups[key]; ok && mode == "all" {
+		old := s.lines[g.idx]
+		s.lines[g.idx] = fmt.Sprintf("%s (×%d)", line, g.count+1)
+		if UTF16Len(strings.Join(s.lines, "\n")) <= statusTextLimit {
+			g.count++
+			s.groups[key] = g
+			s.flush(ctx, false)
+			return
+		}
+		// The update does not fit. Close the bubble with its old text, and
+		// start the line again in a new bubble.
+		s.lines[g.idx] = old
+		if s.split(ctx) {
+			return
+		}
+	} else if len(s.lines) > 0 && UTF16Len(strings.Join(s.lines, "\n")+"\n"+line) > statusTextLimit {
+		if s.split(ctx) {
+			return
+		}
+	}
+	if mode == "all" {
+		if s.groups == nil {
+			s.groups = map[groupKey]statusGroup{}
+		}
+		s.groups[key] = statusGroup{idx: len(s.lines), count: 1}
 	}
 	s.lines = append(s.lines, line)
 	s.flush(ctx, false)
+}
+
+// split closes the full bubble with its last lines, and opens a new one. It
+// returns true when the flush found a permanent edit error. Then the flush
+// sent the line of the call alone, and the caller must stop. s.mu is held.
+func (s *Status) split(ctx context.Context) bool {
+	s.splitting = true
+	s.flush(ctx, true)
+	s.splitting = false
+	s.keepFailedEdit()
+	s.openBubble()
+	return s.noEdit
 }
 
 // Reset closes the open bubble, so the next tool line starts a new message
@@ -219,13 +284,16 @@ func (s *Status) Reset() {
 		ctx, cancel := context.WithTimeout(s.flushCtx, flushTimeout)
 		s.flush(ctx, true)
 		cancel()
+		s.keepFailedEdit()
 	}
 	s.openBubble()
-	s.lastLine, s.repeat = "", 0
+	s.lastLine, s.lastKey = "", groupKey{}
 }
 
 // Close sends the pending lines. It deletes all status messages when Cleanup
-// and success are both true. Add does nothing after Close.
+// and success are both true. Add does nothing after Close. The timer still
+// tries the failed edits of closed bubbles, so the final counts can arrive
+// later.
 func (s *Status) Close(ctx context.Context, success bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -233,22 +301,93 @@ func (s *Status) Close(ctx context.Context, success bool) {
 		return
 	}
 	s.closed = true
-	s.stopTimer()
 	if !s.noEdit && len(s.lines) > 0 {
 		s.flush(ctx, true)
+		s.keepFailedEdit()
 	}
+	s.stopTimer()
 	if s.Cleanup && success {
+		// A deleted message needs no edit.
+		s.waiting = nil
 		for _, id := range s.ids {
 			if err := s.C.DeleteMessage(ctx, s.ChatID, id); err != nil {
 				s.logger().Info("telegram status delete failed", "err", err.Error())
 			}
 		}
+	} else if len(s.waiting) > 0 {
+		s.armTimer(s.editWait())
 	}
+}
+
+// keepFailedEdit runs after the forced flush of a bubble that closes. When
+// the edit failed for a short time or for a flood wait, it keeps the text
+// for the timer. A permanent error set noEdit, and a send error left no
+// message to edit. s.mu is held.
+func (s *Status) keepFailedEdit() {
+	text := strings.Join(s.lines, "\n")
+	if s.msgID == 0 || s.noEdit || text == s.shown {
+		return
+	}
+	s.waiting = append(s.waiting, closedEdit{msgID: s.msgID, text: text, tries: 1})
 }
 
 func (s *Status) openBubble() {
 	s.stopTimer()
-	s.lines, s.msgID, s.shown = nil, 0, ""
+	s.lines, s.msgID, s.shown, s.groups = nil, 0, "", nil
+	if len(s.waiting) > 0 {
+		s.armTimer(s.editWait())
+	}
+}
+
+// editClosed tries the waiting edits of closed bubbles, oldest first. It
+// returns false when an edit must wait for the interval or for a flood wait.
+// Then the timer runs again later. s.mu is held.
+func (s *Status) editClosed(ctx context.Context) bool {
+	for len(s.waiting) > 0 {
+		if wait := s.editWait(); wait > 0 {
+			s.armTimer(wait)
+			return false
+		}
+		e := &s.waiting[0]
+		e.tries++
+		now := s.now()
+		_, err := noWaitClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: e.msgID, Text: e.text})
+		s.lastEdit = now
+		if err != nil && !isNotModified(err) {
+			wait, flood := floodWait(err)
+			if flood {
+				s.floodUntil = now.Add(max(wait, s.interval()))
+			}
+			switch {
+			case !flood && !isTransient(err):
+				// The message cannot be edited. Only this bubble keeps its
+				// old text, and the open bubble is not affected.
+				s.logger().Info("telegram status edit of a closed bubble failed, drop it", "err", err.Error())
+			case e.tries >= maxClosedEditTries:
+				s.logger().Info("telegram status edit of a closed bubble failed too many times, drop it",
+					"err", err.Error(), "tries", e.tries)
+			default:
+				s.logger().Info("telegram status edit of a closed bubble failed, retry later", "err", err.Error())
+				continue
+			}
+		}
+		s.waiting = s.waiting[1:]
+	}
+	return true
+}
+
+// stopIdleTimer stops the timer when no closed bubble waits for an edit.
+// s.mu is held.
+func (s *Status) stopIdleTimer() {
+	if len(s.waiting) == 0 {
+		s.stopTimer()
+	}
+}
+
+// editWait returns the time until the next edit can go out. s.mu is held.
+func (s *Status) editWait() time.Duration {
+	now := s.now()
+	return max(s.lastEdit.Add(s.interval()).Sub(now), s.floodUntil.Sub(now))
 }
 
 // flush shows the open bubble text. Without force, an edit waits for the
@@ -256,7 +395,7 @@ func (s *Status) openBubble() {
 func (s *Status) flush(ctx context.Context, force bool) {
 	text := strings.Join(s.lines, "\n")
 	if text == "" || text == s.shown {
-		s.stopTimer()
+		s.stopIdleTimer()
 		return
 	}
 	now := s.now()
@@ -268,13 +407,14 @@ func (s *Status) flush(ctx context.Context, force bool) {
 		}
 		s.msgID, s.shown, s.lastEdit = m.MessageID, text, now
 		s.ids = append(s.ids, m.MessageID)
-		s.stopTimer()
+		s.stopIdleTimer()
 		return
 	}
 	if !force {
-		wait := max(s.lastEdit.Add(s.interval()).Sub(now), s.floodUntil.Sub(now))
-		if wait > 0 {
-			s.armTimer(wait)
+		// The waiting edits of closed bubbles go first. The timer sends
+		// them, and then this edit.
+		if wait := s.editWait(); wait > 0 || len(s.waiting) > 0 {
+			s.armTimer(max(wait, 0))
 			return
 		}
 	}
@@ -283,7 +423,7 @@ func (s *Status) flush(ctx context.Context, force bool) {
 	switch {
 	case err == nil || isNotModified(err):
 		s.shown = text
-		s.stopTimer()
+		s.stopIdleTimer()
 	case isTransient(err):
 		// Keep the edits. The next line or the timer tries again.
 		s.logger().Info("telegram status edit failed, retry later", "err", err.Error())
@@ -299,9 +439,33 @@ func (s *Status) flush(ctx context.Context, force bool) {
 		// line as its own message (Hermes).
 		s.logger().Info("telegram status edit failed, send each line", "err", err.Error())
 		s.noEdit = true
-		s.stopTimer()
-		s.sendLine(ctx, s.lines[len(s.lines)-1])
+		s.stopIdleTimer()
+		if line := s.noEditLine(); line != "" {
+			s.sendLine(ctx, line)
+		}
 	}
+}
+
+// noEditLine returns the line to send when edits stop. In "all" mode it is
+// the group line of the last call, so the count stays visible. The last line
+// of the bubble can be an earlier group. During a split, the group line in the
+// full bubble does not have the new call yet, so the line of the call goes
+// out. A line that the bubble shows already is not sent again. s.mu is held.
+func (s *Status) noEditLine() string {
+	if s.mode() != "all" || s.splitting {
+		return s.lastLine
+	}
+	g, ok := s.groups[s.lastKey]
+	if !ok {
+		return s.lastLine
+	}
+	line := s.lines[g.idx]
+	for shown := range strings.SplitSeq(s.shown, "\n") {
+		if shown == line {
+			return ""
+		}
+	}
+	return line
 }
 
 func (s *Status) sendLine(ctx context.Context, line string) {
@@ -326,17 +490,25 @@ func (s *Status) armTimer(d time.Duration) {
 	if s.timer != nil {
 		return
 	}
-	s.timer = time.AfterFunc(d, func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.timer = nil
-		if s.closed || s.flushCtx == nil {
-			return
-		}
-		ctx, cancel := context.WithTimeout(s.flushCtx, flushTimeout)
-		defer cancel()
-		s.flush(ctx, false)
-	})
+	s.timer = time.AfterFunc(d, s.onTimer)
+}
+
+// onTimer sends the edits that waited for the interval or for a flood wait.
+func (s *Status) onTimer() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.timer = nil
+	if s.flushCtx == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.flushCtx, flushTimeout)
+	defer cancel()
+	// After Close, and after a permanent edit error, only the closed
+	// bubbles get edits.
+	if !s.editClosed(ctx) || s.closed || s.noEdit {
+		return
+	}
+	s.flush(ctx, false)
 }
 
 func (s *Status) stopTimer() {
@@ -344,6 +516,14 @@ func (s *Status) stopTimer() {
 		s.timer.Stop()
 		s.timer = nil
 	}
+}
+
+// mode returns Mode, with "all" for an empty value.
+func (s *Status) mode() string {
+	if s.Mode == "" {
+		return "all"
+	}
+	return s.Mode
 }
 
 func (s *Status) interval() time.Duration {

@@ -50,7 +50,7 @@ type Env struct {
 	Log      *slog.Logger
 	Ask      Asker
 	Gate     Approver
-	Progress func(line string)
+	Progress ProgressFunc
 	// Values holds per-session tool state, for example the read tracker.
 	Values map[string]any
 	// ScriptCall is true for a call from an execute_code script. The script reads a

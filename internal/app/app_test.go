@@ -594,7 +594,8 @@ func TestNewEnvProgress(t *testing.T) {
 	if tg.Progress == nil {
 		t.Fatal("a Telegram env must route the child lines to the status message")
 	}
-	tg.Progress("no turn runs, so nothing happens")
+	// No turn runs, so nothing happens.
+	tg.Progress(1, "1/2", "read_file", "x")
 }
 
 func TestCloseWaitsForTheMCPReaper(t *testing.T) {

@@ -255,7 +255,7 @@ func TestDelegatorBackgroundEnqueuesResults(t *testing.T) {
 	q := &enqueued{}
 	dl.Batches.Enqueue = q.fn
 	parent, _ := a.Store.Create(ctx, sessionsFor("telegram:dm:1"))
-	env := &tools.Env{SessionID: parent.ID, SessionKey: parent.Key, Values: map[string]any{}, Progress: func(string) { t.Error("no progress after the turn") }}
+	env := &tools.Env{SessionID: parent.ID, SessionKey: parent.Key, Values: map[string]any{}, Progress: func(uint64, string, string, string) { t.Error("no progress after the turn") }}
 	tools.SetTurnTools(env, all(), nil)
 	id, err := dl.StartBackground(ctx, env, []tools.ChildSpecLite{{Goal: "x", Name: "1/1", ParentEnv: env}})
 	if err != nil || id == "" {

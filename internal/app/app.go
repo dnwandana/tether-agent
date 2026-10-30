@@ -632,7 +632,9 @@ func (a *App) NewEnv(sess *sessions.Session, channel string) *tools.Env {
 			env.Ask = ui
 		}
 		key := sess.Key
-		env.Progress = func(line string) { ch.Progress(key, line) }
+		env.Progress = func(batch uint64, child, tool, preview string) {
+			ch.Progress(key, batch, child, tool, preview)
+		}
 	}
 	env.Gate = gate
 	if sess == nil {

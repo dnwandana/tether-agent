@@ -68,10 +68,13 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 		t.Env = d.NewEnv(sess, in.Channel)
 	}
 	// The progress lines of the delegate_task children go through the CLI sink. Its lock
-	// keeps each line apart from the streamed answer text. A channel with its own
-	// progress function, for example Telegram, keeps that function.
+	// keeps each line apart from the streamed answer text. The CLI does not group the
+	// lines, so it does not use the batch number. A channel with its own progress
+	// function, for example Telegram, keeps that function.
 	if cs, ok := in.Sink.(*CLISink); ok && t.Env != nil && t.Env.Progress == nil {
-		t.Env.Progress = cs.Notice
+		t.Env.Progress = func(_ uint64, child, tool, preview string) {
+			cs.Notice(tools.ChildProgressLine(child, tool, preview))
+		}
 	}
 	log.Info("turn start", "session", sess.ID, "channel", in.Channel)
 	start := time.Now()

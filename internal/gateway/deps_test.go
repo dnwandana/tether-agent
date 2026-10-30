@@ -12,7 +12,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
-// progressTool sends one progress line through env.Progress, like delegate_task does for
+// progressTool sends one child tool start through env.Progress, like delegate_task does for
 // the tool starts of its children.
 type progressTool struct{}
 
@@ -26,7 +26,7 @@ func (progressTool) Run(_ context.Context, _ json.RawMessage, env *tools.Env) (s
 	if env.Progress == nil {
 		return "no progress", nil
 	}
-	env.Progress(`🔀 [1/2] read_file "x"`)
+	env.Progress(1, "1/2", "read_file", "x")
 	return "sent", nil
 }
 
@@ -66,7 +66,7 @@ func TestTurnSendsChildProgressToCLISink(t *testing.T) {
 func TestTurnKeepsChannelProgress(t *testing.T) {
 	var got []string
 	d, sess := progressDeps(t, func(s *sessions.Session, _ string) *tools.Env {
-		return &tools.Env{SessionID: s.ID, Values: map[string]any{}, Progress: func(line string) { got = append(got, line) }}
+		return &tools.Env{SessionID: s.ID, Values: map[string]any{}, Progress: func(_ uint64, child, _, _ string) { got = append(got, child) }}
 	})
 	var out bytes.Buffer
 	if _, err := d.Turn(context.Background(), sess, TurnInput{Text: "go", Channel: "cli", Sink: &CLISink{W: &out}}); err != nil {

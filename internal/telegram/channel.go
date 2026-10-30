@@ -704,15 +704,15 @@ func keyboardMarkup(rows [][]gateway.Button) *InlineKeyboardMarkup {
 	return kb
 }
 
-// Progress adds a line to the status message of the running turn of the session key, for
-// example the "🔀 [1/3] tool" line of a delegate_task child. With no running turn, it
-// does nothing.
-func (ch *Channel) Progress(key, line string) {
+// Progress adds the line of one tool call of a delegate_task child to the status message of
+// the running turn of the session key. batch and child are the source of the call, so that
+// each child of each batch gets its own lines. With no running turn, it does nothing.
+func (ch *Channel) Progress(key string, batch uint64, child, tool, preview string) {
 	ch.activeMu.Lock()
 	r := ch.active[key]
 	ch.activeMu.Unlock()
 	if r != nil {
-		r.status.Add(r.ctx, line, "", "")
+		r.status.Add(r.ctx, Source{Batch: batch, Child: child}, tool, preview, "")
 	}
 }
 
@@ -890,7 +890,7 @@ func (r *tgRenderer) Delta(text string) {
 
 func (r *tgRenderer) ToolStart(name, preview string) {
 	if r.begin() {
-		r.status.Add(r.ctx, name, preview, "")
+		r.status.Add(r.ctx, Source{}, name, preview, "")
 	}
 }
 
