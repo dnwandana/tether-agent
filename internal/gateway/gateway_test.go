@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -259,23 +258,6 @@ func TestPanicInTurnKeepsQueue(t *testing.T) {
 	if r1.err == nil || !r2.done || r2.final != "ok" {
 		t.Fatalf("%+v %+v", r1, r2)
 	}
-}
-
-func TestRunStateRoundAndTool(t *testing.T) {
-	tr := &trackSink{Sink: &recRenderer{}}
-	if tr.round() != 1 || tr.tool() != "" {
-		t.Fatal()
-	}
-	tr.Boundary()
-	tr.ToolStart("read_file", "a")
-	if tr.round() != 2 || tr.tool() != "read_file" {
-		t.Fatal(tr.round(), tr.tool())
-	}
-	tr.ToolEnd("read_file", false)
-	if tr.tool() != "" {
-		t.Fatal(tr.tool())
-	}
-	var _ agent.Sink = tr
 }
 
 // recChannel records the messages that the gateway sends.

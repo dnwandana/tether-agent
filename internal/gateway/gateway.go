@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/agent"
-	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 )
@@ -76,10 +75,6 @@ type RunState struct {
 	// Steer receives the guidance for the running turn.
 	Steer   *agent.SteerQueue
 	Started time.Time
-	// Round returns the current tool round and the maximum number of rounds.
-	Round func() (int, int)
-	// Tool returns the name of the running tool, or "".
-	Tool func() string
 	// SessionID is the session of the turn. The busy acks are limited per session.
 	SessionID string
 
@@ -105,14 +100,21 @@ type Gateway struct {
 	now func() time.Time
 	// debounce merges the busy texts of a key. Nil uses 350 ms and a hard cap of 1 s.
 	debounce *Debouncer
-	// lastAck holds the time of the last busy ack per session.
-	lastAck map[string]time.Time
+	// lastAck holds one mark per session: the turn and the time of the last busy ack. Each
+	// new turn resets the limit.
+	lastAck map[string]ackMark
 	// markers writes the turn markers of the busy keys. Use markerW.
 	markers    *markerWriter
 	markerOnce sync.Once
 	// stopping is set by BeginStopping, under mu. Then the gateway takes no new work, and
 	// no queued turn starts.
 	stopping atomic.Bool
+}
+
+// ackMark is the turn and the time of the last busy ack of a session.
+type ackMark struct {
+	turn int
+	at   time.Time
 }
 
 // keyState is the state of one session key. Gateway.mu guards it.
@@ -123,6 +125,9 @@ type keyState struct {
 	running *RunState
 	// current is the message that owns the key: the turn that runs or starts.
 	current *pendingTurn
+	// turns counts the turns that took the key. The number of the current turn is
+	// current.turn.
+	turns int
 	// queue holds the messages that wait for the key, in order.
 	queue []*pendingTurn
 	// last is the newest message of the key and its renderer factory, for Enqueue.
@@ -144,9 +149,45 @@ type pendingTurn struct {
 	// discard is true when /stop, /new, or the slash command rule dropped the message.
 	// Gateway.mu guards it.
 	discard bool
+	// takeOver is true when /now or /stop keep stopped the turn. Then the end of the turn
+	// keeps its steer. Gateway.mu guards it.
+	takeOver bool
+	// system is true for a turn from Enqueue, for example a batch result or a resume note.
+	// /now does not count it as a waiting message of the owner.
+	system bool
 	// handed is true when next gave the key to the message. Then the message counts in
 	// Gateway.active, and its waiter must run it, so the key goes on. Gateway.mu guards it.
 	handed bool
+	// turn is the number of the turn of the message in its key. It is 0 until the message
+	// takes the key. Gateway.mu guards it.
+	turn int
+}
+
+// take gives the key to p and gives p the next turn number. The caller holds Gateway.mu
+// and sets busy.
+func (ks *keyState) take(p *pendingTurn) {
+	ks.turns++
+	p.turn = ks.turns
+	ks.current = p
+}
+
+// currentTurn returns the number of the turn that holds the key, or 0 when no message
+// holds it. The caller holds Gateway.mu.
+func (ks *keyState) currentTurn() int {
+	if ks.current == nil {
+		return 0
+	}
+	return ks.current.turn
+}
+
+// currentTurn returns the number of the turn that holds key, or 0 when no message holds it.
+func (g *Gateway) currentTurn(key string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if ks := g.keys[key]; ks != nil {
+		return ks.currentTurn()
+	}
+	return 0
 }
 
 // Handle routes one inbound message. A slash command from the command table runs at once.
@@ -208,7 +249,8 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	ks.last, ks.lastRenderer = in, newRenderer
 	if !ks.busy {
 		p := &pendingTurn{in: in, newRenderer: newRenderer}
-		ks.busy, ks.current = true, p
+		ks.busy = true
+		ks.take(p)
 		// The turn counts as active from now, so Wait does not miss it.
 		g.active.Add(1)
 		g.mu.Unlock()
@@ -237,7 +279,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	g.sendMarker(op)
 	// A slash text is dropped when it leaves the queue, so it gets no ack.
 	if !isCommandText(in) {
-		g.ack(rs, in.Key, QueueAck, queuedStopButton, newRenderer())
+		g.ack(rs, in.Key, QueueAck, newRenderer())
 	}
 	return func() error {
 		select {
@@ -276,8 +318,15 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 // follow-up. It runs after the current turn and the turns that wait before it. Enqueue
 // does not wait for the turn. The answer goes to the channel of the newest message of the
 // key, or else to the channel and the chat of the active session of the key. While the
-// gateway stops, it returns ErrStopping.
+// gateway stops, it returns ErrStopping. The turn is not a message of the owner, so /now
+// does not count it.
 func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
+	return g.enqueue(ctx, key, text, true)
+}
+
+// enqueue is Enqueue. system is false for a message of the owner, for example a queued
+// text that a restart resumes.
+func (g *Gateway) enqueue(ctx context.Context, key, text string, system bool) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("gateway: enqueue: the text is empty")
 	}
@@ -295,7 +344,7 @@ func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
 		}
 	}
 	in.Key, in.Text, in.Images, in.Files, in.IsText = key, text, nil, nil, true
-	p := &pendingTurn{in: in, newRenderer: newRenderer}
+	p := &pendingTurn{in: in, newRenderer: newRenderer, system: system}
 	g.mu.Lock()
 	if g.stopping.Load() {
 		g.mu.Unlock()
@@ -308,7 +357,8 @@ func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
 		g.sendMarker(op)
 		return nil
 	}
-	ks.busy, ks.current = true, p
+	ks.busy = true
+	ks.take(p)
 	g.start(ctx, p)
 	g.mu.Unlock()
 	return nil
@@ -382,7 +432,9 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 		// the agent drained at the same time can come here.
 		g.logger().Warn("gateway: a steer text is lost in the stop", "key", p.in.Key)
 	}
-	if pending != "" && !p.discard {
+	// A stop drops the steer, because the run that it guides has ended (Hermes). A
+	// take-over keeps it, because the owner asked for the waiting text to run now.
+	if pending != "" && (!p.discard || p.takeOver && !g.stopping.Load()) {
 		// The steer that the turn did not deliver becomes the next turn, before the queue.
 		in := p.in
 		in.Text, in.Images, in.Files, in.IsText = pending, nil, nil, true
@@ -415,7 +467,7 @@ func (g *Gateway) next(ctx context.Context, key string, ks *keyState) {
 			}
 			continue
 		}
-		ks.current = nx
+		ks.take(nx)
 		if nx.ready != nil {
 			// The waiter of nx runs it. Count it now, so Wait does not see zero turns
 			// before the waiter wakes up.
@@ -446,13 +498,10 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) {
 	r := p.newRenderer()
 	tctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	tr := &trackSink{Sink: r}
 	rs := &RunState{
 		Cancel:  cancel,
 		Steer:   agent.NewSteerQueue(),
 		Started: time.Now(),
-		Round:   func() (int, int) { return tr.round(), g.maxTurns() },
-		Tool:    tr.tool,
 	}
 	defer func() {
 		if v := recover(); v != nil {
@@ -486,7 +535,7 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) {
 	// A review notice goes out as its own message after the answer.
 	notify, release := agent.HoldNotices(r.Ack)
 	res, err := g.Deps.Turn(tctx, sess, TurnInput{
-		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, Sink: tr, Steer: rs.Steer, Notify: notify,
+		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, Sink: r, Steer: rs.Steer, Notify: notify,
 	})
 	// Put the steer that the turn did not deliver back before the answer goes out. The send
 	// can take long, and BeginStopping in that time saves the steer queue in the marker.
@@ -545,6 +594,7 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 				}
 			},
 			StopKeep: func() (bool, int) { return g.stopKeepQueue(in.Key) },
+			Now:      func(turn int) (bool, int, bool) { return g.takeOver(in.Key, turn) },
 			Steer:    func(text string) { rest = g.steerCommand(ctx, in, newRenderer, r, text) },
 		},
 	}
@@ -579,63 +629,11 @@ func (g *Gateway) sendRenderer(ctx context.Context, key string) (Inbound, func()
 	return in, func() Renderer { return &sendRenderer{ctx: ctx, ch: ch, to: to, log: log} }, nil
 }
 
-func (g *Gateway) maxTurns() int {
-	if g.Deps.Cfg != nil && g.Deps.Cfg.Agent.MaxTurns > 0 {
-		return g.Deps.Cfg.Agent.MaxTurns
-	}
-	return config.Default().Agent.MaxTurns
-}
-
 func (g *Gateway) logger() *slog.Logger {
 	if g.Log != nil {
 		return g.Log
 	}
 	return g.Deps.logger()
-}
-
-// trackSink passes the events to a Sink and records the tool round and the running tool.
-type trackSink struct {
-	agent.Sink
-
-	mu         sync.Mutex
-	boundaries int
-	current    string
-}
-
-func (t *trackSink) Boundary() {
-	t.mu.Lock()
-	t.boundaries++
-	t.mu.Unlock()
-	t.Sink.Boundary()
-}
-
-func (t *trackSink) ToolStart(name, preview string) {
-	t.mu.Lock()
-	t.current = name
-	t.mu.Unlock()
-	t.Sink.ToolStart(name, preview)
-}
-
-func (t *trackSink) ToolEnd(name string, isError bool) {
-	t.mu.Lock()
-	if t.current == name {
-		t.current = ""
-	}
-	t.mu.Unlock()
-	t.Sink.ToolEnd(name, isError)
-}
-
-// round returns the number of the current model call: 1 before the first tool round.
-func (t *trackSink) round() int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.boundaries + 1
-}
-
-func (t *trackSink) tool() string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.current
 }
 
 // sendRenderer sends the final text of a turn as one message, and each Ack at once.

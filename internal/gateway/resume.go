@@ -102,8 +102,8 @@ func (g *Gateway) resumeMarker(ctx context.Context, m sessions.TurnMarker) {
 			continue
 		}
 		// The note turn runs now and writes the marker of the key, so the marker is not
-		// deleted here.
-		if err := g.Enqueue(ctx, m.SessionKey, text); err != nil {
+		// deleted here. The text is a message of the owner, so /now counts it.
+		if err := g.enqueue(ctx, m.SessionKey, text, false); err != nil {
 			log.Warn("gateway: cannot resume a queued message", "key", m.SessionKey, "err", err.Error())
 			return
 		}

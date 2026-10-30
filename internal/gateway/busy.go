@@ -3,15 +3,16 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// The busy texts of Tether Agent, in Markdown. A busy ack adds the task details line.
+// The busy texts of Tether Agent, in Markdown. A busy ack is one plain line.
 const (
-	SteerAck           = "⏩ **Note sent to the task**\nThe agent reads it after the current tool."
-	QueueAck           = "⏳ **Queued**\nI will answer after the current task."
+	SteerAck           = "↪️ Got it. I'll do this after the current step."
+	QueueAck           = "⏳ Queued. I'll answer after the current task."
 	StopReply          = "⏹ **Stopped**\nThe session is safe. Send a message to continue."
 	NoTaskReply        = "💤 **No task to stop**"
 	SteerStartingReply = "⏩ **Note saved**\nThe agent did not start yet. It reads the note at the start of the task."
@@ -19,14 +20,20 @@ const (
 	// stopKeepOneReply and stopKeepManyReply are the replies to /stop keep while messages wait.
 	stopKeepOneReply  = "⏹ **Stopped**\nThe waiting message runs now."
 	stopKeepManyReply = "⏹ **Stopped**\nThe waiting messages run now, one at a time."
+	// nowOneReply, nowManyReply, and nowNothingReply are the replies to /now.
+	nowOneReply     = "⚡ Taking over. The current answer stopped."
+	nowManyReply    = "⚡ Taking over. The current answer stopped. The waiting messages run now, one at a time."
+	nowNothingReply = "✅ Nothing waits. The agent already has your message."
 )
 
-// stopButton is on the busy replies where no message of the owner waits. It runs /stop.
+// stopButton is on the reply to a command that cannot run during a task. It runs /stop.
 var stopButton = []Button{{Text: "⏹ Stop the task", Data: "/stop"}}
 
-// queuedStopButton is on the reply to a message that waits in the queue. It runs /stop keep,
-// so the waiting messages stay and the next one starts.
-var queuedStopButton = []Button{{Text: "⏹ Stop the current task", Data: "/stop keep"}}
+// nowButton returns the button of the busy replies. It runs /now for the turn of the reply,
+// so a tap on the reply of an old turn does nothing.
+func nowButton(turn int) []Button {
+	return []Button{{Text: "⚡ Do this now", Data: fmt.Sprintf("/now %d", turn)}}
+}
 
 const (
 	// busyAckEvery is the minimum time between two busy acks of one session (Hermes).
@@ -39,6 +46,7 @@ const (
 func init() {
 	Register(Command{Name: "stop", Help: "Stop the running task", Run: cmdStop, WhileBusy: true})
 	Register(Command{Name: "steer", Help: "Guide the running task: /steer <text>", Run: cmdSteer, WhileBusy: true})
+	Register(Command{Name: "now", Help: "Stop the task and run your waiting message now", Run: cmdNow, WhileBusy: true})
 }
 
 // cmdStop stops the run of the key. The Stop hook of the channel sends the reply. With no
@@ -91,6 +99,32 @@ func cmdSteer(_ context.Context, c *CommandCtx, args string) error {
 	return nil
 }
 
+// cmdNow stops the running task and runs the waiting messages of the owner at once. The
+// argument is the number of the turn of the button. With no number, /now acts on the
+// current turn. Each reply edits the message of the pressed button.
+func cmdNow(_ context.Context, c *CommandCtx, args string) error {
+	turn, err := strconv.Atoi(strings.TrimSpace(args))
+	if err != nil || turn < 0 {
+		turn = 0
+	}
+	if c.Hooks.Now == nil {
+		c.send(Reply{Text: nowNothingReply, Edit: true})
+		return nil
+	}
+	took, waiting, stopping := c.Hooks.Now(turn)
+	switch {
+	case stopping:
+		// A command during the stop of the gateway gets no reply.
+	case !took:
+		c.send(Reply{Text: nowNothingReply, Edit: true})
+	case waiting > 1:
+		c.send(Reply{Text: nowManyReply, Edit: true})
+	default:
+		c.send(Reply{Text: nowOneReply, Edit: true})
+	}
+	return nil
+}
+
 // onBusy puts the text of in into the running turn rs as a steer and sends the steer
 // ack to r. It returns false when the steer cannot run: in is not plain text, the text is
 // empty, the agent did not start yet (no steer queue), the run ended or stopped, or the
@@ -106,7 +140,7 @@ func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer
 	if !ok {
 		return false
 	}
-	g.ack(rs, in.Key, SteerAck, stopButton, r)
+	g.ack(rs, in.Key, SteerAck, r)
 	return true
 }
 
@@ -120,7 +154,8 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 	ks := g.key(in.Key)
 	if !ks.busy {
 		p := &pendingTurn{in: in, newRenderer: newRenderer}
-		ks.busy, ks.current = true, p
+		ks.busy = true
+		ks.take(p)
 		g.start(ctx, p)
 		g.mu.Unlock()
 		return
@@ -137,7 +172,8 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 	}
 	if !ks.busy {
 		p := &pendingTurn{in: in, newRenderer: newRenderer}
-		ks.busy, ks.current = true, p
+		ks.busy = true
+		ks.take(p)
 		g.start(ctx, p)
 		g.mu.Unlock()
 		return
@@ -147,7 +183,7 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 	op := g.markerUpsertOp(ks, in.Key)
 	g.mu.Unlock()
 	g.sendMarker(op)
-	g.ack(rs, in.Key, QueueAck, queuedStopButton, r)
+	g.ack(rs, in.Key, QueueAck, r)
 }
 
 // steerCommand runs /steer text for the key of in. With a run, the text goes into the
@@ -164,8 +200,9 @@ func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func
 		return g.acceptMessage(ctx, m, newRenderer)
 	}
 	if rs := ks.running; !g.stopping.Load() && rs != nil && rs.Steer != nil && !rs.ended && !rs.stopped && rs.Steer.Push(text) {
+		turn := ks.currentTurn()
 		g.mu.Unlock()
-		ackReply(r, Reply{Text: withDetail(SteerAck, BusyAckDetail(rs, g.clock())), Buttons: [][]Button{stopButton}})
+		ackReply(r, Reply{Text: SteerAck, Buttons: [][]Button{nowButton(turn)}})
 		return rest
 	}
 	if g.stopping.Load() {
@@ -188,7 +225,8 @@ func (g *Gateway) stopKey(key string) bool {
 	ks := g.key(key)
 	had := ks.current != nil || ks.running != nil
 	if ks.current != nil {
-		ks.current.discard = true
+		// A stop after /now or /stop keep also drops the steer that the turn holds.
+		ks.current.discard, ks.current.takeOver = true, false
 	}
 	rs := ks.running
 	if rs != nil {
@@ -230,8 +268,10 @@ func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
 	ks := g.key(key)
 	stopped = ks.current != nil || ks.running != nil
 	if ks.current != nil {
-		// A turn that starts now runs no agent, and a steer for it does not become a turn.
+		// A turn that starts now runs no agent. The steer that the turn holds becomes the
+		// next turn.
 		ks.current.discard = true
+		ks.current.takeOver = true
 	}
 	rs := ks.running
 	if rs != nil {
@@ -256,25 +296,96 @@ func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
 	return stopped, waiting
 }
 
-// ack sends text with the details line of rs and one row of buttons to r. It sends at most
-// one ack per session in busyAckEvery (Hermes).
-func (g *Gateway) ack(rs *RunState, key, text string, buttons []Button, r Renderer) {
+// takeOver stops the turn of key and runs the waiting messages of the owner at once. A
+// turn above 0 must still hold the key, else nothing changes. The waiting steer text and
+// the merged busy text become the next turn, before the queue. Queued slash commands and
+// Enqueue turns do not count, and they stay in their place. took is false when the turn
+// was already stopped, or when no message of the owner waits, and then nothing changes. waiting is the number of the turns that
+// wait now. stopping is true when the gateway stops, and then nothing changes.
+func (g *Gateway) takeOver(key string, turn int) (took bool, waiting int, stopping bool) {
+	g.mu.Lock()
+	if g.stopping.Load() {
+		// BeginStopping saved the steer queue and the queue in the marker.
+		g.mu.Unlock()
+		return false, 0, true
+	}
+	ks := g.key(key)
+	cur := ks.current
+	// A turn that /stop, /stop keep, or an earlier /now stopped does not go on, and its
+	// end already applies the rule for its steer.
+	if !ks.busy || cur == nil || cur.discard || turn > 0 && turn != cur.turn {
+		g.mu.Unlock()
+		return false, 0, false
+	}
+	// The agent drains the steer queue without g.mu, so the decision uses the drained text.
+	var parts []string
+	rs := ks.running
+	if rs != nil {
+		if s := rs.Steer.Drain(); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if s := g.debouncerLocked().Take(key); s != "" {
+		parts = append(parts, s)
+	}
+	text := strings.Join(parts, "\n")
+	for _, p := range ks.queue {
+		// next drops a queued slash command, so it does not count.
+		if !p.system && !isCommandText(p.in) {
+			waiting++
+		}
+	}
+	if text == "" && waiting == 0 {
+		g.mu.Unlock()
+		return false, 0, false
+	}
+	if text != "" {
+		in := cur.in
+		in.Text, in.Images, in.Files, in.IsText = text, nil, nil, true
+		ks.queue = append([]*pendingTurn{{in: in, newRenderer: cur.newRenderer}}, ks.queue...)
+		waiting++
+	}
+	// A turn that starts now runs no agent. The steer that the stopped turn holds becomes
+	// the next turn.
+	cur.discard, cur.takeOver = true, true
+	if rs != nil {
+		rs.stopped = true
+	}
+	// The next queued turn writes the marker again when it starts.
+	op := g.markerRemoveOp(ks, key)
+	g.mu.Unlock()
+	g.sendMarker(op)
+	if rs != nil {
+		rs.Cancel()
+	}
+	g.logger().Info("gateway: the run is stopped, and the waiting messages run now", "key", key, "waiting", waiting)
+	return true, waiting, false
+}
+
+// ack sends text with the button of the turn that holds the key to r. In one turn of the
+// key, it sends at most one ack per session in busyAckEvery (Hermes). A new turn can get an
+// ack at once.
+func (g *Gateway) ack(rs *RunState, key, text string, r Renderer) {
 	now := g.clock()
 	id := key
 	if rs != nil && rs.SessionID != "" {
 		id = rs.SessionID
 	}
 	g.mu.Lock()
-	if last, ok := g.lastAck[id]; ok && now.Sub(last) < busyAckEvery {
+	turn := 0
+	if ks := g.keys[key]; ks != nil {
+		turn = ks.currentTurn()
+	}
+	if last, ok := g.lastAck[id]; ok && last.turn == turn && now.Sub(last.at) < busyAckEvery {
 		g.mu.Unlock()
 		return
 	}
 	if g.lastAck == nil {
-		g.lastAck = map[string]time.Time{}
+		g.lastAck = map[string]ackMark{}
 	}
-	g.lastAck[id] = now
+	g.lastAck[id] = ackMark{turn: turn, at: now}
 	g.mu.Unlock()
-	ackReply(r, Reply{Text: withDetail(text, BusyAckDetail(rs, now)), Buttons: [][]Button{buttons}})
+	ackReply(r, Reply{Text: text, Buttons: [][]Button{nowButton(turn)}})
 }
 
 // ackReply sends rep with AckReply when r can show buttons, else it sends rep.Text with Ack.
@@ -284,39 +395,6 @@ func ackReply(r Renderer, rep Reply) {
 		return
 	}
 	r.Ack(rep.Text)
-}
-
-// BusyAckDetail returns the task details of rs, for example "2 min · step 4/90 · web_fetch".
-// Like Hermes, it leaves out an elapsed time under 1 min and an empty tool.
-func BusyAckDetail(rs *RunState, now time.Time) string {
-	if rs == nil {
-		return ""
-	}
-	var parts []string
-	if !rs.Started.IsZero() {
-		if m := int(now.Sub(rs.Started) / time.Minute); m > 0 {
-			parts = append(parts, fmt.Sprintf("%d min", m))
-		}
-	}
-	if rs.Round != nil {
-		if i, max := rs.Round(); max > 0 {
-			parts = append(parts, fmt.Sprintf("step %d/%d", i, max))
-		}
-	}
-	if rs.Tool != nil {
-		if tool := rs.Tool(); tool != "" {
-			parts = append(parts, tool)
-		}
-	}
-	return strings.Join(parts, " · ")
-}
-
-// withDetail adds detail to text as a last line in italics. An empty detail adds no line.
-func withDetail(text, detail string) string {
-	if detail == "" {
-		return text
-	}
-	return text + "\n_" + detail + "_"
 }
 
 // steerable reports whether in is a plain text that can go into a run as a steer.

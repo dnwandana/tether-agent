@@ -109,7 +109,8 @@ func TestTextWhileBusySteersAndAcks(t *testing.T) {
 		t.Fatal(rs.Steer.Pending())
 	}
 	acks := f.acks()
-	if len(acks) != 1 || !strings.HasPrefix(acks[0], SteerAck) {
+	// The ack is exactly SteerAck: it has no step line.
+	if len(acks) != 1 || acks[0] != SteerAck {
 		t.Fatal(acks)
 	}
 	// A steer is not also queued, and it does not stop the run.
@@ -140,32 +141,6 @@ func TestAckRateLimit30s(t *testing.T) {
 	}
 }
 
-func TestBusyAckDetailFormat(t *testing.T) {
-	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
-	rs := &RunState{
-		Started: now.Add(-2*time.Minute - 10*time.Second),
-		Round:   func() (int, int) { return 4, 90 },
-		Tool:    func() string { return "web_fetch" },
-	}
-	if got := BusyAckDetail(rs, now); got != "2 min · step 4/90 · web_fetch" {
-		t.Fatal(got)
-	}
-	// Like Hermes, the detail leaves out an elapsed time under 1 min and an idle tool.
-	rs.Started, rs.Tool = now.Add(-20*time.Second), func() string { return "" }
-	if got := BusyAckDetail(rs, now); got != "step 4/90" {
-		t.Fatal(got)
-	}
-	if BusyAckDetail(nil, now) != "" || BusyAckDetail(&RunState{}, now) != "" {
-		t.Fatal("no detail without a run")
-	}
-	if got := withDetail(QueueAck, "step 4/90"); got != "⏳ **Queued**\nI will answer after the current task.\n_step 4/90_" {
-		t.Fatalf("%q", got)
-	}
-	if got := withDetail(QueueAck, ""); got != QueueAck {
-		t.Fatalf("%q", got)
-	}
-}
-
 // replyFactory hands out replyRenderers and keeps them in order.
 type replyFactory struct {
 	mu   sync.Mutex
@@ -193,26 +168,24 @@ func (f *replyFactory) replies() []Reply {
 	return out
 }
 
-// wantBusyReply fails the test when rep is not text with the detail line of rs and buttons.
-func wantBusyReply(t *testing.T, g *Gateway, rs *RunState, rep Reply, text string, buttons []Button) {
+// wantBusyReply fails the test when rep is not exactly text with one row of buttons.
+func wantBusyReply(t *testing.T, rep Reply, text string, buttons []Button) {
 	t.Helper()
-	want := withDetail(text, BusyAckDetail(rs, g.clock()))
-	if rep.Text != want || !reflect.DeepEqual(rep.Buttons, [][]Button{buttons}) {
-		t.Fatalf("got %q %+v, want %q %+v", rep.Text, rep.Buttons, want, buttons)
+	if rep.Text != text || !reflect.DeepEqual(rep.Buttons, [][]Button{buttons}) {
+		t.Fatalf("got %q %+v, want %q %+v", rep.Text, rep.Buttons, text, buttons)
 	}
 	if strings.Contains(rep.Text, "(Send /stop") {
 		t.Fatalf("%q", rep.Text)
 	}
 }
 
-func TestQueuedReplyHasStopButton(t *testing.T) {
+func TestQueuedReplyHasNowButton(t *testing.T) {
 	g, _, _, _ := busyGateway(t)
-	rs := g.mustRun(t, "k")
 	f := &replyFactory{}
 	go func() { _ = g.Handle(context.Background(), media("k"), f.new) }()
 	waitFor(t, func() bool { return len(f.replies()) == 1 })
-	wantBusyReply(t, g, rs, f.replies()[0], QueueAck, []Button{{Text: "⏹ Stop the current task", Data: "/stop keep"}})
-	if !strings.HasPrefix(f.replies()[0].Text, "⏳ **Queued**\nI will answer after the current task.") {
+	wantBusyReply(t, f.replies()[0], QueueAck, []Button{{Text: "⚡ Do this now", Data: "/now 1"}})
+	if f.replies()[0].Text != "⏳ Queued. I'll answer after the current task." {
 		t.Fatalf("%q", f.replies()[0].Text)
 	}
 	// A second queued message within 30 s gets no reply.
@@ -233,10 +206,10 @@ func TestSteerReplyForPlainText(t *testing.T) {
 	_ = g.Handle(context.Background(), inb("k", "one"), f.new)
 	waitFor(t, func() bool { return len(f.replies()) == 1 })
 	rep := f.replies()[0]
-	if !strings.HasPrefix(rep.Text, "⏩ **Note sent to the task**\nThe agent reads it after the current tool.") {
+	if rep.Text != "↪️ Got it. I'll do this after the current step." {
 		t.Fatalf("%q", rep.Text)
 	}
-	wantBusyReply(t, g, rs, rep, SteerAck, []Button{{Text: "⏹ Stop the task", Data: "/stop"}})
+	wantBusyReply(t, rep, SteerAck, []Button{{Text: "⚡ Do this now", Data: "/now 1"}})
 	// The limit of one busy reply in 30 s applies.
 	clk.add(5 * time.Second)
 	_ = g.Handle(context.Background(), inb("k", "two"), f.new)
@@ -294,14 +267,13 @@ func TestStopSteerAndErrorTexts(t *testing.T) {
 
 func TestSteerCommandReplyHasNoLimit(t *testing.T) {
 	g, _, _, _ := busyGateway(t)
-	rs := g.mustRun(t, "k")
 	for i := range 2 {
 		r := &replyRenderer{}
 		_ = g.Handle(context.Background(), inb("k", "/steer use the cache"), func() Renderer { return r })
 		if len(r.replies) != 1 {
 			t.Fatal(i, r.replies, r.acks)
 		}
-		wantBusyReply(t, g, rs, r.replies[0], SteerAck, []Button{{Text: "⏹ Stop the task", Data: "/stop"}})
+		wantBusyReply(t, r.replies[0], SteerAck, []Button{{Text: "⚡ Do this now", Data: "/now 1"}})
 	}
 }
 
@@ -564,6 +536,9 @@ func TestStopAndSteerInCommandTable(t *testing.T) {
 	if _, ok := all["steer"]; !ok {
 		t.Fatal("steer")
 	}
+	if now, ok := all["now"]; !ok || now.Help != "Stop the task and run your waiting message now" || !now.WhileBusy {
+		t.Fatalf("now: %+v", now)
+	}
 	// With no hooks, as in the CLI at the prompt, /stop has no task.
 	c, out := cmdCtx(t, "cli:x")
 	run(t, c, "/stop")
@@ -755,19 +730,22 @@ func TestStopStillDropsQueue(t *testing.T) {
 	}
 }
 
-func TestQueuedStopButtonKeepsQueue(t *testing.T) {
+func TestQueuedNowButtonRunsTheQueue(t *testing.T) {
 	g, _, _, done, fp := busyGatewayProv(t)
 	rf := &replyFactory{}
 	returned := stopKeepWaiting(t, g, rf.new, 1)
 	waitFor(t, func() bool { return len(rf.replies()) == 1 })
 	rep := rf.replies()[0]
-	if len(rep.Buttons) != 1 || len(rep.Buttons[0]) != 1 {
+	if !reflect.DeepEqual(rep.Buttons, [][]Button{{{Text: "⚡ Do this now", Data: "/now 1"}}}) {
 		t.Fatalf("%+v", rep.Buttons)
 	}
 	// A tap runs the action of the button as a typed command.
-	_ = g.Handle(context.Background(), inb("k", rep.Buttons[0][0].Data), func() Renderer { return &recRenderer{} })
+	wantNowReply(t, sendNow(t, g, rep.Buttons[0][0].Data), nowOneReply)
 	waitClosed(t, done, "the tap must end the run")
 	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	if got := fp.lastUserTexts(); !strings.Contains(got[1], "queued a") {
+		t.Fatal(got)
+	}
 	g.mustRun(t, "k").Cancel()
 	waitClosed(t, returned, "the queued turn must end")
 }
@@ -798,4 +776,426 @@ func TestCommandErrorReplyEscapesErrorText(t *testing.T) {
 	if got := StripMarkdown(rr.replies[0].Text); !strings.Contains(got, "usage_daily *x*.") {
 		t.Fatalf("%q", got)
 	}
+}
+
+func TestTurnNumberGrowsPerKey(t *testing.T) {
+	g, f, _, done, _ := busyGatewayProv(t)
+	if n := g.currentTurn("k"); n != 1 {
+		t.Fatal(n)
+	}
+	returned := stopKeepWaiting(t, g, f.new, 1)
+	_ = g.Handle(context.Background(), inb("k", "/stop keep"), func() Renderer { return &recRenderer{} })
+	waitClosed(t, done, "/stop keep must end the run")
+	waitFor(t, func() bool { return g.currentTurn("k") == 2 })
+	waitFor(t, func() bool { _, ok := g.Running("k"); return ok })
+	g.mustRun(t, "k").Cancel()
+	waitClosed(t, returned, "the queued turn must end")
+}
+
+func TestBusyReplyLimitResetsPerTurn(t *testing.T) {
+	g, _, _, done, _ := busyGatewayProv(t)
+	rf := &replyFactory{}
+	returned := stopKeepWaiting(t, g, rf.new, 1) // turn 1 gets the queued reply
+	waitFor(t, func() bool { return len(rf.replies()) == 1 })
+	_ = g.Handle(context.Background(), inb("k", "/stop keep"), func() Renderer { return &recRenderer{} })
+	waitClosed(t, done, "/stop keep must end the run")
+	waitFor(t, func() bool { return g.currentTurn("k") == 2 })
+	waitFor(t, func() bool { _, ok := g.Running("k"); return ok })
+	// The fake clock did not move, so only the new turn allows this reply.
+	_ = g.Handle(context.Background(), inb("k", "new text"), rf.new)
+	waitFor(t, func() bool { return len(rf.replies()) == 2 })
+	if rf.replies()[1].Text != SteerAck {
+		t.Fatalf("%q", rf.replies()[1].Text)
+	}
+	g.mustRun(t, "k").Cancel()
+	waitClosed(t, returned, "the queued turn must end")
+}
+
+func TestStopKeepKeepsTheSteer(t *testing.T) {
+	g, f, _, done, fp := busyGatewayProv(t)
+	rs := g.mustRun(t, "k")
+	_ = g.Handle(context.Background(), inb("k", "also this"), f.new)
+	waitFor(t, func() bool { return rs.Steer.Pending() == "also this" })
+	_ = g.Handle(context.Background(), inb("k", "/stop keep"), func() Renderer { return &recRenderer{} })
+	waitClosed(t, done, "/stop keep must end the run")
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	if got := fp.lastUserTexts(); got[1] != "also this" {
+		t.Fatal(got)
+	}
+	g.mustRun(t, "k").Cancel()
+}
+
+// sendNow sends text (a /now command) to key "k" and returns the replies of its renderer.
+func sendNow(t *testing.T, g *Gateway, text string) []Reply {
+	t.Helper()
+	rr := &replyRenderer{}
+	_ = g.Handle(context.Background(), inb("k", text), func() Renderer { return rr })
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	if len(rr.acks) != 0 {
+		t.Fatalf("%q", rr.acks)
+	}
+	return rr.replies
+}
+
+// wantNowReply fails the test when got is not exactly one reply with text and Edit set.
+func wantNowReply(t *testing.T, got []Reply, text string) {
+	t.Helper()
+	if want := []Reply{{Text: text, Edit: true}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// stoppedRun reports whether /stop, /stop keep, or /now stopped rs.
+func (g *Gateway) stoppedRun(rs *RunState) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return rs.stopped
+}
+
+func TestNowTakesOverATextAnswer(t *testing.T) {
+	g, f, _, done, fp := busyGatewayProv(t)
+	rs := g.mustRun(t, "k")
+	_ = g.Handle(context.Background(), inb("k", "solar"), f.new)
+	waitFor(t, func() bool { return rs.Steer.Pending() == "solar" })
+	wantNowReply(t, sendNow(t, g, "/now"), nowOneReply)
+	waitClosed(t, done, "/now must end the run")
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	// The stopped turn did not get the text. The text runs as the next turn.
+	if got := fp.lastUserTexts(); !reflect.DeepEqual(got, []string{"first", "solar"}) {
+		t.Fatal(got)
+	}
+	g.mustRun(t, "k").Cancel()
+}
+
+func TestNowRunsTheSteerBeforeTheQueue(t *testing.T) {
+	g, f, _, done, fp := busyGatewayProv(t)
+	rs := g.mustRun(t, "k")
+	_ = g.Handle(context.Background(), inb("k", "solar"), f.new)
+	waitFor(t, func() bool { return rs.Steer.Pending() == "solar" })
+	returned := stopKeepWaiting(t, g, f.new, 1)
+	wantNowReply(t, sendNow(t, g, "/now"), nowManyReply)
+	waitClosed(t, done, "/now must end the run")
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	if got := fp.lastUserTexts(); got[1] != "solar" {
+		t.Fatal(got)
+	}
+	// The queued message waits for the turn of the steer text.
+	if n := g.queueLen("k"); n != 1 {
+		t.Fatal(n)
+	}
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+	waitClosed(t, returned, "/stop must end the queued turn")
+}
+
+func TestNowTakesTheDebouncedText(t *testing.T) {
+	g, f, _, done, fp := busyGatewayProv(t)
+	g.debounce = NewDebouncer(time.Hour, time.Hour)
+	_ = g.Handle(context.Background(), inb("k", "late"), f.new)
+	if !g.debouncer().Pending() {
+		t.Fatal("the text must wait in the debouncer")
+	}
+	wantNowReply(t, sendNow(t, g, "/now"), nowOneReply)
+	waitClosed(t, done, "/now must end the run")
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	if got := fp.lastUserTexts(); got[1] != "late" {
+		t.Fatal(got)
+	}
+	if g.debouncer().Pending() {
+		t.Fatal("/now must take the text from the debouncer")
+	}
+	g.mustRun(t, "k").Cancel()
+	if !g.Wait(5 * time.Second) {
+		t.Fatal("wait")
+	}
+	// The text ran one time only.
+	if got := fp.lastUserTexts(); len(got) != 2 {
+		t.Fatal(got)
+	}
+}
+
+func TestNowLateTapDoesNotStop(t *testing.T) {
+	g, fp := gatewayWithSlowProvider(t, 300*time.Millisecond)
+	f := &recFactory{}
+	done := make(chan struct{})
+	go func() { _ = g.Handle(context.Background(), inb("k", "first"), f.new); close(done) }()
+	waitFor(t, func() bool { _, ok := g.Running("k"); return ok })
+	g.mustRun(t, "k").Steer.Push("x")
+	// The text answer ends, and the steer runs as its own turn.
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	if got := fp.lastUserTexts(); got[1] != "x" {
+		t.Fatal(got)
+	}
+	rs2 := g.mustRun(t, "k")
+	wantNowReply(t, sendNow(t, g, "/now"), nowNothingReply)
+	if g.stoppedRun(rs2) {
+		t.Fatal("a late tap must not stop the turn")
+	}
+	waitClosed(t, done, "the first turn must end")
+	if !g.Wait(5 * time.Second) {
+		t.Fatal("wait")
+	}
+	if got := f.finals(); !reflect.DeepEqual(got, []string{"ok", "ok"}) {
+		t.Fatal(got)
+	}
+	if got := fp.lastUserTexts(); len(got) != 2 {
+		t.Fatal(got)
+	}
+}
+
+func TestNowAfterTheAgentReadTheSteer(t *testing.T) {
+	g, f, _, _, _ := busyGatewayProv(t)
+	rs := g.mustRun(t, "k")
+	_ = g.Handle(context.Background(), inb("k", "solar"), f.new)
+	waitFor(t, func() bool { return rs.Steer.Pending() == "solar" })
+	// The agent reads the steer into a tool result.
+	rs.Steer.Drain()
+	wantNowReply(t, sendNow(t, g, "/now"), nowNothingReply)
+	if got := g.mustRun(t, "k"); got != rs || g.stoppedRun(rs) {
+		t.Fatal("the turn must go on")
+	}
+}
+
+func TestNowOnAFreeKey(t *testing.T) {
+	g, _ := gatewayWithSlowProvider(t, 0)
+	wantNowReply(t, sendNow(t, g, "/now"), nowNothingReply)
+}
+
+func TestNowWhileTheGatewayStops(t *testing.T) {
+	g, f, _, _, _ := busyGatewayProv(t)
+	rs := g.mustRun(t, "k")
+	_ = g.Handle(context.Background(), inb("k", "x"), f.new)
+	waitFor(t, func() bool { return rs.Steer.Pending() == "x" })
+	g.stopping.Store(true)
+	took, _, stopping := g.takeOver("k", 0)
+	pending := rs.Steer.Pending()
+	g.stopping.Store(false)
+	if took || !stopping || pending != "x" || g.stoppedRun(rs) {
+		t.Fatal(took, stopping, pending)
+	}
+	// Drop the steer, so that it does not run as a second turn after the test.
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+	// A stopping gateway sends no reply to /now.
+	var got []string
+	c := &CommandCtx{Reply: func(s string) { got = append(got, s) }, Hooks: CommandHooks{
+		Now: func(int) (bool, int, bool) { return false, 0, true },
+	}}
+	if err := cmdNow(context.Background(), c, ""); err != nil || len(got) != 0 {
+		t.Fatal(err, got)
+	}
+}
+
+func TestNowWithNoHookRepliesNothingWaits(t *testing.T) {
+	// The CLI sets no Now hook.
+	var got []string
+	c := &CommandCtx{Reply: func(s string) { got = append(got, s) }}
+	if err := cmdNow(context.Background(), c, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{nowNothingReply}) {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestNowSkipsEnqueuedTurns(t *testing.T) {
+	g, f, _, done, fp := busyGatewayProv(t)
+	rs := g.mustRun(t, "k")
+	if err := g.Enqueue(context.Background(), "k", "batch result"); err != nil {
+		t.Fatal(err)
+	}
+	wantNowReply(t, sendNow(t, g, "/now"), nowNothingReply)
+	if got := g.mustRun(t, "k"); got != rs || g.stoppedRun(rs) {
+		t.Fatal("a batch result must not stop the turn")
+	}
+	_ = g.Handle(context.Background(), inb("k", "solar"), f.new)
+	waitFor(t, func() bool { return rs.Steer.Pending() == "solar" })
+	// The batch result does not count in the reply.
+	wantNowReply(t, sendNow(t, g, "/now"), nowOneReply)
+	waitClosed(t, done, "/now must end the run")
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	if got := fp.lastUserTexts(); got[1] != "solar" {
+		t.Fatal(got)
+	}
+	// The batch result stays in the queue and runs after the steer text.
+	g.mustRun(t, "k").Cancel()
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 3 })
+	if got := fp.lastUserTexts(); got[2] != "batch result" {
+		t.Fatal(got)
+	}
+	g.mustRun(t, "k").Cancel()
+}
+
+func TestNowBeforeTheAgentStarts(t *testing.T) {
+	g, fp := gatewayWithSlowProvider(t, 0)
+	f := &recFactory{}
+	photo := media("k")
+	photo.Text = "photo"
+	first := &pendingTurn{in: inb("k", "first"), newRenderer: f.new}
+	g.mu.Lock()
+	ks := g.key("k")
+	ks.busy = true
+	ks.take(first)
+	ks.queue = append(ks.queue, &pendingTurn{in: photo, newRenderer: f.new})
+	g.mu.Unlock()
+	took, waiting, _ := g.takeOver("k", 0)
+	g.mu.Lock()
+	discard, takeOver := first.discard, first.takeOver
+	g.mu.Unlock()
+	if !took || waiting != 1 || !discard || !takeOver {
+		t.Fatal(took, waiting, discard, takeOver)
+	}
+	// The turn that starts now runs no agent, and the waiting message runs.
+	g.run(context.Background(), first)
+	if !g.Wait(5 * time.Second) {
+		t.Fatal("wait")
+	}
+	if got := fp.lastUserTexts(); len(got) != 1 || !strings.Contains(got[0], "photo") {
+		t.Fatal(got)
+	}
+}
+
+// stoppedKey makes key busy with a turn that has a run with the steer text "held" and
+// one queued photo. The agent did not return yet.
+func stoppedKey(g *Gateway) (first *pendingTurn, rs *RunState) {
+	f := &recFactory{}
+	first = &pendingTurn{in: inb("k", "first"), newRenderer: f.new}
+	rs = &RunState{Cancel: func() {}, Steer: agent.NewSteerQueue(), Started: time.Now()}
+	rs.Steer.Push("held")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ks := g.key("k")
+	ks.busy = true
+	ks.take(first)
+	ks.running = rs
+	ks.queue = append(ks.queue, &pendingTurn{in: media("k"), newRenderer: f.new})
+	return first, rs
+}
+
+func TestNowAfterStopDoesNothing(t *testing.T) {
+	// /stop stopped the turn, and a photo came before the turn returned.
+	g, _ := gatewayWithSlowProvider(t, 0)
+	first, rs := stoppedKey(g)
+	g.mu.Lock()
+	first.discard, rs.stopped = true, true
+	g.mu.Unlock()
+	if took, waiting, _ := g.takeOver("k", first.turn); took || waiting != 0 {
+		t.Fatal(took, waiting)
+	}
+	g.mu.Lock()
+	takeOver, queued := first.takeOver, len(g.key("k").queue)
+	g.mu.Unlock()
+	// The stopped steer stays where the end of the turn drops it.
+	if takeOver || queued != 1 || rs.Steer.Pending() != "held" {
+		t.Fatal(takeOver, queued, rs.Steer.Pending())
+	}
+}
+
+func TestStopAfterNowDropsTheSteer(t *testing.T) {
+	g, _ := gatewayWithSlowProvider(t, 0)
+	first, _ := stoppedKey(g)
+	if took, waiting, _ := g.takeOver("k", 0); !took || waiting != 2 {
+		t.Fatal(took, waiting)
+	}
+	g.stopKey("k")
+	g.mu.Lock()
+	takeOver, queued := first.takeOver, len(g.key("k").queue)
+	g.mu.Unlock()
+	if takeOver || queued != 0 {
+		t.Fatal(takeOver, queued)
+	}
+}
+
+func TestNowCountsAResumedText(t *testing.T) {
+	g, _, _, done, fp := busyGatewayProv(t)
+	// A restart resumes a queued text of the owner with enqueue, not with Enqueue.
+	if err := g.enqueue(context.Background(), "k", "resumed", false); err != nil {
+		t.Fatal(err)
+	}
+	wantNowReply(t, sendNow(t, g, "/now"), nowOneReply)
+	waitClosed(t, done, "/now must end the run")
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	if got := fp.lastUserTexts(); got[1] != "resumed" {
+		t.Fatal(got)
+	}
+	g.mustRun(t, "k").Cancel()
+}
+
+func TestOldNowButtonDoesNothing(t *testing.T) {
+	// Each answer takes 600 ms, so turn 2 still runs when the taps come.
+	g, fp := gatewayWithSlowProvider(t, 600*time.Millisecond)
+	g.debounce = NewDebouncer(time.Millisecond, 10*time.Millisecond)
+	f := &recFactory{}
+	done := make(chan struct{})
+	go func() { _ = g.Handle(context.Background(), inb("k", "first"), f.new); close(done) }()
+	waitFor(t, func() bool { _, ok := g.Running("k"); return ok })
+	rf := &replyFactory{}
+	_ = g.Handle(context.Background(), inb("k", "x"), rf.new)
+	waitFor(t, func() bool { return len(rf.replies()) == 1 })
+	wantBusyReply(t, rf.replies()[0], SteerAck, []Button{{Text: "⚡ Do this now", Data: "/now 1"}})
+	// The text answer ends, and the steer runs as turn 2.
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	waitClosed(t, done, "the first turn must end")
+	rs2 := g.mustRun(t, "k")
+	returned := stopKeepWaiting(t, g, rf.new, 1)
+	// The first busy message of turn 2 gets a button for turn 2.
+	waitFor(t, func() bool { return len(rf.replies()) == 2 })
+	wantBusyReply(t, rf.replies()[1], QueueAck, []Button{{Text: "⚡ Do this now", Data: "/now 2"}})
+	wantNowReply(t, sendNow(t, g, "/now 1"), nowNothingReply)
+	if g.stoppedRun(rs2) || g.currentTurn("k") != 2 {
+		t.Fatal("an old button must not stop turn 2")
+	}
+	wantNowReply(t, sendNow(t, g, "/now 2"), nowOneReply)
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 3 })
+	if got := fp.lastUserTexts(); got[1] != "x" || !strings.Contains(got[2], "queued a") {
+		t.Fatal(got)
+	}
+	g.mustRun(t, "k").Cancel()
+	waitClosed(t, returned, "the queued turn must end")
+}
+
+func TestDoubleTapDoesNothing(t *testing.T) {
+	g, _, _, done, fp := busyGatewayProv(t)
+	rf := &replyFactory{}
+	_ = g.Handle(context.Background(), inb("k", "solar"), rf.new)
+	waitFor(t, func() bool { return len(rf.replies()) == 1 })
+	data := rf.replies()[0].Buttons[0][0].Data
+	wantNowReply(t, sendNow(t, g, data), nowOneReply)
+	waitClosed(t, done, "the tap must end the run")
+	waitFor(t, func() bool { got := fp.lastUserTexts(); return len(got) == 2 && got[1] == "solar" })
+	rs2 := g.mustRun(t, "k")
+	// The second tap of the same button comes after its turn stopped.
+	wantNowReply(t, sendNow(t, g, data), nowNothingReply)
+	if g.currentTurn("k") != 2 || g.stoppedRun(rs2) {
+		t.Fatal("a second tap must not stop the new turn")
+	}
+	rs2.Cancel()
+}
+
+func TestNowArgumentThatIsNotANumber(t *testing.T) {
+	g, f, _, done, fp := busyGatewayProv(t)
+	rs := g.mustRun(t, "k")
+	_ = g.Handle(context.Background(), inb("k", "solar"), f.new)
+	waitFor(t, func() bool { return rs.Steer.Pending() == "solar" })
+	// The argument counts as no argument, so /now acts on the current turn.
+	wantNowReply(t, sendNow(t, g, "/now abc"), nowOneReply)
+	waitClosed(t, done, "/now must end the run")
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 2 })
+	g.mustRun(t, "k").Cancel()
+}
+
+func TestBusyReplyAfterTakeOver(t *testing.T) {
+	g, _, _, done, fp := busyGatewayProv(t)
+	rf := &replyFactory{}
+	_ = g.Handle(context.Background(), inb("k", "solar"), rf.new)
+	waitFor(t, func() bool { return len(rf.replies()) == 1 })
+	wantBusyReply(t, rf.replies()[0], SteerAck, []Button{{Text: "⚡ Do this now", Data: "/now 1"}})
+	wantNowReply(t, sendNow(t, g, "/now"), nowOneReply)
+	waitClosed(t, done, "/now must end the run")
+	waitFor(t, func() bool { got := fp.lastUserTexts(); return len(got) == 2 && got[1] == "solar" })
+	// The fake clock did not move, so only the new turn allows this reply.
+	_ = g.Handle(context.Background(), inb("k", "more"), rf.new)
+	waitFor(t, func() bool { return len(rf.replies()) == 2 })
+	wantBusyReply(t, rf.replies()[1], SteerAck, []Button{{Text: "⚡ Do this now", Data: "/now 2"}})
+	// Drop the steer, so that it does not run as a third turn after the test.
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
 }

@@ -228,7 +228,8 @@ func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args st
 			return a == "y" || a == "yes"
 		},
 		// No turn runs while the REPL reads a command, so /stop has no task (no Stop
-		// hook), and /steer runs its text as a normal message.
+		// hook), /now finds no waiting message (no Now hook), and /steer runs its text as a
+		// normal message.
 		Hooks: CommandHooks{
 			Steer: func(text string) { c.runTurn(ctx, turn, sess, text, ints) },
 		},

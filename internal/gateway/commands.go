@@ -46,7 +46,8 @@ type Reply struct {
 }
 
 // CommandHooks connect the commands to the run of the key. With a nil Stop, StopKeep, or
-// Steer hook, the command replies NoTaskReply.
+// Steer hook, the command replies NoTaskReply. With a nil Now hook, /now replies that
+// nothing waits.
 type CommandHooks struct {
 	// BeforeNew runs before /new replaces the session, for example to start the review of
 	// the old session. Nil uses Deps.BeforeNew.
@@ -58,6 +59,10 @@ type CommandHooks struct {
 	StopKeep func() (stopped bool, waiting int)
 	// Steer adds guidance to the run of the key.
 	Steer func(text string)
+	// Now stops the task of the key and runs the waiting messages of the owner at once. A
+	// turn of 0 is the current turn. It returns false when nothing waits, the number of
+	// the turns that wait, and true for stopping when the gateway stops.
+	Now func(turn int) (took bool, waiting int, stopping bool)
 }
 
 // Command is one slash command.
