@@ -183,18 +183,17 @@ type turnState struct {
 
 // RunTurn runs one user turn. It saves each message when the message is
 // created. A cancelled ctx stops the turn. Then the partial text and the finished tool
-// results stay saved. The pending steer text is dropped, and RunTurn returns ctx.Err().
-// After any other end, TurnResult.PendingSteer holds the steer text that the turn did not
-// deliver.
+// results stay saved, and RunTurn returns ctx.Err(). After every end, also a cancel,
+// TurnResult.PendingSteer holds the steer text that the turn did not deliver, and the steer
+// queue is empty.
 func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error) {
 	if t.Session == nil {
 		return res, errors.New("agent: the turn has no session")
 	}
 	defer func() {
-		// A stop supersedes the steer, because the run that it guides has ended (Hermes).
-		if pending := t.Steer.Drain(); ctx.Err() == nil {
-			res.PendingSteer = pending
-		}
+		// The turn returns the steer also after a cancel. The gateway applies the Hermes
+		// rule "a stop supersedes the steer", or keeps the text for a take-over.
+		res.PendingSteer = t.Steer.Drain()
 	}()
 	// lastReq is the last model request of the turn. The review triggers use its shape.
 	var lastReq provider.Request
@@ -335,8 +334,14 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			contents[i] = a.toolText(results[i].Text)
 		}
 		// The steer goes into the last result before the save, so no update is necessary.
-		if g := t.Steer.Drain(); g != "" && ctx.Err() == nil {
-			contents[len(contents)-1] += SteerMarker + g
+		// After a cancel, the text goes back into the queue, so the turn returns it as
+		// undelivered.
+		if g := t.Steer.Drain(); g != "" {
+			if ctx.Err() == nil {
+				contents[len(contents)-1] += SteerMarker + g
+			} else {
+				t.Steer.restash(g)
+			}
 		}
 		for i, c := range out.ToolCalls {
 			m := provider.Message{Role: provider.RoleTool, Content: contents[i], ToolCallID: c.ID, ToolName: c.Name}

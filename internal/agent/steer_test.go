@@ -217,9 +217,9 @@ func TestStopCancelsTurn(t *testing.T) {
 	if len(fp.requests) != 1 {
 		t.Fatal("no model call after stop")
 	}
-	// Hermes TestSteerClearedOnInterrupt: a stop drops the pending steer.
-	if res.PendingSteer != "" || q.Pending() != "" {
-		t.Fatal("a stop drops the steer:", res.PendingSteer)
+	// The turn returns the steer that it did not deliver. The gateway drops it for /stop.
+	if res.PendingSteer != "dropped" || q.Pending() != "" {
+		t.Fatalf("got %q, queue %q", res.PendingSteer, q.Pending())
 	}
 	msgs := messages(t, a, sess.ID) // user, assistant(2 calls), tool, tool
 	if len(msgs) != 4 || msgs[2].Msg.ToolCallID != "c1" || msgs[3].Msg.ToolCallID != "c2" || !strings.Contains(msgs[3].Msg.Content, "cancelled") {
