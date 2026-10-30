@@ -61,6 +61,9 @@ func busyGatewayProv(t *testing.T) (g *Gateway, f *recFactory, clk *fakeClock, d
 	done = make(chan struct{})
 	go func() { _ = g.Handle(context.Background(), inb("k", "first"), f.new); close(done) }()
 	waitFor(t, func() bool { _, ok := g.Running("k"); return ok })
+	// The run starts before the turn calls the provider. Under load, a stop can come
+	// first, and then the first turn sends no request.
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 1 })
 	t.Cleanup(func() {
 		if rs, ok := g.Running("k"); ok {
 			rs.Cancel()
