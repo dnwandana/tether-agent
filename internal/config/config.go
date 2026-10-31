@@ -49,7 +49,16 @@ type Provider struct {
 	Effort string `yaml:"effort"`
 	// Unusable holds the load error of an entry that cannot serve a call. Load sets it.
 	Unusable string `yaml:"-"`
+	// UnusableCause is the short cause of Unusable, for chat text. It is UnusableNoKey or
+	// UnusableNoModel. Load sets it.
+	UnusableCause string `yaml:"-"`
 }
+
+// The values of Provider.UnusableCause.
+const (
+	UnusableNoKey   = "no API key"
+	UnusableNoModel = "no model in config.yaml"
+)
 
 // AgentConfig sets the limits of the agent loop and the providers for vision and delegation.
 type AgentConfig struct {

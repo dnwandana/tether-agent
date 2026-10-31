@@ -282,6 +282,33 @@ func TestOtherEntryWithNoModelIsUnusable(t *testing.T) {
 	eq(t, c.Providers["spare"].Unusable, "config: providers.spare.model is empty. Set the model name")
 }
 
+func TestResolvePresetSetsUnusableCause(t *testing.T) {
+	path := writeTemp(t, "providers:\n  primary:\n    format: openai\n    base_url: http://localhost:11434/v1\n    model: m\n"+
+		"  deepseek:\n    preset: deepseek\n    model: m\n"+
+		"  proxy:\n    preset: openai\n    base_url: https://my-proxy/v1\n    model: m\n"+
+		"  spare:\n    format: openai\n    base_url: http://x\n")
+	c, err := Load(path, mapEnv(map[string]string{"OPENAI_API_KEY": "secret"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, UnusableNoKey, "no API key")
+	eq(t, UnusableNoModel, "no model in config.yaml")
+	eq(t, c.Providers["primary"].UnusableCause, "")
+	eq(t, c.Providers["deepseek"].UnusableCause, UnusableNoKey)
+	eq(t, c.Providers["proxy"].UnusableCause, UnusableNoKey)
+	eq(t, c.Providers["spare"].UnusableCause, UnusableNoModel)
+	// The Unusable text does not change.
+	eq(t, c.Providers["deepseek"].Unusable, "config: providers.deepseek needs an API key. Set DEEPSEEK_API_KEY in ~/.tether/.env, or set providers.deepseek.api_key")
+	eq(t, c.Providers["spare"].Unusable, "config: providers.spare.model is empty. Set the model name")
+	// ResolvePreset clears an old cause of a usable entry.
+	p, err := ResolvePreset("box", Provider{Format: "openai", BaseURL: "http://x", Model: "m", Unusable: "old", UnusableCause: UnusableNoModel}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, p.Unusable, "")
+	eq(t, p.UnusableCause, "")
+}
+
 func TestEntryWithNoPresetLoadsUnchanged(t *testing.T) {
 	path := writeTemp(t, "providers:\n  primary:\n    format: anthropic\n    base_url: https://api.anthropic.com\n    api_key: k\n    model: m\n")
 	c, err := Load(path, mapEnv(map[string]string{"ANTHROPIC_API_KEY": "env"}))

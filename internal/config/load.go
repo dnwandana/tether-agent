@@ -88,10 +88,11 @@ func Load(path string, env func(string) (string, bool)) (*Config, error) {
 // the URL of the preset, so a preset key never goes to another host.
 //
 // ResolvePreset returns an error only for an unknown or a removed preset id. It sets
-// Unusable when the entry has no API key or no model. env is the lookup for
-// the key env, and an env var with an empty value counts as not set.
+// Unusable and UnusableCause when the entry has no API key or no model. env is the
+// lookup for the key env, and an env var with an empty value counts as not set.
 func ResolvePreset(name string, p Provider, env func(string) (string, bool)) (Provider, error) {
 	p.Unusable = ""
+	p.UnusableCause = ""
 	if p.Preset != "" {
 		if next, removed := removedPresets[p.Preset]; removed {
 			return p, fmt.Errorf("config: providers.%s.preset %q is removed. %s", name, p.Preset, next)
@@ -119,14 +120,17 @@ func ResolvePreset(name string, p Provider, env func(string) (string, bool)) (Pr
 			case onPreset:
 				p.Unusable = fmt.Sprintf("config: providers.%s needs an API key. Set %s in ~/.tether/.env, or set providers.%s.api_key",
 					name, pre.KeyEnv, name)
+				p.UnusableCause = UnusableNoKey
 			default:
 				p.Unusable = fmt.Sprintf("config: providers.%s needs an API key, because its base_url is not the URL of the preset. Set providers.%s.api_key",
 					name, name)
+				p.UnusableCause = UnusableNoKey
 			}
 		}
 	}
 	if p.Unusable == "" && p.Model == "" {
 		p.Unusable = fmt.Sprintf("config: providers.%s.model is empty. Set the model name", name)
+		p.UnusableCause = UnusableNoModel
 	}
 	return p, nil
 }
