@@ -15,8 +15,9 @@ type StoredView struct {
 	Msg provider.Message
 }
 
-// EstimateChars returns the token estimate of msgs: the characters of the content and of
-// the tool call arguments, plus msgOverhead for each message, divided by 4.
+// EstimateChars returns the token estimate of msgs: the characters of the content, of
+// the tool call arguments, and of the reasoning, plus msgOverhead for each message,
+// divided by 4. The next call can send the reasoning again, so the estimate counts it.
 func EstimateChars(msgs []provider.Message) int {
 	n := 0
 	for _, m := range msgs {
@@ -24,6 +25,12 @@ func EstimateChars(msgs []provider.Message) int {
 		n += len(m.Content) + msgOverhead
 		for _, c := range m.ToolCalls {
 			n += len(c.Args)
+		}
+		if r := m.Reasoning; r != nil {
+			n += len(r.Text)
+			for _, item := range r.Output {
+				n += len(item)
+			}
 		}
 	}
 	return n / charsPerToken

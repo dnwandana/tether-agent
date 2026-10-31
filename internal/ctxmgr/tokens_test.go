@@ -1,6 +1,7 @@
 package ctxmgr
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -57,5 +58,20 @@ func TestViewSizeUsesProviderCountPlusNew(t *testing.T) {
 func TestOverThreshold50(t *testing.T) {
 	if OverThreshold(64000, 128000, 0.50) || !OverThreshold(64001, 128000, 0.50) {
 		t.Fatal()
+	}
+}
+
+func TestEstimateCountsReasoning(t *testing.T) {
+	plain := provider.Message{Role: provider.RoleAssistant, Content: "abcd"}
+	withText := plain
+	withText.Reasoning = &provider.Reasoning{Text: strings.Repeat("x", 400)}
+	withItems := plain
+	withItems.Reasoning = &provider.Reasoning{Output: []json.RawMessage{json.RawMessage(strings.Repeat("y", 800))}}
+	base := EstimateChars([]provider.Message{plain})
+	if EstimateChars([]provider.Message{withText}) != base+100 {
+		t.Fatal("text")
+	}
+	if EstimateChars([]provider.Message{withItems}) != base+200 {
+		t.Fatal("items")
 	}
 }
