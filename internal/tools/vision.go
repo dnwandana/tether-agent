@@ -148,7 +148,8 @@ func (t VisionTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (str
 // the answer text. An empty answer is an error.
 func askVision(ctx context.Context, prov provider.Provider, img provider.Image, q string) (string, error) {
 	ch, err := prov.Stream(ctx, provider.Request{
-		Messages: []provider.Message{{Role: provider.RoleUser, Content: q, Images: []provider.Image{img}}},
+		Messages:   []provider.Message{{Role: provider.RoleUser, Content: q, Images: []provider.Image{img}}},
+		NeedVision: true,
 	})
 	if err != nil {
 		return "", toolErr("the vision model %s failed: %v", prov.Name(), err)
