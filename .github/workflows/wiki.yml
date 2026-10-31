@@ -1,0 +1,44 @@
+# Copies docs/wiki/ to the GitHub wiki of this repository.
+# GitHub creates the wiki repository only after the first page exists. Before the first run,
+# open the Wiki tab and save one page.
+name: wiki
+
+on:
+  push:
+    branches: [main]
+    paths: ["docs/wiki/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: wiki
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone the wiki
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${{ github.repository }}.wiki.git" wiki-repo
+
+      - name: Copy the pages
+        run: rsync -a --delete --exclude .git docs/wiki/ wiki-repo/
+
+      - name: Push the changes
+        working-directory: wiki-repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "The wiki is up to date."
+            exit 0
+          fi
+          git commit -m "Sync the wiki from ${GITHUB_SHA::7}"
+          git push
