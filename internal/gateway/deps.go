@@ -20,7 +20,10 @@ type Deps struct {
 	Agent *agent.Agent
 	// Providers holds every provider entry by name. /model accepts only these names.
 	Providers map[string]provider.Provider
-	Log       *slog.Logger
+	// Models keeps the model lists of the provider entries for /model. A nil cache
+	// calls the provider each time.
+	Models *provider.ModelCache
+	Log    *slog.Logger
 	// NewEnv returns the tool context of a session on a channel. Its Values map must be the
 	// same for a session across turns. Nil gives a context with the session ids only.
 	NewEnv func(sess *sessions.Session, channel string) *tools.Env

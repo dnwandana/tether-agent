@@ -152,3 +152,14 @@ func TestCollectNoStamp(t *testing.T) {
 		t.Fatal(r, err)
 	}
 }
+
+func TestCollectCopiesReasoning(t *testing.T) {
+	r := &Reasoning{Issuer: "openai http://x m", Text: "think"}
+	ch := make(chan Event, 1)
+	ch <- Event{Type: EventDone, FinishReason: "stop", Usage: &Usage{}, Reasoning: r}
+	close(ch)
+	res, err := Collect(ch, nil)
+	if err != nil || res.Reasoning != r {
+		t.Fatal(res.Reasoning, err)
+	}
+}

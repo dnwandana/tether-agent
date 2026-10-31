@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,7 +22,9 @@ var varRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 //
 // Load starts from Default, expands each ${VAR} in the string values of the
 // file through env, and decodes the file over the defaults. A missing file
-// is valid. If env is nil, Load uses os.LookupEnv.
+// is valid. Then Load resolves the preset of each provider entry with
+// ResolvePreset. An entry other than primary that cannot serve a call loads
+// with its Unusable message set. If env is nil, Load uses os.LookupEnv.
 func Load(path string, env func(string) (string, bool)) (*Config, error) {
 	if env == nil {
 		env = os.LookupEnv
@@ -53,10 +56,131 @@ func Load(path string, env func(string) (string, bool)) (*Config, error) {
 		}
 	}
 
+	var errs []error
+	for _, name := range sortedKeys(c.Providers) {
+		p, err := ResolvePreset(name, c.Providers[name], env)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		c.Providers[name] = p
+	}
+	// An unknown or a removed preset leaves the entry with no format. Stop here, so that the
+	// error does not also contain a format error for the same entry.
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	if p, ok := c.Providers["primary"]; ok && p.Unusable != "" {
+		errs = append(errs, errors.New(p.Unusable))
+	}
+
 	if err := c.Validate(); err != nil {
+		errs = append(errs, err)
+	}
+	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
 	return &c, nil
+}
+
+// ResolvePreset returns p with the values of its preset filled in. The value
+// that p sets wins. The preset key env applies only when the base URL of p is
+// the URL of the preset, so a preset key never goes to another host.
+//
+// ResolvePreset returns an error only for an unknown or a removed preset id. It sets
+// Unusable when the entry has no API key or no model. env is the lookup for
+// the key env, and an env var with an empty value counts as not set.
+func ResolvePreset(name string, p Provider, env func(string) (string, bool)) (Provider, error) {
+	p.Unusable = ""
+	if p.Preset != "" {
+		if next, removed := removedPresets[p.Preset]; removed {
+			return p, fmt.Errorf("config: providers.%s.preset %q is removed. %s", name, p.Preset, next)
+		}
+		pre, ok := PresetByID(p.Preset)
+		if !ok {
+			return p, fmt.Errorf("config: providers.%s.preset %q is not known. Use one of: %s",
+				name, p.Preset, strings.Join(PresetIDs(), ", "))
+		}
+		if p.Format == "" {
+			p.Format = pre.Format
+		}
+		if p.BaseURL == "" {
+			p.BaseURL = pre.BaseURL
+		}
+		if p.APIKey == "" {
+			onPreset := sameURL(p.BaseURL, pre.BaseURL)
+			if onPreset && env != nil {
+				if v, ok := env(pre.KeyEnv); ok && v != "" {
+					p.APIKey = v
+				}
+			}
+			switch {
+			case p.APIKey != "":
+			case onPreset:
+				p.Unusable = fmt.Sprintf("config: providers.%s needs an API key. Set %s in ~/.tether/.env, or set providers.%s.api_key",
+					name, pre.KeyEnv, name)
+			default:
+				p.Unusable = fmt.Sprintf("config: providers.%s needs an API key, because its base_url is not the URL of the preset. Set providers.%s.api_key",
+					name, name)
+			}
+		}
+	}
+	if p.Unusable == "" && p.Model == "" {
+		p.Unusable = fmt.Sprintf("config: providers.%s.model is empty. Set the model name", name)
+	}
+	return p, nil
+}
+
+// presetOnURL returns the preset of p when p uses the URL of that preset. An
+// empty base URL counts as the preset URL, because the resolution fills it.
+func presetOnURL(p Provider) (Preset, bool) {
+	pre, ok := PresetByID(p.Preset)
+	if !ok || (p.BaseURL != "" && !sameURL(p.BaseURL, pre.BaseURL)) {
+		return Preset{}, false
+	}
+	return pre, true
+}
+
+// QuirksOf returns the quirk flags of the preset of p. It returns nil when p
+// has no preset or when p moves the preset to another host.
+func QuirksOf(p Provider) []string {
+	if pre, ok := presetOnURL(p); ok {
+		return pre.Quirks
+	}
+	return nil
+}
+
+// EffortStyleOf returns the effort style of the preset of p, under the same
+// rule as QuirksOf. Else it returns the standard style of the format of p:
+// chat, responses, or anthropic-std.
+func EffortStyleOf(p Provider) string {
+	if pre, ok := presetOnURL(p); ok {
+		return pre.EffortStyle
+	}
+	switch p.Format {
+	case "openai":
+		return "chat"
+	case "responses":
+		return "responses"
+	case "anthropic":
+		return "anthropic-std"
+	}
+	return ""
+}
+
+// sameURL compares two base URLs without a trailing slash.
+func sameURL(a, b string) bool {
+	return strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
+}
+
+// sortedKeys returns the keys of m in sorted order.
+func sortedKeys(m map[string]Provider) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // expand replaces each ${NAME} in the string scalars under n. It changes
@@ -115,13 +239,27 @@ func (c *Config) Validate() error {
 	if _, ok := c.Providers["primary"]; !ok {
 		errs = append(errs, errors.New(`config: providers.primary is missing. Add a primary provider to config.yaml, or run "tether setup"`))
 	}
-	names := make([]string, 0, len(c.Providers))
-	for name := range c.Providers {
-		names = append(names, name)
+	for _, name := range sortedKeys(c.Providers) {
+		p := c.Providers[name]
+		errs = append(errs, oneOf("providers."+name+".format", p.Format, "openai", "anthropic", "responses"))
+		if p.Effort != "" && !slices.Contains(EffortLevels, p.Effort) {
+			errs = append(errs, fmt.Errorf(`config: providers.%s.effort is %q, which is not a known value. Use "" or %s`,
+				name, p.Effort, strings.Join(EffortLevels, " | ")))
+		}
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		errs = append(errs, oneOf("providers."+name+".format", c.Providers[name].Format, "openai", "anthropic"))
+	seen := map[string]bool{}
+	for _, name := range c.Agent.Fallback {
+		switch {
+		case name == "primary":
+			errs = append(errs, errors.New("config: agent.fallback must not contain primary"))
+		case seen[name]:
+			errs = append(errs, fmt.Errorf("config: agent.fallback names %q two times", name))
+		default:
+			if _, ok := c.Providers[name]; !ok {
+				errs = append(errs, fmt.Errorf("config: agent.fallback names %q, which is not in providers", name))
+			}
+		}
+		seen[name] = true
 	}
 	if c.Sessions.RetentionDays < 0 {
 		errs = append(errs, fmt.Errorf("config: sessions.retention_days is %d, which is negative. Use 0 to keep all sessions, or a number of days", c.Sessions.RetentionDays))

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -24,15 +25,20 @@ const anthropicCacheBreakpoints = 3
 
 // anthropic is the adapter for the Anthropic messages format.
 type anthropic struct {
-	name, baseURL, apiKey, model string
-	hc                           *http.Client
+	endpoint
 }
 
 // NewAnthropic returns a provider that sends POST {baseURL}/v1/messages
 // with streaming. When baseURL already ends with /v1, the adapter does not
-// add it again. A nil hc uses http.DefaultClient.
+// add it again. The provider has no quirks. A nil hc uses
+// http.DefaultClient.
 func NewAnthropic(name, baseURL, apiKey, model string, hc *http.Client) Provider {
-	return &anthropic{name: name, baseURL: baseURL, apiKey: apiKey, model: model, hc: hc}
+	return newAnthropic(endpoint{name: name, format: "anthropic", baseURL: baseURL, apiKey: apiKey, model: model, hc: hc})
+}
+
+// newAnthropic returns the messages adapter for e.
+func newAnthropic(e endpoint) Provider {
+	return &anthropic{endpoint: e}
 }
 
 func (p *anthropic) Name() string  { return p.name }
@@ -47,6 +53,16 @@ type (
 		Messages  []anMessage `json:"messages"`
 		Tools     []anTool    `json:"tools,omitempty"`
 		Stream    bool        `json:"stream"`
+		// The effort fields. The empty effort sends none of them, and the
+		// adapter never asks for thinking on its own.
+		OutputConfig *anOutputConfig `json:"output_config,omitempty"`
+		Thinking     *anThinking     `json:"thinking,omitempty"`
+	}
+	anOutputConfig struct {
+		Effort string `json:"effort"`
+	}
+	anThinking struct {
+		Type string `json:"type"`
 	}
 	anMessage struct {
 		Role    string    `json:"role"`
@@ -62,6 +78,21 @@ type (
 		Content      string          `json:"content,omitempty"`
 		Source       *anSource       `json:"source,omitempty"`
 		CacheControl *anCache        `json:"cache_control,omitempty"`
+		// raw is a stored thinking block. When it is set, the block
+		// marshals as these bytes and the other fields do not apply.
+		raw json.RawMessage
+	}
+	// anThinkingBlock is a finished thinking block, in the field order of
+	// the API.
+	anThinkingBlock struct {
+		Type      string `json:"type"`
+		Thinking  string `json:"thinking"`
+		Signature string `json:"signature"`
+	}
+	// anRedactedBlock is a finished redacted_thinking block.
+	anRedactedBlock struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
 	}
 	anSource struct {
 		Type      string `json:"type"`
@@ -87,15 +118,20 @@ type (
 			Usage *anUsage `json:"usage"`
 		} `json:"message"`
 		ContentBlock *struct {
-			Type  string          `json:"type"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type      string          `json:"type"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			Thinking  string          `json:"thinking"`
+			Signature string          `json:"signature"`
+			Data      string          `json:"data"`
 		} `json:"content_block"`
 		Delta *struct {
 			Type        string `json:"type"`
 			Text        string `json:"text"`
 			PartialJSON string `json:"partial_json"`
+			Thinking    string `json:"thinking"`
+			Signature   string `json:"signature"`
 			StopReason  string `json:"stop_reason"`
 		} `json:"delta"`
 		Usage *anUsage        `json:"usage"`
@@ -109,6 +145,16 @@ type (
 	}
 )
 
+// MarshalJSON writes the stored bytes of a raw block unchanged, and the
+// fields of any other block.
+func (b anBlock) MarshalJSON() ([]byte, error) {
+	if b.raw != nil {
+		return b.raw, nil
+	}
+	type plain anBlock
+	return json.Marshal(plain(b))
+}
+
 // Stream sends req and returns the event stream.
 func (p *anthropic) Stream(ctx context.Context, req Request) (<-chan Event, error) {
 	body, err := p.buildRequest(req)
@@ -118,7 +164,11 @@ func (p *anthropic) Stream(ctx context.Context, req Request) (<-chan Event, erro
 	start := time.Now()
 	h := http.Header{}
 	h.Set("anthropic-version", anthropicVersion)
-	if p.apiKey != "" {
+	switch {
+	case p.apiKey == "":
+	case p.has("bearer_auth"):
+		h.Set("Authorization", "Bearer "+p.apiKey)
+	default:
 		h.Set("x-api-key", p.apiKey)
 	}
 	base := strings.TrimRight(p.baseURL, "/")
@@ -135,7 +185,7 @@ func (p *anthropic) Stream(ctx context.Context, req Request) (<-chan Event, erro
 		defer close(ch)
 		defer resp.Body.Close()
 		e := &emitter{ctx: ctx, ch: ch, provider: p.name, model: body.Model}
-		if err := p.parse(e, resp, start); err != nil {
+		if err := p.parse(e, resp, start, body.Model); err != nil {
 			e.fail(err)
 		}
 	}()
@@ -189,7 +239,10 @@ func (p *anthropic) buildRequest(req Request) (*anRequest, error) {
 				// The format does not accept an empty assistant message (Hermes).
 				blocks = append(blocks, anBlock{Type: "text", Text: "(empty)"})
 			}
-			add("assistant", blocks...)
+			// The thinking blocks go first. The last block stays a text or a
+			// tool_use block, because a thinking block cannot take a cache
+			// marker.
+			add("assistant", append(p.replayBlocks(m, out.Model), blocks...)...)
 		default:
 			var blocks []anBlock
 			if m.Content != "" {
@@ -220,7 +273,34 @@ func (p *anthropic) buildRequest(req Request) (*anRequest, error) {
 		}
 		out.Tools = append(out.Tools, anTool{Name: t.Name, Description: t.Description, InputSchema: schema})
 	}
+	f := mapEffort(p.effortStyle, req.Effort)
+	if f.OutputEffort != "" {
+		out.OutputConfig = &anOutputConfig{Effort: f.OutputEffort}
+	}
+	if f.ThinkingDisabled {
+		out.Thinking = &anThinking{Type: "disabled"}
+	}
+	if f.ThinkingAdaptive {
+		out.Thinking = &anThinking{Type: "adaptive"}
+	}
 	return out, nil
+}
+
+// replayBlocks returns the stored thinking blocks of the assistant message
+// m when this endpoint issued them for model. It drops a block that is not
+// valid JSON, because that block cannot go into the request.
+func (p *anthropic) replayBlocks(m Message, model string) []anBlock {
+	r := m.Reasoning
+	if r == nil || len(r.Output) == 0 || r.Issuer != p.issuer(model) {
+		return nil
+	}
+	var out []anBlock
+	for _, raw := range r.Output {
+		if json.Valid(raw) {
+			out = append(out, anBlock{raw: raw})
+		}
+	}
+	return out
 }
 
 // toolInput returns args as a JSON object. Empty or bad args become {},
@@ -233,6 +313,32 @@ func toolInput(args string) json.RawMessage {
 	return json.RawMessage(s)
 }
 
+// anThinkAcc collects the parts of one thinking or redacted_thinking block.
+type anThinkAcc struct {
+	kind, data, signature string
+	text                  strings.Builder
+}
+
+// block returns the finished block as compacted JSON.
+func (a *anThinkAcc) block() (json.RawMessage, error) {
+	if a.kind == "redacted_thinking" {
+		return marshalCompact(anRedactedBlock{Type: a.kind, Data: a.data})
+	}
+	return marshalCompact(anThinkingBlock{Type: a.kind, Thinking: a.text.String(), Signature: a.signature})
+}
+
+// marshalCompact returns v as compact JSON without HTML escapes, so the
+// stored bytes keep the text of the model as it is.
+func marshalCompact(v any) (json.RawMessage, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
 // anToolAcc collects the parts of one tool_use block.
 type anToolAcc struct {
 	id, name string
@@ -241,10 +347,12 @@ type anToolAcc struct {
 }
 
 // parse reads the SSE body, sends the text deltas at once, and sends the
-// tool calls and the done event at message_stop.
-func (p *anthropic) parse(e *emitter, resp *http.Response, start time.Time) error {
+// tool calls and the done event at message_stop. The done event carries the
+// thinking blocks of model, in stream order.
+func (p *anthropic) parse(e *emitter, resp *http.Response, start time.Time, model string) error {
 	var (
 		tools   = map[int]*anToolAcc{}
+		thinks  = map[int]*anThinkAcc{}
 		stop    string
 		usage   Usage
 		firstMS int64
@@ -286,9 +394,19 @@ func (p *anthropic) parse(e *emitter, resp *http.Response, start time.Time) erro
 				setUsage(ev.Message.Usage)
 			}
 		case "content_block_start":
-			if cb := ev.ContentBlock; cb != nil && cb.Type == "tool_use" {
+			cb := ev.ContentBlock
+			if cb == nil {
+				return nil
+			}
+			switch cb.Type {
+			case "tool_use":
 				markFirst()
 				tools[ev.Index] = &anToolAcc{id: cb.ID, name: cb.Name, start: cb.Input}
+			case "thinking", "redacted_thinking":
+				markFirst()
+				a := &anThinkAcc{kind: cb.Type, data: cb.Data, signature: cb.Signature}
+				a.text.WriteString(cb.Thinking)
+				thinks[ev.Index] = a
 			}
 		case "content_block_delta":
 			if ev.Delta == nil {
@@ -305,6 +423,16 @@ func (p *anthropic) parse(e *emitter, resp *http.Response, start time.Time) erro
 			case "input_json_delta":
 				if t := tools[ev.Index]; t != nil {
 					t.args.WriteString(ev.Delta.PartialJSON)
+				}
+			case "thinking_delta":
+				// The thinking text is not an answer, so it never goes
+				// into an EventText.
+				if a := thinks[ev.Index]; a != nil {
+					a.text.WriteString(ev.Delta.Thinking)
+				}
+			case "signature_delta":
+				if a := thinks[ev.Index]; a != nil {
+					a.signature += ev.Delta.Signature
 				}
 			}
 		case "message_delta":
@@ -358,7 +486,24 @@ func (p *anthropic) parse(e *emitter, resp *http.Response, start time.Time) erro
 	}
 	usage.FirstTokenMS = firstMS
 	usage.TotalMS = time.Since(start).Milliseconds()
-	if !e.send(Event{Type: EventDone, FinishReason: finish, Usage: &usage}) {
+	done := Event{Type: EventDone, FinishReason: finish, Usage: &usage}
+	if len(thinks) > 0 {
+		ti := make([]int, 0, len(thinks))
+		for k := range thinks {
+			ti = append(ti, k)
+		}
+		sort.Ints(ti)
+		blocks := make([]json.RawMessage, 0, len(ti))
+		for _, k := range ti {
+			b, err := thinks[k].block()
+			if err != nil {
+				return fmt.Errorf("provider %s: cannot encode a thinking block: %w", p.name, err)
+			}
+			blocks = append(blocks, b)
+		}
+		done.Reasoning = &Reasoning{Issuer: p.issuer(model), Output: blocks}
+	}
+	if !e.send(done) {
 		return e.ctx.Err()
 	}
 	return nil

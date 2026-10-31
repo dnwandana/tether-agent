@@ -114,3 +114,22 @@ func TestListAllNewestFirst(t *testing.T) {
 		t.Fatal(one)
 	}
 }
+
+func TestExportLeavesOutReasoning(t *testing.T) {
+	ctx := context.Background()
+	st, sess := newStoreSession(t)
+	r := &provider.Reasoning{Issuer: "responses https://api.x.ai/v1 grok", Text: "secret plan",
+		Output: []json.RawMessage{json.RawMessage(`{"type":"reasoning","encrypted_content":"ENCRYPTED-BLOB"}`)}}
+	if _, err := st.Append(ctx, sess.ID, provider.Message{Role: provider.RoleAssistant, Content: "a", Reasoning: r}, MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if n, err := st.ExportJSONL(ctx, sess.ID, &buf); err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	out := buf.String()
+	if strings.Contains(out, "reasoning") || strings.Contains(out, "encrypted_content") ||
+		strings.Contains(out, "ENCRYPTED-BLOB") || strings.Contains(out, "secret plan") {
+		t.Fatal("the export holds reasoning:", out)
+	}
+}

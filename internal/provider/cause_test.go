@@ -74,3 +74,16 @@ func TestShortCause(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestRejectsEffort(t *testing.T) {
+	yes := []string{`{"error":"Unsupported parameter: reasoning_effort"}`, "thinking.type disabled is not supported", "EFFORT xhigh"}
+	for _, b := range yes {
+		if !RejectsEffort(fmt.Errorf("x: %w", &HTTPStatusError{Code: 400, Body: b})) {
+			t.Error(b)
+		}
+	}
+	if RejectsEffort(&HTTPStatusError{Code: 400, Body: "bad tool schema"}) ||
+		RejectsEffort(&HTTPStatusError{Code: 422, Body: "effort"}) || RejectsEffort(errors.New("effort")) {
+		t.Fatal("false positive")
+	}
+}

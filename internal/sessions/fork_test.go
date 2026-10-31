@@ -2,7 +2,9 @@ package sessions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
@@ -102,5 +104,32 @@ func TestForkRemapsCompactionRows(t *testing.T) {
 	}
 	if !fm[2].Compacted {
 		t.Fatal("the compacted flag must be copied")
+	}
+}
+
+func TestForkKeepsEffortAndReasoning(t *testing.T) {
+	ctx := context.Background()
+	st, sess := newStoreSession(t)
+	if err := st.SetEffort(ctx, sess.ID, "xhigh"); err != nil {
+		t.Fatal(err)
+	}
+	r := &provider.Reasoning{Issuer: "anthropic https://api.anthropic.com claude", Output: []json.RawMessage{json.RawMessage(`{"type":"thinking","thinking":"t","signature":"S"}`)}}
+	if _, err := st.Append(ctx, sess.ID, provider.Message{Role: provider.RoleUser, Content: "q"}, MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Append(ctx, sess.ID, provider.Message{Role: provider.RoleAssistant, Content: "a", Reasoning: r}, MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := st.Fork(ctx, sess.ID, "")
+	if err != nil || f.Effort != "xhigh" {
+		t.Fatal(f, err)
+	}
+	got, err := st.Get(ctx, f.ID)
+	if err != nil || got.Effort != "xhigh" {
+		t.Fatal(got, err)
+	}
+	ms, err := st.Messages(ctx, f.ID)
+	if err != nil || len(ms) != 2 || ms[0].Msg.Reasoning != nil || !reflect.DeepEqual(ms[1].Msg.Reasoning, r) {
+		t.Fatal(err, ms)
 	}
 }

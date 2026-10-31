@@ -75,7 +75,8 @@ func TestChatCommandsHelp(t *testing.T) {
 	if !strings.Contains(got, "  /resume <id>      Switch to another session\n") {
 		t.Fatal(got)
 	}
-	if !strings.Contains(got, "  /model ...        Pin the model of this session: <provider>[:<model>] | clear\n") {
+	if !strings.Contains(got, "  /model ...        Change the model of this session: [<provider>[:<model>] |\n"+
+		strings.Repeat(" ", chatHelpIndent)+"<provider> config | clear]\n") {
 		t.Fatal(got)
 	}
 }

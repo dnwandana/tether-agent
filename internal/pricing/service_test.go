@@ -155,16 +155,19 @@ func TestOpenRouterOnlyForOpenRouterHost(t *testing.T) {
 	}
 }
 
-func TestFlatRateCostZero(t *testing.T) {
-	usd, known, flat := newSvc(t).Cost("primary", config.Provider{FlatRate: true}, provider.Usage{InputTokens: 1000})
-	if !flat || known || usd != 0 {
-		t.Fatal()
+// A Coding Plan entry has a price like any other entry.
+func TestCostIgnoresPlanType(t *testing.T) {
+	svc := newSvc(t)
+	svc.cfg.Pricing.Overrides = map[string]config.PriceOverride{"glm-4.7": {Input: 1}}
+	usd, known := svc.Cost("primary", config.Provider{Preset: "zai-coding", BaseURL: "https://api.z.ai/api/coding/paas/v4", Model: "glm-4.7"}, provider.Usage{InputTokens: 1000})
+	if !known || usd <= 0 {
+		t.Fatal(usd, known)
 	}
 }
 
 func TestUnknownCost(t *testing.T) {
-	usd, known, flat := newSvc(t).Cost("primary", config.Provider{Model: "nothing"}, provider.Usage{InputTokens: 1000})
-	if flat || known || usd != 0 {
+	usd, known := newSvc(t).Cost("primary", config.Provider{Model: "nothing"}, provider.Usage{InputTokens: 1000})
+	if known || usd != 0 {
 		t.Fatal()
 	}
 }
@@ -172,14 +175,14 @@ func TestUnknownCost(t *testing.T) {
 func TestCacheReadPriceUsed(t *testing.T) {
 	s := serviceWith(t, nil)
 	p := config.Provider{BaseURL: "https://api.z.ai/v4", Model: "glm-4.7"}
-	usd, known, flat := s.Cost("primary", p, provider.Usage{InputTokens: 1000, OutputTokens: 100, CacheReadTokens: 10000})
+	usd, known := s.Cost("primary", p, provider.Usage{InputTokens: 1000, OutputTokens: 100, CacheReadTokens: 10000})
 	want := 1000*6e-7 + 100*2.2e-6 + 10000*1.1e-7
-	if !known || flat || !near(usd, want) {
+	if !known || !near(usd, want) {
 		t.Fatal(usd, want)
 	}
 	// With no cache-read price, the cache reads use the input price.
 	s.cfg.Pricing.Overrides = map[string]config.PriceOverride{"glm-4.7": {Input: 1, Output: 2}}
-	usd, _, _ = s.Cost("primary", p, provider.Usage{CacheReadTokens: 1000000})
+	usd, _ = s.Cost("primary", p, provider.Usage{CacheReadTokens: 1000000})
 	if !near(usd, 1) {
 		t.Fatal(usd)
 	}

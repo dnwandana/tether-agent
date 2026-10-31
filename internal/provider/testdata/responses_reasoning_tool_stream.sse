@@ -1,0 +1,20 @@
+event: ping
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
+
+event: ping
+data: {"type":"response.output_item.done","output_index":0,"item": {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "gAAAAB-ENC"}}
+
+event: ping
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"terminal","arguments":""}}
+
+event: response.created
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","output_index":1,"delta":"{\"cmd\":\"ls\"}"}
+
+event: ping
+data: {"type":"response.output_item.done","output_index":1,"item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "terminal", "arguments": "{\"cmd\":\"ls\"}", "status": "completed"}}
+
+event: ping
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":30,"output_tokens":12}}}
+
+data: [DONE]
+

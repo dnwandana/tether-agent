@@ -1,0 +1,29 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_2","status":"in_progress"}}
+
+event: ping
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"terminal","arguments":""}}
+
+event: ping
+data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"terminal","arguments":""}}
+
+event: response.created
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_a","output_index":0,"delta":"{\"cmd\":"}
+
+event: response.created
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_b","output_index":1,"delta":"{\"cmd\":\"du -sh /\"}"}
+
+event: response.created
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_a","output_index":0,"delta":"\"df -h\"}"}
+
+event: ping
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"terminal","status":"completed"}}
+
+event: ping
+data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"terminal","arguments":"{\"cmd\":\"du -sh /\"}","status":"completed"}}
+
+event: ping
+data: {"type":"response.completed","response":{"id":"resp_2","status":"completed","usage":{"input_tokens":50,"output_tokens":20}}}
+
+data: [DONE]
+

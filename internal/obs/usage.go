@@ -22,18 +22,16 @@ type UsageRow struct {
 	TokPerSec float64
 	// CostUSD is the sum of the stored costs. It is valid only when CostKnown is true.
 	CostUSD float64
-	// CostKnown is true when one or more calls have a stored cost. Flat is true when the
-	// provider has a flat-rate plan.
-	CostKnown, Flat bool
+	// CostKnown is true when one or more calls have a stored cost.
+	CostKnown bool
 }
 
 // UsageReport returns the usage of each model since the time, from the stored assistant
-// messages. A sessionID that is not empty limits the report to that session. flat holds
-// the names of the providers with a flat-rate plan. The second value is the number of
-// compactions in the same scope.
+// messages. A sessionID that is not empty limits the report to that session. The second
+// value is the number of compactions in the same scope.
 //
 // The report reads the stored cost_usd and never prices old rows again.
-func UsageReport(ctx context.Context, d *db.DB, since time.Time, sessionID string, flat map[string]bool) ([]UsageRow, int, error) {
+func UsageReport(ctx context.Context, d *db.DB, since time.Time, sessionID string) ([]UsageRow, int, error) {
 	var sinceMS int64
 	if !since.IsZero() {
 		sinceMS = since.UnixMilli()
@@ -68,7 +66,6 @@ func UsageReport(ctx context.Context, d *db.DB, since time.Time, sessionID strin
 			r.TokPerSec = float64(timedOut) / (float64(genMS) / 1000)
 		}
 		r.CostKnown = costCount > 0
-		r.Flat = flat[r.Provider]
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -107,10 +104,7 @@ func FormatUsage(rows []UsageRow) string {
 			tps = strconv.FormatFloat(r.TokPerSec, 'f', 1, 64)
 		}
 		cost := noValue
-		switch {
-		case r.Flat:
-			cost = "flat plan"
-		case r.CostKnown:
+		if r.CostKnown {
 			cost = humanCost(r.CostUSD)
 		}
 		table = append(table, []string{r.Model, strconv.Itoa(r.Calls), humanTokens(r.InTok), humanTokens(r.OutTok), tps, cost})
@@ -242,28 +236,22 @@ func tableTokens(n int) string {
 
 // rowCost returns the cost cell of one row of the rich and the narrow tables.
 func rowCost(r UsageRow) string {
-	switch {
-	case r.Flat:
-		return "flat"
-	case r.CostKnown:
+	if r.CostKnown {
 		return humanCost(r.CostUSD)
 	}
 	return unknownCost
 }
 
 // totalCost returns the total cost of the rows. It adds only the known prices, and it ends
-// with "+" when a row has no known price. With no known price at all, it is "flat" when
-// each row has a flat-rate plan, else unknownCost.
+// with "+" when a row has no known price. With no known price at all, it is unknownCost.
 func totalCost(rows []UsageRow) string {
 	var sum float64
 	priced, unknown := false, false
 	for _, r := range rows {
-		switch {
-		case r.Flat:
-		case r.CostKnown:
+		if r.CostKnown {
 			sum += r.CostUSD
 			priced = true
-		default:
+		} else {
 			unknown = true
 		}
 	}
@@ -272,10 +260,8 @@ func totalCost(rows []UsageRow) string {
 		return humanCost(sum) + "+"
 	case priced:
 		return humanCost(sum)
-	case unknown:
-		return unknownCost
 	}
-	return "flat"
+	return unknownCost
 }
 
 // humanTokens returns n with a "k" or "M" suffix and three significant digits at most,

@@ -38,8 +38,8 @@ var commandHelps = []cmdHelp{
 		Summary: "Run the setup wizard: provider, Telegram, host programs, systemd.",
 		Usage:   "tether setup [flags]",
 		Body: `Run the interactive setup in five steps:
-  1. The provider.
-  2. An optional fallback provider.
+  1. The provider, from a list of presets.
+  2. An optional list of fallback providers.
   3. An optional Telegram bot, with the owner pairing.
   4. The host programs.
   5. The systemd unit.
@@ -51,7 +51,8 @@ Flags:
   --data-dir DIR       The data folder. The default is TETHER_HOME, then
                        ~/.tether.
   --system             Write a system unit to /etc/systemd/system, not a user
-                       unit. This needs root.
+                       unit. This needs root. Under sudo, the data folder and
+                       its files belong to the user who called sudo.
 
 Examples:
   tether setup
@@ -64,9 +65,10 @@ Examples:
 		Summary: "Check the install. Each line shows ✓, ⚠, or ✗ and the next action.",
 		Usage:   "tether doctor [flags]",
 		Body: `Check the install. The checks are the config, .env, the providers, Telegram,
-state.db, the host programs, the MCP servers, the free disk space, and the
-newest release. Each line shows ✓, ⚠, or ✗ and the next action. The exit code
-is 1 when a check fails. A running gateway does not stop the checks.
+state.db, the provider of the last answer, the host programs, the systemd unit,
+the MCP servers, the free disk space, and the newest release. Each line shows
+✓, ⚠, or ✗ and the next action. The exit code is 1 when a check fails. A
+running gateway does not stop the checks.
 
 Flags:
   --data-dir DIR       The data folder. The default is TETHER_HOME, then

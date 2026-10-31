@@ -47,7 +47,7 @@ func insertUsage(t *testing.T, d *db.DB, r usageRow) {
 	}
 }
 
-// seedUsage writes 212 flat glm-4.7 calls, 9 priced z-ai/glm-4.7 calls, and 1 call of a
+// seedUsage writes 212 glm-4.7 calls with no stored cost, 9 priced z-ai/glm-4.7 calls, and 1 call of a
 // model with no price.
 func seedUsage(t *testing.T) *db.DB {
 	t.Helper()
@@ -70,7 +70,7 @@ func seedUsage(t *testing.T) *db.DB {
 func TestReportAndFormat(t *testing.T) {
 	ctx := context.Background()
 	d := seedUsage(t)
-	rows, _, err := UsageReport(ctx, d, time.Now().Add(-24*time.Hour), "", map[string]bool{"primary": true})
+	rows, _, err := UsageReport(ctx, d, time.Now().Add(-24*time.Hour), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestReportAndFormat(t *testing.T) {
 		t.Fatalf("%+v", rows)
 	}
 	out := FormatUsage(rows)
-	for _, want := range []string{"glm-4.7", "212", "flat plan", "z-ai/glm-4.7", "$0.07", "—", "3.18M", "mystery"} {
+	for _, want := range []string{"glm-4.7", "212", "z-ai/glm-4.7", "$0.07", "—", "3.18M", "mystery"} {
 		if !strings.Contains(out, want) {
 			t.Fatal(want, "\n", out)
 		}
@@ -89,15 +89,15 @@ func TestReportAndFormat(t *testing.T) {
 	for _, r := range rows {
 		switch r.Model {
 		case "glm-4.7":
-			if !r.Flat || r.Calls != 212 || r.InTok != 212*15000 || r.OutTok != 212*900 {
+			if r.CostKnown || r.Calls != 212 || r.InTok != 212*15000 || r.OutTok != 212*900 {
 				t.Fatalf("%+v", r)
 			}
 		case "z-ai/glm-4.7":
-			if r.Flat || !r.CostKnown || r.CostUSD < 0.0699 || r.CostUSD > 0.0701 {
+			if !r.CostKnown || r.CostUSD < 0.0699 || r.CostUSD > 0.0701 {
 				t.Fatalf("%+v", r)
 			}
 		case "mystery":
-			if r.Flat || r.CostKnown || r.TokPerSec != 0 {
+			if r.CostKnown || r.TokPerSec != 0 {
 				t.Fatalf("%+v", r)
 			}
 		}
@@ -110,10 +110,21 @@ func TestReportAndFormat(t *testing.T) {
 	}
 }
 
+func TestUsageReportHasNoFlatPlan(t *testing.T) {
+	d := seedUsage(t)
+	rows, _, err := UsageReport(context.Background(), d, time.Time{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out := FormatUsage(rows); strings.Contains(out, "flat") {
+		t.Fatal(out)
+	}
+}
+
 func TestReportCountsCacheReadsAsInput(t *testing.T) {
 	d := openUsageDB(t)
 	insertUsage(t, d, usageRow{model: "m", prov: "p", in: 100, cache: 900, out: 1})
-	rows, _, err := UsageReport(context.Background(), d, time.Now().Add(-time.Hour), "", nil)
+	rows, _, err := UsageReport(context.Background(), d, time.Now().Add(-time.Hour), "")
 	if err != nil || len(rows) != 1 || rows[0].InTok != 1000 {
 		t.Fatal(rows, err)
 	}
@@ -122,7 +133,7 @@ func TestReportCountsCacheReadsAsInput(t *testing.T) {
 func TestTokPerSecExcludesFirstTokenLatency(t *testing.T) {
 	d := openUsageDB(t)
 	insertUsage(t, d, usageRow{model: "m", prov: "p", out: 100, latency: 3000, first: 500})
-	rows, _, err := UsageReport(context.Background(), d, time.Now().Add(-time.Hour), "", nil)
+	rows, _, err := UsageReport(context.Background(), d, time.Now().Add(-time.Hour), "")
 	if err != nil || len(rows) != 1 {
 		t.Fatal(rows, err)
 	}
@@ -153,18 +164,18 @@ func TestSessionScopeShowsCompactions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	rows, n, err := UsageReport(ctx, d, time.Time{}, "a", nil)
+	rows, n, err := UsageReport(ctx, d, time.Time{}, "a")
 	if err != nil || n != 2 || len(rows) != 1 || rows[0].OutTok != 5 {
 		t.Fatal(rows, n, err)
 	}
-	_, n, err = UsageReport(ctx, d, time.Now().Add(-time.Hour), "", nil)
+	_, n, err = UsageReport(ctx, d, time.Now().Add(-time.Hour), "")
 	if err != nil || n != 3 {
 		t.Fatal(n, err)
 	}
 }
 
 func TestReportEmpty(t *testing.T) {
-	rows, n, err := UsageReport(context.Background(), openUsageDB(t), time.Now().Add(-time.Hour), "", nil)
+	rows, n, err := UsageReport(context.Background(), openUsageDB(t), time.Now().Add(-time.Hour), "")
 	if err != nil || len(rows) != 0 || n != 0 {
 		t.Fatal(rows, n, err)
 	}
@@ -212,7 +223,7 @@ func TestUsageSince(t *testing.T) {
 func tableRows() []UsageRow {
 	return []UsageRow{
 		{Model: "anthropic/claude-sonnet-5", Provider: "openrouter", Calls: 18, InTok: 412300, OutTok: 21700, CostUSD: 1.62, CostKnown: true},
-		{Model: "zai/glm-4.6", Provider: "zai", Calls: 7, InTok: 88100, OutTok: 4200, Flat: true},
+		{Model: "zai/glm-4.6", Provider: "zai", Calls: 7, InTok: 88100, OutTok: 4200, CostUSD: 0.05, CostKnown: true},
 	}
 }
 
@@ -220,8 +231,8 @@ func TestFormatUsageMarkdown(t *testing.T) {
 	want := "| Model | Calls | In | Out | Cost |\n" +
 		"|:--|--:|--:|--:|--:|\n" +
 		"| claude-sonnet-5 | 18 | 412.3k | 21.7k | $1.62 |\n" +
-		"| glm-4.6 | 7 | 88.1k | 4.2k | flat |\n" +
-		"| **Total** | **25** | **500.4k** | **25.9k** | **$1.62** |"
+		"| glm-4.6 | 7 | 88.1k | 4.2k | $0.05 |\n" +
+		"| **Total** | **25** | **500.4k** | **25.9k** | **$1.67** |"
 	if got := FormatUsageMarkdown(tableRows()); got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
@@ -233,11 +244,11 @@ func TestFormatUsageMarkdownEscapesAndUnknownCost(t *testing.T) {
 	if !strings.Contains(got, "\n| my\\_model\\|v2\\*\\\\ | 1 | 10 | 5 | – |\n") {
 		t.Fatalf("got:\n%s", got)
 	}
-	if !strings.HasSuffix(got, "| **Total** | **26** | **500.4k** | **25.9k** | **$1.62+** |") {
+	if !strings.HasSuffix(got, "| **Total** | **26** | **500.4k** | **25.9k** | **$1.67+** |") {
 		t.Fatalf("got:\n%s", got)
 	}
 	// Two rows with the same short name keep the full names.
-	got = FormatUsageMarkdown([]UsageRow{{Model: "a/m", Calls: 1, Flat: true}, {Model: "b/m", Calls: 1, Flat: true}})
+	got = FormatUsageMarkdown([]UsageRow{{Model: "a/m", Calls: 1}, {Model: "b/m", Calls: 1}})
 	if !strings.Contains(got, "\n| a/m | 1 |") || !strings.Contains(got, "\n| b/m | 1 |") {
 		t.Fatalf("got:\n%s", got)
 	}
@@ -246,9 +257,9 @@ func TestFormatUsageMarkdownEscapesAndUnknownCost(t *testing.T) {
 func TestFormatUsageNarrow(t *testing.T) {
 	want := "model         calls  tokens   cost\n" +
 		"claude-sonn…     18  434.0k  $1.62\n" +
-		"glm-4.6           7   92.3k   flat\n" +
+		"glm-4.6           7   92.3k  $0.05\n" +
 		"──────────────────────────────────\n" +
-		"total            25  526.3k  $1.62"
+		"total            25  526.3k  $1.67"
 	got := FormatUsageNarrow(tableRows())
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
@@ -265,17 +276,15 @@ func TestFormatUsageNarrow(t *testing.T) {
 }
 
 func TestUsageTotalCost(t *testing.T) {
-	flat := UsageRow{Model: "f", Flat: true}
 	priced := UsageRow{Model: "p", CostKnown: true, CostUSD: 0.5}
 	unknown := UsageRow{Model: "u"}
 	for _, tc := range []struct {
 		rows []UsageRow
 		want string
 	}{
-		{[]UsageRow{flat}, "flat"},
 		{[]UsageRow{unknown}, "–"},
-		{[]UsageRow{flat, unknown}, "–"},
-		{[]UsageRow{priced, flat}, "$0.50"},
+		{[]UsageRow{priced}, "$0.50"},
+		{[]UsageRow{priced, priced}, "$1.00"},
 		{[]UsageRow{priced, unknown}, "$0.50+"},
 	} {
 		if got := totalCost(tc.rows); got != tc.want {

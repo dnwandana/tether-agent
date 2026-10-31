@@ -27,20 +27,85 @@ An empty string is `""`. An empty list is `[]`. An empty map is `{}`.
 
 ## providers
 
-Each entry is one model endpoint. The entry `primary` is necessary. The entry `fallback` is
-optional: the agent uses it when the primary provider fails before the first byte of an answer.
-Other keys can refer to any entry by its name.
+Each entry is one model endpoint. The entry `primary` is necessary. Other keys can refer to any
+entry by its name. `agent.fallback` gives the entries that get a call when the entries before them
+fail. "The fallback chain" below links to the rules for the next entry. An entry
+with the name `fallback` is the old shape of `agent.fallback`: when `agent.fallback` is absent, the
+agent uses that entry as the only fallback.
+
+An entry with `preset` takes the values of a known endpoint from the table below:
+
+- An empty `format` or `base_url` takes the value of the preset. A value that you set wins.
+- An empty `api_key` takes the value of the key env of the preset. This occurs only when the
+  `base_url` is the URL of the preset, so the key of a preset never goes to another host.
+- A key env that is set but empty counts as not set.
+- The URL compare ignores a trailing slash.
+- The quirks and the effort style of the preset also apply only on the URL of the preset.
+- The preset does not fill `model`. Each entry must set it.
+
+An entry is not usable when it has no model. An entry with a preset is also not usable when it
+has no API key. The entry `primary` that is not usable stops the load. Another entry that is not
+usable loads, but it cannot serve a call. The agent logs a warning for it, and the fallback goes
+to the next entry.
+
+An entry with no preset and no `api_key` loads. The agent sends no auth header to it, for example
+to a local model server.
+
+The key `flat_rate` is removed. The usage report counts every provider in dollars. The program
+ignores the key, and `tether doctor` gives a warning for it.
+
+| Wizard item | Preset | Format | Base URL | Key env | Quirks |
+|---|---|---|---|---|---|
+| xAI | `xai` | `responses` | `https://api.x.ai/v1` | `XAI_API_KEY` | `conv_id_header`, `prompt_cache_key` |
+| OpenRouter | `openrouter` | `openai` | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | `openrouter_headers` |
+| OpenAI | `openai` | `responses` | `https://api.openai.com/v1` | `OPENAI_API_KEY` | `prompt_cache_key` |
+| Anthropic | `anthropic` | `anthropic` | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` | none |
+| Z.AI, Pay as you go | `zai` | `openai` | `https://api.z.ai/api/paas/v4` | `ZAI_API_KEY` | `reasoning_content`, `keep_thinking` |
+| Z.AI, Coding Plan | `zai-coding` | `openai` | `https://api.z.ai/api/coding/paas/v4` | `ZAI_API_KEY` | `reasoning_content` |
+| DeepSeek | `deepseek` | `openai` | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` | `reasoning_content` |
+| Moonshot | `moonshot` | `openai` | `https://api.moonshot.ai/v1` | `MOONSHOT_API_KEY` | `reasoning_content` |
+| Alibaba | `alibaba` | `openai` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` | `reasoning_content` |
+| MiniMax | `minimax` | `anthropic` | `https://api.minimax.io/anthropic` | `MINIMAX_API_KEY` | `bearer_auth` |
+| Ollama | `ollama-cloud` | `openai` | `https://ollama.com/v1` | `OLLAMA_API_KEY` | none |
+
+The quirks change the requests to one provider:
+
+- `conv_id_header`: the Responses call sends the session id in the `x-grok-conv-id` header.
+- `prompt_cache_key`: the Responses call sends the session id as `prompt_cache_key`. The
+  provider uses the key for its prompt cache.
+- `openrouter_headers`: the chat call and the model list call send `HTTP-Referer` and `X-Title`.
+  These headers name Tether Agent to OpenRouter.
+- `reasoning_content`: the adapter reads the reasoning text from the `reasoning_content` field of
+  the stream. It sends the field back on each assistant message. The value is the stored text
+  when the same endpoint and model wrote it, else one space.
+- `keep_thinking`: the request sends `thinking` with `clear_thinking: false`, so Z.AI keeps the
+  thinking of earlier turns.
+- `bearer_auth`: the calls of the `anthropic` format send the key as `Authorization: Bearer
+  <key>`, not as `x-api-key`.
+
+The Ollama preset is Ollama Cloud. For a local model server, for example Ollama, LM Studio, or
+llama.cpp, use an entry with no preset: set `format: openai` and a `base_url` such as
+`http://localhost:11434/v1`. The preset `ollama` is removed, and a config that uses it does
+not load. The error tells what to set in its place.
 
 | Key | Default | Effect |
 |---|---|---|
-| `providers.<name>.format` | `""` | The wire format of the endpoint: `openai` or `anthropic`. Each entry must set it. |
-| `providers.<name>.base_url` | `""` | The base URL of the API, for example `https://openrouter.ai/api/v1`. |
+| `providers.<name>.preset` | `""` | The id of a preset from the table above. It fills `format`, `base_url`, the key env, and the quirks. `""` is an entry with no preset. An unknown id stops the load, and the error gives the known ids. |
+| `providers.<name>.format` | `""` | The wire format of the endpoint: `openai`, `anthropic`, or `responses`. It is necessary only for an entry with no preset. |
+| `providers.<name>.base_url` | `""` | The base URL of the API, for example `https://openrouter.ai/api/v1`. With `format: anthropic`, the chat call goes to `<base_url>/v1/messages`, or to `<base_url>/messages` when the URL ends in `/v1`. The model list call uses the same rule. |
 | `providers.<name>.api_key` | `""` | The API key. Use `${VAR}` and keep the value in `.env`. |
 | `providers.<name>.model` | `""` | The model name that the agent sends to the endpoint. |
-| `providers.<name>.flat_rate` | `false` | When `true`, the usage report shows no cost for this provider, because you pay a flat rate. |
 | `providers.<name>.vision` | `false` | When `true`, images go inline to this model. When `false`, the `view_image` tool uses `agent.vision_provider`. |
 | `providers.<name>.context_window` | `0` | The context window in tokens. `0` takes the value from the price data. When the price data has no value, the agent uses 128000. |
-| `providers.<name>.price_key` | `""` | The LiteLLM price key, for example `zai/glm-4.7`. Set it when the automatic key match fails. |
+| `providers.<name>.price_key` | `""` | The LiteLLM price key, for example `zai/glm-5.3`. Set it when the automatic key match fails. |
+| `providers.<name>.effort` | `""` | The reasoning effort of this entry: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. `""` sends no effort field, so the provider uses its default. The `/effort` command of a session wins. Each level goes to the nearest level that the provider accepts. The effort style of a preset applies only on the preset URL. Else the entry uses the standard style of its `format`. When the entry rejects the effort with an HTTP 400 that names `effort`, `reasoning`, or `thinking`, the chain sends the call again with no effort. When that call works, the entry gets no effort until a restart. |
+
+### The fallback chain
+
+Each model call goes through a chain of entries: the pinned entry, then `primary`, then the
+entries of `agent.fallback`. The wiki page
+[The fallback chain](https://github.com/dnwandana/tether-agent/wiki/Providers#the-fallback-chain)
+gives the order, the failures that move a call to the next entry, and the wait times.
 
 ## agent
 
@@ -48,9 +113,10 @@ Other keys can refer to any entry by its name.
 |---|---|---|
 | `agent.max_turns` | `90` | The maximum number of tool rounds in one turn. |
 | `agent.tool_concurrency` | `4` | The maximum number of tool calls that run at the same time in one round. |
-| `agent.vision_provider` | `""` | The provider for `view_image`. `""` uses the primary provider when it has `vision: true`. Else the agent has no `view_image` tool. |
-| `agent.delegation_provider` | `""` | The provider for child runs of `delegate_task`. `""` uses the provider of the parent. |
+| `agent.vision_provider` | `""` | The provider entry for `view_image`. `""` uses the default chain when `primary` has `vision: true`. Else the agent has no `view_image` tool. `primary` uses the default chain. In the default chain, the call goes only to the entries with `vision: true`. Another name uses that entry alone, with no fallback. |
+| `agent.delegation_provider` | `""` | The provider for child runs of `delegate_task`, as `name` or `name:model`. The value is the pin of the child session, so that entry is first in the chain of the child. `""` uses the pin of the parent session. |
 | `agent.restart_drain_timeout_s` | `180` | The maximum time in seconds that a stop or a restart waits for the running turns. The turns that still run after it are cancelled, and they continue after the restart. `tether setup` writes `TimeoutStopSec` from this value. |
+| `agent.fallback` | `[]` | The ordered list of entry names after `primary` in the chain (see "The fallback chain"). Each name must be an entry in `providers`. The list must not contain `primary` or a name two times. The default is no key. With no key, the list is the entry `fallback` when it exists, else there is no fallback. An explicit `[]` turns off the fallback. |
 | `agent.resume_freshness_s` | `3600` | A turn that a restart or a crash cut continues at the next start when the cut is not older than this time, in seconds. `0` turns off the resume. |
 
 ## context
@@ -245,13 +311,13 @@ The command templates can use the placeholders `{text}`, `{in}`, `{out}`, `{out_
 |---|---|---|
 | `media.tts.backend` | `command` | The backend of `text_to_speech`: `command`, `endpoint`, or `""`. |
 | `media.tts.command` | `edge-tts --voice en-US-AriaNeural --text {text} --write-media {out}` | The command template of `text_to_speech`. |
-| `media.tts.provider` | `""` | The provider entry for the `endpoint` backend of `text_to_speech`. |
+| `media.tts.provider` | `""` | The provider entry for the `endpoint` backend of `text_to_speech`. `""` uses `primary`. |
 | `media.stt.backend` | `command` | The backend of `transcribe_audio`: `command`, `endpoint`, or `""`. |
 | `media.stt.command` | `whisper-cli -m ~/models/ggml-base.bin -f {in} -otxt -of {out_base}` | The command template of `transcribe_audio`. |
-| `media.stt.provider` | `""` | The provider entry for the `endpoint` backend of `transcribe_audio`. |
+| `media.stt.provider` | `""` | The provider entry for the `endpoint` backend of `transcribe_audio`. `""` uses `primary`. |
 | `media.image.backend` | `""` | The backend of `generate_image`. `""` hides the tool. |
 | `media.image.command` | `""` | The command template of `generate_image`. |
-| `media.image.provider` | `""` | The provider entry for the `endpoint` backend of `generate_image`. |
+| `media.image.provider` | `""` | The provider entry for the `endpoint` backend of `generate_image`. `""` uses `primary`. |
 
 ## pricing
 

@@ -1298,8 +1298,8 @@ func pairingRevoke(ctx context.Context, p *telegram.Pairing, platform, userID st
 	}
 }
 
-// runUsage runs the usage subcommand and returns the exit code. It opens state.db and reads
-// the config for the flat-rate providers.
+// runUsage runs the usage subcommand and returns the exit code. It opens only state.db and
+// does not load the config.
 func runUsage(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("usage", flag.ContinueOnError)
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
@@ -1324,24 +1324,13 @@ func runUsage(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "usage: cannot open %s: %v\n", dbPath, err)
 		return 1
 	}
-	cfg := config.Default()
-	dotenv, err := security.LoadDotEnv(filepath.Join(dir, ".env"))
-	if err == nil {
-		var loaded *config.Config
-		if loaded, err = config.Load(filepath.Join(dir, "config.yaml"), security.EnvLookup(dotenv)); err == nil {
-			cfg = *loaded
-		}
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "warning: the config did not load, so no provider shows as a flat plan: %v\n", err)
-	}
 	d, err := db.Open(dbPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "usage: %v\n", err)
 		return 1
 	}
 	defer d.Close()
-	rows, compactions, err := obs.UsageReport(context.Background(), d, since, "", gateway.FlatProviders(&cfg))
+	rows, compactions, err := obs.UsageReport(context.Background(), d, since, "")
 	if err != nil {
 		fmt.Fprintf(stderr, "usage: %v\n", err)
 		return 1
@@ -1383,10 +1372,23 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 	if len(rest) > 0 {
 		return usageError(stderr, "setup", "unexpected argument: "+rest[0])
 	}
-	dir, err := filepath.Abs(dataDir(*dataFlag))
+	pick := dataDir
+	if *system {
+		pick = sudoDataDir
+	}
+	dir, err := filepath.Abs(pick(*dataFlag))
 	if err != nil {
 		fmt.Fprintf(stderr, "setup: %v\n", err)
 		return 1
+	}
+	// The system unit runs as the user who called sudo, so that user must own the files.
+	if *system {
+		defer func() {
+			if err := giveToSudoUser(dir); err != nil {
+				u := os.Getenv("SUDO_USER")
+				fmt.Fprintf(stderr, "setup: cannot give %s to %s: %v. Run: sudo chown -R %s: %s\n", dir, u, err, u, dir)
+			}
+		}()
 	}
 	bin, err := os.Executable()
 	if err != nil {

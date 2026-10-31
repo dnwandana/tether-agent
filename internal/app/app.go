@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -80,9 +81,15 @@ type App struct {
 	DotEnv   map[string]string
 	// HTTP is the shared client of the providers and the price sources.
 	HTTP *http.Client
+	// Models keeps the model lists for /model. It makes no call until the first
+	// /model <entry>.
+	Models *provider.ModelCache
 	// WebClient is the guarded client of the web tools.
 	WebClient *http.Client
-	// Prov is the default provider. Providers holds every provider entry by name.
+	// Set holds the adapters, the shared Health, and the default chain.
+	Set *provider.Set
+	// Prov is the default chain. Providers holds every provider entry by name, with
+	// "primary" set to the default chain.
 	Prov      provider.Provider
 	Providers map[string]provider.Provider
 	Prices    *pricing.Service
@@ -191,8 +198,15 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.Store.Redactor = a.Redactor
 
 	a.HTTP = &http.Client{}
-	if a.Prov, a.Providers, err = provider.FromConfig(a.Cfg, a.HTTP, a.Log); err != nil {
+	a.Models = provider.NewModelCache(a.HTTP)
+	if a.Set, err = provider.FromConfig(a.Cfg, a.HTTP, a.Log); err != nil {
 		return nil, err
+	}
+	a.Prov, a.Providers = a.Set.Default, a.Set.All
+	for _, name := range slices.Sorted(maps.Keys(a.Cfg.Providers)) {
+		if reason := a.Cfg.Providers[name].Unusable; reason != "" {
+			a.Log.Warn("provider entry is not usable", "name", name, "reason", reason)
+		}
 	}
 	a.Gate = security.NewGate(a.Cfg.Approvals, a.DB)
 	a.Gate.SudoPasswordSet = a.DotEnv["SUDO_PASSWORD"] != "" || os.Getenv("SUDO_PASSWORD") != ""
@@ -228,6 +242,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.Agent = &agent.Agent{
 		Prov:      a.Prov,
 		Providers: a.Providers,
+		Chains:    a.Set,
 		Tools:     a.Registry,
 		Store:     a.Store,
 		DB:        a.DB,
@@ -660,6 +675,7 @@ func (a *App) Deps() *gateway.Deps {
 		Store:     a.Store,
 		Agent:     a.Agent,
 		Providers: a.Providers,
+		Models:    a.Models,
 		Log:       a.Log,
 		NewEnv:    a.NewEnv,
 		CLIAsk:    a.CLIAsk,

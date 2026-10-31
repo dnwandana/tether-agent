@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/agent"
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/memory"
@@ -172,7 +174,7 @@ func TestModelAndPromptOverrides(t *testing.T) {
 	if s.PromptOverride != "" || s.ModelOverride != "" {
 		t.Fatal(s)
 	}
-	run(t, c, "/model cheap")
+	run(t, c, "/model cheap config")
 	if s, _ = c.Deps.Store.Get(ctx, c.Session.ID); s.ModelOverride != "cheap" {
 		t.Fatal(s)
 	}
@@ -249,15 +251,15 @@ func TestUsageCommand(t *testing.T) {
 	other, _ := st.Create(ctx, sessions.Session{Key: "cli:other"})
 	st.Append(ctx, other.ID, provider.Message{Role: provider.RoleAssistant, Content: "b"},
 		sessions.MessageMeta{Model: "z-ai/glm-4.7", Provider: "openrouter", CostUSD: 0.07})
-	flat := c.Deps.Cfg.Providers["primary"]
-	flat.FlatRate = true
-	c.Deps.Cfg.Providers["primary"] = flat
 
 	run(t, c, "/usage")
-	for _, want := range []string{"📊 **Usage: today**\n", "glm-4.7", "188k", "flat plan", "z-ai/glm-4.7", "$0.07", "tok/s"} {
+	for _, want := range []string{"📊 **Usage: today**\n", "glm-4.7", "188k", "z-ai/glm-4.7", "$0.07", "tok/s"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatal(want, "\n", out)
 		}
+	}
+	if strings.Contains(out.String(), "flat") {
+		t.Fatal(out)
 	}
 	out.Reset()
 	run(t, c, "/usage session")
@@ -288,11 +290,8 @@ func seedUsage(t *testing.T, c *CommandCtx) []obs.UsageRow {
 			t.Fatal(err)
 		}
 	}
-	flat := c.Deps.Cfg.Providers["primary"]
-	flat.FlatRate = true
-	c.Deps.Cfg.Providers["primary"] = flat
 	since, _ := obs.UsageSince("today", time.Now())
-	rows, _, err := obs.UsageReport(ctx, c.Deps.Agent.DB, since, "", FlatProviders(c.Deps.Cfg))
+	rows, _, err := obs.UsageReport(ctx, c.Deps.Agent.DB, since, "")
 	if err != nil || len(rows) != 2 {
 		t.Fatal(rows, err)
 	}
@@ -535,8 +534,8 @@ func TestHelpTelegram(t *testing.T) {
 	c, sent := interactiveCtx(t)
 	want := "📖 **Commands**\n\n**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
 		"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/delete · delete a session\n\n" +
-		"**This session**\n/model · change the model\n/prompt · change the prompt\n/compact · make the context shorter\n" +
-		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n" +
+		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
+		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 	run(t, c, "/help")
 	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
@@ -552,8 +551,8 @@ func TestHelpCLI(t *testing.T) {
 	run(t, c, "/help")
 	want := "📖 **Commands**\n\n**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
 		"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/delete · delete a session\n\n" +
-		"**This session**\n/model · change the model\n/prompt · change the prompt\n/compact · make the context shorter\n" +
-		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n\n" +
+		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
+		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n\n" +
 		"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat\n"
 	if out.String() != want {
 		t.Fatalf("got:\n%s", out)
@@ -942,13 +941,13 @@ var fallbackNow = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 
 // activeStatus returns a fallback state where glm-5.3 failed 2 minutes before fallbackNow.
 func activeStatus() provider.FallbackStatus {
-	return provider.FallbackStatus{Active: true, PrimaryModel: "glm-5.3", FallbackName: "fallback",
+	return provider.FallbackStatus{Active: true, FirstName: "primary", PrimaryModel: "glm-5.3", FallbackName: "fallback",
 		FallbackModel: "deepseek/deepseek-v4.1-flash-1017", FailedAt: fallbackNow.Add(-2 * time.Minute), Cause: "HTTP 503"}
 }
 
 // fallbackWarningText is the warning for activeStatus at fallbackNow.
 const fallbackWarningText = "⚠️ The primary model glm-5.3 failed 2 min ago (HTTP 503). " +
-	"Calls go to the fallback until the primary answers again."
+	"Calls go to fallback until the primary answers again."
 
 func TestNewReplyFallback(t *testing.T) {
 	fixTip(t, "T")
@@ -1005,27 +1004,67 @@ func modelCtx(t *testing.T) (*CommandCtx, *[]Reply) {
 	prim := modelProv{fakeProv: fp, model: "anthropic/claude-sonnet-5"}
 	c.Deps.Agent.Prov = prim
 	c.Deps.Providers = map[string]provider.Provider{"openrouter": fp, "primary": prim, "zai": fp}
+	c.Deps.Agent.Providers = c.Deps.Providers
+	c.Deps.Cfg.Providers = map[string]config.Provider{
+		"openrouter": {Preset: "openrouter"},
+		"primary":    {Preset: "openrouter", Model: "anthropic/claude-sonnet-5"},
+		"zai":        {Preset: "zai"},
+	}
 	return c, sent
+}
+
+func TestEntryLabel(t *testing.T) {
+	for _, tc := range []struct{ name, preset, want string }{
+		{"primary", "openrouter", "primary (OpenRouter)"},
+		{"deepseek", "deepseek", "deepseek"},
+		{"openrouter-2", "openrouter", "openrouter-2 (OpenRouter)"},
+		{"cheap", "", "cheap"},
+		{"glm", "zai-coding", "glm (Z.AI)"},
+		{"odd", "no-such-preset", "odd"},
+	} {
+		if got := entryLabel(tc.name, config.Provider{Preset: tc.preset}); got != tc.want {
+			t.Errorf("%s/%s: got %q, want %q", tc.name, tc.preset, got, tc.want)
+		}
+	}
+}
+
+func TestModelSetReply(t *testing.T) {
+	c, _ := modelCtx(t)
+	c.Deps.Cfg.Providers["my_box"] = config.Provider{Preset: "openrouter"}
+	r := c.modelSetReply("my_box", "glm_4.6")
+	if want := "🧠 **Model: my\\_box (OpenRouter)**\n`glm_4.6`\nThis session uses it from the next message."; r.Text != want || !r.Edit {
+		t.Fatalf("got:\n%s\n%+v", r.Text, r)
+	}
+	if want := [][]Button{{{Text: "↺ Use the default", Data: "/model clear"}}}; !reflect.DeepEqual(r.Buttons, want) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+	// A code span cannot hold a backtick, so the model is escaped text.
+	if r := c.modelSetReply("primary", "a`b"); r.Text != "🧠 **Model: primary (OpenRouter)**\na\\`b\nThis session uses it from the next message." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if r := c.modelSetReply("primary", ""); r.Text != "🧠 **Model: primary (OpenRouter)**\nThis session uses it from the next message." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
 }
 
 func TestModelShowWithButtons(t *testing.T) {
 	c, sent := modelCtx(t)
 	run(t, c, "/model")
 	r := lastSent(t, sent)
-	if want := "🧠 **Model: default**\n`primary` · anthropic/claude-sonnet-5\nSelect a provider for this session:"; r.Text != want {
+	if want := "🧠 **Model: default**\n`primary` (OpenRouter) · anthropic/claude-sonnet-5\nTap a provider to see its models."; r.Text != want {
 		t.Fatalf("got:\n%s", r.Text)
 	}
-	want := [][]Button{{{Text: "openrouter", Data: "/model openrouter"}, {Text: "✓ primary", Data: "/model primary"}, {Text: "zai", Data: "/model zai"}}}
+	want := [][]Button{{{Text: "openrouter", Data: "/model openrouter"}, {Text: "✓ primary (OpenRouter)", Data: "/model primary"}}, {{Text: "zai", Data: "/model zai"}}}
 	if !reflect.DeepEqual(r.Buttons, want) {
 		t.Fatalf("%+v", r.Buttons)
 	}
 	run(t, c, "/model zai:glm_4.6")
 	run(t, c, "/model")
 	r = lastSent(t, sent)
-	if want := "🧠 **Model: zai:glm\\_4.6**\n`zai` · glm\\_4.6\nSelect a provider for this session:"; r.Text != want {
+	if want := "🧠 **Model: zai:glm\\_4.6**\n`zai` · glm\\_4.6\nTap a provider to see its models."; r.Text != want {
 		t.Fatalf("got:\n%s", r.Text)
 	}
-	if r.Buttons[0][2].Text != "✓ zai" || r.Buttons[0][1].Text != "primary" {
+	if r.Buttons[1][0].Text != "✓ zai" || r.Buttons[0][1].Text != "primary (OpenRouter)" {
 		t.Fatalf("%+v", r.Buttons)
 	}
 }
@@ -1035,7 +1074,8 @@ func fallbackModelCtx(t *testing.T) (*CommandCtx, *[]Reply) {
 	t.Helper()
 	setNow(t, fallbackNow)
 	c, sent := modelCtx(t)
-	c.Deps.Providers["primary"] = statusProv{fakeProv: &fakeProv{}, st: activeStatus()}
+	sp := statusProv{fakeProv: &fakeProv{}, st: activeStatus()}
+	c.Deps.Agent.Prov, c.Deps.Providers["primary"] = sp, sp
 	return c, sent
 }
 
@@ -1043,33 +1083,19 @@ func TestModelShowFallback(t *testing.T) {
 	c, sent := fallbackModelCtx(t)
 	run(t, c, "/model")
 	r := lastSent(t, sent)
-	want := "🧠 **Model: default**\n`fallback` · deepseek/deepseek-v4.1-flash-1017\n" + fallbackWarningText + "\nSelect a provider for this session:"
+	want := "🧠 **Model: default**\n`fallback` · deepseek/deepseek-v4.1-flash-1017\n" + fallbackWarningText + "\nTap a provider to see its models."
 	if r.Text != want {
 		t.Fatalf("got:\n%s", r.Text)
 	}
-	want2 := [][]Button{{{Text: "openrouter", Data: "/model openrouter"}, {Text: "✓ primary", Data: "/model primary"}, {Text: "zai", Data: "/model zai"}}}
+	want2 := [][]Button{{{Text: "openrouter", Data: "/model openrouter"}, {Text: "✓ primary (OpenRouter)", Data: "/model primary"}}, {{Text: "zai", Data: "/model zai"}}}
 	if !reflect.DeepEqual(r.Buttons, want2) {
-		t.Fatalf("%+v", r.Buttons)
-	}
-}
-
-func TestModelShowFallbackPinnedPrimary(t *testing.T) {
-	c, sent := fallbackModelCtx(t)
-	run(t, c, "/model primary:glm-4.7")
-	run(t, c, "/model")
-	r := lastSent(t, sent)
-	want := "🧠 **Model: primary:glm-4.7**\n`fallback` · deepseek/deepseek-v4.1-flash-1017\n" + fallbackWarningText + "\n"
-	if !strings.HasPrefix(r.Text, want) {
-		t.Fatalf("got:\n%s", r.Text)
-	}
-	if r.Buttons[0][1].Text != "✓ primary" {
 		t.Fatalf("%+v", r.Buttons)
 	}
 }
 
 func TestModelShowNoWarningForOtherEntry(t *testing.T) {
 	c, sent := fallbackModelCtx(t)
-	run(t, c, "/model zai")
+	run(t, c, "/model zai config")
 	run(t, c, "/model")
 	r := lastSent(t, sent)
 	if strings.Contains(r.Text, "⚠️") || !strings.Contains(r.Text, "`zai`") {
@@ -1080,16 +1106,17 @@ func TestModelShowNoWarningForOtherEntry(t *testing.T) {
 func TestModelShowFallbackCLI(t *testing.T) {
 	setNow(t, fallbackNow)
 	c, out := cmdCtx(t, "cli:t")
-	c.Deps.Providers["primary"] = statusProv{fakeProv: &fakeProv{}, st: activeStatus()}
+	sp := statusProv{fakeProv: &fakeProv{}, st: activeStatus()}
+	c.Deps.Agent.Prov, c.Deps.Providers["primary"] = sp, sp
 	run(t, c, "/model")
 	want := "🧠 **Model: default**\n`fallback` · deepseek/deepseek-v4.1-flash-1017\n" + fallbackWarningText +
-		"\nSend /model <provider> to change it. The providers are: cheap, primary.\n"
+		"\nSend /model <provider> to see its models. The providers are: cheap, primary.\n"
 	if out.String() != want {
 		t.Fatalf("got:\n%s", out)
 	}
 }
 
-func TestModelButtonRowsOfThree(t *testing.T) {
+func TestModelButtonRowsOfTwo(t *testing.T) {
 	c, sent := modelCtx(t)
 	fp := &fakeProv{}
 	for _, n := range []string{"a", "b", "c", "d"} {
@@ -1097,7 +1124,7 @@ func TestModelButtonRowsOfThree(t *testing.T) {
 	}
 	run(t, c, "/model")
 	r := lastSent(t, sent)
-	if len(r.Buttons) != 3 || len(r.Buttons[0]) != 3 || len(r.Buttons[2]) != 1 || r.Buttons[2][0].Text != "zai" {
+	if len(r.Buttons) != 4 || len(r.Buttons[0]) != 2 || len(r.Buttons[3]) != 1 || r.Buttons[3][0].Text != "zai" {
 		t.Fatalf("%+v", r.Buttons)
 	}
 }
@@ -1105,7 +1132,7 @@ func TestModelButtonRowsOfThree(t *testing.T) {
 func TestModelShowCLI(t *testing.T) {
 	c, out := cmdCtx(t, "cli:t")
 	run(t, c, "/model")
-	want := "🧠 **Model: default**\n`primary` · fake-model\nSend /model <provider> to change it. The providers are: cheap, primary.\n"
+	want := "🧠 **Model: default**\n`primary` · fake-model\nSend /model <provider> to see its models. The providers are: cheap, primary.\n"
 	if out.String() != want {
 		t.Fatalf("got:\n%s", out)
 	}
@@ -1115,7 +1142,7 @@ func TestModelSetAndClear(t *testing.T) {
 	c, sent := modelCtx(t)
 	run(t, c, "/model zai:glm-4.6")
 	r := lastSent(t, sent)
-	if r.Text != "🧠 **Model: zai:glm-4.6**\nThis session uses it from the next message." {
+	if r.Text != "🧠 **Model: zai**\n`glm-4.6`\nThis session uses it from the next message." || !r.Edit {
 		t.Fatalf("got:\n%s", r.Text)
 	}
 	if want := [][]Button{{{Text: "↺ Use the default", Data: "/model clear"}}}; !reflect.DeepEqual(r.Buttons, want) {
@@ -1205,5 +1232,256 @@ func TestCompactReplies(t *testing.T) {
 		if got := compactReply(tc.n, tc.err); got.Text != tc.want || got.Buttons != nil {
 			t.Fatalf("got:\n%s\nwant:\n%s", got.Text, tc.want)
 		}
+	}
+}
+
+func TestFallbackWarningTexts(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	def := provider.FallbackStatus{Active: true, FirstName: "primary", PrimaryModel: "glm-4.7",
+		FallbackName: "openrouter", FallbackModel: "z-ai/glm-4.7", FailedAt: now.Add(-2 * time.Minute), Cause: "HTTP 503"}
+	if got, want := fallbackWarning(def, now), "⚠️ The primary model glm-4.7 failed 2 min ago (HTTP 503). Calls go to openrouter until the primary answers again."; got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	pin := provider.FallbackStatus{Active: true, FirstName: "deepseek", PrimaryModel: "deepseek-chat",
+		FallbackName: "primary", FallbackModel: "glm-4.7", FailedAt: now.Add(-2 * time.Minute), Cause: "HTTP 429"}
+	if got, want := fallbackWarning(pin, now), "⚠️ The model deepseek-chat of deepseek failed 2 min ago (HTTP 429). Calls go to primary until deepseek answers again."; got != want {
+		t.Fatalf("got  %q\nwant %q", got, want)
+	}
+	pin.FirstName, pin.FallbackName = "my_box", "open_router"
+	if got := fallbackWarning(pin, now); !strings.Contains(got, "of my\\_box failed") || !strings.Contains(got, "go to open\\_router until my\\_box") {
+		t.Fatal(got)
+	}
+}
+
+// chainCtx returns an interactive context whose agent builds its chains from a
+// provider.Set. The entries are primary (glm-4.7), deepseek (deepseek-chat), and
+// openrouter (z-ai/glm-4.7). The fallback list is [openrouter].
+func chainCtx(t *testing.T, edit func(cfg *config.Config)) (*CommandCtx, *[]Reply, *provider.Set) {
+	t.Helper()
+	c, sent := interactiveCtx(t)
+	cfg := c.Deps.Cfg
+	cfg.Providers = map[string]config.Provider{
+		"primary":    {Format: "openai", BaseURL: "http://p", Model: "glm-4.7"},
+		"deepseek":   {Format: "openai", BaseURL: "http://d", Model: "deepseek-chat"},
+		"openrouter": {Format: "openai", BaseURL: "http://o", Model: "z-ai/glm-4.7"},
+	}
+	cfg.Agent.Fallback = []string{"openrouter"}
+	if edit != nil {
+		edit(cfg)
+	}
+	set, err := provider.FromConfig(cfg, nil, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := c.Deps.Agent
+	ag.Cfg, ag.Chains, ag.Prov, ag.Providers = cfg, set, set.Default, set.All
+	c.Deps.Providers = set.All
+	return c, sent, set
+}
+
+// failProv fails each call before the first byte with HTTP 429.
+type failProv struct{ name, model string }
+
+func (f failProv) Name() string  { return f.name }
+func (f failProv) Model() string { return f.model }
+func (f failProv) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	return nil, fmt.Errorf("provider %s: %w: %w", f.name, provider.ErrBeforeFirstByte, &provider.HTTPStatusError{Code: 429})
+}
+
+// failEntry records an HTTP 429 of the entry name and model in the Health of set. It sets
+// the clock of the commands to 2 minutes after the failure.
+func failEntry(t *testing.T, set *provider.Set, name, model string) {
+	t.Helper()
+	c := provider.NewChain([]provider.ChainEntry{{Name: name, P: failProv{name, model}}}, set.Health, slog.New(slog.DiscardHandler))
+	if _, err := c.Stream(context.Background(), provider.Request{}); err == nil {
+		t.Fatal("the call must fail")
+	}
+	setNow(t, c.FallbackStatus().FailedAt.Add(2*time.Minute))
+}
+
+func TestModelShowPinnedChainFallback(t *testing.T) {
+	c, sent, set := chainCtx(t, nil)
+	failEntry(t, set, "deepseek", "deepseek-chat")
+	run(t, c, "/model deepseek config")
+	run(t, c, "/model")
+	r := lastSent(t, sent)
+	want := "🧠 **Model: deepseek**\n`primary` · glm-4.7\n" +
+		"⚠️ The model deepseek-chat of deepseek failed 2 min ago (HTTP 429). Calls go to primary until deepseek answers again.\n" +
+		"Tap a provider to see its models."
+	if r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	// The buttons mark the entry that the session chose, not the served entry.
+	want2 := [][]Button{{{Text: "✓ deepseek", Data: "/model deepseek"}, {Text: "openrouter", Data: "/model openrouter"}}, {{Text: "primary", Data: "/model primary"}}}
+	if !reflect.DeepEqual(r.Buttons, want2) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+	// Another session of the same agent has the default chain, and primary answers.
+	other := &CommandCtx{Deps: c.Deps, Key: "telegram:dm:2", Send: c.Send}
+	run(t, other, "/model")
+	if r := lastSent(t, sent); r.Text != "🧠 **Model: default**\n`primary` · glm-4.7\nTap a provider to see its models." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+func TestModelShowDefaultChainFallback(t *testing.T) {
+	fixTip(t, "T")
+	c, sent, set := chainCtx(t, func(cfg *config.Config) {
+		pc := cfg.Providers["openrouter"]
+		pc.ContextWindow = 64000
+		cfg.Providers["openrouter"] = pc
+	})
+	failEntry(t, set, "primary", "glm-4.7")
+	warn := "⚠️ The primary model glm-4.7 failed 2 min ago (HTTP 429). Calls go to openrouter until the primary answers again."
+	run(t, c, "/model")
+	if r := lastSent(t, sent); r.Text != "🧠 **Model: default**\n`openrouter` · z-ai/glm-4.7\n"+warn+"\nTap a provider to see its models." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	run(t, c, "/new")
+	want := "✨ Starting new session.\nSend a message to begin.\n\n" +
+		"Model: z-ai/glm-4.7 (fallback)\nContext: 64K tokens\n" + warn + "\n\n💡 Tip: T"
+	if r := lastSent(t, sent); r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	// A pinned model of primary has its own health key, so it shows no warning.
+	run(t, c, "/model primary:glm-4.6")
+	run(t, c, "/model")
+	if r := lastSent(t, sent); r.Text != "🧠 **Model: primary:glm-4.6**\n`primary` · glm-4.6\nTap a provider to see its models." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+const effortLevels = "default, none, minimal, low, medium, high, xhigh, max"
+
+// effortCtx returns an interactive context whose agent has a provider.Set from a config
+// with primary at the model glm-5.3 and the effort cfgEffort.
+func effortCtx(t *testing.T, cfgEffort string) (*CommandCtx, *[]Reply) {
+	t.Helper()
+	c, sent, _ := chainCtx(t, func(cfg *config.Config) {
+		cfg.Providers = map[string]config.Provider{
+			"primary": {Format: "openai", BaseURL: "http://p", Model: "glm-5.3", Effort: cfgEffort},
+		}
+		cfg.Agent.Fallback = nil
+	})
+	return c, sent
+}
+
+// effortProv rejects a call that has an effort with an HTTP 400 about the effort.
+type effortProv struct{ name, model string }
+
+func (e effortProv) Name() string  { return e.name }
+func (e effortProv) Model() string { return e.model }
+func (e effortProv) Stream(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
+	if req.Effort != "" {
+		return nil, &provider.HTTPStatusError{Code: 400, Body: `{"error":"thinking is not supported"}`}
+	}
+	ch := make(chan provider.Event)
+	close(ch)
+	return ch, nil
+}
+
+// markEffortRejected drives one call with an effort through the Health of the agent's Set,
+// to an entry that rejects the effort.
+func markEffortRejected(t *testing.T, c *CommandCtx, name, model string) {
+	t.Helper()
+	set := c.Deps.Agent.Chains
+	ch := provider.NewChain([]provider.ChainEntry{{Name: name, P: effortProv{name, model}}}, set.Health, slog.New(slog.DiscardHandler))
+	if _, err := ch.Stream(context.Background(), provider.Request{Effort: "low"}); err != nil {
+		t.Fatal(err)
+	}
+	if !set.Health.RejectsEffort(name, model) {
+		t.Fatal("the entry must reject the effort")
+	}
+}
+
+func TestEffortShowWithButtons(t *testing.T) {
+	c, sent := effortCtx(t, "high")
+	run(t, c, "/effort")
+	r := lastSent(t, sent)
+	if want := "🧠 **Effort: high**\n`primary` · glm-5.3 · from config\nSelect the effort for this session:"; r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	want := [][]Button{
+		{{Text: "default", Data: "/effort default"}, {Text: "none", Data: "/effort none"}, {Text: "low", Data: "/effort low"}, {Text: "medium", Data: "/effort medium"}},
+		{{Text: "✓ high", Data: "/effort high"}, {Text: "xhigh", Data: "/effort xhigh"}, {Text: "max", Data: "/effort max"}, {Text: "minimal", Data: "/effort minimal"}},
+	}
+	if !reflect.DeepEqual(r.Buttons, want) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+	for _, row := range r.Buttons {
+		for _, b := range row {
+			if len(b.Data) >= 64 {
+				t.Fatal(b.Data)
+			}
+		}
+	}
+}
+
+func TestEffortShowDefault(t *testing.T) {
+	c, sent := effortCtx(t, "")
+	run(t, c, "/effort")
+	r := lastSent(t, sent)
+	if want := "🧠 **Effort: default**\n`primary` · glm-5.3 · provider default\nSelect the effort for this session:"; r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if r.Buttons[0][0].Text != "✓ default" || r.Buttons[1][0].Text != "high" {
+		t.Fatalf("%+v", r.Buttons)
+	}
+}
+
+func TestEffortSetDefaultUnknownAndCLI(t *testing.T) {
+	c, sent := effortCtx(t, "")
+	run(t, c, "/effort  HIGH ")
+	r := lastSent(t, sent)
+	if want := "🧠 **Effort: high**\nThis session uses it from the next message."; r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if !reflect.DeepEqual(r.Buttons, [][]Button{{{Text: "↺ Use the default", Data: "/effort default"}}}) {
+		t.Fatal(r.Buttons)
+	}
+	if s, _ := c.Deps.Store.Get(context.Background(), c.Session.ID); s.Effort != "high" || c.Session.Effort != "high" {
+		t.Fatal(s.Effort, c.Session.Effort)
+	}
+	run(t, c, "/effort")
+	if r := lastSent(t, sent); !strings.Contains(r.Text, "· this session") || r.Buttons[1][0].Text != "✓ high" {
+		t.Fatal(r.Text)
+	}
+	run(t, c, "/effort default")
+	if r := lastSent(t, sent); r.Text != "🧠 **Effort: default**\nThis session uses the default again." || r.Buttons != nil {
+		t.Fatalf("%+v", r)
+	}
+	if s, _ := c.Deps.Store.Get(context.Background(), c.Session.ID); s.Effort != "" {
+		t.Fatal(s.Effort)
+	}
+	run(t, c, "/effort turbo_x")
+	if r := lastSent(t, sent); r.Text != "⚠️ **Unknown effort: turbo\\_x**\nThe levels are: "+effortLevels+"." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+
+	cli, out := cmdCtx(t, "cli:local") // a channel with no buttons
+	run(t, cli, "/effort")
+	if !strings.HasSuffix(strings.TrimSpace(out.String()), "Send /effort <level>. The levels are: "+effortLevels+".") {
+		t.Fatal(out.String())
+	}
+	out.Reset()
+	run(t, cli, "/effort max")
+	if want := "🧠 **Effort: max**\nThis session uses it from the next message.\nSend /effort default to use the default again.\n"; out.String() != want {
+		t.Fatalf("got:\n%s", out)
+	}
+}
+
+func TestEffortRejectedWarning(t *testing.T) {
+	c, sent := effortCtx(t, "none")
+	markEffortRejected(t, c, "primary", "glm-5.3")
+	run(t, c, "/effort")
+	if !strings.Contains(lastSent(t, sent).Text, "\n⚠️ glm-5.3 rejects the effort \"none\". The provider default applies.") {
+		t.Fatal(lastSent(t, sent).Text)
+	}
+}
+
+func TestEffortCommandEntry(t *testing.T) {
+	cmd, ok := Commands()["effort"]
+	if !ok || cmd.WhileBusy || cmd.Help != "Set the reasoning effort of this session: /effort <level> | default" {
+		t.Fatalf("%+v", cmd)
 	}
 }

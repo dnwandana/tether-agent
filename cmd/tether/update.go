@@ -6,12 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -110,7 +112,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	case update.StateUpdated:
 		fmt.Fprintf(stdout, "updated tether %s → %s at %s\n", res.Current, res.Available, res.BinPath)
 		// gatewaylock.Held opens the file read-only and never creates it. An error gives no hint.
-		held, err := gatewaylock.Held(filepath.Join(updateDataDir(*dir), "gateway.lock"))
+		held, err := gatewaylock.Held(filepath.Join(sudoDataDir(*dir), "gateway.lock"))
 		if err == nil && held {
 			return restartGateway(ctx, stdout, stderr, res.Available, *restart, *noRestart)
 		}
@@ -190,10 +192,10 @@ func sudoUserUnit() bool {
 	return err == nil
 }
 
-// updateDataDir returns the data folder in which update looks for gateway.lock. The order is
+// sudoDataDir returns the data folder for update and for setup --system. The order is
 // --data-dir, TETHER_HOME, the home of SUDO_USER when the process runs as root, and then
 // ~/.tether. The sudo rule exists because sudo sets the home folder to the home of root.
-func updateDataDir(flagValue string) string {
+func sudoDataDir(flagValue string) string {
 	if flagValue != "" || os.Getenv("TETHER_HOME") != "" {
 		return dataDir(flagValue)
 	}
@@ -205,9 +207,32 @@ func updateDataDir(flagValue string) string {
 	return dataDir("")
 }
 
+// lchown changes the owner of a file. Tests replace it.
+var lchown = os.Lchown
+
+// giveToSudoUser gives dir and all its files to the user who called sudo. The gateway of a
+// system unit runs as that user, and it cannot read the 0600 files that root wrote. It does
+// nothing when the process is not root or when sudo did not set SUDO_UID and SUDO_GID.
+func giveToSudoUser(dir string) error {
+	if geteuid() != 0 {
+		return nil
+	}
+	uid, uerr := strconv.Atoi(os.Getenv("SUDO_UID"))
+	gid, gerr := strconv.Atoi(os.Getenv("SUDO_GID"))
+	if uerr != nil || gerr != nil || uid == 0 {
+		return nil
+	}
+	return filepath.WalkDir(dir, func(path string, _ fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return lchown(path, uid, gid)
+	})
+}
+
 // restartHint returns the line that tells the user to restart a running gateway. systemUnit
-// is true when the system-wide unit of the gateway exists. The command only prints the hint
-// and never runs systemctl.
+// is true when the system-wide unit of the gateway exists. restartGateway prints it when it
+// does not run systemctl itself.
 func restartHint(goos string, systemUnit bool) string {
 	const head = "the gateway still runs the old version; "
 	switch {

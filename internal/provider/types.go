@@ -1,5 +1,5 @@
 // Package provider holds the model provider interface, the wire adapters
-// for the OpenAI and Anthropic formats, and the fallback wrapper.
+// for the OpenAI, Anthropic, and Responses formats, and the fallback chain.
 package provider
 
 import "encoding/json"
@@ -40,6 +40,23 @@ type Message struct {
 	ToolCallID string
 	ToolName   string
 	ToolCalls  []ToolCall
+	// Reasoning is the reasoning of the model for an assistant message, in
+	// the shape of the adapter that produced it. It goes back only to the
+	// issuer that produced it.
+	Reasoning *Reasoning
+}
+
+// Reasoning is the reasoning of the model for one assistant message. The
+// adapter compacts each raw item when it arrives, so the bytes in memory
+// and the bytes after a reload are the same.
+type Reasoning struct {
+	// Issuer is "<format> <base_url> <model>" of the call that produced it.
+	Issuer string `json:"issuer"`
+	// Text is the reasoning_content of the Chat Completions format.
+	Text string `json:"text,omitempty"`
+	// Output holds all the output items of the Responses format, or the
+	// thinking blocks of the Anthropic format, in order.
+	Output []json.RawMessage `json:"output,omitempty"`
 }
 
 // ToolSchema describes one tool to the model. Parameters is a JSON schema.
@@ -70,10 +87,10 @@ const (
 )
 
 // Event is one item of the internal event stream. EventText sets Delta.
-// EventToolCall sets ToolCall. EventDone sets FinishReason and Usage.
-// EventError sets Err. An event of each type can carry the stamp: Provider
-// is the config entry name and Model is the model of the request that
-// served the stream.
+// EventToolCall sets ToolCall. EventDone sets FinishReason and Usage, and
+// it can set Reasoning. EventError sets Err. An event of each type can
+// carry the stamp: Provider is the config entry name and Model is the model
+// of the request that served the stream.
 type Event struct {
 	Type         EventType
 	Delta        string
@@ -81,6 +98,7 @@ type Event struct {
 	FinishReason string
 	Usage        *Usage
 	Err          error
+	Reasoning    *Reasoning
 	Provider     string
 	Model        string
 }
@@ -93,16 +111,29 @@ type Request struct {
 	Tools     []ToolSchema
 	Model     string
 	MaxTokens int
+	// CacheKey is the session id. The Responses adapter sends it as the
+	// prompt cache key. The other adapters ignore it.
+	CacheKey string
+	// Effort is the reasoning effort level. The empty value sends no
+	// effort field.
+	Effort string
+	// StartAt is the name of the chain entry that the call starts at. The
+	// empty value starts at the first entry.
+	StartAt string
+	// NeedVision is true when the call has no use without its images, for
+	// example view_image. A chain then skips each entry with no vision.
+	NeedVision bool
 }
 
-// Result is the assembled result of one stream. Provider and Model name
-// the provider that served the stream. They are empty when no event
-// carries a stamp.
+// Result is the assembled result of one stream. Reasoning comes from the
+// EventDone event. Provider and Model name the provider that served the
+// stream. They are empty when no event carries a stamp.
 type Result struct {
 	Text         string
 	ToolCalls    []ToolCall
 	FinishReason string
 	Usage        Usage
+	Reasoning    *Reasoning
 	Provider     string
 	Model        string
 }

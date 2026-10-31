@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -510,7 +511,9 @@ func TestUsageSubcommand(t *testing.T) {
 	if code := run([]string{"usage", "--data-dir", dir}, &out, &errb); code != 1 || !strings.Contains(errb.String(), "state.db") {
 		t.Fatalf("no db: exit %d: %s", code, errb.String())
 	}
-	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("providers:\n  primary:\n    format: openai\n    base_url: http://127.0.0.1:1\n    model: glm-4.7\n    flat_rate: true\n"), 0o600); err != nil {
+	// The usage subcommand reads only state.db, so a config that does not load gives no
+	// warning.
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("providers: [\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	d, err := db.Open(filepath.Join(dir, "state.db"))
@@ -531,10 +534,13 @@ func TestUsageSubcommand(t *testing.T) {
 		if code := run(args, &out, &errb); code != 0 {
 			t.Fatalf("%v: exit %d: %s", args, code, errb.String())
 		}
-		for _, want := range []string{"3.41M", "flat plan", "$0.07", "tok/s"} {
+		for _, want := range []string{"3.41M", "$0.07", "tok/s"} {
 			if !strings.Contains(out.String(), want) {
 				t.Fatal(args, want, out.String())
 			}
+		}
+		if strings.Contains(out.String(), "flat") || errb.Len() != 0 {
+			t.Fatalf("%v: stdout:\n%s\nstderr:\n%s", args, out.String(), errb.String())
 		}
 	}
 	if code := run([]string{"usage", "1y", "--data-dir", dir}, &out, &errb); code != 2 {
@@ -691,7 +697,7 @@ func TestSetupSubcommand(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	stdin = strings.NewReader("openai\n" + srv.URL + "\nsk-setup-key-123\nm\nn\nn\nn\n")
+	stdin = strings.NewReader("11\nopenai\n" + srv.URL + "\nsk-setup-key-123\nm\nn\nn\nn\n")
 	defer func() { stdin = os.Stdin }()
 	var out, errb bytes.Buffer
 	if code := run([]string{"setup", "--data-dir", dir}, &out, &errb); code != 0 {
@@ -708,6 +714,56 @@ func TestSetupSubcommand(t *testing.T) {
 	stdin = strings.NewReader("")
 	if code := run([]string{"setup", "--data-dir", t.TempDir()}, &out, &errb); code != 1 {
 		t.Fatalf("exit %d", code)
+	}
+}
+
+func TestGiveToSudoUser(t *testing.T) {
+	oldEUID, oldChown := geteuid, lchown
+	t.Cleanup(func() { geteuid, lchown = oldEUID, oldChown })
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "memory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"config.yaml", ".env", "memory/memory.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var got []string
+	lchown = func(path string, uid, gid int) error {
+		if uid != 1000 || gid != 1001 {
+			t.Fatalf("chown %s to %d:%d", path, uid, gid)
+		}
+		rel, _ := filepath.Rel(dir, path)
+		got = append(got, rel)
+		return nil
+	}
+	t.Setenv("SUDO_UID", "1000")
+	t.Setenv("SUDO_GID", "1001")
+
+	geteuid = func() int { return 0 }
+	if err := giveToSudoUser(dir); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{".", ".env", "config.yaml", "memory", "memory/memory.md"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("chown %v, want %v", got, want)
+	}
+
+	// Not root, root as the sudo user, or no sudo: nothing changes.
+	got = nil
+	geteuid = func() int { return 1000 }
+	if err := giveToSudoUser(dir); err != nil || got != nil {
+		t.Fatalf("not root: %v %v", got, err)
+	}
+	geteuid = func() int { return 0 }
+	t.Setenv("SUDO_UID", "0")
+	if err := giveToSudoUser(dir); err != nil || got != nil {
+		t.Fatalf("sudo user is root: %v %v", got, err)
+	}
+	t.Setenv("SUDO_UID", "")
+	if err := giveToSudoUser(dir); err != nil || got != nil {
+		t.Fatalf("no sudo: %v %v", got, err)
 	}
 }
 

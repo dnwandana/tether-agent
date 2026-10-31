@@ -38,7 +38,7 @@ func TestReadLastAnswerNewest(t *testing.T) {
 	if diff := l.At.Sub(now.Add(-2 * time.Minute)).Abs(); diff > time.Millisecond {
 		t.Fatalf("At = %v, diff %v", l.At, diff)
 	}
-	if l.Pin != "" || l.PinsFallback() {
+	if l.Pin != "" || l.PinnedEntry() != "primary" {
 		t.Fatalf("pin %q", l.Pin)
 	}
 	// The connection is free after the call.
@@ -59,18 +59,17 @@ func TestReadLastAnswerPin(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if l.Pin != "fallback" || !l.PinsFallback() {
+	if l.Pin != "fallback" || l.PinnedEntry() != "fallback" {
 		t.Fatalf("%+v", l)
 	}
-	for pin, want := range map[string]bool{
-		"fallback":          true,
-		"fallback:deepseek": true,
-		"primary:glm-4.7":   false,
-		"":                  false,
-		"fallbacks":         false,
+	for pin, want := range map[string]string{
+		"":                "primary",
+		"deepseek:m":      "deepseek",
+		"fallback":        "fallback",
+		"primary:glm-4.7": "primary",
 	} {
-		if got := (LastAnswer{Pin: pin}).PinsFallback(); got != want {
-			t.Errorf("PinsFallback(%q) = %v, want %v", pin, got, want)
+		if got := (LastAnswer{Pin: pin}).PinnedEntry(); got != want {
+			t.Errorf("PinnedEntry(%q) = %q, want %q", pin, got, want)
 		}
 	}
 }

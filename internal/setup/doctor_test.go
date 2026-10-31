@@ -17,6 +17,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/hostos"
+	"github.com/dnwandana/tether-agent/internal/obs"
 )
 
 // ctx is the context of the calls in the tests.
@@ -559,7 +560,7 @@ func TestLastAnswerPinnedFallbackOK(t *testing.T) {
 		model: "deepseek/deepseek-v4.1-flash-1017", age: 2 * time.Minute})
 	got := find(t, d.Run(ctx), "last answer")
 	want := Check{Name: "last answer", Status: StatusOK,
-		Detail: "fallback · deepseek/deepseek-v4.1-flash-1017, 2 min ago (the session pins the fallback)"}
+		Detail: "fallback · deepseek/deepseek-v4.1-flash-1017, 2 min ago (the session pins the entry fallback)"}
 	if got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
@@ -610,5 +611,92 @@ func TestDoctorUnitCheck(t *testing.T) {
 	c = find(t, d.Run(ctx), "systemd unit")
 	if c.Status != StatusOK || c.Next != "" {
 		t.Fatalf("%+v", c)
+	}
+}
+
+// eq fails the test when got is not want.
+func eq[T comparable](t *testing.T, got, want T) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+func TestProviderOrderFollowsFallbackList(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{"primary": {}, "zeta": {}, "openrouter": {}, "deepseek": {}, "alpha": {}}
+	cfg.Agent.Fallback = []string{"openrouter", "deepseek"}
+	eq(t, strings.Join(providerOrder(&cfg), ","), "primary,openrouter,deepseek,alpha,zeta")
+
+	// The old entry "fallback" with no agent.fallback key comes second.
+	cfg.Providers = map[string]config.Provider{"primary": {}, "zeta": {}, "fallback": {}, "alpha": {}}
+	cfg.Agent.Fallback = nil
+	eq(t, strings.Join(providerOrder(&cfg), ","), "primary,fallback,alpha,zeta")
+}
+
+func TestCheckProvidersPresetNameAndUnusable(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{
+		"primary":  {Format: "openai", BaseURL: okProvider(t).URL, Model: "m"},
+		"deepseek": {Preset: "deepseek", Format: "openai", Model: "m", Unusable: "config: providers.deepseek needs an API key. Set DEEPSEEK_API_KEY in ~/.tether/.env, or set providers.deepseek.api_key"},
+	}
+	got := (&Doctor{}).checkProviders(ctx, &cfg)
+	if len(got) != 2 || got[0].Status != StatusOK {
+		t.Fatalf("%+v", got)
+	}
+	if got[1].Name != "provider deepseek (deepseek)" || got[1].Status != StatusFail || !strings.Contains(got[1].Detail, "DEEPSEEK_API_KEY") ||
+		got[1].Next == "" {
+		t.Fatalf("%+v", got[1])
+	}
+}
+
+func TestLastAnswerWarnsWhenServedIsNotFirst(t *testing.T) {
+	cases := []struct {
+		provider, pin string
+		warn          bool
+	}{
+		{"primary", "", false}, {"openrouter", "", true}, {"fallback", "", true},
+		{"deepseek", "deepseek:deepseek-chat", false}, {"primary", "deepseek", true},
+	}
+	for _, c := range cases {
+		got := lastAnswerCheck(obs.LastAnswer{Provider: c.provider, Model: "m", Pin: c.pin}, time.Minute)
+		if (got.Status == StatusWarn) != c.warn {
+			t.Errorf("%+v: %+v", c, got)
+		}
+	}
+}
+
+func TestDoctorWarnsOldFlatRate(t *testing.T) {
+	raw := []byte("providers:\n  primary:\n    format: openai\n    flat_rate: true\n  zai:\n    preset: zai\n")
+	got := flatRateChecks(raw)
+	if len(got) != 1 || got[0].Status != StatusWarn || got[0].Name != "config" ||
+		got[0].Detail != "providers.primary.flat_rate is removed. The usage report counts every provider in dollars. Delete the key from config.yaml." {
+		t.Fatalf("%+v", got)
+	}
+	if got[0].Next == "" {
+		t.Fatalf("no next action: %+v", got[0])
+	}
+	if len(flatRateChecks([]byte("providers:\n  primary:\n    format: openai\n"))) != 0 {
+		t.Fatal("no key, no warning")
+	}
+	if len(flatRateChecks([]byte("providers: [\n"))) != 0 {
+		t.Fatal("bad YAML, no warning")
+	}
+}
+
+func TestDoctorRunWarnsOldFlatRate(t *testing.T) {
+	prov := okProvider(t)
+	d := doctorWithFakes(t, prov, okTelegram(t), allPrograms)
+	cfg := "providers:\n  primary:\n    format: openai\n    base_url: " + prov.URL +
+		"\n    api_key: ${PRIMARY_API_KEY}\n    model: m\n    flat_rate: true\npricing:\n  sources: []\n"
+	if err := os.WriteFile(d.ConfigPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := d.Run(ctx)
+	if c := find(t, checks, "config"); c.Status != StatusOK {
+		t.Fatalf("config check: %+v", c)
+	}
+	if out := Format(checks); !strings.Contains(out, "⚠ config: providers.primary.flat_rate is removed.") {
+		t.Fatal(out)
 	}
 }

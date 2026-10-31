@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -297,5 +298,133 @@ func TestOpenAIStampsMidStreamError(t *testing.T) {
 	r, err := Collect(ch, nil)
 	if err == nil || r.Text != "half" || r.Provider != "p" || r.Model != "m" {
 		t.Fatal(r, err)
+	}
+}
+
+func reasoningEndpoint(url string, hc *http.Client) endpoint {
+	return endpoint{name: "deepseek", format: "openai", baseURL: url, apiKey: "k", model: "deepseek-chat",
+		hc: hc, quirks: map[string]bool{"reasoning_content": true}}
+}
+
+func TestOpenAIKeepsReasoningContent(t *testing.T) {
+	srv := fixtureServer(t, "testdata/openai_reasoning_stream.sse")
+	ch, err := newOpenAI(reasoningEndpoint(srv.URL, srv.Client())).Stream(ctx, Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := Collect(ch, nil)
+	if err != nil || r.Reasoning == nil {
+		t.Fatal(err, r.Reasoning)
+	}
+	if r.Reasoning.Text != "Check df." || r.Reasoning.Issuer != "openai "+srv.URL+" deepseek-chat" || r.Text != "" {
+		t.Fatalf("%+v %q", r.Reasoning, r.Text)
+	}
+}
+
+func TestOpenAIReplaysReasoningAndPads(t *testing.T) {
+	var body map[string]any
+	srv := captureServer(t, &body, "testdata/openai_text_stream.sse")
+	e := reasoningEndpoint(srv.URL, srv.Client())
+	own := &Reasoning{Issuer: e.issuer(""), Text: "plan A"}
+	other := &Reasoning{Issuer: "openai https://openrouter.ai/api/v1 x", Text: "plan B"}
+	req := Request{Messages: []Message{
+		{Role: RoleUser, Content: "q"},
+		{Role: RoleAssistant, Content: "a1", Reasoning: own},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1", Name: "t", Args: "{}"}}, Reasoning: other},
+		{Role: RoleTool, ToolCallID: "c1", Content: "out"},
+		{Role: RoleAssistant, Content: "a3"}, // an old row: no reasoning
+	}}
+	if _, err := newOpenAI(e).Stream(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	var got []any
+	for _, m := range body["messages"].([]any) {
+		mm := m.(map[string]any)
+		if mm["role"] == "assistant" {
+			got = append(got, mm["reasoning_content"])
+		}
+	}
+	if !reflect.DeepEqual(got, []any{"plan A", " ", " "}) {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestOpenAIWithoutQuirkSendsNoReasoning(t *testing.T) {
+	var body map[string]any
+	srv := captureServer(t, &body, "testdata/openai_text_stream.sse")
+	req := Request{Messages: []Message{{Role: RoleUser, Content: "q"}, {Role: RoleAssistant, Content: "a", Reasoning: &Reasoning{Text: "x"}}}}
+	if _, err := NewOpenAI("p", srv.URL, "k", "m", srv.Client()).Stream(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fmt.Sprint(body["messages"]), "reasoning_content") {
+		t.Fatal(body["messages"])
+	}
+}
+
+func chatBody(t *testing.T, e endpoint, req Request) (map[string]any, http.Header) {
+	t.Helper()
+	var body map[string]any
+	var hdr http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr = r.Header.Clone()
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		serveFile(w, "testdata/openai_text_stream.sse")
+	}))
+	t.Cleanup(srv.Close)
+	e.baseURL, e.hc = srv.URL, srv.Client()
+	if _, err := newOpenAI(e).Stream(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	return body, hdr
+}
+
+func TestChatEffortFields(t *testing.T) {
+	cases := []struct {
+		style, quirk, level string
+		want                map[string]any // keys that must be present, with their JSON values
+		absent              []string
+	}{
+		{"glm", "", "medium", map[string]any{"reasoning_effort": "high"}, []string{"thinking"}},
+		{"glm", "", "none", map[string]any{"thinking": map[string]any{"type": "disabled"}}, []string{"reasoning_effort"}},
+		{"glm", "keep_thinking", "high", map[string]any{"reasoning_effort": "high",
+			"thinking": map[string]any{"type": "enabled", "clear_thinking": false}}, nil},
+		{"glm", "keep_thinking", "none", map[string]any{"thinking": map[string]any{"type": "disabled"}}, nil},
+		{"glm", "keep_thinking", "", map[string]any{"thinking": map[string]any{"type": "enabled", "clear_thinking": false}}, []string{"reasoning_effort"}},
+		{"glm-think", "", "none", map[string]any{"reasoning_effort": "low"}, []string{"thinking"}},
+		{"glm-think", "keep_thinking", "none", map[string]any{"reasoning_effort": "low",
+			"thinking": map[string]any{"type": "enabled", "clear_thinking": false}}, nil},
+		{"glm-think", "keep_thinking", "xhigh", map[string]any{"reasoning_effort": "max",
+			"thinking": map[string]any{"type": "enabled", "clear_thinking": false}}, nil},
+		{"qwen", "", "none", map[string]any{"enable_thinking": false}, []string{"reasoning_effort"}},
+		{"qwen", "", "high", map[string]any{"enable_thinking": true, "reasoning_effort": "xhigh"}, nil},
+		{"openrouter", "", "low", map[string]any{"reasoning": map[string]any{"effort": "low"}}, []string{"reasoning_effort"}},
+		{"ollama", "", "none", map[string]any{"reasoning_effort": "none"}, nil},
+		{"chat", "", "", nil, []string{"reasoning_effort", "reasoning", "thinking", "enable_thinking"}},
+	}
+	for _, c := range cases {
+		e := endpoint{name: "p", format: "openai", model: "m", effortStyle: c.style, quirks: map[string]bool{c.quirk: c.quirk != ""}}
+		body, _ := chatBody(t, e, Request{Effort: c.level})
+		for k, v := range c.want {
+			if !reflect.DeepEqual(body[k], v) {
+				t.Errorf("%s %s %s: %s = %v", c.style, c.quirk, c.level, k, body[k])
+			}
+		}
+		for _, k := range c.absent {
+			if _, ok := body[k]; ok {
+				t.Errorf("%s %s %s: %s is present", c.style, c.quirk, c.level, k)
+			}
+		}
+	}
+}
+
+func TestOpenRouterHeaders(t *testing.T) {
+	e := endpoint{name: "openrouter", format: "openai", model: "m", quirks: map[string]bool{"openrouter_headers": true}}
+	_, hdr := chatBody(t, e, Request{})
+	if hdr.Get("HTTP-Referer") != "https://github.com/dnwandana/tether-agent" || hdr.Get("X-Title") != "Tether Agent" {
+		t.Fatal(hdr)
+	}
+	_, hdr = chatBody(t, endpoint{name: "p", format: "openai", model: "m"}, Request{})
+	if hdr.Get("X-Title") != "" {
+		t.Fatal("headers without the quirk")
 	}
 }

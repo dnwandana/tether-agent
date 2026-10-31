@@ -21,8 +21,10 @@ import (
 var ErrNotFound = errors.New("no session")
 
 // Session is one row of the sessions table. Kind is chat, cron, subagent, or review.
+// Effort is the reasoning effort that /effort set. "" uses the config.
 type Session struct {
 	ID, Key, Source, ChatID, ThreadID, UserID, Title, ModelOverride, PromptOverride, ParentID, Kind string
+	Effort                                                                                          string
 	StartedAt, LastActive                                                                           time.Time
 	Archived                                                                                        bool
 }
@@ -64,7 +66,7 @@ func New(d *db.DB) *Store { return &Store{db: d} }
 
 // sessionCols is the column list that scanSession reads, in order.
 const sessionCols = `id, session_key, source, chat_id, thread_id, user_id, title, model_override,
-	prompt_override, parent_id, kind, started_at, last_active, archived`
+	prompt_override, parent_id, kind, started_at, last_active, archived, effort`
 
 // newID returns the UTC time in milliseconds as 13 hex characters plus 6 random hex
 // characters. The ids sort by creation time.
@@ -84,9 +86,9 @@ func (s *Store) Create(ctx context.Context, in Session) (*Session, error) {
 		in.Kind = "chat"
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO sessions (`+sessionCols+`)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ID, in.Key, in.Source, in.ChatID, in.ThreadID, in.UserID, in.Title, in.ModelOverride,
-		in.PromptOverride, in.ParentID, in.Kind, now.UnixMilli(), now.UnixMilli(), boolInt(in.Archived))
+		in.PromptOverride, in.ParentID, in.Kind, now.UnixMilli(), now.UnixMilli(), boolInt(in.Archived), in.Effort)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: create: %w", err)
 	}
@@ -171,6 +173,7 @@ func (s *Store) ActiveOrCreate(ctx context.Context, key string, tmpl Session) (*
 // Append writes one message and updates last_active of the session. It returns the message
 // id. Each message is one INSERT with no buffer, so a crash does not lose a written message.
 // Image bytes are not stored. The content gets an "[image: <path>]" marker for each image.
+// m.Reasoning goes into the reasoning column as JSON. A nil Reasoning writes NULL.
 func (s *Store) Append(ctx context.Context, sessionID string, m provider.Message, meta MessageMeta) (int64, error) {
 	content := m.Content
 	for _, img := range m.Images {
@@ -187,6 +190,14 @@ func (s *Store) Append(ctx context.Context, sessionID string, m provider.Message
 		}
 		toolCalls = string(b)
 	}
+	var reasoning any
+	if m.Reasoning != nil {
+		b, err := json.Marshal(m.Reasoning)
+		if err != nil {
+			return 0, fmt.Errorf("sessions: append to %s: %w", sessionID, err)
+		}
+		reasoning = string(b)
+	}
 	var cost any
 	if meta.CostUSD != 0 {
 		cost = meta.CostUSD
@@ -194,12 +205,12 @@ func (s *Store) Append(ctx context.Context, sessionID string, m provider.Message
 	now := time.Now().UnixMilli()
 	res, err := s.db.ExecContext(ctx, `INSERT INTO messages (session_id, role, content, tool_call_id,
 		tool_calls, tool_name, input_tokens, output_tokens, cache_read_tokens, latency_ms,
-		latency_first_ms, cost_usd, model, provider, finish_reason, observed, timestamp)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		latency_first_ms, cost_usd, model, provider, finish_reason, observed, timestamp, reasoning)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID, string(m.Role), content, m.ToolCallID, toolCalls, m.ToolName,
 		meta.Usage.InputTokens, meta.Usage.OutputTokens, meta.Usage.CacheReadTokens,
 		meta.Usage.TotalMS, meta.Usage.FirstTokenMS, cost, meta.Model, meta.Provider,
-		meta.FinishReason, boolInt(meta.Observed), now)
+		meta.FinishReason, boolInt(meta.Observed), now, reasoning)
 	if err != nil {
 		return 0, fmt.Errorf("sessions: append to %s: %w", sessionID, err)
 	}
@@ -316,6 +327,11 @@ func (s *Store) SetModel(ctx context.Context, id, v string) error {
 	return s.setColumn(ctx, id, "model_override", v)
 }
 
+// SetEffort sets the reasoning effort of the session. "" removes it, so the config applies.
+func (s *Store) SetEffort(ctx context.Context, id, v string) error {
+	return s.setColumn(ctx, id, "effort", v)
+}
+
 // SetPrompt sets the prompt override of the session. "" removes it.
 func (s *Store) SetPrompt(ctx context.Context, id, v string) error {
 	return s.setColumn(ctx, id, "prompt_override", v)
@@ -400,7 +416,7 @@ func (s *Store) setColumn(ctx context.Context, id, col string, v any) error {
 // messageCols is the column list that scanMessage reads, in order.
 const messageCols = `id, role, content, tool_call_id, tool_calls, tool_name, input_tokens,
 	output_tokens, cache_read_tokens, latency_ms, latency_first_ms, cost_usd, model, provider,
-	finish_reason, compacted, observed, timestamp`
+	finish_reason, compacted, observed, timestamp, reasoning`
 
 // Messages returns all the messages of the session in id order.
 func (s *Store) Messages(ctx context.Context, sessionID string) ([]StoredMessage, error) {
@@ -434,8 +450,8 @@ func scanSession(r scanner, extra ...any) (*Session, error) {
 		started, lastAct int64
 		archived         int
 	)
-	dest := append(make([]any, 0, 14+len(extra)), &s.ID, &s.Key, &s.Source, &s.ChatID, &s.ThreadID, &s.UserID, &s.Title,
-		&s.ModelOverride, &s.PromptOverride, &s.ParentID, &s.Kind, &started, &lastAct, &archived)
+	dest := append(make([]any, 0, 15+len(extra)), &s.ID, &s.Key, &s.Source, &s.ChatID, &s.ThreadID, &s.UserID, &s.Title,
+		&s.ModelOverride, &s.PromptOverride, &s.ParentID, &s.Kind, &started, &lastAct, &archived, &s.Effort)
 	if err := r.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
 	}
@@ -445,11 +461,14 @@ func scanSession(r scanner, extra ...any) (*Session, error) {
 	return &s, nil
 }
 
+// scanMessage reads the messageCols columns. A reasoning value with bad JSON gives a nil
+// Reasoning and no error, so one bad cell does not block the load of the session.
 func scanMessage(r scanner) (StoredMessage, error) {
 	var (
 		m                   StoredMessage
 		role                string
 		toolCalls           sql.NullString
+		reasoning           sql.NullString
 		cost                sql.NullFloat64
 		compacted, observed int
 		at                  int64
@@ -457,13 +476,19 @@ func scanMessage(r scanner) (StoredMessage, error) {
 	if err := r.Scan(&m.ID, &role, &m.Msg.Content, &m.Msg.ToolCallID, &toolCalls, &m.Msg.ToolName,
 		&m.Meta.Usage.InputTokens, &m.Meta.Usage.OutputTokens, &m.Meta.Usage.CacheReadTokens,
 		&m.Meta.Usage.TotalMS, &m.Meta.Usage.FirstTokenMS, &cost, &m.Meta.Model, &m.Meta.Provider,
-		&m.Meta.FinishReason, &compacted, &observed, &at); err != nil {
+		&m.Meta.FinishReason, &compacted, &observed, &at, &reasoning); err != nil {
 		return m, err
 	}
 	m.Msg.Role = provider.Role(role)
 	if toolCalls.Valid && toolCalls.String != "" {
 		if err := json.Unmarshal([]byte(toolCalls.String), &m.Msg.ToolCalls); err != nil {
 			return m, fmt.Errorf("message %d: bad tool_calls JSON: %w", m.ID, err)
+		}
+	}
+	if reasoning.Valid && reasoning.String != "" {
+		var rs provider.Reasoning
+		if json.Unmarshal([]byte(reasoning.String), &rs) == nil {
+			m.Msg.Reasoning = &rs
 		}
 	}
 	m.Meta.CostUSD = cost.Float64

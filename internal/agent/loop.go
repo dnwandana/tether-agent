@@ -56,8 +56,11 @@ type Agent struct {
 	Prov provider.Provider
 	// Providers holds every provider entry by name, for a session model override.
 	Providers map[string]provider.Provider
-	Tools     *tools.Registry
-	Store     *sessions.Store
+	// Chains builds the chain of each session from the raw adapters. A nil Chains uses
+	// Prov and Providers, for the tests that build an Agent by hand.
+	Chains *provider.Set
+	Tools  *tools.Registry
+	Store  *sessions.Store
 	// DB is the state.db handle. The steer injection updates a stored tool message with it.
 	DB  *db.DB
 	Cfg *config.Config
@@ -179,6 +182,10 @@ type turnState struct {
 	patched map[int64]string
 	// history goes before the stored messages in each request (a review run).
 	history []provider.Message
+	// served is the chain entry that served the last call of the turn. The next call of
+	// the turn starts there, so the reasoning replay stays with one entry. A new turn
+	// starts at the first entry again.
+	served string
 }
 
 // RunTurn runs one user turn. It saves each message when the message is
@@ -256,6 +263,12 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		return res, err
 	}
 
+	// A review run sends the copy of the parent view, so it uses the cache key of the
+	// parent.
+	cacheKey := t.Session.ID
+	if t.review != nil && t.Session.ParentID != "" {
+		cacheKey = t.Session.ParentID
+	}
 	var (
 		lastText string
 		failures failureTracker
@@ -279,7 +292,8 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		if err != nil {
 			return res, err
 		}
-		req := provider.Request{System: system, Messages: msgs, Tools: schemas}
+		req := provider.Request{System: system, Messages: msgs, Tools: schemas,
+			CacheKey: cacheKey, Effort: t.Session.Effort, StartAt: ts.served}
 		if round == maxTurns-1 {
 			req.Messages = append(req.Messages, provider.Message{Role: provider.RoleSystem, Content: NoteMaxTurns})
 		}
@@ -301,7 +315,8 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			}
 			return res, fmt.Errorf("agent: the model call to %s failed: %w", meta.Provider, cerr)
 		}
-		answer := provider.Message{Role: provider.RoleAssistant, Content: out.Text, ToolCalls: out.ToolCalls}
+		ts.served = out.Provider
+		answer := provider.Message{Role: provider.RoleAssistant, Content: out.Text, ToolCalls: out.ToolCalls, Reasoning: out.Reasoning}
 		if _, err := a.save(dbCtx, ts, answer, meta); err != nil {
 			return res, err
 		}
@@ -486,25 +501,43 @@ func (a *Agent) DefaultModel() (model string, contextWindow int) {
 	return model, a.contextWindow(a.Prov)
 }
 
-// ModelState is the model that answers now for the default provider.
+// ModelState is the entry and the model that answer now for a session.
 type ModelState struct {
+	// Name is the entry that answers now. It is "" when the agent has no provider.
+	Name          string
 	Model         string
 	ContextWindow int
-	// Fallback.Active is false when the primary answers.
+	// Fallback.Active is false when the first entry of the chain answers.
 	Fallback provider.FallbackStatus
 }
 
-// CurrentModel returns the model that answers now. When the default provider calls its
-// fallback, the result names the fallback model and its context window. Else it is the
-// same as DefaultModel.
-func (a *Agent) CurrentModel() ModelState {
-	if a.Prov == nil {
+// CurrentModel returns the entry and the model that answer now for the chain of s. A nil
+// s gives the default chain. When the first entry is in its wait time, the result names
+// the served entry, its model, and its context window.
+func (a *Agent) CurrentModel(s *sessions.Session) ModelState {
+	if a.Chains != nil {
+		st := a.chainFor(s).FallbackStatus()
+		name, model := st.FirstName, st.PrimaryModel
+		if st.Active {
+			name, model = st.FallbackName, st.FallbackModel
+		}
+		if model == "" {
+			model = a.config().Providers[name].Model
+		}
+		return ModelState{Name: name, Model: model, ContextWindow: a.modelWindow(name, model), Fallback: st}
+	}
+	prov := a.providerFor(s)
+	if prov == nil {
 		return ModelState{}
 	}
-	st, _ := provider.StatusOf(a.Prov)
+	name := a.providerEntry(s)
+	st, _ := provider.StatusOf(prov)
 	if !st.Active {
-		model, window := a.DefaultModel()
-		return ModelState{Model: model, ContextWindow: window, Fallback: st}
+		model := prov.Model()
+		if model == "" {
+			model = a.config().Providers[name].Model
+		}
+		return ModelState{Name: name, Model: model, ContextWindow: a.contextWindow(prov), Fallback: st}
 	}
 	var window int
 	if p, ok := a.Providers[st.FallbackName]; ok {
@@ -512,7 +545,56 @@ func (a *Agent) CurrentModel() ModelState {
 	} else {
 		window = a.modelWindow(st.FallbackName, st.FallbackModel)
 	}
-	return ModelState{Model: st.FallbackModel, ContextWindow: window, Fallback: st}
+	return ModelState{Name: st.FallbackName, Model: st.FallbackModel, ContextWindow: window, Fallback: st}
+}
+
+// The sources of EffortState.Source.
+const (
+	EffortFromSession = "this session"
+	EffortFromConfig  = "from config"
+	EffortDefault     = "provider default"
+)
+
+// EffortState is the reasoning effort of a session for the first entry of its chain.
+type EffortState struct {
+	// Level is the effort level. "" is the provider default.
+	Level string
+	// Source is EffortFromSession, EffortFromConfig, or EffortDefault.
+	Source string
+	// Entry and Model name the first entry of the chain of the session and its model.
+	Entry, Model string
+	// Rejected is true when the entry and the model rejected a non-empty level. Then the
+	// calls send no effort, and the provider default applies.
+	Rejected bool
+}
+
+// EffortState returns the effort of the session s: the value of /effort, else the config
+// value of the first entry of its chain, else the provider default. A nil s gives the
+// default chain.
+func (a *Agent) EffortState(s *sessions.Session) EffortState {
+	var st EffortState
+	if a.Chains != nil {
+		c := a.chainFor(s)
+		st.Entry, st.Model = c.Name(), c.Model()
+	} else if p := a.providerFor(s); p != nil {
+		st.Entry, st.Model = a.providerEntry(s), p.Model()
+	}
+	pc := a.config().Providers[st.Entry]
+	if st.Model == "" {
+		st.Model = pc.Model
+	}
+	switch {
+	case s != nil && s.Effort != "":
+		st.Level, st.Source = s.Effort, EffortFromSession
+	case pc.Effort != "":
+		st.Level, st.Source = pc.Effort, EffortFromConfig
+	default:
+		st.Source = EffortDefault
+	}
+	if st.Level != "" && a.Chains != nil {
+		st.Rejected = a.Chains.Health.RejectsEffort(st.Entry, st.Model)
+	}
+	return st
 }
 
 // contextWindow returns the context window of the model of prov.
@@ -675,7 +757,7 @@ func (a *Agent) meta(prov provider.Provider, out provider.Result) sessions.Messa
 	if m.Model != "" {
 		pc.Model = m.Model
 	}
-	if usd, known, flat := a.Prices.Cost(m.Provider, pc, out.Usage); known && !flat {
+	if usd, known := a.Prices.Cost(m.Provider, pc, out.Usage); known {
 		m.CostUSD = usd
 	}
 	return m
@@ -703,8 +785,12 @@ func cutNoSpill(s string, max int) string {
 }
 
 // providerFor returns the provider of the session. ModelOverride is "name" or
-// "name:model", where name is a key of Providers. An unknown name uses the default.
+// "name:model", where name is a key of Providers. An unknown name uses the default. With
+// Chains, the result is the chain of the session.
 func (a *Agent) providerFor(s *sessions.Session) provider.Provider {
+	if a.Chains != nil {
+		return a.chainFor(s)
+	}
 	if s == nil || s.ModelOverride == "" {
 		return a.Prov
 	}
@@ -721,12 +807,33 @@ func (a *Agent) providerFor(s *sessions.Session) provider.Provider {
 	return pinned{Provider: p, model: model}
 }
 
+// chainFor returns the chain of the session s from Chains. A pin "name:model" puts name
+// first with model, then the default chain. No pin, a nil s, or an unknown name gives the
+// default chain. A chain keeps its state in the shared Health, so a new chain on each call
+// is cheap.
+func (a *Agent) chainFor(s *sessions.Session) *provider.Chain {
+	if s == nil || s.ModelOverride == "" {
+		return a.Chains.ChainFor("primary", "")
+	}
+	name, model, _ := strings.Cut(s.ModelOverride, ":")
+	if _, ok := a.Chains.Raw[name]; !ok {
+		a.logger().Warn("agent: the model override names an unknown provider; the default provider is used",
+			"session", s.ID, "override", s.ModelOverride)
+		return a.Chains.ChainFor("primary", "")
+	}
+	return a.Chains.ChainFor(name, model)
+}
+
 // providerEntry returns the name of the provider entry of the session: the name of the
 // model override when it names a known provider, else "primary".
 func (a *Agent) providerEntry(s *sessions.Session) string {
 	if s != nil && s.ModelOverride != "" {
 		name, _, _ := strings.Cut(s.ModelOverride, ":")
-		if p, ok := a.Providers[name]; ok && p != nil {
+		if a.Chains != nil {
+			if _, ok := a.Chains.Raw[name]; ok {
+				return name
+			}
+		} else if p, ok := a.Providers[name]; ok && p != nil {
 			return name
 		}
 	}

@@ -115,16 +115,13 @@ func (s *Service) Lookup(providerName string, p config.Provider) (Price, bool) {
 	return Price{}, false
 }
 
-// Cost returns the cost in USD of one response. flat is true for a provider with
-// flat_rate. known is false when the price is not known or the provider is flat. The
+// Cost returns the cost in USD of one response at the API price. known is false when the
+// price is not known. A plan entry, for example a Coding Plan, gets the same price. The
 // cache-read tokens use the cache-read price when it is known, else the input price.
-func (s *Service) Cost(providerName string, p config.Provider, u provider.Usage) (usd float64, known bool, flat bool) {
-	if p.FlatRate {
-		return 0, false, true
-	}
+func (s *Service) Cost(providerName string, p config.Provider, u provider.Usage) (usd float64, known bool) {
 	pr, ok := s.Lookup(providerName, p)
 	if !ok {
-		return 0, false, false
+		return 0, false
 	}
 	cache := pr.CacheReadPerToken
 	if cache == 0 {
@@ -132,7 +129,7 @@ func (s *Service) Cost(providerName string, p config.Provider, u provider.Usage)
 	}
 	usd = float64(u.InputTokens)*pr.InputPerToken + float64(u.OutputTokens)*pr.OutputPerToken +
 		float64(u.CacheReadTokens)*cache
-	return usd, true, false
+	return usd, true
 }
 
 // ContextWindow returns the context window of the model of p. The order is the

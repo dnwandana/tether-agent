@@ -282,3 +282,19 @@ func TestChildSystemPromptPort(t *testing.T) {
 		t.Fatal(p)
 	}
 }
+
+func TestChildTakesParentEffort(t *testing.T) {
+	fp := scripted(text("child done"))
+	a, parent := newAgent(t, fp)
+	parent.Effort = "low"
+	if r := a.RunChild(ctx, ChildSpec{Goal: "x", ParentSession: parent, ParentToolsets: all()}); r.Status != "ok" {
+		t.Fatalf("%+v", r)
+	}
+	rows := childSessions(t, a, parent.ID)
+	if len(rows) != 1 || rows[0].Effort != "low" {
+		t.Fatalf("%+v", rows)
+	}
+	if fp.requests[0].Effort != "low" {
+		t.Fatal(fp.requests[0].Effort)
+	}
+}

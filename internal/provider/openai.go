@@ -14,14 +14,19 @@ import (
 
 // openAI is the adapter for the OpenAI chat.completions format.
 type openAI struct {
-	name, baseURL, apiKey, model string
-	hc                           *http.Client
+	endpoint
 }
 
 // NewOpenAI returns a provider that sends POST {baseURL}/chat/completions
-// with streaming. A nil hc uses http.DefaultClient.
+// with streaming. The provider has no quirks. A nil hc uses
+// http.DefaultClient.
 func NewOpenAI(name, baseURL, apiKey, model string, hc *http.Client) Provider {
-	return &openAI{name: name, baseURL: baseURL, apiKey: apiKey, model: model, hc: hc}
+	return newOpenAI(endpoint{name: name, format: "openai", baseURL: baseURL, apiKey: apiKey, model: model, hc: hc})
+}
+
+// newOpenAI returns the chat.completions adapter for e.
+func newOpenAI(e endpoint) Provider {
+	return &openAI{endpoint: e}
 }
 
 func (p *openAI) Name() string  { return p.name }
@@ -36,6 +41,20 @@ type (
 		Stream        bool        `json:"stream"`
 		StreamOptions oaStreamOpt `json:"stream_options"`
 		MaxTokens     int         `json:"max_tokens,omitempty"`
+		// The effort fields. The empty effort sends none of them.
+		ReasoningEffort string       `json:"reasoning_effort,omitempty"`
+		Reasoning       *oaReasoning `json:"reasoning,omitempty"`
+		Thinking        *oaThinking  `json:"thinking,omitempty"`
+		EnableThinking  *bool        `json:"enable_thinking,omitempty"`
+	}
+	// oaReasoning is the OpenRouter reasoning object.
+	oaReasoning struct {
+		Effort string `json:"effort"`
+	}
+	// oaThinking is the thinking object of Z.AI, DeepSeek, and Kimi.
+	oaThinking struct {
+		Type          string `json:"type"`
+		ClearThinking *bool  `json:"clear_thinking,omitempty"`
 	}
 	oaStreamOpt struct {
 		IncludeUsage bool `json:"include_usage"`
@@ -45,6 +64,9 @@ type (
 		Content    any          `json:"content"`
 		ToolCalls  []oaToolCall `json:"tool_calls,omitempty"`
 		ToolCallID string       `json:"tool_call_id,omitempty"`
+		// ReasoningContent goes only to an entry with the quirk
+		// reasoning_content.
+		ReasoningContent *string `json:"reasoning_content,omitempty"`
 	}
 	oaPart struct {
 		Type     string      `json:"type"`
@@ -83,8 +105,9 @@ type (
 	}
 	oaChoice struct {
 		Delta struct {
-			Content   string         `json:"content"`
-			ToolCalls []oaDeltaToolC `json:"tool_calls"`
+			Content          string         `json:"content"`
+			ReasoningContent string         `json:"reasoning_content"`
+			ToolCalls        []oaDeltaToolC `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	}
@@ -108,6 +131,13 @@ type (
 // emptySchema is the parameters schema for a tool that has none.
 var emptySchema = json.RawMessage(`{"type":"object","properties":{}}`)
 
+// The OpenRouter app headers. OpenRouter shows the app name in its
+// rankings and its activity page.
+const (
+	openRouterReferer = "https://github.com/dnwandana/tether-agent"
+	openRouterTitle   = "Tether Agent"
+)
+
 // errStreamDone stops ReadSSE at the [DONE] marker.
 var errStreamDone = errors.New("stream done")
 
@@ -122,6 +152,10 @@ func (p *openAI) Stream(ctx context.Context, req Request) (<-chan Event, error) 
 	if p.apiKey != "" {
 		h.Set("Authorization", "Bearer "+p.apiKey)
 	}
+	if p.has("openrouter_headers") {
+		h.Set("HTTP-Referer", openRouterReferer)
+		h.Set("X-Title", openRouterTitle)
+	}
 	resp, err := postJSON(ctx, p.hc, p.name, joinURL(p.baseURL, "/chat/completions"), h, body, p.apiKey)
 	if err != nil {
 		return nil, err
@@ -131,7 +165,7 @@ func (p *openAI) Stream(ctx context.Context, req Request) (<-chan Event, error) 
 		defer close(ch)
 		defer resp.Body.Close()
 		e := &emitter{ctx: ctx, ch: ch, provider: p.name, model: body.Model}
-		if err := p.parse(e, resp, start); err != nil {
+		if err := p.parse(e, resp, start, body.Model); err != nil {
 			e.fail(err)
 		}
 	}()
@@ -167,6 +201,9 @@ func (p *openAI) buildRequest(req Request) (*oaRequest, error) {
 			if len(om.ToolCalls) > 0 && m.Content == "" {
 				om.Content = nil
 			}
+			if p.has("reasoning_content") {
+				om.ReasoningContent = p.replayText(m, model)
+			}
 		case RoleTool:
 			om.ToolCallID = m.ToolCallID
 		case RoleUser:
@@ -191,7 +228,42 @@ func (p *openAI) buildRequest(req Request) (*oaRequest, error) {
 		}
 		out.Tools = append(out.Tools, oaTool{Type: "function", Function: oaToolFuncDef{Name: t.Name, Description: t.Description, Parameters: params}})
 	}
+	p.setEffort(out, req.Effort)
 	return out, nil
+}
+
+// setEffort puts the effort fields of level on out. The quirk keep_thinking
+// asks Z.AI to keep the thinking of earlier turns. It shares one thinking
+// object with a disabled thinking, because the API accepts only one.
+func (p *openAI) setEffort(out *oaRequest, level string) {
+	f := mapEffort(p.effortStyle, level)
+	out.ReasoningEffort = f.ReasoningEffort
+	if f.ResponsesEffort != "" {
+		out.Reasoning = &oaReasoning{Effort: f.ResponsesEffort}
+	}
+	out.EnableThinking = f.EnableThinking
+	switch {
+	case f.ThinkingDisabled:
+		out.Thinking = &oaThinking{Type: "disabled"}
+	case p.has("keep_thinking"):
+		keep := false
+		out.Thinking = &oaThinking{Type: "enabled", ClearThinking: &keep}
+	}
+}
+
+// reasoningPad is the reasoning_content of an assistant message with no
+// stored reasoning from this issuer. DeepSeek and Kimi need the field on
+// each assistant message, and DeepSeek rejects an empty string (Hermes).
+const reasoningPad = " "
+
+// replayText returns the reasoning_content of the assistant message m: the
+// stored text when this endpoint issued it for model, else the pad.
+func (p *openAI) replayText(m Message, model string) *string {
+	if r := m.Reasoning; r != nil && r.Text != "" && r.Issuer == p.issuer(model) {
+		return &r.Text
+	}
+	pad := reasoningPad
+	return &pad
 }
 
 // oaToolAcc collects the deltas of one tool call.
@@ -201,9 +273,11 @@ type oaToolAcc struct {
 }
 
 // parse reads the SSE body, sends the text deltas at once, and sends the
-// tool calls and the done event at the end of the stream.
-func (p *openAI) parse(e *emitter, resp *http.Response, start time.Time) error {
+// tool calls and the done event at the end of the stream. With the quirk
+// reasoning_content, the done event carries the reasoning text of model.
+func (p *openAI) parse(e *emitter, resp *http.Response, start time.Time, model string) error {
 	var (
+		thinking   strings.Builder
 		acc        = map[int]*oaToolAcc{}
 		lastID     = map[int]string{} // raw index -> last id seen at it
 		activeSlot = map[int]int{}    // raw index -> slot in acc
@@ -246,6 +320,12 @@ func (p *openAI) parse(e *emitter, resp *http.Response, start time.Time) error {
 			return nil
 		}
 		ch := c.Choices[0]
+		if ch.Delta.ReasoningContent != "" && p.has("reasoning_content") {
+			// The reasoning text is not an answer, so it never goes into
+			// an EventText.
+			markFirst()
+			thinking.WriteString(ch.Delta.ReasoningContent)
+		}
 		if ch.Delta.Content != "" {
 			markFirst()
 			if !e.send(Event{Type: EventText, Delta: ch.Delta.Content}) {
@@ -331,7 +411,11 @@ func (p *openAI) parse(e *emitter, resp *http.Response, start time.Time) error {
 	}
 	usage.FirstTokenMS = firstMS
 	usage.TotalMS = time.Since(start).Milliseconds()
-	if !e.send(Event{Type: EventDone, FinishReason: finish, Usage: &usage}) {
+	done := Event{Type: EventDone, FinishReason: finish, Usage: &usage}
+	if thinking.Len() > 0 {
+		done.Reasoning = &Reasoning{Issuer: p.issuer(model), Text: thinking.String()}
+	}
+	if !e.send(done) {
 		return e.ctx.Err()
 	}
 	return nil

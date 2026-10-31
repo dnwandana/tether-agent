@@ -286,7 +286,7 @@ func TestRestartHint(t *testing.T) {
 	}
 }
 
-func TestUpdateDataDirUnderSudo(t *testing.T) {
+func TestSudoDataDir(t *testing.T) {
 	oldEUID, oldLookup := geteuid, lookupHome
 	t.Cleanup(func() { geteuid, lookupHome = oldEUID, oldLookup })
 	t.Setenv("TETHER_HOME", "")
@@ -299,20 +299,20 @@ func TestUpdateDataDirUnderSudo(t *testing.T) {
 	}
 
 	geteuid = func() int { return 0 }
-	if got := updateDataDir(""); got != "/home/alice/.tether" {
+	if got := sudoDataDir(""); got != "/home/alice/.tether" {
 		t.Fatalf("root with SUDO_USER: %q", got)
 	}
-	if got := updateDataDir("/x"); got != "/x" {
+	if got := sudoDataDir("/x"); got != "/x" {
 		t.Fatalf("flag: %q", got)
 	}
 	t.Setenv("TETHER_HOME", "/th")
-	if got := updateDataDir(""); got != "/th" {
+	if got := sudoDataDir(""); got != "/th" {
 		t.Fatalf("TETHER_HOME: %q", got)
 	}
 	t.Setenv("TETHER_HOME", "")
 
 	geteuid = func() int { return 1000 }
-	if got := updateDataDir(""); got != dataDir("") {
+	if got := sudoDataDir(""); got != dataDir("") {
 		t.Fatalf("not root: %q, want %q", got, dataDir(""))
 	}
 }

@@ -1,10 +1,13 @@
 package sessions
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -491,5 +494,122 @@ func TestCountMessages(t *testing.T) {
 	}
 	if n, err := s.CountMessages(ctx, "nope"); err != nil || n != 0 {
 		t.Fatal(n, err)
+	}
+}
+
+// newStoreSession returns a Store over a new state.db and one new session in it.
+
+func newStoreSession(t *testing.T) (*Store, *Session) {
+	t.Helper()
+	st := New(openTestDB(t))
+	sess, err := st.Create(context.Background(), Session{Key: "cli:user", Source: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, sess
+}
+
+func TestReasoningRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st, sess := newStoreSession(t)
+	r := &provider.Reasoning{Issuer: "responses https://api.x.ai/v1 grok", Output: []json.RawMessage{json.RawMessage(`{"type":"reasoning","encrypted_content":"E"}`)}}
+	if _, err := st.Append(ctx, sess.ID, provider.Message{Role: provider.RoleAssistant, Content: "a", Reasoning: r}, MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Append(ctx, sess.ID, provider.Message{Role: provider.RoleAssistant, Content: "b"}, MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := st.Messages(ctx, sess.ID)
+	if err != nil || len(ms) != 2 {
+		t.Fatal(err, ms)
+	}
+	if !reflect.DeepEqual(ms[0].Msg.Reasoning, r) || ms[1].Msg.Reasoning != nil {
+		t.Fatalf("%+v %+v", ms[0].Msg.Reasoning, ms[1].Msg.Reasoning)
+	}
+	b1, _ := json.Marshal(r)
+	b2, _ := json.Marshal(ms[0].Msg.Reasoning)
+	if !bytes.Equal(b1, b2) {
+		t.Fatal("the bytes changed after a reload")
+	}
+	var n int
+	if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM messages WHERE session_id = ? AND reasoning IS NULL`, sess.ID).Scan(&n); err != nil || n != 1 {
+		t.Fatal("a message with no reasoning must store NULL", n, err)
+	}
+}
+
+func TestReasoningInAround(t *testing.T) {
+	ctx := context.Background()
+	st, sess := newStoreSession(t)
+	r := &provider.Reasoning{Issuer: "openai http://x m", Text: "think"}
+	id, err := st.Append(ctx, sess.ID, provider.Message{Role: provider.RoleAssistant, Content: "a", Reasoning: r}, MessageMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, err := st.Around(ctx, sess.ID, id, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.ID == id && !reflect.DeepEqual(m.Msg.Reasoning, r) {
+			t.Fatalf("%+v", m.Msg.Reasoning)
+		}
+	}
+}
+
+func TestBadReasoningJSONDoesNotFailTheLoad(t *testing.T) {
+	ctx := context.Background()
+	st, sess := newStoreSession(t)
+	id, _ := st.Append(ctx, sess.ID, provider.Message{Role: provider.RoleAssistant, Content: "a"}, MessageMeta{})
+	if _, err := st.db.ExecContext(ctx, `UPDATE messages SET reasoning = '{bad' WHERE id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := st.Messages(ctx, sess.ID)
+	if err != nil || len(ms) != 1 || ms[0].Msg.Reasoning != nil {
+		t.Fatal(err, ms)
+	}
+}
+
+func TestSetEffort(t *testing.T) {
+	ctx := context.Background()
+	st, sess := newStoreSession(t)
+	if sess.Effort != "" {
+		t.Fatalf("a new session has effort %q", sess.Effort)
+	}
+	if err := st.SetEffort(ctx, sess.ID, "high"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(ctx, sess.ID)
+	if err != nil || got.Effort != "high" {
+		t.Fatal(got, err)
+	}
+	if act, err := st.ActiveOrCreate(ctx, "k", Session{}); err != nil || act.Effort != "" {
+		t.Fatal(act, err)
+	}
+	if err := st.SetEffort(ctx, sess.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.Get(ctx, sess.ID)
+	if got.Effort != "" {
+		t.Fatalf("effort = %q, want empty", got.Effort)
+	}
+	if err := st.SetEffort(ctx, "nope", "low"); err == nil || !strings.Contains(err.Error(), "no session") {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateKeepsEffort(t *testing.T) {
+	ctx := context.Background()
+	st := New(openTestDB(t))
+	sess, err := st.Create(ctx, Session{Key: "k", Effort: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(ctx, sess.ID)
+	if err != nil || got.Effort != "low" {
+		t.Fatal(got, err)
+	}
+	page, _, err := st.ListPage(ctx, "k", ListQuery{})
+	if err != nil || len(page) != 1 || page[0].Effort != "low" {
+		t.Fatal(page, err)
 	}
 }

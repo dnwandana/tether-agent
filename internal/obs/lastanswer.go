@@ -22,10 +22,14 @@ type LastAnswer struct {
 	Pin string
 }
 
-// PinsFallback reports whether the session pins the entry "fallback" ("fallback" or
-// "fallback:<model>").
-func (l LastAnswer) PinsFallback() bool {
-	return l.Pin == "fallback" || strings.HasPrefix(l.Pin, "fallback:")
+// PinnedEntry returns the entry name of the pin (the part before ":"). It returns
+// "primary" when the session has no pin, because a turn with no pin starts on primary.
+func (l LastAnswer) PinnedEntry() string {
+	if l.Pin == "" {
+		return "primary"
+	}
+	name, _, _ := strings.Cut(l.Pin, ":")
+	return name
 }
 
 // ReadLastAnswer returns the newest assistant row with a model. ok is false when no row

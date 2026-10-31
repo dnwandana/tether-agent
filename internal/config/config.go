@@ -5,7 +5,11 @@
 // these tags with reflection and compares them with docs/CONFIG.md, so keep them exact.
 package config
 
-import "gopkg.in/yaml.v3"
+import (
+	"slices"
+
+	"gopkg.in/yaml.v3"
+)
 
 // Config is the full content of config.yaml.
 type Config struct {
@@ -32,14 +36,19 @@ type Config struct {
 
 // Provider is one named model endpoint.
 type Provider struct {
+	// Preset is the id of a known endpoint. It fills an empty format, base_url, and api_key.
+	Preset        string `yaml:"preset"`
 	Format        string `yaml:"format"`
 	BaseURL       string `yaml:"base_url"`
 	APIKey        string `yaml:"api_key"`
 	Model         string `yaml:"model"`
-	FlatRate      bool   `yaml:"flat_rate"`
 	Vision        bool   `yaml:"vision"`
 	ContextWindow int    `yaml:"context_window"`
 	PriceKey      string `yaml:"price_key"`
+	// Effort is the default reasoning effort of the entry. "" sends no effort field.
+	Effort string `yaml:"effort"`
+	// Unusable holds the load error of an entry that cannot serve a call. Load sets it.
+	Unusable string `yaml:"-"`
 }
 
 // AgentConfig sets the limits of the agent loop and the providers for vision and delegation.
@@ -52,6 +61,22 @@ type AgentConfig struct {
 	RestartDrainTimeoutS int `yaml:"restart_drain_timeout_s"`
 	// ResumeFreshnessS is the age in seconds up to which a cut turn continues at the next start.
 	ResumeFreshnessS int `yaml:"resume_freshness_s"`
+	// Fallback is the ordered list of entries that serve a call when the entries before fail.
+	// nil means that the key is absent. An empty list turns off the fallback.
+	Fallback []string `yaml:"fallback"`
+}
+
+// FallbackList returns the effective fallback entries in order. A present
+// agent.fallback key wins, also an empty list. Else an entry with the name
+// "fallback" gives the old one-entry list. Else the list is nil.
+func (c *Config) FallbackList() []string {
+	if c.Agent.Fallback != nil {
+		return slices.Clone(c.Agent.Fallback)
+	}
+	if _, ok := c.Providers["fallback"]; ok {
+		return []string{"fallback"}
+	}
+	return nil
 }
 
 // ContextConfig sets the compaction and the tool output limits.

@@ -225,3 +225,93 @@ func TestAnthropicStampsEveryEvent(t *testing.T) {
 	}
 	checkStamp(t, ch, "an", "m")
 }
+
+func TestAnthropicKeepsThinkingBlocks(t *testing.T) {
+	srv := fixtureServer(t, "testdata/anthropic_thinking_stream.sse")
+	ch, _ := newAnthropic(endpoint{name: "anthropic", format: "anthropic", baseURL: srv.URL, model: "claude", hc: srv.Client()}).Stream(ctx, Request{})
+	var deltas []string
+	r, err := Collect(ch, func(d string) { deltas = append(deltas, d) })
+	if err != nil || r.Reasoning == nil || len(r.Reasoning.Output) != 2 {
+		t.Fatalf("%+v %v", r.Reasoning, err)
+	}
+	eq(t, string(r.Reasoning.Output[0]), `{"type":"thinking","thinking":"Plan: run df.","signature":"SIG1"}`)
+	eq(t, string(r.Reasoning.Output[1]), `{"type":"redacted_thinking","data":"RED1"}`)
+	if strings.Contains(strings.Join(deltas, ""), "Plan") || len(r.ToolCalls) != 1 {
+		t.Fatalf("thinking text leaked: %v", deltas)
+	}
+}
+
+func TestAnthropicReplaysThinkingBeforeToolUse(t *testing.T) {
+	var raw []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ = io.ReadAll(r.Body)
+		serveFile(w, "testdata/anthropic_tool_stream.sse")
+	}))
+	t.Cleanup(srv.Close)
+	e := endpoint{name: "anthropic", format: "anthropic", baseURL: srv.URL, model: "claude", hc: srv.Client()}
+	blk := json.RawMessage(`{"type":"thinking","thinking":"Plan","signature":"SIG1"}`)
+	req := Request{Messages: []Message{
+		{Role: RoleUser, Content: "q"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1", Name: "t", Args: "{}"}},
+			Reasoning: &Reasoning{Issuer: e.issuer(""), Output: []json.RawMessage{blk}}},
+		{Role: RoleTool, ToolCallID: "c1", Content: "out"},
+		{Role: RoleAssistant, Content: "x", Reasoning: &Reasoning{Issuer: "anthropic https://api.minimax.io/anthropic m", Output: []json.RawMessage{blk}}},
+	}}
+	if _, err := newAnthropic(e).Stream(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"content":[{"type":"thinking","thinking":"Plan","signature":"SIG1"},{"type":"tool_use"`) {
+		t.Fatalf("%s", raw)
+	}
+	if strings.Count(string(raw), "SIG1") != 1 {
+		t.Fatal("another issuer got the blocks")
+	}
+}
+
+func TestAnthropicBearerAuth(t *testing.T) {
+	var hdr http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hdr = r.Header.Clone()
+		serveFile(w, "testdata/anthropic_tool_stream.sse")
+	}))
+	t.Cleanup(srv.Close)
+	e := endpoint{name: "minimax", format: "anthropic", baseURL: srv.URL, apiKey: "k", model: "m", hc: srv.Client(), quirks: map[string]bool{"bearer_auth": true}}
+	_, _ = newAnthropic(e).Stream(ctx, Request{})
+	if hdr.Get("Authorization") != "Bearer k" || hdr.Get("x-api-key") != "" {
+		t.Fatal(hdr)
+	}
+}
+
+func TestAnthropicEffortFields(t *testing.T) {
+	cases := []struct {
+		style, level, want string // want: a substring of the body, or "" for none of the fields
+	}{
+		{"anthropic", "none", `"output_config":{"effort":"low"}`},
+		{"anthropic", "minimal", `"output_config":{"effort":"low"}`},
+		{"anthropic", "max", `"output_config":{"effort":"max"}`},
+		{"anthropic-std", "none", `"output_config":{"effort":"none"}`},
+		{"minimax", "none", `"output_config":{"effort":"low"}}`},
+		{"minimax", "high", `"output_config":{"effort":"high"},"thinking":{"type":"adaptive"}`},
+		{"anthropic", "", ""},
+	}
+	for _, c := range cases {
+		var raw []byte
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw, _ = io.ReadAll(r.Body)
+			serveFile(w, "testdata/anthropic_tool_stream.sse")
+		}))
+		e := endpoint{name: "a", format: "anthropic", baseURL: srv.URL, model: "m", hc: srv.Client(), effortStyle: c.style}
+		_, _ = newAnthropic(e).Stream(ctx, Request{Effort: c.level})
+		srv.Close()
+		s := string(raw)
+		if c.want == "" {
+			if strings.Contains(s, "output_config") || strings.Contains(s, `"thinking"`) {
+				t.Errorf("%s empty: %s", c.style, s)
+			}
+			continue
+		}
+		if !strings.Contains(s, c.want) {
+			t.Errorf("%s %s: %s", c.style, c.level, s)
+		}
+	}
+}

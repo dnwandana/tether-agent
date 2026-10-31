@@ -69,6 +69,10 @@ func TestReviewUsesParentToolsAndSystem(t *testing.T) {
 	if !reflect.DeepEqual(req.Tools, parentReq.Tools) {
 		t.Fatal("the tool schemas must be byte-identical")
 	}
+	// The review run sends the prompt cache key of the parent.
+	if req.CacheKey != sess.ID || parentReq.CacheKey != sess.ID {
+		t.Fatal(req.CacheKey, parentReq.CacheKey, sess.ID)
+	}
 	// The request is the parent view plus the review prompt.
 	n := len(parentReq.Messages)
 	if len(req.Messages) != n+2 || !reflect.DeepEqual(req.Messages[:n], parentReq.Messages) {

@@ -1,0 +1,5 @@
+event: ping
+data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"delta":"cut"}
+
+data: [DONE]
+

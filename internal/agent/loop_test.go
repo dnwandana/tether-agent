@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +38,11 @@ type step struct {
 	stall bool
 	// noClose sends the text and then never closes the channel and ignores the context.
 	noClose bool
+	// reasoning goes on the EventDone event.
+	reasoning *provider.Reasoning
+	// provider is the entry name that the step stamps on each event. "" keeps the stamp of
+	// fakeProv.
+	provider string
 }
 
 // fakeProv is a scripted provider.Provider. It records each request.
@@ -91,6 +97,17 @@ func (f *fakeProv) Stream(ctx context.Context, req provider.Request) (<-chan pro
 			}
 		}()
 	}
+	if s.provider != "" {
+		in := make(chan provider.Event, 8+len(s.calls))
+		go func(out chan provider.Event) {
+			defer close(out)
+			for ev := range in {
+				ev.Provider, ev.Model = s.provider, f.model
+				out <- ev
+			}
+		}(ch)
+		ch = in
+	}
 	go func() {
 		if s.text != "" {
 			ch <- provider.Event{Type: provider.EventText, Delta: s.text}
@@ -117,7 +134,7 @@ func (f *fakeProv) Stream(ctx context.Context, req provider.Request) (<-chan pro
 		if len(s.calls) > 0 {
 			finish = "tool_calls"
 		}
-		ch <- provider.Event{Type: provider.EventDone, FinishReason: finish, Usage: &u}
+		ch <- provider.Event{Type: provider.EventDone, FinishReason: finish, Usage: &u, Reasoning: s.reasoning}
 	}()
 	return out, nil
 }
@@ -574,15 +591,18 @@ func TestCostStampedOnAssistantMessage(t *testing.T) {
 	}
 }
 
-func TestFlatRateStoresNoCost(t *testing.T) {
+// A Coding Plan entry stores the cost at the API price, like any other entry.
+func TestCodingPlanStoresCost(t *testing.T) {
 	fp := scripted(step{text: "hi", usage: provider.Usage{InputTokens: 1000}})
 	a, sess := newAgent(t, fp)
-	a.Cfg.Providers["primary"] = config.Provider{Model: "test-model", FlatRate: true}
+	a.Cfg.Providers["primary"] = config.Provider{Preset: "zai-coding", BaseURL: "https://api.z.ai/api/coding/paas/v4", Model: "test-model"}
 	a.Cfg.Pricing.Overrides = map[string]config.PriceOverride{"test-model": {Input: 2}}
 	a.Prices = pricing.NewService(a.Cfg, t.TempDir(), nil, nil, nil)
-	a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}})
-	if got := messages(t, a, sess.ID)[1].Meta.CostUSD; got != 0 {
-		t.Fatal(got)
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := messages(t, a, sess.ID)[1].Meta.CostUSD, 1000*2e-6; got < want-1e-12 || got > want+1e-12 {
+		t.Fatal(got, want)
 	}
 }
 
@@ -616,7 +636,7 @@ func fallbackAgent(t *testing.T, edit func(*config.Config), s ...step) (*Agent, 
 	t.Helper()
 	sec := &fakeProv{name: "fallback", model: "deepseek/deepseek-v4.1-flash-1017", stamp: true, script: s}
 	a, sess := newAgent(t, scripted())
-	a.Prov = provider.NewFallback(deadPrimary{}, sec, slog.New(slog.DiscardHandler))
+	a.Prov = provider.NewChain([]provider.ChainEntry{{Name: "primary", P: deadPrimary{}}, {Name: "fallback", P: sec}}, provider.NewHealth(nil), slog.New(slog.DiscardHandler))
 	a.Providers = map[string]provider.Provider{"primary": a.Prov, "fallback": sec}
 	a.Cfg.Providers = map[string]config.Provider{
 		"primary":  {Model: "glm-5.3"},
@@ -651,10 +671,12 @@ func TestFallbackRowNamesFallback(t *testing.T) {
 	}
 }
 
-// A flat-rate primary does not hide the cost of a paid fallback call.
-func TestFallbackRowPricedWhenPrimaryFlat(t *testing.T) {
-	flat := func(c *config.Config) { c.Providers["primary"] = config.Provider{Model: "glm-5.3", FlatRate: true} }
-	a, sess := fallbackAgent(t, flat, fallbackStep)
+// A Coding Plan primary does not change the price of a fallback call.
+func TestFallbackRowPricedWhenPrimaryCodingPlan(t *testing.T) {
+	plan := func(c *config.Config) {
+		c.Providers["primary"] = config.Provider{Preset: "zai-coding", Model: "glm-5.3"}
+	}
+	a, sess := fallbackAgent(t, plan, fallbackStep)
 	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}}); err != nil {
 		t.Fatal(err)
 	}
@@ -833,7 +855,7 @@ func TestCurrentModelPrimary(t *testing.T) {
 	a, _ := newAgent(t, scripted())
 	a.Prov = statusProv{fakeProv: &fakeProv{name: "primary", model: "glm-5.3"}}
 	a.Cfg.Providers["primary"] = config.Provider{Model: "glm-5.3", ContextWindow: 200000}
-	got := a.CurrentModel()
+	got := a.CurrentModel(nil)
 	if got.Model != "glm-5.3" || got.ContextWindow != 200000 || got.Fallback.Active {
 		t.Fatal(got)
 	}
@@ -842,11 +864,11 @@ func TestCurrentModelPrimary(t *testing.T) {
 	}
 	// A provider with no fallback state gives the default model.
 	a.Prov = &fakeProv{name: "primary", model: "glm-5.3"}
-	if got := a.CurrentModel(); got.Model != "glm-5.3" || got.ContextWindow != 200000 || got.Fallback.Active {
+	if got := a.CurrentModel(nil); got.Model != "glm-5.3" || got.ContextWindow != 200000 || got.Fallback.Active {
 		t.Fatal(got)
 	}
 	a.Prov = nil
-	if got := a.CurrentModel(); got != (ModelState{}) {
+	if got := a.CurrentModel(nil); got != (ModelState{}) {
 		t.Fatal(got)
 	}
 }
@@ -857,7 +879,7 @@ func TestCurrentModelFallback(t *testing.T) {
 	a.Providers["fallback"] = &fakeProv{name: "fallback", model: "deepseek/deepseek-v4.1-flash-1017"}
 	a.Cfg.Providers["primary"] = config.Provider{Model: "glm-5.3", ContextWindow: 200000}
 	a.Cfg.Providers["fallback"] = config.Provider{Model: "deepseek/deepseek-v4.1-flash-1017", ContextWindow: 64000}
-	got := a.CurrentModel()
+	got := a.CurrentModel(nil)
 	if got.Model != "deepseek/deepseek-v4.1-flash-1017" || got.ContextWindow != 64000 ||
 		!got.Fallback.Active || got.Fallback.Cause != "HTTP 503" {
 		t.Fatal(got)
@@ -868,11 +890,214 @@ func TestCurrentModelFallbackNoEntry(t *testing.T) {
 	a, _ := newAgent(t, scripted())
 	a.Prov = statusProv{fakeProv: &fakeProv{name: "primary", model: "glm-5.3"}, status: activeStatus}
 	a.Cfg.Providers["fallback"] = config.Provider{Model: "deepseek/deepseek-v4.1-flash-1017", ContextWindow: 64000}
-	if got := a.CurrentModel(); got.Model != "deepseek/deepseek-v4.1-flash-1017" || got.ContextWindow != 64000 {
+	if got := a.CurrentModel(nil); got.Model != "deepseek/deepseek-v4.1-flash-1017" || got.ContextWindow != 64000 {
 		t.Fatal(got)
 	}
 	delete(a.Cfg.Providers, "fallback")
-	if got := a.CurrentModel(); got.Model != "deepseek/deepseek-v4.1-flash-1017" || got.ContextWindow != pricing.DefaultContextWindow {
+	if got := a.CurrentModel(nil); got.Model != "deepseek/deepseek-v4.1-flash-1017" || got.ContextWindow != pricing.DefaultContextWindow {
 		t.Fatal(got)
+	}
+}
+
+func TestProviderForPinnedChain(t *testing.T) {
+	a, sess := newAgent(t, scripted(text("ok")))
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{
+		"primary":  {Format: "openai", BaseURL: "http://p", Model: "m1"},
+		"deepseek": {Format: "openai", BaseURL: "http://d", Model: "m2"},
+	}
+	cfg.Agent.Fallback = []string{"deepseek"}
+	set, err := provider.FromConfig(&cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Cfg, a.Chains = &cfg, set
+	sess.ModelOverride = "deepseek:deepseek-reasoner"
+	p := a.providerFor(sess)
+	if p.Name() != "deepseek" || p.Model() != "deepseek-reasoner" {
+		t.Fatal(p.Name(), p.Model())
+	}
+	if ms := a.CurrentModel(sess); ms.Model != "deepseek-reasoner" || ms.Fallback.FirstName != "deepseek" {
+		t.Fatalf("%+v", ms)
+	}
+	// No pin and an unknown pin use the default chain.
+	sess.ModelOverride = "nope"
+	if p := a.providerFor(sess); p.Name() != "primary" || p.Model() != "m1" {
+		t.Fatal(p.Name(), p.Model())
+	}
+	if ms := a.CurrentModel(nil); ms.Model != "m1" || ms.Fallback.FirstName != "primary" {
+		t.Fatalf("%+v", ms)
+	}
+}
+
+// failProv fails each call before the first byte with HTTP 503.
+type failProv struct{ name, model string }
+
+func (f failProv) Name() string  { return f.name }
+func (f failProv) Model() string { return f.model }
+func (f failProv) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	return nil, fmt.Errorf("provider %s: %w: %w", f.name, provider.ErrBeforeFirstByte, &provider.HTTPStatusError{Code: 503})
+}
+
+// failEntry records an HTTP 503 of the entry name and model in the Health of set.
+func failEntry(t *testing.T, set *provider.Set, name, model string) {
+	t.Helper()
+	c := provider.NewChain([]provider.ChainEntry{{Name: name, P: failProv{name, model}}}, set.Health, slog.New(slog.DiscardHandler))
+	if _, err := c.Stream(ctx, provider.Request{}); err == nil {
+		t.Fatal("the call must fail")
+	}
+}
+
+func TestCurrentModelOfEachChain(t *testing.T) {
+	a, s1 := newAgent(t, scripted())
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{
+		"primary":    {Format: "openai", BaseURL: "http://p", Model: "glm-4.7", ContextWindow: 200000},
+		"deepseek":   {Format: "openai", BaseURL: "http://d", Model: "deepseek-chat", ContextWindow: 128000},
+		"openrouter": {Format: "openai", BaseURL: "http://o", Model: "z-ai/glm-4.7", ContextWindow: 64000},
+	}
+	cfg.Agent.Fallback = []string{"openrouter"}
+	set, err := provider.FromConfig(&cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Cfg, a.Chains = &cfg, set
+	failEntry(t, set, "primary", "glm-4.7")
+	ms := a.CurrentModel(s1)
+	if ms.Name != "openrouter" || ms.Model != "z-ai/glm-4.7" || ms.ContextWindow != 64000 || !ms.Fallback.Active ||
+		ms.Fallback.FirstName != "primary" || ms.Fallback.Cause != "HTTP 503" {
+		t.Fatalf("%+v", ms)
+	}
+	// A session pinned to deepseek has its own status.
+	s2 := &sessions.Session{ID: "s2", ModelOverride: "deepseek"}
+	if ms := a.CurrentModel(s2); ms.Name != "deepseek" || ms.Model != "deepseek-chat" || ms.ContextWindow != 128000 || ms.Fallback.Active {
+		t.Fatalf("%+v", ms)
+	}
+	failEntry(t, set, "deepseek", "deepseek-chat")
+	// The chain of s2 is [deepseek, primary, openrouter], and primary also waits.
+	if ms := a.CurrentModel(s2); ms.Name != "openrouter" || !ms.Fallback.Active || ms.Fallback.FirstName != "deepseek" {
+		t.Fatalf("%+v", ms)
+	}
+	// A pinned model of primary has its own health key.
+	s3 := &sessions.Session{ID: "s3", ModelOverride: "primary:glm-5.3"}
+	if ms := a.CurrentModel(s3); ms.Name != "primary" || ms.Model != "glm-5.3" || ms.Fallback.Active {
+		t.Fatalf("%+v", ms)
+	}
+}
+
+func TestTurnRequestFields(t *testing.T) {
+	r := &provider.Reasoning{Issuer: "openai http://d m", Text: "plan"}
+	fp := scripted(
+		step{calls: []provider.ToolCall{tc("c1", "echo", `{}`)}, reasoning: r, provider: "openrouter"},
+		text("done"),
+	)
+	a, sess := newAgent(t, fp, echoTool{})
+	sess.Effort = "high"
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "hi", Toolsets: all()}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fp.requests) != 2 {
+		t.Fatal(len(fp.requests))
+	}
+	for _, req := range fp.requests {
+		if req.CacheKey != sess.ID || req.Effort != "high" {
+			t.Fatalf("%q %q", req.CacheKey, req.Effort)
+		}
+	}
+	if fp.requests[0].StartAt != "" {
+		t.Fatal(fp.requests[0].StartAt)
+	}
+	// The turn stays on the entry that served.
+	if fp.requests[1].StartAt != "openrouter" {
+		t.Fatal(fp.requests[1].StartAt)
+	}
+	ms := messages(t, a, sess.ID)
+	var saved *provider.Reasoning
+	for _, m := range ms {
+		if m.Msg.Role == provider.RoleAssistant && len(m.Msg.ToolCalls) == 1 {
+			saved = m.Msg.Reasoning
+		}
+	}
+	if !reflect.DeepEqual(saved, r) {
+		t.Fatalf("%+v", saved)
+	}
+}
+
+func TestNextTurnStartsAtFirstEntry(t *testing.T) {
+	fp := scripted(step{text: "one", provider: "openrouter"}, text("two"))
+	a, sess := newAgent(t, fp)
+	_, _ = a.RunTurn(ctx, Turn{Session: sess, UserText: "a", Toolsets: all()})
+	_, _ = a.RunTurn(ctx, Turn{Session: sess, UserText: "b", Toolsets: all()})
+	if fp.requests[1].StartAt != "" {
+		t.Fatal(fp.requests[1].StartAt)
+	}
+}
+
+func TestPartialAnswerKeepsNoReasoning(t *testing.T) {
+	r := &provider.Reasoning{Issuer: "openai http://d m", Text: "plan"}
+	fp := scripted(step{text: "part", err: errors.New("cut"), reasoning: r})
+	a, sess := newAgent(t, fp)
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "a", Toolsets: all()}); err == nil {
+		t.Fatal("the turn must fail")
+	}
+	ms := messages(t, a, sess.ID)
+	if last := ms[len(ms)-1].Msg; last.Content != "part" || last.Reasoning != nil {
+		t.Fatalf("%+v", last)
+	}
+}
+
+// effortProv rejects a call that has an effort with an HTTP 400 about the effort.
+type effortProv struct{ name, model string }
+
+func (e effortProv) Name() string  { return e.name }
+func (e effortProv) Model() string { return e.model }
+func (e effortProv) Stream(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
+	if req.Effort != "" {
+		return nil, &provider.HTTPStatusError{Code: 400, Body: `{"error":"reasoning_effort is not supported"}`}
+	}
+	ch := make(chan provider.Event)
+	close(ch)
+	return ch, nil
+}
+
+func TestEffortState(t *testing.T) {
+	a, sess := newAgent(t, scripted())
+	// With no Chains, the state comes from the session and the config only.
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", Effort: "medium"}
+	if got := a.EffortState(sess); got != (EffortState{Level: "medium", Source: "from config", Entry: "primary", Model: "test-model"}) {
+		t.Fatalf("%+v", got)
+	}
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{
+		"primary":  {Format: "openai", BaseURL: "http://p", Model: "glm-5.3", Effort: "high"},
+		"deepseek": {Format: "openai", BaseURL: "http://d", Model: "deepseek-chat"},
+	}
+	set, err := provider.FromConfig(&cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Cfg, a.Chains = &cfg, set
+	if got := a.EffortState(nil); got != (EffortState{Level: "high", Source: "from config", Entry: "primary", Model: "glm-5.3"}) {
+		t.Fatalf("%+v", got)
+	}
+	sess.ModelOverride = "deepseek:deepseek-reasoner"
+	if got := a.EffortState(sess); got != (EffortState{Source: "provider default", Entry: "deepseek", Model: "deepseek-reasoner"}) {
+		t.Fatalf("%+v", got)
+	}
+	sess.Effort = "none"
+	if got := a.EffortState(sess); got != (EffortState{Level: "none", Source: "this session", Entry: "deepseek", Model: "deepseek-reasoner"}) {
+		t.Fatalf("%+v", got)
+	}
+	// The entry rejects the effort, so the provider default applies.
+	c := provider.NewChain([]provider.ChainEntry{{Name: "deepseek", P: effortProv{"deepseek", "deepseek-reasoner"}}}, set.Health, slog.New(slog.DiscardHandler))
+	if _, err := c.Stream(ctx, provider.Request{Effort: "none"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.EffortState(sess); !got.Rejected || got.Level != "none" {
+		t.Fatalf("%+v", got)
+	}
+	sess.Effort = ""
+	if got := a.EffortState(sess); got.Rejected {
+		t.Fatalf("an empty level is never rejected: %+v", got)
 	}
 }

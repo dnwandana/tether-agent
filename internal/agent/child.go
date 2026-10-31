@@ -166,7 +166,7 @@ func delegationLimits(cfg *config.Config) config.DelegationConfig {
 }
 
 // forkSession creates the session of a child or a review run. It copies the channel data
-// of the parent. It has no session key, so no channel makes it active.
+// and the effort of the parent. It has no session key, so no channel makes it active.
 func (a *Agent) forkSession(ctx context.Context, parent *sessions.Session, kind, title, modelOverride string) (*sessions.Session, error) {
 	sess, err := a.Store.Create(context.WithoutCancel(ctx), sessions.Session{
 		Source:        parent.Source,
@@ -175,6 +175,7 @@ func (a *Agent) forkSession(ctx context.Context, parent *sessions.Session, kind,
 		UserID:        parent.UserID,
 		Title:         capRunes(oneLine(title), titleMax),
 		ModelOverride: modelOverride,
+		Effort:        parent.Effort,
 		ParentID:      parent.ID,
 		Kind:          kind,
 	})

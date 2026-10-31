@@ -129,6 +129,9 @@ func Collect(ch <-chan Event, onDelta func(string)) (Result, error) {
 			if ev.Usage != nil {
 				res.Usage = *ev.Usage
 			}
+			if ev.Reasoning != nil {
+				res.Reasoning = ev.Reasoning
+			}
 		case EventError:
 			if errOut == nil {
 				errOut = ev.Err

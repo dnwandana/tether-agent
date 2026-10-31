@@ -252,6 +252,13 @@ func TestNewBuildsApprovalGate(t *testing.T) {
 	}
 }
 
+func TestNewBuildsModelCache(t *testing.T) {
+	a := newApp(t)
+	if a.Models == nil || a.Deps().Models != a.Models {
+		t.Fatal("the model cache is not wired")
+	}
+}
+
 func TestNewEnvSetsGateAndAsk(t *testing.T) {
 	a := newApp(t)
 	cli := a.NewEnv(&sessions.Session{ID: "s1", Key: "cli:t", Kind: "chat"}, "cli")

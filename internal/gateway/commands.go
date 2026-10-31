@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/obs"
@@ -89,7 +91,8 @@ func init() {
 		{Name: "rename", Help: "Rename the current session: /rename <title>", Run: cmdRename},
 		{Name: "archive", Help: "Hide the current session from /sessions", Run: cmdArchive},
 		{Name: "delete", Help: "Delete a session", Run: cmdDelete},
-		{Name: "model", Help: "Pin the model of this session: /model <provider>[:<model>] | clear", Run: cmdModel},
+		{Name: "model", Help: "Change the model of this session: /model [<provider>[:<model>] | <provider> config | clear]", Run: cmdModel},
+		{Name: "effort", Help: "Set the reasoning effort of this session: /effort <level> | default", Run: cmdEffort},
 		{Name: "prompt", Help: "Set the base prompt of this session: /prompt set <text> | show | clear", Run: cmdPrompt},
 		{Name: "fork", Help: "Copy the current session and switch to the copy: /fork [title]", Run: cmdFork},
 		{Name: "compact", Help: "Replace the older messages of this session with a summary now", Run: cmdCompact},
@@ -335,12 +338,12 @@ func cmdNew(ctx context.Context, c *CommandCtx, _ string) error {
 }
 
 // newReply returns the reply to /new and /reset. With no agent, the reply has no model
-// and no context lines. When the primary failed, the reply names the fallback model and
-// adds the warning.
+// and no context lines. When the primary failed, the reply names the model of the served
+// entry and adds the warning.
 func newReply(d *Deps) string {
 	text := "✨ Starting new session.\nSend a message to begin.\n\n"
 	if d.Agent != nil {
-		ms := d.Agent.CurrentModel()
+		ms := d.Agent.CurrentModel(nil)
 		mark := ""
 		if ms.Fallback.Active {
 			mark = " (fallback)"
@@ -354,14 +357,21 @@ func newReply(d *Deps) string {
 	return text + "💡 Tip: " + pickTip()
 }
 
-// fallbackWarning returns the warning line for a primary that failed, or "" when the
-// primary answers.
+// fallbackWarning returns the warning line for a first entry that failed, or "" when the
+// first entry answers. The line names the served entry. A chain that starts with an entry
+// other than primary gets the text for a pinned chain.
 func fallbackWarning(st provider.FallbackStatus, now time.Time) string {
 	if !st.Active {
 		return ""
 	}
-	return fmt.Sprintf("⚠️ The primary model %s failed %s (%s). Calls go to the fallback until the primary answers again.",
-		EscapeMarkdown(st.PrimaryModel), obs.Ago(now.Sub(st.FailedAt)), EscapeMarkdown(st.Cause))
+	ago, cause, served := obs.Ago(now.Sub(st.FailedAt)), EscapeMarkdown(st.Cause), EscapeMarkdown(st.FallbackName)
+	if st.FirstName != "primary" {
+		first := EscapeMarkdown(st.FirstName)
+		return fmt.Sprintf("⚠️ The model %s of %s failed %s (%s). Calls go to %s until %s answers again.",
+			EscapeMarkdown(st.PrimaryModel), first, ago, cause, served, first)
+	}
+	return fmt.Sprintf("⚠️ The primary model %s failed %s (%s). Calls go to %s until the primary answers again.",
+		EscapeMarkdown(st.PrimaryModel), ago, cause, served)
 }
 
 func cmdRename(ctx context.Context, c *CommandCtx, args string) error {
@@ -475,46 +485,9 @@ func cmdDelete(ctx context.Context, c *CommandCtx, args string) error {
 	return nil
 }
 
-func cmdModel(ctx context.Context, c *CommandCtx, args string) error {
-	s, err := c.current(ctx)
-	if err != nil {
-		return err
-	}
-	if args == "" {
-		c.send(c.modelReply(s))
-		return nil
-	}
-	if args == "clear" {
-		if err := c.store().SetModel(ctx, s.ID, ""); err != nil {
-			return err
-		}
-		s.ModelOverride = ""
-		c.send(Reply{Text: "🧠 **Model: default**\nThis session uses the default model again."})
-		return nil
-	}
-	name, model, _ := strings.Cut(args, ":")
-	if _, ok := c.Deps.Providers[name]; !ok || strings.ContainsAny(args, " \t\n") {
-		c.send(Reply{Text: fmt.Sprintf("⚠️ **Unknown provider: %s**\nThe providers are: %s.",
-			EscapeMarkdown(name), strings.Join(c.providerNames(), ", "))})
-		return nil
-	}
-	if strings.Contains(args, ":") && model == "" {
-		c.send(Reply{Text: "⚠️ **No model after the colon**\nSend /model <provider> or /model <provider>:<model>."})
-		return nil
-	}
-	if err := c.store().SetModel(ctx, s.ID, args); err != nil {
-		return err
-	}
-	s.ModelOverride = args
-	c.send(Reply{
-		Text:    fmt.Sprintf("🧠 **Model: %s**\nThis session uses it from the next message.", EscapeMarkdown(args)),
-		Buttons: [][]Button{{{Text: "↺ Use the default", Data: "/model clear"}}},
-	})
-	return nil
-}
-
-// modelButtonsPerRow is the number of provider buttons in one row of the /model reply.
-const modelButtonsPerRow = 3
+// modelButtonsPerRow is the number of provider buttons in one row of the /model reply. A
+// label can have the provider name after the entry name, so a row has two buttons only.
+const modelButtonsPerRow = 2
 
 // modelReply returns the reply to /model with no argument. It names the provider and the
 // model that the session s uses now. On a channel with buttons, it has one button for each
@@ -526,14 +499,17 @@ func (c *CommandCtx) modelReply(s *sessions.Session) Reply {
 	}
 	name, model := c.modelInUse(s)
 	// The buttons mark the entry that the session chose. The text names the entry that
-	// answers now, which is the fallback when the primary failed.
+	// answers now, which is the served entry when the first entry of the chain failed.
 	shown, warning := name, ""
-	if name == "primary" {
-		if st, _ := provider.StatusOf(c.Deps.Providers["primary"]); st.Active {
-			shown, model, warning = st.FallbackName, st.FallbackModel, fallbackWarning(st, nowFunc())
+	if ag := c.Deps.Agent; ag != nil {
+		if ms := ag.CurrentModel(s); ms.Name != "" {
+			shown, model, warning = ms.Name, ms.Model, fallbackWarning(ms.Fallback, nowFunc())
 		}
 	}
 	text := fmt.Sprintf("🧠 **Model: %s**\n`%s`", head, shown)
+	if label := c.labelOf(shown); label != shown {
+		text += label[len(shown):]
+	}
 	if model != "" {
 		text += " · " + EscapeMarkdown(model)
 	}
@@ -542,7 +518,11 @@ func (c *CommandCtx) modelReply(s *sessions.Session) Reply {
 	}
 	names := c.providerNames()
 	if !c.interactive() {
-		text += fmt.Sprintf("\nSend /model <provider> to change it. The providers are: %s.", strings.Join(names, ", "))
+		labels := make([]string, len(names))
+		for i, n := range names {
+			labels[i] = EscapeMarkdown(c.labelOf(n))
+		}
+		text += fmt.Sprintf("\nSend /model <provider> to see its models. The providers are: %s.", strings.Join(labels, ", "))
 		return Reply{Text: text}
 	}
 	var rows [][]Button
@@ -550,13 +530,13 @@ func (c *CommandCtx) modelReply(s *sessions.Session) Reply {
 		if i%modelButtonsPerRow == 0 {
 			rows = append(rows, nil)
 		}
-		label := n
+		label := c.labelOf(n)
 		if n == name {
-			label = "✓ " + n
+			label = "✓ " + label
 		}
 		rows[len(rows)-1] = append(rows[len(rows)-1], Button{Text: label, Data: "/model " + n})
 	}
-	return Reply{Text: text + "\nSelect a provider for this session:", Buttons: rows}
+	return Reply{Text: text + "\nTap a provider to see its models.", Buttons: rows}
 }
 
 // modelInUse returns the provider name and the model that the session s uses now: the
@@ -580,6 +560,49 @@ func (c *CommandCtx) modelInUse(s *sessions.Session) (name, model string) {
 	return name, model
 }
 
+// entryLabel returns the label of a provider entry for a button or a reply. The label adds
+// the provider name of the preset when the entry name does not already say it.
+func entryLabel(name string, p config.Provider) string {
+	if p.Preset == "" || name == p.Preset {
+		return name
+	}
+	pr, ok := config.PresetByID(p.Preset)
+	if !ok || pr.Group == "" {
+		return name
+	}
+	return name + " (" + pr.Group + ")"
+}
+
+// labelOf returns the entryLabel of the entry name with its config.Provider from the config.
+// A nil config gives the zero config.Provider.
+func (c *CommandCtx) labelOf(name string) string {
+	var p config.Provider
+	if c.Deps.Cfg != nil {
+		p = c.Deps.Cfg.Providers[name]
+	}
+	return entryLabel(name, p)
+}
+
+// modelSetReply returns the confirmation of a model change to the entry and the model. An
+// empty model gives no model line.
+func (c *CommandCtx) modelSetReply(entry, model string) Reply {
+	text := "🧠 **Model: " + EscapeMarkdown(c.labelOf(entry)) + "**"
+	switch {
+	case model == "":
+	case strings.Contains(model, "`"):
+		// A code span cannot hold a backtick, so the model is escaped text.
+		text += "\n" + EscapeMarkdown(model)
+	default:
+		// A code span shows its text literally, so the model is not escaped.
+		text += "\n`" + model + "`"
+	}
+	return Reply{
+		Text:    text + "\nThis session uses it from the next message.",
+		Buttons: [][]Button{{{Text: "↺ Use the default", Data: "/model clear"}}},
+		Edit:    true,
+	}
+}
+
 // providerNames returns the provider names in order.
 func (c *CommandCtx) providerNames() []string {
 	names := make([]string, 0, len(c.Deps.Providers))
@@ -588,6 +611,93 @@ func (c *CommandCtx) providerNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// effortDefault is the /effort argument that removes the effort of the session.
+const effortDefault = "default"
+
+// effortButtons is the order of the /effort buttons, in two rows of effortButtonsPerRow.
+var effortButtons = []string{effortDefault, "none", "low", "medium", "high", "xhigh", "max", "minimal"}
+
+// effortButtonsPerRow is the number of buttons in one row of the /effort reply.
+const effortButtonsPerRow = 4
+
+// effortLevelList returns the permitted /effort arguments for a reply.
+func effortLevelList() string {
+	return effortDefault + ", " + strings.Join(config.EffortLevels, ", ")
+}
+
+func cmdEffort(ctx context.Context, c *CommandCtx, args string) error {
+	level := strings.ToLower(strings.TrimSpace(args))
+	if level != "" && level != effortDefault && !slices.Contains(config.EffortLevels, level) {
+		c.send(Reply{Text: fmt.Sprintf("⚠️ **Unknown effort: %s**\nThe levels are: %s.", EscapeMarkdown(level), effortLevelList())})
+		return nil
+	}
+	s, err := c.current(ctx)
+	if err != nil {
+		return err
+	}
+	switch level {
+	case "":
+		c.send(c.effortReply(s))
+	case effortDefault:
+		if err := c.store().SetEffort(ctx, s.ID, ""); err != nil {
+			return err
+		}
+		s.Effort = ""
+		c.send(Reply{Text: "🧠 **Effort: default**\nThis session uses the default again."})
+	default:
+		if err := c.store().SetEffort(ctx, s.ID, level); err != nil {
+			return err
+		}
+		s.Effort = level
+		text := fmt.Sprintf("🧠 **Effort: %s**\nThis session uses it from the next message.", level)
+		if !c.interactive() {
+			text += "\nSend /effort default to use the default again."
+		}
+		c.send(Reply{Text: text, Buttons: [][]Button{{{Text: "↺ Use the default", Data: "/effort default"}}}})
+	}
+	return nil
+}
+
+// effortReply returns the reply to /effort with no argument. It names the effort of the
+// session s, the first entry of its chain, and the source of the effort. On a channel with
+// buttons, it has one button for each level. A text-only channel gets the command to type.
+func (c *CommandCtx) effortReply(s *sessions.Session) Reply {
+	st := agent.EffortState{Level: s.Effort}
+	if c.Deps.Agent != nil {
+		st = c.Deps.Agent.EffortState(s)
+	}
+	head := st.Level
+	if head == "" {
+		head = effortDefault
+	}
+	text := "🧠 **Effort: " + head + "**"
+	if st.Entry != "" {
+		text += "\n`" + st.Entry + "`"
+		if st.Model != "" {
+			text += " · " + EscapeMarkdown(st.Model)
+		}
+		text += " · " + st.Source
+	}
+	if st.Rejected {
+		text += fmt.Sprintf("\n⚠️ %s rejects the effort \"%s\". The provider default applies.", EscapeMarkdown(st.Model), st.Level)
+	}
+	if !c.interactive() {
+		return Reply{Text: text + "\nSend /effort <level>. The levels are: " + effortLevelList() + "."}
+	}
+	var rows [][]Button
+	for i, l := range effortButtons {
+		if i%effortButtonsPerRow == 0 {
+			rows = append(rows, nil)
+		}
+		label := l
+		if l == head {
+			label = "✓ " + l
+		}
+		rows[len(rows)-1] = append(rows[len(rows)-1], Button{Text: label, Data: "/effort " + l})
+	}
+	return Reply{Text: text + "\nSelect the effort for this session:", Buttons: rows}
 }
 
 // useBasePrompt is the button that removes the custom prompt.
@@ -701,9 +811,9 @@ const helpTelegram = "📖 **Commands**\n\n" +
 	"**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
 	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n" +
 	"/delete · delete a session\n\n" +
-	"**This session**\n/model · change the model\n/prompt · change the prompt\n" +
+	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
-	"**The current task**\n/stop · stop it\n/steer · send it a note\n" +
+	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/approve · /deny · answer an approval\n\n" +
 	"**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 
@@ -713,9 +823,9 @@ const helpCLI = "📖 **Commands**\n\n" +
 	"**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
 	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n" +
 	"/delete · delete a session\n\n" +
-	"**This session**\n/model · change the model\n/prompt · change the prompt\n" +
+	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
-	"**The current task**\n/stop · stop it\n/steer · send it a note\n\n" +
+	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n\n" +
 	"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
 
 func cmdHelp(_ context.Context, c *CommandCtx, _ string) error {
@@ -857,7 +967,7 @@ func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 	if session != nil {
 		sessionID = session.ID
 	}
-	rows, compactions, err := obs.UsageReport(ctx, c.Deps.Agent.DB, since, sessionID, FlatProviders(c.Deps.Cfg))
+	rows, compactions, err := obs.UsageReport(ctx, c.Deps.Agent.DB, since, sessionID)
 	if err != nil {
 		return err
 	}
@@ -898,18 +1008,4 @@ func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 	}
 	c.send(r)
 	return nil
-}
-
-// FlatProviders returns the names of the providers with a flat-rate plan.
-func FlatProviders(cfg *config.Config) map[string]bool {
-	flat := map[string]bool{}
-	if cfg == nil {
-		return flat
-	}
-	for name, p := range cfg.Providers {
-		if p.FlatRate {
-			flat[name] = true
-		}
-	}
-	return flat
 }

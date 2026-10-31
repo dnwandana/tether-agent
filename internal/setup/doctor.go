@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -29,6 +30,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/telegram"
 	"github.com/dnwandana/tether-agent/internal/update"
+	"gopkg.in/yaml.v3"
 )
 
 // The values of Check.Status.
@@ -85,7 +87,11 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	var out []Check
 	dotenv, envCheck := d.checkDotEnv()
 	cfg, cfgCheck := d.checkConfig(dotenv, envCheck)
-	out = append(out, cfgCheck, envCheck)
+	out = append(out, cfgCheck)
+	if raw, err := os.ReadFile(d.configPath()); err == nil {
+		out = append(out, flatRateChecks(raw)...)
+	}
+	out = append(out, envCheck)
 	if cfg != nil {
 		out = append(out, d.checkProviders(ctx, cfg)...)
 		out = append(out, d.checkTelegram(ctx, cfg))
@@ -222,30 +228,73 @@ func (d *Doctor) checkConfig(dotenv map[string]string, envCheck Check) (*config.
 	return cfg, c
 }
 
-// providerOrder returns the provider names: primary, fallback, and then the others in
-// name order.
+// flatRateChecks returns one warning for each providers.<name> entry that has the removed key
+// flat_rate. The config struct has no field for the key, so the check reads the raw YAML.
+func flatRateChecks(raw []byte) []Check {
+	var doc struct {
+		Providers map[string]map[string]any `yaml:"providers"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil
+	}
+	var out []Check
+	for _, name := range slices.Sorted(maps.Keys(doc.Providers)) {
+		if _, ok := doc.Providers[name]["flat_rate"]; !ok {
+			continue
+		}
+		out = append(out, Check{
+			Name:   "config",
+			Status: StatusWarn,
+			Detail: "providers." + name + ".flat_rate is removed. The usage report counts every provider in dollars. Delete the key from config.yaml.",
+			Next:   "delete the flat_rate line under providers." + name + " in config.yaml",
+		})
+	}
+	return out
+}
+
+// providerOrder returns the provider names: primary, then the fallback list in order, and
+// then the other entries in name order.
 func providerOrder(cfg *config.Config) []string {
 	var names []string
-	for name := range cfg.Providers {
-		if name != "primary" && name != "fallback" {
+	seen := map[string]bool{}
+	add := func(name string) {
+		if _, ok := cfg.Providers[name]; ok && !seen[name] {
+			seen[name] = true
 			names = append(names, name)
 		}
 	}
-	slices.Sort(names)
-	for _, first := range []string{"fallback", "primary"} {
-		if _, ok := cfg.Providers[first]; ok {
-			names = append([]string{first}, names...)
-		}
+	add("primary")
+	for _, name := range cfg.FallbackList() {
+		add(name)
+	}
+	rest := make([]string, 0, len(cfg.Providers))
+	for name := range cfg.Providers {
+		rest = append(rest, name)
+	}
+	slices.Sort(rest)
+	for _, name := range rest {
+		add(name)
 	}
 	return names
 }
 
-// checkProviders sends a 1-token test call to each provider.
+// checkProviders sends a 1-token test call to each provider. An unusable entry fails with
+// its load message and gets no test call. The other entries still get their checks.
 func (d *Doctor) checkProviders(ctx context.Context, cfg *config.Config) []Check {
 	var out []Check
 	for _, name := range providerOrder(cfg) {
+		pc := cfg.Providers[name]
 		c := Check{Name: "provider " + name, Status: StatusOK}
-		model, ms, err := TestProvider(ctx, name, cfg.Providers[name], d.hc())
+		if pc.Preset != "" {
+			c.Name += " (" + pc.Preset + ")"
+		}
+		if pc.Unusable != "" {
+			c.Status, c.Detail = StatusFail, pc.Unusable
+			c.Next = fmt.Sprintf("set the API key and the model of providers.%s, or remove the entry from config.yaml", name)
+			out = append(out, c)
+			continue
+		}
+		model, ms, err := TestProvider(ctx, name, pc, d.hc())
 		if err != nil {
 			c.Status = StatusFail
 			c.Detail = fmt.Sprintf("the test call to provider %s failed: %v", name, err)
@@ -354,18 +403,17 @@ func (d *Doctor) checkStateDB(ctx context.Context) []Check {
 }
 
 // lastAnswerCheck shows the provider and the model of the newest stored answer. An answer
-// from the fallback is a warning, because the primary failed at that time, but not when the
-// session pins the fallback.
+// from an entry other than the first entry of the turn is a warning, because the first
+// entry failed at that time. The first entry is the pinned entry, else primary.
 func lastAnswerCheck(l obs.LastAnswer, age time.Duration) Check {
 	c := Check{Name: "last answer", Status: StatusOK,
 		Detail: l.Provider + " · " + l.Model + ", " + obs.Ago(age)}
 	switch {
-	case l.Provider != "fallback":
-	case l.PinsFallback():
-		c.Detail += " (the session pins the fallback)"
-	default:
+	case l.Provider != l.PinnedEntry():
 		c.Status = StatusWarn
 		c.Next = `the primary failed at that time; see "provider fallback" in the gateway log`
+	case l.Pin != "":
+		c.Detail += " (the session pins the entry " + l.PinnedEntry() + ")"
 	}
 	return c
 }
