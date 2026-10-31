@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/dnwandana/tether-agent/internal/config"
@@ -275,5 +276,112 @@ func TestModelUseActionFitsCallbackData(t *testing.T) {
 	data := "cmd:" + "1234567890123456" + ":" + action
 	if action != "/model "+entry+" use 999 7f3a" || len(action) != 40 || len(data) > 64 {
 		t.Fatalf("%q has %d bytes", data, len(data))
+	}
+}
+
+// zaiNoKey is the Unusable text of a zai entry with no API key.
+const zaiNoKey = "config: providers.zai needs an API key. Set ZAI_API_KEY in ~/.tether/.env, or set providers.zai.api_key"
+
+// zaiNoModel is the Unusable text of a zai entry with no model.
+const zaiNoModel = "config: providers.zai.model is empty. Set the model name"
+
+// unusableForms are the /model forms with an entry. Each form must get the "not usable" reply.
+var unusableForms = []string{"zai", "zai 2", "zai refresh", "zai config", "zai:m", "zai:", "zai use 1 abcd"}
+
+// unusableZai returns modelCtx with a zai entry that a fake /models server serves, and with
+// the Unusable text unusable on zai. It returns the count of list calls.
+func unusableZai(t *testing.T, model, unusable string) (*CommandCtx, *[]Reply, *atomic.Int32) {
+	t.Helper()
+	c, sent := modelCtx(t)
+	calls := serveModels(t, c, "zai", model, http.StatusOK, "glm-4.7")
+	pc := c.Deps.Cfg.Providers["zai"]
+	pc.Unusable = unusable
+	c.Deps.Cfg.Providers["zai"] = pc
+	return c, sent, calls
+}
+
+func TestModelUnusableEntryRefused(t *testing.T) {
+	back := [][]Button{{{Text: "↩ Providers", Data: "/model providers"}}}
+	for _, tc := range []struct{ name, model, unusable, detail string }{
+		{"no key", "glm-4.7", zaiNoKey, "providers.zai needs an API key. Set ZAI\\_API\\_KEY in \\~/.tether/.env, or set providers.zai.api\\_key."},
+		{"no model", "", zaiNoModel, "providers.zai.model is empty. Set the model name."},
+	} {
+		c, sent, calls := unusableZai(t, tc.model, tc.unusable)
+		want := "⚠️ **zai is not usable**\n" + tc.detail + "\nThis session still uses primary."
+		for _, form := range unusableForms {
+			run(t, c, "/model "+form)
+			r := lastSent(t, sent)
+			if r.Text != want || !r.Edit || !reflect.DeepEqual(r.Buttons, back) {
+				t.Fatalf("%s, /model %s: got %+v", tc.name, form, r)
+			}
+		}
+		if s, _ := c.Deps.Store.Get(context.Background(), c.Session.ID); s.ModelOverride != "" {
+			t.Fatalf("%s: the override must not change: %q", tc.name, s.ModelOverride)
+		}
+		if calls.Load() != 0 {
+			t.Fatalf("%s: %d list calls", tc.name, calls.Load())
+		}
+	}
+}
+
+func TestModelUnusableEntryCLI(t *testing.T) {
+	c, out := cmdCtx(t, "cli:t")
+	calls := serveModels(t, c, "zai", "glm-4.7", http.StatusOK, "glm-4.7")
+	pc := c.Deps.Cfg.Providers["zai"]
+	pc.Unusable = zaiNoKey
+	c.Deps.Cfg.Providers["zai"] = pc
+	run(t, c, "/model zai config")
+	want := "⚠️ **zai is not usable**\nproviders.zai needs an API key. Set ZAI\\_API\\_KEY in \\~/.tether/.env, or set providers.zai.api\\_key.\nThis session still uses primary.\n"
+	if out.String() != want || calls.Load() != 0 {
+		t.Fatalf("%d list calls, got:\n%s", calls.Load(), out)
+	}
+	if s, _ := c.Deps.Store.Get(context.Background(), c.Session.ID); s.ModelOverride != "" {
+		t.Fatal(s.ModelOverride)
+	}
+	if r := c.unusableReply(c.Session, "zai", pc); r.Buttons != nil || !r.Edit {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestServedEntry(t *testing.T) {
+	c, _ := modelCtx(t)
+	s, err := c.current(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.servedEntry(s); got != "primary" {
+		t.Fatal(got)
+	}
+	s.ModelOverride = "zai:glm-4.7"
+	if got := c.servedEntry(s); got != "zai" {
+		t.Fatal(got)
+	}
+	pc := c.Deps.Cfg.Providers["zai"]
+	pc.Unusable = zaiNoKey
+	c.Deps.Cfg.Providers["zai"] = pc
+	if got := c.servedEntry(s); got != "primary" {
+		t.Fatal(got)
+	}
+	// With no agent, the name comes from modelInUse.
+	c.Deps.Agent = nil
+	if got := c.servedEntry(s); got != "primary" {
+		t.Fatal(got)
+	}
+	pc.Unusable = ""
+	c.Deps.Cfg.Providers["zai"] = pc
+	if got := c.servedEntry(s); got != "zai" {
+		t.Fatal(got)
+	}
+}
+
+func TestUnusableDetail(t *testing.T) {
+	for in, want := range map[string]string{
+		zaiNoModel:                              "providers.zai.model is empty. Set the model name.",
+		"config: providers.x needs an API key.": "providers.x needs an API key.",
+		"no prefix":                             "no prefix.",
+	} {
+		if got := unusableDetail(config.Provider{Unusable: in}); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
 	}
 }

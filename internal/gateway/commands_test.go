@@ -1485,3 +1485,182 @@ func TestEffortCommandEntry(t *testing.T) {
 		t.Fatalf("%+v", cmd)
 	}
 }
+
+// zaiKeyMissing is the Unusable text of a zai entry with no API key.
+const zaiKeyMissing = "config: providers.zai needs an API key. Set ZAI_API_KEY in ~/.tether/.env, or set providers.zai.api_key"
+
+// zaiNotUsableReply is the reply to /model zai when zai has the Unusable text zaiKeyMissing.
+const zaiNotUsableReply = "⚠️ **zai is not usable**\nproviders.zai needs an API key. Set ZAI\\_API\\_KEY in \\~/.tether/.env, or set providers.zai.api\\_key.\nThis session still uses primary."
+
+// unusableModelCtx returns modelCtx with zai (preset zai-coding, label "zai (Z.AI)") not
+// usable, with the Unusable text unusable and the short cause cause.
+func unusableModelCtx(t *testing.T, unusable, cause string) (*CommandCtx, *[]Reply) {
+	t.Helper()
+	c, sent := modelCtx(t)
+	c.Deps.Cfg.Providers["zai"] = config.Provider{Preset: "zai-coding", Unusable: unusable, UnusableCause: cause}
+	return c, sent
+}
+
+// storeOverride saves the model override v for the session of c.
+func storeOverride(t *testing.T, c *CommandCtx, v string) {
+	t.Helper()
+	ctx := context.Background()
+	s, err := c.current(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Deps.Store.SetModel(ctx, s.ID, v); err != nil {
+		t.Fatal(err)
+	}
+	s.ModelOverride = v
+}
+
+func TestModelShowUnusableMarks(t *testing.T) {
+	c, sent := unusableModelCtx(t, zaiKeyMissing, config.UnusableNoKey)
+	run(t, c, "/model")
+	r := lastSent(t, sent)
+	want := "🧠 **Model: default**\n`primary` (OpenRouter) · anthropic/claude-sonnet-5\nTap a provider to see its models. ⚠️ marks a provider that is not usable."
+	if r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	wantB := [][]Button{
+		{{Text: "openrouter", Data: "/model openrouter"}, {Text: "✓ primary (OpenRouter)", Data: "/model primary"}},
+		{{Text: "⚠️ zai (Z.AI)", Data: "/model zai"}},
+	}
+	if !reflect.DeepEqual(r.Buttons, wantB) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+	// With no entry that is not usable, the reply has no mark and no sentence about it.
+	c.Deps.Cfg.Providers["zai"] = config.Provider{Preset: "zai-coding"}
+	run(t, c, "/model")
+	r = lastSent(t, sent)
+	if !strings.HasSuffix(r.Text, "\nTap a provider to see its models.") || r.Buttons[1][0].Text != "zai (Z.AI)" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestModelShowUnusableCLI(t *testing.T) {
+	c, out := cmdCtx(t, "cli:t")
+	c.Deps.Providers["zai"] = &fakeProv{}
+	c.Deps.Cfg.Providers["zai"] = config.Provider{Preset: "zai-coding", Unusable: zaiKeyMissing, UnusableCause: config.UnusableNoKey}
+	run(t, c, "/model")
+	want := "🧠 **Model: default**\n`primary` · fake-model\nSend /model <provider> to see its models. The providers are: cheap, primary, zai (Z.AI, not usable).\n"
+	if out.String() != want {
+		t.Fatalf("got:\n%s", out)
+	}
+	// A label with no provider group gets "not usable" in new brackets.
+	out.Reset()
+	c.Deps.Cfg.Providers["zai"] = config.Provider{Preset: "zai", Unusable: zaiKeyMissing, UnusableCause: config.UnusableNoKey}
+	run(t, c, "/model")
+	if !strings.HasSuffix(out.String(), "The providers are: cheap, primary, zai (not usable).\n") {
+		t.Fatalf("got:\n%s", out)
+	}
+}
+
+func TestModelShowStoredUnusableOverride(t *testing.T) {
+	for _, tc := range []struct{ unusable, cause, line, reply string }{
+		{zaiKeyMissing, config.UnusableNoKey, "⚠️ zai has no API key, so calls go to primary.", zaiNotUsableReply},
+		{"config: providers.zai.model is empty. Set the model name", config.UnusableNoModel,
+			"⚠️ zai has no model in config.yaml, so calls go to primary.",
+			"⚠️ **zai is not usable**\nproviders.zai.model is empty. Set the model name.\nThis session still uses primary."},
+	} {
+		c, sent := unusableModelCtx(t, tc.unusable, tc.cause)
+		storeOverride(t, c, "zai:glm-4.7")
+		run(t, c, "/model")
+		r := lastSent(t, sent)
+		if want := "🧠 **Model: zai:glm-4.7**\n`primary` (OpenRouter) · anthropic/claude-sonnet-5\n" + tc.line; r.Text != want {
+			t.Fatalf("got:\n%s", r.Text)
+		}
+		wantB := [][]Button{
+			{{Text: "openrouter", Data: "/model openrouter"}, {Text: "primary (OpenRouter)", Data: "/model primary"}},
+			{{Text: "✓ ⚠️ zai (Z.AI)", Data: "/model zai"}},
+			{{Text: "↺ Use the default", Data: "/model clear"}},
+		}
+		if !reflect.DeepEqual(r.Buttons, wantB) {
+			t.Fatalf("%+v", r.Buttons)
+		}
+		// A tap on the zai button gives the full cause and keeps the stored override.
+		run(t, c, "/model zai")
+		if r := lastSent(t, sent); r.Text != tc.reply {
+			t.Fatalf("got:\n%s", r.Text)
+		}
+		if s, _ := c.Deps.Store.Get(context.Background(), c.Session.ID); s.ModelOverride != "zai:glm-4.7" {
+			t.Fatal(s.ModelOverride)
+		}
+	}
+}
+
+func TestModelShowStoredUnusableOverrideCLI(t *testing.T) {
+	c, out := cmdCtx(t, "cli:t")
+	c.Deps.Providers["zai"] = &fakeProv{}
+	c.Deps.Cfg.Providers["primary"] = config.Provider{Model: "fake-model"}
+	c.Deps.Cfg.Providers["zai"] = config.Provider{Preset: "zai-coding", Unusable: zaiKeyMissing, UnusableCause: config.UnusableNoKey}
+	storeOverride(t, c, "zai:glm-4.7")
+	run(t, c, "/model")
+	want := "🧠 **Model: zai:glm-4.7**\n`primary` · fake-model\n" +
+		"⚠️ zai has no API key, so calls go to primary. Send /model zai to see how to fix it, or /model clear.\n" +
+		"Send /model <provider> to see its models. The providers are: cheap, primary, zai (Z.AI, not usable).\n"
+	if out.String() != want {
+		t.Fatalf("got:\n%s", out)
+	}
+}
+
+func TestModelUnusableEscapes(t *testing.T) {
+	box := config.Provider{Preset: "openrouter", UnusableCause: config.UnusableNoKey,
+		Unusable: "config: providers.my_box needs an API key. Set OPENROUTER_API_KEY in ~/.tether/.env, or set providers.my_box.api_key"}
+	c, sent := modelCtx(t)
+	c.Deps.Providers["my_box"] = &fakeProv{}
+	c.Deps.Cfg.Providers["my_box"] = box
+	run(t, c, "/model my_box")
+	reply := "⚠️ **my\\_box is not usable**\nproviders.my\\_box needs an API key. Set OPENROUTER\\_API\\_KEY in \\~/.tether/.env, or set providers.my\\_box.api\\_key.\nThis session still uses primary."
+	if r := lastSent(t, sent); r.Text != reply {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	storeOverride(t, c, "my_box:x")
+	run(t, c, "/model")
+	r := lastSent(t, sent)
+	if !strings.HasPrefix(r.Text, "🧠 **Model: my\\_box:x**\n") ||
+		!strings.HasSuffix(r.Text, "\n⚠️ my\\_box has no API key, so calls go to primary.") ||
+		r.Buttons[0][0].Text != "✓ ⚠️ my_box (OpenRouter)" {
+		t.Fatalf("got:\n%s\n%+v", r.Text, r.Buttons)
+	}
+	cli, out := cmdCtx(t, "cli:t")
+	cli.Deps.Providers["my_box"] = &fakeProv{}
+	cli.Deps.Cfg.Providers["my_box"] = box
+	storeOverride(t, cli, "my_box:x")
+	run(t, cli, "/model")
+	if !strings.Contains(out.String(), "\n⚠️ my\\_box has no API key, so calls go to primary. Send /model my\\_box to see how to fix it, or /model clear.\n") ||
+		!strings.HasSuffix(out.String(), "The providers are: cheap, my\\_box (OpenRouter, not usable), primary.\n") {
+		t.Fatalf("got:\n%s", out)
+	}
+}
+
+func TestModelShowStoredUnusableOverrideFallback(t *testing.T) {
+	c, sent, set := chainCtx(t, func(cfg *config.Config) {
+		cfg.Providers["zai"] = config.Provider{Format: "openai", BaseURL: "http://z", Model: "glm-4.7",
+			Unusable: zaiKeyMissing, UnusableCause: config.UnusableNoKey}
+	})
+	storeOverride(t, c, "zai:glm-4.7")
+	line := "⚠️ zai has no API key, so calls go to primary."
+	run(t, c, "/model")
+	if r := lastSent(t, sent); r.Text != "🧠 **Model: zai:glm-4.7**\n`primary` · glm-4.7\n"+line {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	// primary also failed: the line for the stored override comes first, and the fallback warning follows it.
+	failEntry(t, set, "primary", "glm-4.7")
+	run(t, c, "/model")
+	r := lastSent(t, sent)
+	want := "🧠 **Model: zai:glm-4.7**\n`openrouter` · z-ai/glm-4.7\n" + line + "\n" +
+		"⚠️ The primary model glm-4.7 failed 2 min ago (HTTP 429). Calls go to openrouter until the primary answers again."
+	if r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	wantB := [][]Button{
+		{{Text: "deepseek", Data: "/model deepseek"}, {Text: "openrouter", Data: "/model openrouter"}},
+		{{Text: "primary", Data: "/model primary"}, {Text: "✓ ⚠️ zai", Data: "/model zai"}},
+		{{Text: "↺ Use the default", Data: "/model clear"}},
+	}
+	if !reflect.DeepEqual(r.Buttons, wantB) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+}

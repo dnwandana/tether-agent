@@ -155,7 +155,7 @@ func modelShortName(id string) string {
 }
 
 // modelListFailure returns the reply for a failed model list call of the entry. It offers
-// the model of the entry in config.yaml, when the entry has one.
+// the model of the entry in config.yaml only when the entry has one.
 func (c *CommandCtx) modelListFailure(entry string, pc config.Provider, err error) Reply {
 	e := EscapeMarkdown(entry)
 	use := "/model " + entry + " config"
@@ -164,6 +164,10 @@ func (c *CommandCtx) modelListFailure(entry string, pc config.Provider, err erro
 	end := "Tap the button to use the model in config.yaml. Send /model " + e + ":<model> to use another model."
 	if !tap {
 		end = "Send /model " + e + " config to use the model in config.yaml. Send /model " + e + ":<model> to use another model."
+	}
+	// An entry with no model in config.yaml has no model to offer.
+	if pc.Model == "" {
+		end = "Send /model " + e + ":<model> to use a model."
 	}
 	r := Reply{
 		Text: fmt.Sprintf("⚠️ **No model list from %s**\n%s\n%s", e, EscapeMarkdown(provider.ModelListCause(err)), end),
@@ -176,5 +180,26 @@ func (c *CommandCtx) modelListFailure(entry string, pc config.Provider, err erro
 		r.Buttons = append(r.Buttons, []Button{{Text: "Use " + pc.Model, Data: use}})
 	}
 	r.Buttons = append(r.Buttons, []Button{{Text: "↩ Providers", Data: "/model providers"}})
+	return r
+}
+
+// unusableDetail returns the Unusable text of pc as one sentence for a reply: with no
+// prefix "config: " and with one "." at the end. The text is not escaped.
+func unusableDetail(pc config.Provider) string {
+	d := strings.TrimPrefix(pc.Unusable, "config: ")
+	return strings.TrimSuffix(d, ".") + "."
+}
+
+// unusableReply returns the reply for a /model form that names the entry, when pc is not
+// usable. It tells the cause and the entry that still serves the session s.
+func (c *CommandCtx) unusableReply(s *sessions.Session, entry string, pc config.Provider) Reply {
+	r := Reply{
+		Text: fmt.Sprintf("⚠️ **%s is not usable**\n%s\nThis session still uses %s.",
+			EscapeMarkdown(entry), EscapeMarkdown(unusableDetail(pc)), EscapeMarkdown(c.servedEntry(s))),
+		Edit: true,
+	}
+	if c.interactive() {
+		r.Buttons = [][]Button{{{Text: "↩ Providers", Data: "/model providers"}}}
+	}
 	return r
 }

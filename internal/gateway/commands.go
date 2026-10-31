@@ -506,12 +506,32 @@ func (c *CommandCtx) modelReply(s *sessions.Session) Reply {
 			shown, model, warning = ms.Name, ms.Model, fallbackWarning(ms.Fallback, nowFunc())
 		}
 	}
+	// The chain skips an entry that is not usable, so the text names the entry that answers.
+	if served := c.servedEntry(s); served != shown {
+		shown, model = served, ""
+		if c.Deps.Cfg != nil {
+			model = c.Deps.Cfg.Providers[served].Model
+		}
+	}
 	text := fmt.Sprintf("🧠 **Model: %s**\n`%s`", head, shown)
 	if label := c.labelOf(shown); label != shown {
 		text += label[len(shown):]
 	}
 	if model != "" {
 		text += " · " + EscapeMarkdown(model)
+	}
+	// A stored override to an entry that is not usable gets a line that tells where the
+	// calls go. This line comes before the fallback warning.
+	stored := ""
+	if name != "primary" && c.isUnusable(name) {
+		stored = "⚠️ " + EscapeMarkdown(name) + " is not usable, so calls go to primary."
+		if cause := c.Deps.Cfg.Providers[name].UnusableCause; cause != "" {
+			stored = "⚠️ " + EscapeMarkdown(name) + " has " + cause + ", so calls go to primary."
+		}
+		if !c.interactive() {
+			stored += " Send /model " + EscapeMarkdown(name) + " to see how to fix it, or /model clear."
+		}
+		text += "\n" + stored
 	}
 	if warning != "" {
 		text += "\n" + warning
@@ -520,23 +540,44 @@ func (c *CommandCtx) modelReply(s *sessions.Session) Reply {
 	if !c.interactive() {
 		labels := make([]string, len(names))
 		for i, n := range names {
-			labels[i] = EscapeMarkdown(c.labelOf(n))
+			label := c.labelOf(n)
+			if c.isUnusable(n) {
+				if label == n {
+					label = n + " (not usable)"
+				} else {
+					label = strings.TrimSuffix(label, ")") + ", not usable)"
+				}
+			}
+			labels[i] = EscapeMarkdown(label)
 		}
 		text += fmt.Sprintf("\nSend /model <provider> to see its models. The providers are: %s.", strings.Join(labels, ", "))
 		return Reply{Text: text}
 	}
 	var rows [][]Button
+	anyUnusable := false
 	for i, n := range names {
 		if i%modelButtonsPerRow == 0 {
 			rows = append(rows, nil)
 		}
 		label := c.labelOf(n)
+		if c.isUnusable(n) {
+			label = "⚠️ " + label
+			anyUnusable = true
+		}
 		if n == name {
 			label = "✓ " + label
 		}
 		rows[len(rows)-1] = append(rows[len(rows)-1], Button{Text: label, Data: "/model " + n})
 	}
-	return Reply{Text: text + "\nTap a provider to see its models.", Buttons: rows}
+	if stored != "" {
+		rows = append(rows, []Button{{Text: "↺ Use the default", Data: "/model clear"}})
+		return Reply{Text: text, Buttons: rows}
+	}
+	text += "\nTap a provider to see its models."
+	if anyUnusable {
+		text += " ⚠️ marks a provider that is not usable."
+	}
+	return Reply{Text: text, Buttons: rows}
 }
 
 // modelInUse returns the provider name and the model that the session s uses now: the
@@ -560,6 +601,21 @@ func (c *CommandCtx) modelInUse(s *sessions.Session) (name, model string) {
 	return name, model
 }
 
+// servedEntry returns the provider entry that answers for the session s now. The chain
+// skips an entry that is not usable, so such an entry gives primary.
+func (c *CommandCtx) servedEntry(s *sessions.Session) string {
+	name, _ := c.modelInUse(s)
+	if ag := c.Deps.Agent; ag != nil {
+		if ms := ag.CurrentModel(s); ms.Name != "" {
+			name = ms.Name
+		}
+	}
+	if name != "primary" && c.Deps.Cfg != nil && c.Deps.Cfg.Providers[name].Unusable != "" {
+		return "primary"
+	}
+	return name
+}
+
 // entryLabel returns the label of a provider entry for a button or a reply. The label adds
 // the provider name of the preset when the entry name does not already say it.
 func entryLabel(name string, p config.Provider) string {
@@ -581,6 +637,12 @@ func (c *CommandCtx) labelOf(name string) string {
 		p = c.Deps.Cfg.Providers[name]
 	}
 	return entryLabel(name, p)
+}
+
+// isUnusable returns true when the config marks the provider entry name as not usable. A nil
+// config gives false.
+func (c *CommandCtx) isUnusable(name string) bool {
+	return c.Deps.Cfg != nil && c.Deps.Cfg.Providers[name].Unusable != ""
 }
 
 // modelSetReply returns the confirmation of a model change to the entry and the model. An

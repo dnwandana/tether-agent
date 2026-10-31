@@ -125,6 +125,11 @@ func cmdModel(ctx context.Context, c *CommandCtx, args string) error {
 		if c.Deps.Cfg != nil {
 			pc = c.Deps.Cfg.Providers[a.Entry]
 		}
+		// An entry that is not usable cannot serve a call, so no form lists it or saves it.
+		if pc.Unusable != "" {
+			c.send(c.unusableReply(s, a.Entry, pc))
+			return nil
+		}
 	}
 	switch a.Action {
 	case modelShow:

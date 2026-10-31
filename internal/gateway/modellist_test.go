@@ -257,3 +257,26 @@ func TestModelListFailure(t *testing.T) {
 		t.Fatalf("got:\n%s", r.Text)
 	}
 }
+
+// TestModelListFailureNoModel checks a failed list call of an entry with no model in
+// config.yaml: the reply has no sentence about config.yaml and no Use button.
+func TestModelListFailureNoModel(t *testing.T) {
+	ctx := context.Background()
+	want := "⚠️ **No model list from box**\nHTTP 500\nSend /model box:<model> to use a model."
+	c, _ := interactiveCtx(t)
+	serveModels(t, c, "box", "", http.StatusInternalServerError)
+	s, _ := c.current(ctx)
+	r := c.modelListReply(ctx, s, "box", 1, "")
+	if r.Text != want || !r.Edit || strings.Contains(r.Text, "config.yaml") {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if wantB := [][]Button{{{Text: "↩ Providers", Data: "/model providers"}}}; !reflect.DeepEqual(r.Buttons, wantB) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+	cli, out := cmdCtx(t, "cli:t")
+	serveModels(t, cli, "box", "", http.StatusInternalServerError)
+	run(t, cli, "/model box")
+	if out.String() != want+"\n" {
+		t.Fatalf("got:\n%s", out)
+	}
+}
