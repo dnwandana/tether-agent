@@ -187,6 +187,7 @@ func BotCommands() []BotCommand {
 		{Command: "steer", Description: "Send a note to the current task"},
 		{Command: "now", Description: "Do my waiting message now"},
 		{Command: "model", Description: "Change the model"},
+		{Command: "effort", Description: "Change the reasoning effort"},
 		{Command: "usage", Description: "See tokens and cost"},
 		{Command: "help", Description: "See all commands"},
 		{Command: "rename", Description: "Change the session title"},
