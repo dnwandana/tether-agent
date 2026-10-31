@@ -930,6 +930,31 @@ func TestProviderForPinnedChain(t *testing.T) {
 	}
 }
 
+func TestProviderForSkipsUnusableOverride(t *testing.T) {
+	a, sess := newAgent(t, scripted(text("ok")))
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{
+		"primary": {Format: "openai", BaseURL: "http://p", Model: "m1"},
+		"zai": {Format: "openai", BaseURL: "http://z", Model: "glm-4.7",
+			Unusable: "config: providers.zai needs an API key. Set ZAI_API_KEY in ~/.tether/.env, or set providers.zai.api_key"},
+	}
+	cfg.Agent.Fallback = []string{"zai"}
+	set, err := provider.FromConfig(&cfg, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Cfg, a.Chains = &cfg, set
+	// The override stays, but the chain skips zai, so no call goes to it.
+	sess.ModelOverride = "zai:glm-4.7"
+	if p := a.providerFor(sess); p.Name() != "primary" || p.Model() != "m1" {
+		t.Fatal(p.Name(), p.Model())
+	}
+	ms := a.CurrentModel(sess)
+	if ms.Name != "primary" || ms.Model != "m1" || ms.Fallback.FirstName != "primary" || ms.Fallback.Active {
+		t.Fatalf("%+v", ms)
+	}
+}
+
 // failProv fails each call before the first byte with HTTP 503.
 type failProv struct{ name, model string }
 

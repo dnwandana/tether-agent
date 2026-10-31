@@ -65,8 +65,8 @@ func (e endpoint) issuer(model string) string {
 func (e endpoint) has(quirk string) bool { return e.quirks[quirk] }
 
 // unusable is the adapter of an entry that cannot serve a call, for
-// example an entry with no API key. Each call fails before the first byte,
-// so the chain goes to the next entry.
+// example an entry with no API key. Each call fails before the first byte.
+// ChainFor leaves it out of each chain, except as "primary".
 type unusable struct {
 	name, model, reason string
 }
@@ -147,7 +147,10 @@ func FromConfig(cfg *config.Config, hc *http.Client, log *slog.Logger) (*Set, er
 
 // ChainFor returns the chain [first, primary, FallbackList()...] with no
 // name twice. model is a pin for the first entry only. An unknown first
-// uses "primary". The chain reads Raw, so it never holds a chain.
+// uses "primary". The chain reads Raw, so it never holds a chain. It leaves
+// out each entry that is not usable, except "primary", so no chain calls an
+// entry that must fail. A first entry that is not usable gives the default
+// chain with no pin.
 func (s *Set) ChainFor(first, model string) *Chain {
 	if _, ok := s.Raw[first]; !ok {
 		first = "primary"
@@ -160,6 +163,9 @@ func (s *Set) ChainFor(first, model string) *Chain {
 			continue
 		}
 		seen[name] = true
+		if _, bad := p.(*unusable); bad && name != "primary" {
+			continue
+		}
 		e := ChainEntry{Name: name, P: p, Vision: s.vision[name], Effort: s.effort[name]}
 		if name == first {
 			e.Model = model

@@ -96,6 +96,38 @@ func TestChainForPinned(t *testing.T) {
 	}
 }
 
+func TestChainForSkipsUnusable(t *testing.T) {
+	c := setConfig("")
+	c.Providers["zai"] = config.Provider{Format: "openai", BaseURL: "http://z", Model: "glm-4.7",
+		Unusable: "config: providers.zai needs an API key. Set ZAI_API_KEY in ~/.tether/.env, or set providers.zai.api_key"}
+	c.Agent.Fallback = []string{"zai", "deepseek", "openrouter"}
+	s, err := FromConfig(c, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A pinned first entry that is not usable gives the default chain with no pin.
+	eq(t, names(s.ChainFor("zai", "m")), "primary/,deepseek/,openrouter/")
+	eq(t, s.ChainFor("zai", "m").FallbackStatus().FirstName, "primary")
+	// A fallback entry that is not usable is never in a chain.
+	eq(t, names(s.ChainFor("primary", "")), "primary/,deepseek/,openrouter/")
+	eq(t, names(s.Default), "primary/,deepseek/,openrouter/")
+	eq(t, names(s.ChainFor("deepseek", "m9")), "deepseek/m9,primary/,openrouter/")
+
+	// A primary that is not usable stays, so a chain is never empty.
+	bad := setConfig("")
+	p := bad.Providers["primary"]
+	p.Unusable = "x"
+	bad.Providers["primary"] = p
+	bad.Agent.Fallback = []string{}
+	s2, err := FromConfig(bad, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, names(s2.Default), "primary/")
+	eq(t, names(s2.ChainFor("primary", "m9")), "primary/m9")
+	eq(t, names(s2.ChainFor("deepseek", "m9")), "deepseek/m9,primary/")
+}
+
 func TestFromConfigNeedsPrimary(t *testing.T) {
 	c := config.Default()
 	c.Providers = map[string]config.Provider{}
