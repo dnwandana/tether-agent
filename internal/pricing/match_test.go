@@ -32,6 +32,16 @@ func TestCandidatesOrder(t *testing.T) {
 	}
 }
 
+// Each preset host maps to the provider prefix of its LiteLLM keys.
+func TestHostPrefixHasPresetHosts(t *testing.T) {
+	for host, want := range map[string]string{"api.x.ai": "xai", "api.moonshot.ai": "moonshot",
+		"dashscope-intl.aliyuncs.com": "dashscope", "api.minimax.io": "minimax"} {
+		if HostPrefix[host] != want {
+			t.Errorf("%s: %q", host, HostPrefix[host])
+		}
+	}
+}
+
 func TestHostOf(t *testing.T) {
 	if hostOf("https://API.Z.AI:443/api") != "api.z.ai" || hostOf("not a url") != "" {
 		t.Fatal()

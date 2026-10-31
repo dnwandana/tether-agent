@@ -9,12 +9,16 @@ import (
 
 // HostPrefix maps the host of a provider base URL to its LiteLLM key prefix.
 var HostPrefix = map[string]string{
-	"api.z.ai":          "zai",
-	"api.openai.com":    "openai",
-	"api.anthropic.com": "anthropic",
-	"api.deepseek.com":  "deepseek",
-	"api.groq.com":      "groq",
-	"api.mistral.ai":    "mistral",
+	"api.z.ai":                    "zai",
+	"api.openai.com":              "openai",
+	"api.anthropic.com":           "anthropic",
+	"api.deepseek.com":            "deepseek",
+	"api.groq.com":                "groq",
+	"api.mistral.ai":              "mistral",
+	"api.x.ai":                    "xai",
+	"api.moonshot.ai":             "moonshot",
+	"dashscope-intl.aliyuncs.com": "dashscope",
+	"api.minimax.io":              "minimax",
 }
 
 // openRouterHost is the host whose providers use the OpenRouter price data.
