@@ -23,6 +23,7 @@ FUZZ_TARGETS := \
 	./internal/tools:FuzzFuzzyFindSpans \
 	./internal/tools:FuzzParseDDG \
 	./internal/provider:FuzzReadSSE \
+	./internal/provider:FuzzResponsesParse \
 	./internal/telegram:FuzzMarkdownV2 \
 	./internal/telegram:FuzzSplitUTF16 \
 	./internal/telegram:FuzzSplitMarkdownV2
