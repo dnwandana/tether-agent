@@ -83,7 +83,7 @@ func (w *Wizard) hc() *http.Client {
 
 func (w *Wizard) say(format string, args ...any) { fmt.Fprintf(w.Out, format+"\n", args...) }
 
-// Run runs the setup steps: the provider, the fallback provider, Telegram, the host
+// Run runs the setup steps: the provider, the fallback list, Telegram, the host
 // programs, and the systemd unit. It saves config.yaml and .env after each step that
 // changes them.
 func (w *Wizard) Run(ctx context.Context) error {
@@ -105,25 +105,17 @@ func (w *Wizard) Run(ctx context.Context) error {
 	w.say("Press Enter to keep the value in [brackets].")
 
 	w.say("\nStep 1 of 5: the primary provider")
-	if err := w.providerStep(ctx, "primary", "PRIMARY_API_KEY"); err != nil {
+	if err := w.providerStep(ctx, "primary", "PRIMARY_API_KEY", nil); err != nil {
 		return err
 	}
 
-	w.say("\nStep 2 of 5: the fallback provider (optional)")
-	q := "Set up a fallback provider?"
-	if w.cfg.has("providers", "fallback") {
-		q = "Change the fallback provider?"
-	}
-	if yes, err := w.confirm(q); err != nil {
+	w.say("\nStep 2 of 5: the fallback providers (optional)")
+	if err := w.fallbackStep(ctx); err != nil {
 		return err
-	} else if yes {
-		if err := w.providerStep(ctx, "fallback", "FALLBACK_API_KEY"); err != nil {
-			return err
-		}
 	}
 
 	w.say("\nStep 3 of 5: Telegram (optional)")
-	q = "Set up Telegram?"
+	q := "Set up Telegram?"
 	if w.cfg.get("telegram", "enabled") == "true" {
 		q = "Change the Telegram setup?"
 	}
@@ -206,23 +198,32 @@ func (w *Wizard) lookup(name string) (string, bool) {
 
 // providerAnswers holds the answers of the provider questions.
 type providerAnswers struct {
+	// preset is the chosen preset id. It is "" for a custom entry.
+	preset                      string
 	format, baseURL, key, model string
-	// keyRef is the variable of the key in the config.
+	// keyRef is the variable of the key in the config. It is "" when the entry has no
+	// api_key and no answer gave one.
 	keyRef string
 	// keyFromUser is true when key must go to .env under keyRef.
 	keyFromUser bool
 }
 
 // providerStep asks for one provider, tests it, and saves it. A failed test call asks the
-// questions one more time. A second failure stops the wizard.
-func (w *Wizard) providerStep(ctx context.Context, name, keyVar string) error {
-	a := w.currentProvider(name, keyVar)
+// questions one more time. A second failure stops the wizard. keyVar is the variable of a
+// new key for a custom entry. A non-nil chosen is the menu answer of the first try.
+func (w *Wizard) providerStep(ctx context.Context, name, keyVar string, chosen *string) error {
+	a := w.currentProvider(name)
 	for try := 1; ; try++ {
 		var err error
-		if a, err = w.askProvider(ctx, a); err != nil {
+		if try == 1 && chosen != nil {
+			a, err = w.askChosen(ctx, name, keyVar, *chosen, a)
+		} else {
+			a, err = w.askProvider(ctx, name, keyVar, a)
+		}
+		if err != nil {
 			return err
 		}
-		model, ms, err := TestProvider(ctx, name, config.Provider{Format: a.format, BaseURL: a.baseURL, APIKey: a.key, Model: a.model}, w.hc())
+		model, ms, err := w.testProvider(ctx, name, a)
 		if err == nil {
 			w.say("The test call works: model %s answered in %d ms.", model, ms)
 			break
@@ -239,20 +240,51 @@ func (w *Wizard) providerStep(ctx context.Context, name, keyVar string) error {
 		w.env.set(a.keyRef, a.key)
 		w.dotenv[a.keyRef] = a.key
 	}
-	w.cfg.setString(a.format, "providers", name, "format")
-	w.cfg.setString(a.baseURL, "providers", name, "base_url")
-	w.cfg.setString("${"+a.keyRef+"}", "providers", name, "api_key")
+	if a.preset != "" {
+		pre, _ := config.PresetByID(a.preset)
+		w.cfg.setString(a.preset, "providers", name, "preset")
+		// A stale format or base_url wins over the preset, so the entry loses them.
+		w.cfg.delete("providers", name, "format")
+		w.cfg.delete("providers", name, "base_url")
+		if a.keyRef == pre.KeyEnv {
+			w.cfg.delete("providers", name, "api_key")
+		} else {
+			w.cfg.setString("${"+a.keyRef+"}", "providers", name, "api_key")
+		}
+	} else {
+		w.cfg.delete("providers", name, "preset")
+		w.cfg.setString(a.format, "providers", name, "format")
+		w.cfg.setString(a.baseURL, "providers", name, "base_url")
+		if a.keyRef == "" {
+			w.cfg.delete("providers", name, "api_key")
+		} else {
+			w.cfg.setString("${"+a.keyRef+"}", "providers", name, "api_key")
+		}
+	}
 	w.cfg.setString(a.model, "providers", name, "model")
 	return w.save()
 }
 
+// testProvider resolves the preset of the answers and sends the test call. The key of
+// the answers is the resolved key, so the resolution gets no env lookup.
+func (w *Wizard) testProvider(ctx context.Context, name string, a providerAnswers) (string, int64, error) {
+	pc, err := w.resolvedEntry(name, a)
+	if err != nil {
+		return "", 0, err
+	}
+	if pc.Unusable != "" {
+		return "", 0, errors.New(pc.Unusable)
+	}
+	return TestProvider(ctx, name, pc, w.hc())
+}
+
 // currentProvider returns the current values of a provider entry as the defaults.
-func (w *Wizard) currentProvider(name, keyVar string) providerAnswers {
+func (w *Wizard) currentProvider(name string) providerAnswers {
 	a := providerAnswers{
+		preset:  w.cfg.get("providers", name, "preset"),
 		format:  w.cfg.get("providers", name, "format"),
 		baseURL: w.cfg.get("providers", name, "base_url"),
 		model:   w.cfg.get("providers", name, "model"),
-		keyRef:  keyVar,
 	}
 	raw := w.cfg.get("providers", name, "api_key")
 	if m := envRef.FindStringSubmatch(raw); m != nil {
@@ -265,21 +297,297 @@ func (w *Wizard) currentProvider(name, keyVar string) providerAnswers {
 	return a
 }
 
-// askProvider asks the four provider questions with a as the defaults.
-func (w *Wizard) askProvider(ctx context.Context, a providerAnswers) (providerAnswers, error) {
+// presetGroup is one item of the preset menu. A group with two rows asks a second
+// question.
+type presetGroup struct {
+	label string
+	rows  []config.Preset
+}
+
+// presetGroups returns the items of the preset menu in wizard order.
+func presetGroups() []presetGroup {
+	var out []presetGroup
+	for _, p := range config.Presets() {
+		if n := len(out); n > 0 && out[n-1].label == p.Group {
+			out[n-1].rows = append(out[n-1].rows, p)
+			continue
+		}
+		out = append(out, presetGroup{label: p.Group, rows: []config.Preset{p}})
+	}
+	return out
+}
+
+// secondQuestions are the second questions of the groups with two rows.
+var secondQuestions = map[string]string{"Z.AI": "Plan"}
+
+// askPreset shows the preset menu and returns the chosen preset id, or "" for Custom. The
+// default is the preset of a, else Custom for a custom entry, else the first item.
+func (w *Wizard) askPreset(a providerAnswers) (string, error) {
+	groups := presetGroups()
+	custom := len(groups) + 1
+	def, defRow := 1, 1
+	switch {
+	case a.preset != "":
+		for gi, g := range groups {
+			for ri, r := range g.rows {
+				if r.ID == a.preset {
+					def, defRow = gi+1, ri+1
+				}
+			}
+		}
+	case a.format != "":
+		def = custom
+	}
+	for i, g := range groups {
+		w.say("%4d) %s", i+1, g.label)
+	}
+	w.say("%4d) Custom", custom)
+	n, err := w.askNumber("Provider", def, custom)
+	if err != nil || n == custom {
+		return "", err
+	}
+	g := groups[n-1]
+	if len(g.rows) == 1 {
+		return g.rows[0].ID, nil
+	}
+	if n != def {
+		defRow = 1
+	}
+	for i, r := range g.rows {
+		w.say("%4d) %s", i+1, r.Choice)
+	}
+	q := secondQuestions[g.label]
+	if q == "" {
+		q = "Choice"
+	}
+	r, err := w.askNumber(q, defRow, len(g.rows))
+	if err != nil {
+		return "", err
+	}
+	return g.rows[r-1].ID, nil
+}
+
+// askNumber asks for a number from 1 to max. It asks again after a bad answer.
+func (w *Wizard) askNumber(question string, def, max int) (int, error) {
+	for {
+		v := w.ask(question, strconv.Itoa(def))
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 && n <= max {
+			return n, nil
+		}
+		if w.eof {
+			return 0, errInputEnded
+		}
+		w.say("Enter a number from 1 to %d.", max)
+	}
+}
+
+// askProvider shows the preset menu, then asks the questions of the chosen item with a as
+// the defaults.
+func (w *Wizard) askProvider(ctx context.Context, name, keyVar string, a providerAnswers) (providerAnswers, error) {
+	id, err := w.askPreset(a)
+	if err != nil {
+		return a, err
+	}
+	return w.askChosen(ctx, name, keyVar, id, a)
+}
+
+// askChosen asks the questions of the menu answer id. An empty id is Custom.
+func (w *Wizard) askChosen(ctx context.Context, name, keyVar, id string, a providerAnswers) (providerAnswers, error) {
+	if id == "" {
+		return w.askCustom(ctx, name, keyVar, a)
+	}
+	return w.askPresetEntry(ctx, name, id, a)
+}
+
+// fallbackStep shows the fallback list and builds a new list when the user wants a
+// change. A new list starts empty, and each added entry goes to the end. An old entry
+// that the user does not add again stays in providers, but it is not in the list.
+func (w *Wizard) fallbackStep(ctx context.Context) error {
+	w.say("The fallback list is: %s.", listText(w.fallbackList()))
+	if yes, err := w.confirm("Change the fallback list?"); err != nil || !yes {
+		return err
+	}
+	list := []string{}
+	used := map[string]bool{}
+	for {
+		yes, err := w.confirm("Add a fallback provider?")
+		if err != nil {
+			return err
+		}
+		if !yes {
+			break
+		}
+		id, err := w.askPreset(providerAnswers{})
+		if err != nil {
+			return err
+		}
+		name, err := w.askEntryName(id, used)
+		if err != nil {
+			return err
+		}
+		if err := w.providerStep(ctx, name, entryKeyVar(name), &id); err != nil {
+			return err
+		}
+		list = append(list, name)
+		used[name] = true
+		// Save the list after each entry, so that a stop later keeps the entries that work.
+		w.cfg.setList(list, "agent", "fallback")
+		if err := w.save(); err != nil {
+			return err
+		}
+	}
+	w.cfg.setList(list, "agent", "fallback")
+	if err := w.save(); err != nil {
+		return err
+	}
+	w.say("The fallback list is: %s.", listText(list))
+	return nil
+}
+
+// fallbackList returns the fallback list of config.yaml with the rule of
+// config.FallbackList: agent.fallback wins, else an entry "fallback" is the list.
+func (w *Wizard) fallbackList() []string {
+	if w.cfg.has("agent", "fallback") {
+		return w.cfg.getList("agent", "fallback")
+	}
+	if w.cfg.has("providers", "fallback") {
+		return []string{"fallback"}
+	}
+	return nil
+}
+
+// listText returns the names with commas, or "none".
+func listText(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
+}
+
+// entryKeyVar returns the variable of a new key for the custom entry name, for example
+// FALLBACK_API_KEY.
+func entryKeyVar(name string) string {
+	return strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_API_KEY"
+}
+
+// entryNamePattern is the set of permitted entry names. A name also goes into the name of
+// a variable in .env.
+var entryNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// validEntryName returns an error when name cannot be a fallback entry. used holds the
+// names that are in the new list already.
+func validEntryName(name string, used map[string]bool) error {
+	switch {
+	case name == "primary":
+		return errors.New("the name primary is for the primary provider")
+	case !entryNamePattern.MatchString(name):
+		return errors.New(`a name can contain only letters, digits, "-", and "_"`)
+	case used[name]:
+		return fmt.Errorf("the entry %s is in the fallback list already", name)
+	}
+	return nil
+}
+
+// askEntryName asks for the name of a fallback entry. The default is the preset id, or
+// "custom". When an entry has that name or that preset already, the default gets a number,
+// for example openrouter-2. The name of an existing entry changes that entry.
+func (w *Wizard) askEntryName(id string, used map[string]bool) (string, error) {
+	base := id
+	if base == "" {
+		base = "custom"
+	}
+	taken := func(n string) bool { return n == "primary" || used[n] || w.cfg.has("providers", n) }
+	numbered := taken(base)
+	for _, n := range w.cfg.keys("providers") {
+		if id != "" && w.cfg.get("providers", n, "preset") == id {
+			numbered = true
+		}
+	}
+	def := base
+	for i := 2; numbered; i++ {
+		def = base + "-" + strconv.Itoa(i)
+		numbered = taken(def)
+	}
+	for {
+		v := w.ask("Name of the entry", def)
+		err := validEntryName(v, used)
+		if err == nil {
+			if w.cfg.has("providers", v) {
+				w.say("The entry %s exists. The answers change it.", v)
+			}
+			return v, nil
+		}
+		if w.eof {
+			return "", errInputEnded
+		}
+		msg := err.Error()
+		w.say("%s%s. Enter another name.", strings.ToUpper(msg[:1]), msg[1:])
+	}
+}
+
+// askPresetEntry asks the key and the model of a preset entry.
+func (w *Wizard) askPresetEntry(ctx context.Context, name, id string, a providerAnswers) (providerAnswers, error) {
+	pre, _ := config.PresetByID(id)
+	changed := a.preset != id
+	if a.preset != "" && changed {
+		// The model of another preset is not a good default.
+		a.model = ""
+	}
+	a.preset, a.format, a.baseURL = id, pre.Format, pre.BaseURL
+	if changed {
+		// The old key belongs to another endpoint. The default is the key env of the
+		// new preset.
+		a.keyRef, a.keyFromUser = pre.KeyEnv, false
+		a.key, _ = w.lookup(pre.KeyEnv)
+	}
+	if a.keyRef == "" {
+		// An entry with no api_key takes its key from the key env of the preset. A
+		// literal key from config.yaml goes to that variable.
+		a.keyRef = pre.KeyEnv
+		if !a.keyFromUser {
+			a.key, _ = w.lookup(pre.KeyEnv)
+		}
+	}
+	var err error
+	if a, err = w.askKey(ctx, "API key ("+pre.KeyEnv+")", a); err != nil {
+		return a, err
+	}
+	if a.keyFromUser && a.keyRef == pre.KeyEnv {
+		a.keyRef = w.keyVarFor(name, pre.KeyEnv, a.key)
+	}
+	if a.model, err = w.askModel(ctx, name, a); err != nil {
+		return a, err
+	}
+	return a, nil
+}
+
+// askCustom asks the four questions of a custom entry with a as the defaults.
+func (w *Wizard) askCustom(ctx context.Context, name, keyVar string, a providerAnswers) (providerAnswers, error) {
+	if a.preset != "" {
+		// Start from the values of the old preset. The key of the preset does not go to
+		// another host, so the key default is the variable of the entry.
+		pre, _ := config.PresetByID(a.preset)
+		a.format, a.baseURL = pre.Format, pre.BaseURL
+		a.preset = ""
+		a.keyRef, a.keyFromUser = keyVar, false
+		a.key, _ = w.lookup(keyVar)
+	}
+	if a.keyRef == "" {
+		a.keyRef = keyVar
+	}
 	def := a.format
 	if def == "" {
 		def = "openai"
 	}
 	for {
-		a.format = strings.ToLower(w.ask("Format (openai or anthropic)", def))
-		if a.format == "openai" || a.format == "anthropic" {
+		a.format = strings.ToLower(w.ask("Format (openai, anthropic, or responses)", def))
+		if a.format == "openai" || a.format == "anthropic" || a.format == "responses" {
 			break
 		}
 		if w.eof {
 			return a, errInputEnded
 		}
-		w.say("The format must be openai or anthropic.")
+		w.say("The format must be openai, anthropic, or responses.")
 	}
 	defURL := a.baseURL
 	if defURL == "" {
@@ -292,11 +600,69 @@ func (w *Wizard) askProvider(ctx context.Context, a providerAnswers) (providerAn
 	if a.baseURL, err = w.askRequired("Base URL", defURL); err != nil {
 		return a, err
 	}
-	keyQ := "API key (or ${NAME} for a variable in .env)"
-	if a.key != "" {
-		keyQ += " [Enter keeps the current key]"
+	if a, err = w.askKey(ctx, "API key (or ${NAME} for a variable in .env)", a); err != nil {
+		return a, err
 	}
-	v, err := w.askSecret(ctx, keyQ)
+	if _, set := w.lookup(keyVar); a.key == "" && a.keyRef == keyVar && !set {
+		// An entry with no key, for example a local model server, gets no api_key line. A
+		// reference to a variable that is not set stops the load.
+		a.keyRef = ""
+	}
+	if a.model, err = w.askModel(ctx, name, a); err != nil {
+		return a, err
+	}
+	return a, nil
+}
+
+// keyVarFor returns the variable in .env for the key of a preset entry. It is keyEnv when
+// .env has no value for keyEnv, when the value is key, or when no other entry uses
+// keyEnv. Else it is the first free <keyEnv>_<n> from 2, so a second entry does not
+// replace the key of the first entry.
+func (w *Wizard) keyVarFor(entry, keyEnv, key string) string {
+	if cur := w.dotenv[keyEnv]; cur == "" || cur == key || !w.otherEntryUses(entry, keyEnv) {
+		return keyEnv
+	}
+	for n := 2; ; n++ {
+		v := keyEnv + "_" + strconv.Itoa(n)
+		if cur := w.dotenv[v]; cur == "" || cur == key {
+			return v
+		}
+	}
+}
+
+// otherEntryUses reports whether a provider entry other than entry takes its key from the
+// variable v: through api_key: ${v}, or through the key env of its preset.
+func (w *Wizard) otherEntryUses(entry, v string) bool {
+	for _, name := range w.cfg.keys("providers") {
+		if name == entry {
+			continue
+		}
+		raw := w.cfg.get("providers", name, "api_key")
+		if m := envRef.FindStringSubmatch(raw); m != nil {
+			if m[1] == v {
+				return true
+			}
+			continue
+		}
+		if raw != "" {
+			continue
+		}
+		pre, ok := config.PresetByID(w.cfg.get("providers", name, "preset"))
+		base := strings.TrimRight(w.cfg.get("providers", name, "base_url"), "/")
+		if ok && pre.KeyEnv == v && (base == "" || base == strings.TrimRight(pre.BaseURL, "/")) {
+			return true
+		}
+	}
+	return false
+}
+
+// askKey asks for the API key. Enter keeps the current key, and a ${NAME} answer refers
+// to a variable in .env.
+func (w *Wizard) askKey(ctx context.Context, question string, a providerAnswers) (providerAnswers, error) {
+	if a.key != "" {
+		question += " [Enter keeps the current key]"
+	}
+	v, err := w.askSecret(ctx, question)
 	if err != nil {
 		return a, err
 	}
@@ -312,9 +678,6 @@ func (w *Wizard) askProvider(ctx context.Context, a providerAnswers) (providerAn
 		}
 	} else if a.key == "" {
 		w.say("Note: no API key is set.")
-	}
-	if a.model, err = w.askRequired("Model", a.model); err != nil {
-		return a, err
 	}
 	return a, nil
 }

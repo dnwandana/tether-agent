@@ -150,7 +150,7 @@ func TestEchoOffOnPipeFails(t *testing.T) {
 func TestWizardHidesKeyAndToken(t *testing.T) {
 	dir := t.TempDir()
 	prov := newFakeProvider(t)
-	w, out := wizard(t, dir, answers("openai", prov.URL+"/v1", "sk-test-123", "glm-4.7", "n", "n"))
+	w, out := wizard(t, dir, answers("11", "openai", prov.URL+"/v1", "sk-test-123", "glm-4.7", "n", "n"))
 	r, _ := pipe(t)
 	f := &fakeTerm{}
 	w.Term, w.term = r, f.ops()

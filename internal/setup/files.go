@@ -106,6 +106,47 @@ func (c *configDoc) setList(values []string, keys ...string) {
 	c.set(seq, keys...)
 }
 
+// delete removes the key at the key path. An absent key or path is no error.
+func (c *configDoc) delete(keys ...string) {
+	if len(keys) == 0 {
+		return
+	}
+	n := c.root.Content[0]
+	for _, k := range keys[:len(keys)-1] {
+		if n = mapValue(n, k); n == nil {
+			return
+		}
+	}
+	if n.Kind != yaml.MappingNode {
+		return
+	}
+	last := keys[len(keys)-1]
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == last {
+			n.Content = append(n.Content[:i], n.Content[i+2:]...)
+			return
+		}
+	}
+}
+
+// keys returns the keys of the mapping at the key path in file order.
+func (c *configDoc) keys(path ...string) []string {
+	n := c.root.Content[0]
+	for _, k := range path {
+		if n = mapValue(n, k); n == nil {
+			return nil
+		}
+	}
+	if n.Kind != yaml.MappingNode {
+		return nil
+	}
+	var out []string
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		out = append(out, n.Content[i].Value)
+	}
+	return out
+}
+
 // set puts value at the key path. An existing value keeps its comments.
 func (c *configDoc) set(value *yaml.Node, keys ...string) {
 	n := c.root.Content[0]

@@ -105,7 +105,7 @@ func TestWizardStep5(t *testing.T) {
 	fixedTZ(t, "UTC")
 	dir := t.TempDir()
 	prov := newFakeProvider(t)
-	w, out := wizard(t, dir, answers("openai", prov.URL, "sk-test-123", "m", "n", "n", "y"))
+	w, out := wizard(t, dir, answers("11", "openai", prov.URL, "sk-test-123", "m", "n", "n", "y"))
 	w.GOOS = "linux"
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err, out.String())
@@ -122,10 +122,10 @@ func TestWizardStep5(t *testing.T) {
 	// "N" writes nothing, and macOS skips the step.
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Setenv("HOME", t.TempDir())
-		w, out := wizard(t, t.TempDir(), answers("openai", prov.URL, "sk-test-123", "m", "n", "n", "y"))
+		w, out := wizard(t, t.TempDir(), answers("11", "openai", prov.URL, "sk-test-123", "m", "n", "n", "y"))
 		w.GOOS = goos
 		if goos == "linux" {
-			w.In = answers("openai", prov.URL, "sk-test-123", "m", "n", "n", "n")
+			w.In = answers("11", "openai", prov.URL, "sk-test-123", "m", "n", "n", "n")
 		}
 		if err := w.Run(ctx); err != nil {
 			t.Fatal(err, out.String())
@@ -168,7 +168,7 @@ func TestServiceStepUsesConfigDrain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			prov := newFakeProvider(t)
-			w, out := wizard(t, dir, answers("openai", prov.URL, "sk-test-123", "m", "n", "n", "n"))
+			w, out := wizard(t, dir, answers("11", "openai", prov.URL, "sk-test-123", "m", "n", "n", "n"))
 			w.GOOS = "linux"
 			if err := w.Run(ctx); err != nil {
 				t.Fatal(err, out.String())
@@ -178,7 +178,7 @@ func TestServiceStepUsesConfigDrain(t *testing.T) {
 			if err := os.WriteFile(path, append(b, tc.extra...), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			w, out = wizard(t, dir, answers("", "", "", "", "", "", "y"))
+			w, out = wizard(t, dir, answers("", "", "", "", "", "", "", "y"))
 			w.GOOS = "linux"
 			if err := w.Run(ctx); err != nil {
 				t.Fatal(err, out.String())
