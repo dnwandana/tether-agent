@@ -1,0 +1,387 @@
+# Telegram
+
+Tether Agent uses a Telegram bot as its main chat channel. The `tether gateway` command runs the
+bot. This page tells you how to set up the bot, who can talk to it, and what you see in the chat.
+
+For all `telegram.*` keys, see
+[docs/CONFIG.md](https://github.com/dnwandana/tether-agent/blob/main/docs/CONFIG.md#telegram).
+
+## Set up the bot
+
+### With the setup wizard
+
+Stop the gateway before you start. Telegram permits only one program to read the updates of a
+bot. If the gateway runs, the wizard stops with "Stop the tether gateway, then run tether setup
+again".
+
+1. Open [@BotFather](https://t.me/BotFather) in Telegram.
+2. Send `/newbot` and follow the questions.
+3. Copy the bot token.
+4. Run `tether setup`.
+5. At "Set up Telegram? [y/N]", type `y`.
+6. Paste the token at "Bot token from @BotFather". The wizard checks the token and shows the bot
+   name.
+7. Send `/start` to your bot in a private chat. The wizard waits for 5 minutes.
+8. At `Approve <name> (<id>) as the owner? [y/N]`, type `y`.
+
+The wizard then does these steps:
+
+- It writes the token to `.env` as `TELEGRAM_BOT_TOKEN`.
+- It writes `telegram.bot_token: ${TELEGRAM_BOT_TOKEN}` to `config.yaml`.
+- It adds your user id to `telegram.allowed_users`.
+- It sets `telegram.enabled: true`.
+
+If you type `n` at the owner question, the wizard prints a `tether pairing approve telegram
+<code>` command. Run it later to approve yourself.
+
+### With a manual config
+
+You can also edit the files yourself.
+
+1. Add the token to `<data dir>/.env`:
+
+   ```sh
+   TELEGRAM_BOT_TOKEN=123456:ABC...
+   ```
+
+2. Add the Telegram section to `<data dir>/config.yaml`:
+
+   ```yaml
+   telegram:
+     enabled: true
+     bot_token: ${TELEGRAM_BOT_TOKEN}
+     allowed_users: [123456789]   # your Telegram user id
+   ```
+
+When `telegram.bot_token` is empty, Tether Agent uses the `TELEGRAM_BOT_TOKEN` variable.
+
+### Start the gateway
+
+1. Run `tether gateway`.
+2. Send a message to the bot.
+
+The gateway checks the token when it starts, and it stops at once if the token is bad. To keep
+the bot on all the time, run the gateway as a systemd service. See
+[Running as a Service](Running-as-a-Service).
+
+The gateway reads the updates with the `getUpdates` long poll. It has these rules:
+
+- It saves the update offset in `state.db` before it handles an update. Thus a restart does
+  not handle an update a second time.
+- The messages of one chat go to the gateway one at a time, in their order.
+- The messages of different chats run in parallel.
+- A button tap does not wait for the messages of its chat.
+- An edited message counts as a new message.
+- After a failed call, the gateway waits 1 second, then 2, then 4, up to 30 seconds.
+
+## Pairing
+
+Pairing lets a new user ask for access without a config change. The bot replies to an unknown
+user with a pairing code. The owner approves the code on the server.
+
+The bot sends this reply:
+
+```text
+🔐 Pairing needed …
+tether pairing approve telegram <code>
+```
+
+The pairing codes have these rules:
+
+- A code has 8 characters from `A-Z` and `2-9`. The characters `0`, `O`, `1`, and `I` are not
+  used, because they look the same.
+- A code expires after 1 hour.
+- A user can get one new code every 10 minutes.
+- A platform can have a maximum of 3 codes that wait for approval.
+- After 5 failed approvals, the platform locks for 1 hour.
+- The database keeps only a salted SHA-256 hash of each code.
+
+Use these commands on the server:
+
+| Command | Effect |
+|---|---|
+| `tether pairing list [platform]` | Shows the waiting codes and the approved users. |
+| `tether pairing approve [platform] <code>` | Approves the user of the code. |
+| `tether pairing revoke [platform] <user id>` | Removes the access of a user. |
+
+The default platform for `approve` and `revoke` is `telegram`. `tether pairing list` with no
+platform lists all platforms. A running gateway sees a change at once. You do not have to
+restart it.
+
+## Who can talk to the bot
+
+The bot checks a sender in this order:
+
+1. `telegram.group_allowed_chats`: every member of these groups. `*` permits all groups.
+2. `telegram.allow_all_users`: every user. Use it only for a test bot.
+3. Users that you approved with pairing.
+4. `telegram.allowed_users`, and in groups also `telegram.group_allowed_users`. `*` permits
+   all users.
+
+With no allow list and no `allow_all_users`, the bot permits nobody. The bot ignores an unknown
+sender in a group. `telegram.group_allowed_users` does not permit direct messages.
+
+`telegram.unauthorized_dm_behavior` controls the reply to a direct message from an unknown user:
+
+- `pair`: the bot sends a pairing code.
+- `ignore`: the bot does not reply.
+- `""` (the default): `ignore` when an allow list is set, else `pair`.
+
+> **Note:** The setup wizard adds your id to `telegram.allowed_users`. After that, the default
+> is `ignore`, so the bot does not reply to new users. To let new users ask for a pairing code,
+> set `telegram.unauthorized_dm_behavior: pair`.
+
+## Groups and topics
+
+### Privacy mode
+
+By default, BotFather turns on privacy mode for a bot. In privacy mode, the bot receives only
+commands, mentions, and replies in a group. If you want the bot to see every group message, do
+these steps:
+
+1. Send `/setprivacy` to @BotFather.
+2. Select your bot.
+3. Select `Disable`.
+4. Remove the bot from each group.
+5. Add the bot to each group again.
+
+`tether doctor` shows a warning when privacy mode blocks the group messages that your config
+needs.
+
+### When the bot answers in a group
+
+These keys control the answers in groups. The bot applies them in this order:
+
+| Key | Effect |
+|---|---|
+| `allowed_topics` | The bot answers only in these forum topics. |
+| `ignored_threads` | The bot ignores these threads. |
+| `exclusive_bot_mentions` | The bot ignores a message that mentions only another bot. |
+| `allowed_chats`, `guest_mode` | The bot answers only in these groups. Guest mode also permits a direct mention in other groups. |
+| `free_response_chats` | The bot answers every message in these groups, with no mention. |
+| `require_mention` | The bot answers only to a mention, a reply to the bot, or a `mention_patterns` match. |
+| `observe_unmentioned_group_messages` | The bot saves the messages that it does not answer as context. |
+
+All these keys are in the `telegram` section.
+
+### Sessions in groups and topics
+
+Each chat has its own session. The session key has this form:
+
+- Direct message: `telegram:dm:<chat>[:<thread>]`
+- Group: `telegram:group:<chat>[:<thread>][:<user>]`
+
+Two keys add the user to the key:
+
+- `telegram.group_sessions_per_user` (default `true`): each user in a group without topics has a
+  separate session.
+- `telegram.thread_sessions_per_user` (default `false`): each user in a forum topic has a
+  separate session.
+
+## The home channel
+
+Cron jobs that you create from the CLI send their results to the home channel. To set it, send
+`/sethome` in the chat or topic that you want. The command saves the chat in `state.db`.
+
+You can also set a first value in the config:
+
+- `telegram.home_chat`: the home chat.
+- `telegram.home_thread`: the home topic.
+- `telegram.cron_thread`: the topic for cron results. It overrides `home_thread` for cron only.
+
+When the gateway starts with a new version, the home chat gets a message such as "♻ Tether
+updated from X to Y and restarted." This occurs after `/restart` and after `tether update`
+with a restart. The chat that sent `/restart` gets "♻ The gateway restarted. Your session
+continues." If you sent `/restart` from the home chat, that chat gets only this second
+message.
+
+## The command menu
+
+The gateway sets the bot command menu when it starts. The menu shows these commands, in this
+order:
+
+`/new`, `/sessions`, `/stop`, `/steer`, `/now`, `/model`, `/effort`, `/usage`, `/help`,
+`/rename`, `/fork`, `/compact`, `/prompt`, `/archive`, `/delete`, `/approve`, `/deny`,
+`/sethome`, `/reload_mcp`, and `/restart`.
+
+Telegram does not permit `-` in a command name, so the menu shows `/reload-mcp` as
+`/reload_mcp`. Both names work. `/start`, `/reset`, and `/resume` are not in the menu, but they
+work. See [Commands](Commands) for each command.
+
+`/start` shows a welcome message with 📋 Sessions, 🧠 Model, and 📊 Usage buttons.
+
+## What you see in the chat
+
+### Typing and tool status lines
+
+While the agent works, the chat shows "typing". This includes the time for media downloads and
+transcription.
+
+The bot also sends one status message and edits it as the tools run. Each line shows the tool and
+a short preview of its main argument, for example the command or the search query:
+
+```text
+💻 terminal: "ls -la"
+🔍 web_search: "go 1.26 release notes" (×2)
+🔀 [1/3] web_fetch "https://example.com"
+```
+
+The status lines have these rules:
+
+- A preview has a maximum of 40 characters.
+- In the default mode, each tool has one line. A new call of the same tool replaces the
+  preview with its own preview and adds the count `(×N)`.
+- A line that starts with `🔀 [i/n]` comes from a subagent. Each subagent has its own lines.
+- The bot edits the status message a maximum of one time every 1.5 seconds.
+- After a streamed answer, the next tool line starts a new status message below the answer.
+- A status message that gets too long continues in a new message.
+
+`telegram.tool_progress` sets the detail:
+
+| Value | Effect |
+|---|---|
+| `off` | No status message. |
+| `new` | A line when the tool changes. |
+| `all` | One line per tool, with a count. This is the default. |
+| `verbose` | Each call, with the argument names and the arguments as JSON on the next line. |
+
+Set `telegram.cleanup_progress: true` to delete the status message after a successful run.
+
+### Streamed answers
+
+The answer appears while the model writes it:
+
+- In a direct message, the answer streams into a Telegram draft.
+- In a group, the bot edits one message, with a ` ▉` cursor at the end.
+
+`telegram.streaming.transport` sets the method: `auto`, `edit`, or `draft`. `auto` and `draft`
+use drafts in direct messages and edits in groups.
+
+The final answer has these rules:
+
+- The bot sends the final text as Telegram MarkdownV2.
+- A text longer than 4096 characters goes out in parts, with `(1/3)`, `(2/3)`, and so on.
+- If Telegram refuses the markup, the bot sends plain text.
+- If the preview is older than 60 seconds, the final answer goes out as a new message.
+- A tool round splits the answer into separate messages.
+
+### Approval buttons
+
+The agent asks you before it runs a dangerous command. The message shows the command and these
+buttons:
+
+- ✅ Allow once
+- ✅ Allow in this session
+- ✅ Always allow
+- ❌ Deny
+
+No answer in 10 minutes counts as a denial. `approvals.timeout_s` sets this time. You can also
+answer with a command:
+
+- `/approve`, `/approve session`, or `/approve always`
+- `/deny`
+- Add `all` to answer all the waiting approvals.
+
+These commands do not go through the gateway queue, so they work also while a task waits for
+the approval. See [Security](Security) for the approval rules.
+
+### While the agent is busy
+
+The gateway runs one turn at a time for each session. A message that you send during a turn
+does not start a second turn:
+
+- A plain text goes into the running task as a steer. The bot replies "↪️ Got it. I'll do this
+  after the current step."
+- A photo, a file, or a voice note waits in the queue. The bot replies "⏳ Queued. I'll answer
+  after the current task."
+- A command that can change the session gets the "⏳ Busy" reply with a **⏹ Stop the task**
+  button.
+
+The steer reply and the queue reply have a **⚡ Do this now** button. A tap stops the task and
+runs your waiting message at once, the same as `/now`. A button from an older turn stops
+nothing. The bot sends a maximum of one busy reply for each session every 30 seconds in one
+turn.
+
+For `/stop`, `/stop keep`, `/now`, and `/steer`, see
+[Commands](Commands#while-the-agent-is-busy).
+
+### Questions from the agent
+
+The agent can ask you a question with the `clarify` tool. The bot shows the choices as buttons.
+You can also type the answer as the next message.
+
+### The model list
+
+`/model <provider>` shows the models of the entry as buttons:
+
+```text
+🧠 primary (OpenRouter) · 15 models
+Most used this week (1 to 10), then best for agents (11 to 15). Only models with tool support.
+[deepseek-v4.1-flash-1017] [glm-5.3-flash]
+[deepseek-v4.1-flash]      [gpt-6-luna]
+[hy4-preview]              [claude-opus-5.5]
+[step-5-preview]           [minimax-m3.1-flash]
+[·] [1 / 2] [Next ▶]
+[↩ Providers] [↻ Refresh]
+```
+
+- A page has 8 models, 2 in a row. The row with ◀ Prev, `n / N`, and Next ▶ is the same as in
+  the `/sessions` list. A list with one page has no such row.
+- A button shows the part of the model ID after the last `/`. A label longer than 32
+  characters ends in `…`.
+- The ✓ marks the model that this session uses with the entry.
+- A tap on a page button, ↻ Refresh, or ↩ Providers replaces the message. A tap on a model
+  replaces the list with the confirmation.
+- A model button sends the position of the model and a stamp of the list, not the model ID.
+  Telegram permits only 64 bytes of button data.
+- If the list changed after the bot sent the button, the reply is the new page 1 with the line
+  `The list changed. Select the model again.` The model does not change.
+- An entry name longer than 20 bytes gets no model buttons. Its list is a numbered text list
+  with the line `Send /model <provider>:<model> to use a model.`
+- During a task, a tap gets the busy reply, and the model does not change. Tap the button
+  again after the task.
+
+For the forms of the command, see [Commands](Commands#model-and-effort).
+
+### Buttons and other users
+
+Only the user who sent a command can tap its buttons. Another user sees "⛔ This button is for
+another user." The buttons continue to work after a restart.
+
+A tap on a command button runs the action of the button as a typed command. Thus the busy rule
+applies to a button too.
+
+## Media that you send
+
+| Type | What happens |
+|---|---|
+| Photo | The model gets the largest size as an image. |
+| Voice note | The bot transcribes it when speech-to-text is set up. Else the agent gets a note that transcription is not set up. |
+| Document | The bot saves documents of up to 20 MB of these types: pdf, md, txt, csv, log, json, xml, yaml, yml, toml, ini, cfg, zip, docx, xlsx, pptx, ts, py, sh. A `.md` or `.txt` file of 100 KB or less goes into the message as text. |
+| Album | The bot waits 800 ms and joins the parts into one message. |
+| Sticker | The vision model describes a static sticker. |
+| Video, audio, location, venue | The bot handles these types too. |
+
+To set up speech-to-text, see [Tools](Tools#media).
+
+## Media that the agent sends
+
+The agent can send local files after its text:
+
+- An answer can contain a `MEDIA:<path>` tag or a bare file path.
+- The flag `[[audio_as_voice]]` sends audio as a voice note.
+- The flag `[[as_document]]` sends a file as a document.
+
+Text-to-speech audio becomes a voice note when `ffmpeg` is installed. Without `ffmpeg`, the bot
+sends the audio as a file.
+
+The bot never sends a protected path. Four `TETHER_MEDIA_*` environment variables control the
+other files that it can send. See
+[docs/SECURITY.md](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md) for the
+full rule.
+
+## See also
+
+- [Commands](Commands): all slash commands and the busy behavior.
+- [Cron](Cron): scheduled jobs that send results to Telegram.
+- [Security](Security): the approval gate.

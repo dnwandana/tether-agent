@@ -1,0 +1,1 @@
+Tether Agent uses the [MIT License](https://github.com/dnwandana/tether-agent/blob/main/LICENSE). Source: [github.com/dnwandana/tether-agent](https://github.com/dnwandana/tether-agent). Edit these pages in `docs/wiki/` of the repository, not in the wiki.
