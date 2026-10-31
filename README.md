@@ -7,6 +7,8 @@ skills, delegation, MCP servers, and media.
 The agent uses little CPU and RAM when it is idle. Heavy parts start on the first call and
 stop when they are idle. These parts are the browser, the MCP servers, and the media programs.
 
+The [wiki](https://github.com/dnwandana/tether-agent/wiki) has the full guide.
+
 ## Quick start
 
 1. Download the archive for your platform from the releases page. The platforms are
@@ -19,8 +21,13 @@ stop when they are idle. These parts are the browser, the MCP servers, and the m
 
    Run `tether` with no command to see all the commands.
 
-2. Run the setup wizard. The wizard asks for your provider, an optional fallback provider,
-   and an optional Telegram bot. It writes `~/.tether/config.yaml` and
+2. Run the setup wizard. The wizard asks for your provider from a list of presets. The last
+   item, Custom, is for an endpoint with no preset. Then the wizard gets the model list from
+   the provider. Type a number, a text to filter the list, or a model ID. If the list call
+   fails, type the model ID.
+
+   Then the wizard asks for an optional list of fallback providers and an optional Telegram
+   bot. It sends a test call to each provider. It writes `~/.tether/config.yaml` and
    `~/.tether/.env`.
 
    ```sh
@@ -61,32 +68,52 @@ stop when they are idle. These parts are the browser, the MCP servers, and the m
 
 ## Configuration example
 
-This example uses OpenAI as the primary provider and OpenRouter as the fallback provider. Put
-the API keys in `~/.tether/.env` (mode 0600). The config refers to them with `${VAR}`.
+This example uses OpenAI as the primary provider. DeepSeek and OpenRouter are the fallback
+providers, in that order. Each entry uses a preset, so it needs only a model. The preset gives
+the format, the base URL, the name of the key variable, and the provider quirks. Put the API
+keys in `~/.tether/.env` (mode 0600).
 
 ```yaml
 # ~/.tether/config.yaml
 providers:
   primary:
-    format: openai
-    base_url: https://api.openai.com/v1
-    api_key: ${OPENAI_API_KEY}
-    model: gpt-5.6-sol
-  fallback:
-    format: openai
-    base_url: https://openrouter.ai/api/v1
-    api_key: ${OPENROUTER_API_KEY}
-    model: openai/gpt-5.6-sol
+    preset: openai
+    model: gpt-6.1-sol
+  deepseek:
+    preset: deepseek
+    model: deepseek-v4-pro
+  openrouter:
+    preset: openrouter
+    model: z-ai/glm-5.3
+agent:
+  fallback: [deepseek, openrouter]
 ```
 
 ```sh
 # ~/.tether/.env
 OPENAI_API_KEY=...
+DEEPSEEK_API_KEY=...
 OPENROUTER_API_KEY=...
 ```
 
-The agent uses the fallback provider only when the primary provider fails before the first
-byte of the answer. All keys and their default values are in [docs/CONFIG.md](docs/CONFIG.md).
+Each model call goes through a chain of entries. The order is the entry of the `/model` pin,
+then `primary`, then the entries of `agent.fallback`. The call goes to the next entry only on
+one of these failures before the first byte of the answer:
+
+- No connection.
+- HTTP 5xx, 429, 401, 402, 403, or 408.
+- An HTTP 400 with a billing or quota text.
+- An entry that is not usable.
+
+Other errors stop the call. The chain skips a failed entry for 60 seconds. A turn stays on the
+entry that answered. `agent.fallback: []` turns off the fallback. If the config has no
+`agent.fallback` key, an entry with the name `fallback` is the list. See
+[The fallback chain](https://github.com/dnwandana/tether-agent/wiki/Providers#the-fallback-chain) in the wiki.
+
+Send `/model` to change the model of a session. It shows the providers. `/model <provider>`
+shows the model list of that entry: buttons in Telegram, and a numbered list in the CLI. Send
+`/effort` to change the reasoning effort. All keys and their default values are in
+[docs/CONFIG.md](docs/CONFIG.md).
 
 ## Backup and restore
 
@@ -147,13 +174,18 @@ tether skills check
 - One binary has two roles: `gateway` runs Telegram and cron, and `chat` runs the CLI.
 - Both roles share `state.db` (SQLite in WAL mode) in the data folder `~/.tether`.
 - Each agent run is a goroutine: a chat turn, a cron run, a child task, or a review.
-- A run calls a provider (OpenAI or Anthropic wire format) with the tools of its toolsets.
+- A run calls a provider (OpenAI, Anthropic, or Responses wire format) with the tools of its
+  toolsets.
 - An approval gate checks dangerous shell commands before they run.
 - The browser, MCP servers, and media programs start on the first call and stop when idle.
 
 ## Build from source
 
 You need Go 1.26 or later. The build does not use CGO.
+
+To install with Go, run `go install github.com/dnwandana/tether-agent/cmd/tether@latest`. That
+binary has the version `dev`. `tether update` then needs `--force`, and `tether doctor` does
+not check for a newer release. Use `make build VERSION=v1.2.3` to set a version.
 
 ```sh
 make build          # bin/tether

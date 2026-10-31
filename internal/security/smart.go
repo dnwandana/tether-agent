@@ -34,9 +34,9 @@ Rules:
 
 Respond with exactly one line: "APPROVE: <short reason>" or "ESCALATE: <short reason>"`
 
-// ProviderJudge is the smart-mode Judge. It asks the model of the session if
-// a flagged command is risky. Each failure counts as risky, so the gate then
-// asks the user.
+// ProviderJudge is the smart-mode Judge. It asks the model of Prov, the default
+// chain, if a flagged command is risky. Each failure counts as risky, so the
+// gate then asks the user.
 type ProviderJudge struct {
 	Prov provider.Provider
 }

@@ -40,21 +40,31 @@ call. The gate is a port of the Hermes approval flow.
    - `kill -1`
    - shutdown and reboot, through `shutdown`, `reboot`, `halt`, `poweroff`, `init`, `telinit`,
      or `systemctl`
+   - `tether skills install`, `tether skills update`, and `tether skills uninstall`. Only the
+     owner runs these commands, in a terminal.
 3. **Sudo guard.** The gate blocks `sudo -S` when no sudo password is set, because the model
    then guesses the password. Set `SUDO_PASSWORD` in `.env` if the agent must use sudo.
-4. **Dangerous rules.** A command that matches one of the 56 Hermes dangerous rules needs an
+4. **Gateway self-stop.** In the gateway, the gate blocks a command that stops or restarts the
+   gateway process itself. Examples are `systemctl restart tether`, `tether gateway stop`,
+   `pkill tether`, and `tether update --restart`. The stop would cut the turn that runs the
+   command. A cron run does not get this check.
+5. **Dangerous rules.** A command that matches one of the 56 Hermes dangerous rules needs an
    approval. Examples are `rm -r`, `chmod 777`, `curl … | sh`, and `git push --force`. A shell
    write to a protected path is also dangerous.
-5. **No match.** The command runs.
+6. **No match.** The command runs.
 
 ### Approval modes
 
 `approvals.mode` sets the result for a dangerous command:
 
 - `manual` (the default): the gate asks the user.
-- `smart`: a second call to the primary provider judges the risk. The gate permits a
-  low-risk command with no question. For other commands, the gate asks the user. When the
-  judge call fails, the gate also asks the user.
+- `smart`: a second call to the model judges the risk. The call uses the default fallback
+  chain: the primary provider, then the entries of `agent.fallback`. When the key
+  `agent.fallback` is absent, the next entry is the entry `fallback`. The call moves to the
+  next entry under the rules of
+  [the fallback chain](https://github.com/dnwandana/tether-agent/wiki/Providers#the-fallback-chain).
+  The gate permits a low-risk command with no question. For other commands, the gate asks the
+  user. When the judge call fails, the gate also asks the user.
 - `off`: the command runs with no question. The hardline list and the sudo guard still apply.
 
 ### Cron runs
@@ -143,6 +153,45 @@ the logs, in tool output, in error text, and in the text that goes to the model.
   the process environment. It ignores values of fewer than 8 characters, because they match
   too much normal text.
 
+### Provider keys
+
+- The wizard writes each provider key to `.env`, not to `config.yaml`.
+- An entry with a `preset` reads the key env of the preset only when its `base_url` is the URL
+  of the preset. The key of a preset never goes to another host.
+- The provider client removes the API key from the error text of a failed call. It keeps at
+  most 512 bytes of the error body.
+- When the chain moves a call to another entry, that provider gets the full conversation. The
+  conversation includes the tool output and the memory in the system prompt.
+- The `openrouter` preset on the preset URL also sends the attribution headers `HTTP-Referer`
+  and `X-Title`.
+
+These actions send a model list call to an entry:
+
+- the setup wizard
+- `/model <entry>`
+- the ↻ Refresh button of a model list, or `/model <entry> refresh`
+
+A model list call is a GET with the API key of the entry. These rules apply:
+
+- The URL is `<base_url>/models`. For the `anthropic` format, the URL is
+  `<base_url>/v1/models?limit=1000`, with the `/v1` rule of `base_url` in CONFIG.md.
+- The call sends the same auth headers as a chat call.
+- The key goes only to the base URL of the entry.
+- The `openrouter` preset on the preset URL gets two list calls.
+- In the wizard, a search text goes to OpenRouter as `/models?q=<text>`.
+- Each call stops after 10 seconds.
+- A failed call shows only a short cause, for example `HTTP 401` or `no connection`. The reply
+  never shows the response body or the URL.
+
+The gateway and the CLI chat keep the model lists in a cache:
+
+- The cache is in memory only. No list goes to disk.
+- A list stays in the cache for 1 hour.
+- Only a list from a successful call goes into the cache.
+- The cache key holds the first 16 hex characters of the SHA-256 hash of the API key, not the
+  key.
+- Refresh removes the list of the entry. A restart removes all lists.
+
 ### Backups
 
 `tether backup` writes the data to one archive. `tether restore` puts the data from an archive
@@ -152,13 +201,17 @@ back in the data folder.
 - The archive never holds `.env` or `.history`.
 - The backup replaces a literal key in `providers.<p>.api_key`, `telegram.bot_token`,
   `mcp.servers.<s>.env`, and `mcp.servers.<s>.headers` with a `${NAME}` reference.
-- The backup masks each known secret value in the messages, the memory files, the skills, and
-  the scripts. The list of known values is the same list that the redactor uses.
+- The backup masks each known secret value in the messages, the reasoning text of the
+  messages, the memory files, the skills, and the scripts. The list of known values is the same
+  list that the redactor uses.
 - The backup replaces each known secret value in the other strings of `config.yaml` with a
   `${NAME}` reference to its variable. The value works again after a restore when `.env` has
   that name.
 - The backup reports other values in `config.yaml` that look like a key. It does not change
   these values.
+- `tether restore` lists each variable that the restored `config.yaml` needs, and tells you
+  which variables are not set. The list includes the key env of each preset entry with no
+  `api_key`, when the `base_url` of the entry is empty or the URL of the preset.
 - `tether restore` refuses links, absolute paths, `..` paths, and names that are not tether
   data files.
 - `tether restore` keeps the replaced data in `<data>/pre-restore-<time>/`. This folder holds
@@ -434,7 +487,9 @@ path checks. Hide the `code_execution` toolset from a channel when you do not tr
 - It never reads `config.yaml`, `.env`, or `state.db`.
 - It needs write permission on the folder of the binary. A binary in `/usr/local/bin` needs
   `sudo tether update`.
-- A running gateway keeps the old code until a restart. The command prints the restart command
-  and does not run it.
+- A running gateway keeps the old code until a restart. In a terminal, the command asks
+  `Restart the gateway now?`. If you answer yes, it runs `systemctl restart` for the unit. It
+  runs a system unit only as root. Without a terminal, with `--no-restart`, or when it cannot
+  restart the unit, it prints the restart command.
 - The checksum file comes from the same release. The check finds a cut-off or a corrupted
   download. It does not protect against a compromised GitHub account.

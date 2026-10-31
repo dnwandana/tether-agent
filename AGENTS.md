@@ -30,7 +30,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
 
 - `cmd/tether/main.go`: `run()` returns an exit code and never calls `os.Exit`, so tests
   call it directly. The subcommands are `chat`, `gateway`, `setup`, `doctor`, `skills`,
-  `sessions`, `pairing`, `usage`, `update`, `version`, and `help`.
+  `sessions`, `pairing`, `usage`, `backup`, `restore`, `update`, `version`, `help`, and the
+  hidden `gen-tools-doc`.
 - `internal/app` is the composition root. `app.New` builds config, DB, providers, tools, MCP,
   and the agent. Only `Options.Gateway` builds the cron scheduler and the background
   `delegate_task` batches. Only the gateway role polls Telegram.
@@ -39,10 +40,13 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   2. `gateway.Gateway` runs one turn per session key. On a busy key, a plain text goes into
      the running turn as a steer (`agent.SteerQueue`), and other messages wait in the queue.
   3. `agent.Agent.RunTurn` runs the loop. It saves each message as soon as the message exists.
-  4. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool goes through
-     `security.Gate.Check` (the approval gate).
-  5. `provider` streams the answer (`openai` or `anthropic` wire format). The fallback
-     provider runs only when the primary fails before the first byte.
+  4. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool and the script text
+     of `execute_code` go through `security.Gate.Check` (the approval gate).
+  5. `provider` streams the answer (`openai`, `anthropic`, or `responses` wire format). Each
+     model call goes through a `provider.Chain` from `provider.Set.ChainFor`. The chain order
+     is the pinned entry, `primary`, and then `agent.fallback`. The chain goes to the next
+     entry only on an error that wraps `provider.ErrBeforeFirstByte`. `provider.Health` keeps
+     the failures and skips a failed entry for 60 s. All chains share one `Health`.
 - State: the data dir is `--data-dir`, else `TETHER_HOME`, else `~/.tether`. `state.db` is
   pure-Go SQLite (`modernc.org/sqlite`) with one connection. Do not run a second query while
   rows are open, because it deadlocks. Migrations are `internal/db/migrations/NNN_*.sql`
@@ -50,13 +54,14 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
 - Import rules: `tools` cannot import `agent` (`tools.ChildSpecLite` mirrors
   `agent.ChildSpec`), and `gateway` cannot import `app` (`app` builds `gateway.Deps`).
 - The browser, MCP servers, and media programs start on the first call and stop when idle.
-  `app.New` must not do network work, because `TestStartupUnder100ms` measures startup.
+  `app.New` must not do network work, because `TestStartupUnder100ms` measures startup. For
+  example, `provider.ModelCache` makes no call before the first `/model <entry>`.
 
 ## Rules that span files
 
 - Keep the system prompt of a session byte-stable. The provider prompt cache needs the same
-  bytes. `agent.PromptCache` keys a prompt by session, overrides, compaction count, and MCP
-  generation. Memory and skill edits do not change a prompt that already exists.
+  bytes. `agent.PromptCache` keys a prompt by session, model override, prompt override,
+  compaction count, and MCP generation. Memory and skill edits do not change a prompt that already exists.
 - A new tool implements `tools.Tool` and registers in `App.registerTools` (or
   `registerDelegation`). Then do these steps:
   1. Put the tool in a toolset from `internal/tools/toolsets.go`. A new set also goes into
@@ -76,8 +81,16 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   2. Check `c.interactive()`. The CLI shows no buttons, so give it a line with the command to
      send.
   3. Keep a button action short. Telegram callback data has a limit of 64 bytes, and
-     `encodeCmd` cuts a longer action. A tap runs the action as a typed command through
-     `Gateway.Submit`.
+     `telegram.encodeCmd` cuts a longer action. The `/model` buttons stay under the limit
+     through `modelEntryMaxBytes` and `modelActionMaxBytes` in `internal/gateway/modellist.go`.
+     A tap runs the action as a typed command through `Gateway.Submit`.
+- A new provider preset needs these steps:
+  1. Add a row to `presets` in `internal/config/presets.go`. The table order is the wizard
+     order.
+  2. Add a row to the preset table in `docs/CONFIG.md`. No test checks that table.
+  3. Add the ID to the two ID lists of `TestPresetTable` in `internal/config/presets_test.go`.
+  4. Give the row an `EffortStyle` that `mapEffort` in `internal/provider/effort.go` handles.
+     `mapEffort` maps an unknown style like `chat`.
 - Tests reset global state: `security.AddProtectedPathPatterns(nil)`, the command table of
   `gateway.Register`, and `gateway.pickTip` and `gateway.nowFunc`.
 - `internal/skills/testdata/guard_golden.json` is the output of the Hermes threat patterns.
