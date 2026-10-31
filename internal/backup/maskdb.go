@@ -15,7 +15,7 @@ import (
 // freeTextColumns lists the columns of state.db that hold text from the user, the model, or a
 // tool. maskDB masks the known secret values in these columns only.
 var freeTextColumns = map[string][]string{
-	"messages":           {"content", "tool_calls"},
+	"messages":           {"content", "tool_calls", "reasoning"},
 	"compactions":        {"summary"},
 	"sessions":           {"title", "prompt_override"},
 	"cron_jobs":          {"prompt", "last_output"},
@@ -29,7 +29,7 @@ var freeTextColumns = map[string][]string{
 // would break the state. A test compares the two lists with the live schema.
 var stateColumns = map[string][]string{
 	"sessions": {"id", "session_key", "source", "chat_id", "thread_id", "user_id",
-		"model_override", "parent_id", "kind"},
+		"model_override", "parent_id", "kind", "effort"},
 	"messages":    {"session_id", "role", "tool_call_id", "tool_name", "model", "provider", "finish_reason"},
 	"compactions": {"session_id"},
 	"cron_jobs": {"id", "name", "schedule", "script", "deliver", "skills", "model", "toolsets",

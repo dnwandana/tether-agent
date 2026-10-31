@@ -254,3 +254,15 @@ func maskHasColumn(m map[string][]string, tbl, col string) bool {
 	}
 	return false
 }
+
+func TestMaskDBMasksReasoning(t *testing.T) {
+	d := maskOpenDB(t)
+	maskInsertSession(t, d, "s1", "c1")
+	maskExec(t, d, `INSERT INTO messages (session_id, role, content, reasoning, timestamp) VALUES ('s1', 'assistant', 'x', ?, 1)`,
+		`{"Issuer":"openai http://x m","Text":"the key is `+maskSecret+`"}`)
+	n, err := maskDB(context.Background(), d, []string{maskSecret})
+	if err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	maskAssertNoCell(t, d, maskSecret)
+}

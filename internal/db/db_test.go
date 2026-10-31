@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -298,5 +299,64 @@ func TestMigrationTurnMarkers(t *testing.T) {
 	want := []string{"session_key", "session_id", "updated_at", "resumes", "queued"}
 	if fmt.Sprint(cols) != fmt.Sprint(want) {
 		t.Fatalf("columns = %v, want %v", cols, want)
+	}
+}
+
+// A database at schema version 2 gains messages.reasoning and sessions.effort. An old row
+// reads reasoning as NULL and effort as ”.
+func TestMigrationReasoningEffortFrom002(t *testing.T) {
+	ctx := context.Background()
+	p := filepath.Join(t.TempDir(), "state.db")
+	sdb, err := sql.Open("sqlite", p+dsnParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdb.SetMaxOpenConns(1)
+	old := &DB{DB: sdb}
+	if _, err := old.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.version <= 2 {
+			if err := old.apply(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := old.ExecContext(ctx, `INSERT INTO sessions (id) VALUES ('s1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.ExecContext(ctx, `INSERT INTO messages (session_id, role, content, timestamp)
+		VALUES ('s1', 'assistant', 'old', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	d, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	var reasoning sql.NullString
+	if err := d.QueryRowContext(ctx, `SELECT reasoning FROM messages WHERE session_id = 's1'`).Scan(&reasoning); err != nil {
+		t.Fatal(err)
+	}
+	if reasoning.Valid {
+		t.Fatalf("reasoning = %q, want NULL", reasoning.String)
+	}
+	var effort string
+	if err := d.QueryRowContext(ctx, `SELECT effort FROM sessions WHERE id = 's1'`).Scan(&effort); err != nil {
+		t.Fatal(err)
+	}
+	if effort != "" {
+		t.Fatalf("effort = %q, want ''", effort)
+	}
+	if v, err := d.SchemaVersion(ctx); err != nil || v != 3 {
+		t.Fatal(v, err)
 	}
 }
