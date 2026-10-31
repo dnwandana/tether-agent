@@ -103,9 +103,9 @@ one of these failures before the first byte of the answer:
 - No connection.
 - HTTP 5xx, 429, 401, 402, 403, or 408.
 - An HTTP 400 with a billing or quota text.
-- An entry that is not usable.
 
-Other errors stop the call. The chain skips a failed entry for 60 seconds. A turn stays on the
+Other errors stop the call. The chain skips an entry that is not usable, for example an entry
+with no API key. The chain skips a failed entry for 60 seconds. A turn stays on the
 entry that answered. `agent.fallback: []` turns off the fallback. If the config has no
 `agent.fallback` key, an entry with the name `fallback` is the list. See
 [The fallback chain](https://github.com/dnwandana/tether-agent/wiki/Providers#the-fallback-chain) in the wiki.

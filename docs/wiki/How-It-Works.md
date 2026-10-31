@@ -140,7 +140,7 @@ When `primary` is not complete, the load stops. Another entry that is not comple
 unusable entry:
 
 - Its adapter fails each call before the first byte. It makes no network call.
-- The fallback chain then goes to the next entry.
+- The fallback chain skips the entry, so the adapter gets no call from a chain.
 - `app.New` logs `provider entry is not usable` with the cause.
 
 The `responses` adapter sends `store: false` and the full history on each call. The provider

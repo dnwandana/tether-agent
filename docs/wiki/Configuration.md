@@ -100,8 +100,8 @@ Each entry has these keys:
 | `effort` | `""` | The reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. `""` sends no effort field. The `/effort` level of a session wins. |
 
 A `primary` entry that is not usable stops the load. For example, an entry with no model or a
-preset entry with no API key is not usable. Another entry that is not usable loads, but each
-call to it fails.
+preset entry with no API key is not usable. Another entry that is not usable loads, but the
+fallback chain skips it.
 
 This example has a primary provider and a fallback chain of two entries:
 

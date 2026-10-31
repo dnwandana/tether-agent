@@ -53,8 +53,9 @@ An entry that cannot serve a call is "not usable". These entries are not usable:
 - A preset entry with no `api_key` and a `base_url` that is not the URL of the preset.
 
 A `primary` entry that is not usable stops the load. Another entry that is not usable loads, and
-the program logs `provider entry is not usable`. Each call to it fails, so the fallback chain
-goes to the next entry. `tether doctor` shows the cause for each entry.
+the program logs `provider entry is not usable`. The fallback chain skips the entry, also when a
+session override or a cron job names it. `/model` refuses the entry and shows the cause. The
+provider list of `/model` marks the entry with ⚠️. `tether doctor` shows the cause for each entry.
 
 An entry with no preset and no `api_key` is usable. The agent sends the request with no
 authorization header. A local server needs this.
@@ -374,7 +375,6 @@ The first byte is the start of a successful HTTP response. These failures count:
 - An HTTP 400 whose body tells of a billing or a quota failure. The texts are `credit balance`,
   `spend limit`, `insufficient balance`, `insufficient_quota`, and `arrearage`. The match
   ignores case.
-- An entry that is not usable.
 
 These failures do not go to the next entry:
 

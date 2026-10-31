@@ -226,7 +226,8 @@ The result depends on the entry:
 - For `primary`, the config does not load. `tether chat` and `tether gateway` do not start.
 - For another entry, the config loads. The gateway log has the warning
   `provider entry is not usable`. The doctor line of the entry is a failure. The fallback
-  chain skips the entry and goes to the next entry.
+  chain skips the entry and goes to the next entry. `/model` marks the entry with ⚠️, and
+  `/model <name>` shows the same cause.
 
 A second form is
 `needs an API key, because its base_url is not the URL of the preset`. The entry sets a
@@ -244,7 +245,8 @@ The result depends on the entry:
 - For `primary`, the config does not load. `tether chat` and `tether gateway` do not start.
 - For another entry, the config loads, but the entry is not usable. The log has the warning
   `provider entry is not usable`. The doctor line of the entry is a failure. The fallback chain
-  skips the entry and goes to the next entry.
+  skips the entry and goes to the next entry. `/model` marks the entry with ⚠️, and
+  `/model <name>` shows the same cause.
 
 ### `config: providers.<name>.preset "<id>" is not known`
 

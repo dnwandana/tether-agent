@@ -121,6 +121,14 @@ message. `/model` does not change `config.yaml`.
 - When the list call fails, the reply shows the cause. Send `/model <provider>:<model>`. When
   the entry has a model in `config.yaml`, tap `Use <model>` to use that model.
 - An unknown provider entry gets a reply with the list of provider entries.
+- An entry is not usable when it has no API key or no `model`. Its button has the ⚠️ mark.
+  On the CLI, its label has `not usable` in the brackets, for example
+  `zai (Z.AI, not usable)`. Each `/model <provider>` form for the entry shows the cause, for
+  example `⚠️ **zai is not usable**`, and changes nothing.
+- When the stored model of the session names an entry that is not usable, `/model` shows a
+  ⚠️ line, for example `⚠️ zai has no API key, so calls go to primary.` The calls go to the
+  default chain. Tap ↺ Use the default, or send `/model clear`. After you fix the config and
+  restart, the stored model works again.
 - Another form gets the reply `⚠️ **Unknown form: <args>**` with the line
   `Send /model, /model <provider>, /model <provider>:<model>, or /model clear.`
 - The words `clear` and `providers` are always commands. Thus an entry with one of these names

@@ -45,8 +45,8 @@ An entry with `preset` takes the values of a known endpoint from the table below
 
 An entry is not usable when it has no model. An entry with a preset is also not usable when it
 has no API key. The entry `primary` that is not usable stops the load. Another entry that is not
-usable loads, but it cannot serve a call. The agent logs a warning for it, and the fallback goes
-to the next entry.
+usable loads, and the agent logs a warning for it. The fallback chain skips the entry, so no call
+goes to it. `/model` refuses the entry and shows the cause.
 
 An entry with no preset and no `api_key` loads. The agent sends no auth header to it, for example
 to a local model server.
