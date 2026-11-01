@@ -50,6 +50,10 @@ type ApprovalRequest struct {
 	Command     string
 	PatternID   string
 	Description string
+	// Summary is one short sentence that tells what the command does. It comes
+	// from the description argument of the model and is not trusted. The gate
+	// does not read it. The UI shows it next to the command.
+	Summary string
 }
 
 // Prompter asks the user about one dangerous command. It is the UI of a
