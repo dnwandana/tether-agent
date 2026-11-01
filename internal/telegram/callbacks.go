@@ -26,16 +26,6 @@ const (
 // maxCommandPreview is the longest command in an approval message (Hermes).
 const maxCommandPreview = 3800
 
-// The first lines of an approval message after the answer. These are Tether Agent texts.
-// The approval scopes follow Hermes.
-const (
-	labelOnce    = "✅ **Allowed once**"
-	labelSession = "✅ **Allowed in this session**"
-	labelAlways  = "✅ **Always allowed**"
-	labelDenied  = "❌ **Denied**"
-	labelTimeout = "⌛ **Denied: no answer**"
-)
-
 // The answers to a button press that cannot act.
 const (
 	resolvedText     = "✔️ This prompt has an answer already."
@@ -119,23 +109,7 @@ func (c *ChatUI) Ask(ctx context.Context, q tools.Question) (tools.Answer, error
 // After the answer, the message shows the result and loses its buttons. When ctx ends, it
 // returns ScopeTimeout and the context error.
 func (it *Interactions) promptApproval(ctx context.Context, chatID int64, threadID string, req security.ApprovalRequest) (security.Scope, error) {
-	cmd := req.Command
-	if len([]rune(cmd)) > maxCommandPreview {
-		cmd = string([]rune(cmd)[:maxCommandPreview]) + "..."
-	}
-	desc := req.Description
-	if desc == "" {
-		desc = "dangerous command"
-	}
-	text := "🛡 **Approval needed**\nThe agent wants to run a " + desc
-	if req.ChildName != "" {
-		text += " (from subagent " + req.ChildName + ")"
-	}
-	block := "\n```\n" + cmd + "\n```"
-	text += "." + block
-	if it.ApprovalTimeout > 0 {
-		text += "\n_No answer in " + formatWait(it.ApprovalTimeout) + " = deny._"
-	}
+	mdv2, plain := buildApprovalPrompt(req, it.ApprovalTimeout)
 	p := it.add(approvalPrefix, chatID, threadID)
 	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
 		{{Text: "✅ Allow once", CallbackData: callbackData(approvalPrefix, p.id, "once")},
@@ -143,28 +117,29 @@ func (it *Interactions) promptApproval(ctx context.Context, chatID int64, thread
 		{{Text: "✅ Always allow", CallbackData: callbackData(approvalPrefix, p.id, "always")},
 			{Text: "❌ Deny", CallbackData: callbackData(approvalPrefix, p.id, "deny")}},
 	}}
-	if err := it.send(ctx, p, text, kb); err != nil {
+	if err := it.sendMDV2(ctx, p, mdv2, plain, kb); err != nil {
 		it.remove(p.id)
 		return security.ScopeDeny, fmt.Errorf("telegram approval: %w", err)
 	}
-	// After the answer, the message keeps the command, so the chat shows what ran.
+	// After the answer, the message keeps the command in a closed quote, so the chat shows
+	// what ran.
 	ectx := context.WithoutCancel(ctx)
 	select {
 	case r := <-p.reply:
-		it.editMarkdown(ectx, p, it.approvalLabel(r.scope)+block)
+		it.editResult(ectx, p, headerFor(r.scope, it.ApprovalTimeout), req)
 		return r.scope, nil
 	case <-ctx.Done():
 		if !it.remove(p.id) {
 			// An answer came at the same time.
 			r := <-p.reply
-			it.editMarkdown(ectx, p, it.approvalLabel(r.scope)+block)
+			it.editResult(ectx, p, headerFor(r.scope, it.ApprovalTimeout), req)
 			return r.scope, nil
 		}
-		label := labelDenied
+		scope := security.ScopeDeny
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			label = it.approvalLabel(security.ScopeTimeout)
+			scope = security.ScopeTimeout
 		}
-		it.editMarkdown(ectx, p, label+block)
+		it.editResult(ectx, p, headerFor(scope, it.ApprovalTimeout), req)
 		return security.ScopeTimeout, ctx.Err()
 	}
 }
@@ -247,8 +222,8 @@ func (it *Interactions) HandleCallback(ctx context.Context, cq CallbackQuery) bo
 			answerCB(invalidCallback)
 			return true
 		}
-		// A pop-up shows plain text, so it gets the label without the bold markers.
-		answerCB(strings.ReplaceAll(it.approvalLabel(scope), "**", ""))
+		// A pop-up shows plain text, so it gets the plain header.
+		answerCB(headerFor(scope, it.ApprovalTimeout).plain())
 		if !it.deliver(id, promptReply{scope: scope}) {
 			it.logger().Info("telegram: the approval was answered already", "prompt", id)
 		}
@@ -394,14 +369,25 @@ func (it *Interactions) deliverLocked(id string, r promptReply) bool {
 // send sends the prompt message as MarkdownV2, or as plain text when Telegram rejects the
 // markup.
 func (it *Interactions) send(ctx context.Context, p *prompt, text string, kb *InlineKeyboardMarkup) error {
-	params := SendMessageParams{ChatID: p.chatID, Text: cutMarkdownV2(ToMarkdownV2(text), maxMessageLen), ParseMode: "MarkdownV2", ReplyMarkup: kb}
+	return it.sendMDV2(ctx, p, cutMarkdownV2(ToMarkdownV2(text), maxMessageLen), text, kb)
+}
+
+// sendMDV2 sends the prompt message as the MarkdownV2 text mdv2. When Telegram rejects the
+// markup, it sends plain with no markup.
+func (it *Interactions) sendMDV2(ctx context.Context, p *prompt, mdv2, plain string, kb *InlineKeyboardMarkup) error {
+	params := SendMessageParams{ChatID: p.chatID, Text: mdv2, ParseMode: "MarkdownV2", ReplyMarkup: kb}
+	if p.kind == approvalPrefix {
+		// The summary is model text. A link in it must not get a preview card that the
+		// site controls.
+		params.LinkPreviewOptions = noPreview
+	}
 	if id, ok := ThreadParam(p.threadID, false); ok {
 		params.MessageThreadID = id
 	}
 	m, err := it.C.SendMessage(ctx, params)
 	if err != nil && isBadRequest(err) {
 		logPlainFallback(it.logger(), "prompt_send", p.chatID, p.threadID, 1, 1, err)
-		params.Text, params.ParseMode = cutUTF16(text, maxMessageLen), ""
+		params.Text, params.ParseMode = cutUTF16(plain, maxMessageLen), ""
 		m, err = it.C.SendMessage(ctx, params)
 	}
 	if err != nil {
@@ -413,21 +399,29 @@ func (it *Interactions) send(ctx context.Context, p *prompt, text string, kb *In
 	return nil
 }
 
-// editMarkdown replaces the text of the prompt message with md as MarkdownV2 and removes
-// its buttons. When Telegram rejects the markup, it sends the text without the markup.
-func (it *Interactions) editMarkdown(ctx context.Context, p *prompt, md string) {
+// editResult replaces the approval message with the result and removes its buttons. It
+// tries three texts: the full MarkdownV2 text with the command, then the header and the
+// summary, then the plain header and summary. Each bad request goes to the next text.
+func (it *Interactions) editResult(ctx context.Context, p *prompt, h approvalHeader, req security.ApprovalRequest) {
 	it.mu.Lock()
 	msgID := p.msgID
 	it.mu.Unlock()
 	if msgID == 0 {
 		return
 	}
-	formatted := cutMarkdownV2(ToMarkdownV2(md), maxMessageLen)
-	params := EditMessageTextParams{ChatID: p.chatID, MessageID: msgID, Text: formatted, ParseMode: "MarkdownV2"}
+	full, short, plain := buildApprovalResult(h, req)
+	// The params have no ReplyMarkup, so the edit removes the buttons. The quote and the
+	// summary can have a link, so the preview stays off.
+	params := EditMessageTextParams{ChatID: p.chatID, MessageID: msgID, Text: full, ParseMode: "MarkdownV2", LinkPreviewOptions: noPreview}
 	_, err := it.C.EditMessageText(ctx, params)
 	if err != nil && isBadRequest(err) && !isNotModified(err) {
 		logPlainFallback(it.logger(), "prompt_edit", p.chatID, p.threadID, 1, 1, err)
-		params.Text, params.ParseMode = StripMarkdownV2(formatted), ""
+		params.Text = short
+		_, err = it.C.EditMessageText(ctx, params)
+	}
+	if err != nil && isBadRequest(err) && !isNotModified(err) {
+		logPlainFallback(it.logger(), "prompt_edit_short", p.chatID, p.threadID, 1, 1, err)
+		params.Text, params.ParseMode = plain, ""
 		_, err = it.C.EditMessageText(ctx, params)
 	}
 	if err != nil && !isNotModified(err) {
@@ -489,25 +483,6 @@ func parseCallback(data string) (kind, id, arg string, ok bool) {
 	return parts[0], parts[1], parts[2], true
 }
 
-// approvalLabel returns the first line of an approval message after the answer. The
-// timeout line names the wait when ApprovalTimeout is set.
-func (it *Interactions) approvalLabel(s security.Scope) string {
-	switch s {
-	case security.ScopeOnce:
-		return labelOnce
-	case security.ScopeSession:
-		return labelSession
-	case security.ScopeAlways:
-		return labelAlways
-	case security.ScopeTimeout:
-		if it.ApprovalTimeout > 0 {
-			return "⌛ **Denied: no answer in " + formatWait(it.ApprovalTimeout) + "**"
-		}
-		return labelTimeout
-	}
-	return labelDenied
-}
-
 // formatWait returns a wait as whole minutes ("10 min"), or as seconds ("45 s") under a
 // minute.
 func formatWait(d time.Duration) string {
@@ -535,18 +510,15 @@ func resolveReply(name string, scope security.Scope, n int) string {
 	case n == 0:
 		return noPendingApproval
 	case name == "deny" && n == 1:
-		return labelDenied + "\nThe agent continues without the command."
+		return headerFor(security.ScopeDeny, 0).markdown() + "\nThe agent continues without the command."
 	case name == "deny":
-		return fmt.Sprintf("❌ **Denied %d commands**\nThe agent continues without them.", n)
+		h := headerFor(security.ScopeDeny, 0)
+		h.Detail = fmt.Sprintf("%d commands", n)
+		return h.markdown() + "\nThe agent continues without them."
 	case n > 1:
-		return fmt.Sprintf("✅ **Allowed %d commands**\nThe agent continues.", n)
+		h := headerFor(security.ScopeOnce, 0)
+		h.Detail = fmt.Sprintf("%d commands", n)
+		return h.markdown() + "\nThe agent continues."
 	}
-	label := labelOnce
-	switch scope {
-	case security.ScopeSession:
-		label = labelSession
-	case security.ScopeAlways:
-		label = labelAlways
-	}
-	return label + "\nThe agent continues."
+	return headerFor(scope, 0).markdown() + "\nThe agent continues."
 }

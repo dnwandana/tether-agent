@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 const fallbackMsg = `msg="telegram: Telegram rejected the MarkdownV2 text, sent it as plain text"`
@@ -218,12 +219,13 @@ func TestPromptFallbackLogsWarn(t *testing.T) {
 		t.Fatalf("want one Warn line, got %q", logLines(buf))
 	}
 	mustContain(t, lines[0], "op=prompt_send", "chat=42")
-	it.editMarkdown(ctx, p, "**y**")
+	it.editResult(ctx, p, headerFor(security.ScopeDeny, 0), security.ApprovalRequest{Command: "rm 1.5", Summary: "Remove 1.5."})
 	lines = warnLines(buf)
-	if len(lines) != 2 {
-		t.Fatalf("want two Warn lines, got %q", logLines(buf))
+	if len(lines) != 3 {
+		t.Fatalf("want three Warn lines, got %q", logLines(buf))
 	}
 	mustContain(t, lines[1], "op=prompt_edit", "chat=42")
+	mustContain(t, lines[2], "op=prompt_edit_short", "chat=42")
 	if strings.Contains(buf.String(), "1.5") {
 		t.Fatalf("log must not have the text: %q", buf.String())
 	}

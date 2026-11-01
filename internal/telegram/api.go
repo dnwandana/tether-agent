@@ -250,13 +250,22 @@ type ReplyParameters struct {
 // SendMessageParams are the sendMessage parameters. A zero MessageThreadID is
 // left out. Use ThreadParam to set it.
 type SendMessageParams struct {
-	ChatID          int64                 `json:"chat_id"`
-	MessageThreadID int                   `json:"message_thread_id,omitempty"`
-	Text            string                `json:"text"`
-	ParseMode       string                `json:"parse_mode,omitempty"`
-	ReplyMarkup     *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
-	ReplyParameters *ReplyParameters      `json:"reply_parameters,omitempty"`
+	ChatID             int64                 `json:"chat_id"`
+	MessageThreadID    int                   `json:"message_thread_id,omitempty"`
+	Text               string                `json:"text"`
+	ParseMode          string                `json:"parse_mode,omitempty"`
+	ReplyMarkup        *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	ReplyParameters    *ReplyParameters      `json:"reply_parameters,omitempty"`
+	LinkPreviewOptions *LinkPreviewOptions   `json:"link_preview_options,omitempty"`
 }
+
+// LinkPreviewOptions are the link preview options of a message.
+type LinkPreviewOptions struct {
+	IsDisabled bool `json:"is_disabled,omitempty"`
+}
+
+// noPreview turns off the link preview of a message.
+var noPreview = &LinkPreviewOptions{IsDisabled: true}
 
 // InputRichMessage is a rich message to send. Tether Agent uses only the
 // Markdown form, which is GitHub Flavored Markdown.
@@ -276,12 +285,13 @@ type SendRichMessageParams struct {
 // EditMessageTextParams are the editMessageText parameters. Set Text for a
 // plain edit, or RichMessage for a rich edit. The empty one is left out.
 type EditMessageTextParams struct {
-	ChatID      int64                 `json:"chat_id"`
-	MessageID   int                   `json:"message_id"`
-	Text        string                `json:"text,omitempty"`
-	ParseMode   string                `json:"parse_mode,omitempty"`
-	RichMessage *InputRichMessage     `json:"rich_message,omitempty"`
-	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	ChatID             int64                 `json:"chat_id"`
+	MessageID          int                   `json:"message_id"`
+	Text               string                `json:"text,omitempty"`
+	ParseMode          string                `json:"parse_mode,omitempty"`
+	RichMessage        *InputRichMessage     `json:"rich_message,omitempty"`
+	ReplyMarkup        *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	LinkPreviewOptions *LinkPreviewOptions   `json:"link_preview_options,omitempty"`
 }
 
 // SendMessageDraftParams are the sendMessageDraft parameters. DraftID must not

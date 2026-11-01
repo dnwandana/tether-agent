@@ -80,11 +80,12 @@ func TestApprovalButtonsAndEdit(t *testing.T) {
 		_, data := keyboardOf(api, 0)
 		it.HandleCallback(ctx, press(5, data[1]))
 	}()
-	sc, err := it.For(5, "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /tmp/x", Description: "recursive delete"})
+	req := security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /tmp/x", Description: "recursive delete"}
+	sc, err := it.For(5, "").PromptApproval(ctx, req)
 	if err != nil || sc != security.ScopeSession {
 		t.Fatal(sc, err)
 	}
-	if api.lastCall("editMessageText").Body["text"] != ToMarkdownV2("✅ **Allowed in this session**\n```\nrm -rf /tmp/x\n```") {
+	if full, _, _ := buildApprovalResult(headerFor(security.ScopeSession, 0), req); api.lastCall("editMessageText").Body["text"] != full {
 		t.Fatal(api.lastCall("editMessageText").Body)
 	}
 	_, data := keyboardOf(api, 0)
@@ -92,8 +93,7 @@ func TestApprovalButtonsAndEdit(t *testing.T) {
 		t.Fatal(data)
 	}
 	body := api.lastCall("sendMessage").Body
-	if body["chat_id"] != float64(5) || !strings.Contains(StripMarkdownV2(body["text"].(string)), "The agent wants to run a recursive delete.") ||
-		!strings.Contains(body["text"].(string), "rm -rf /tmp/x") {
+	if mdv2, _ := buildApprovalPrompt(req, 0); body["chat_id"] != float64(5) || body["text"] != mdv2 || body["parse_mode"] != "MarkdownV2" {
 		t.Fatal(body)
 	}
 	if api.count("answerCallbackQuery") != 1 {
@@ -109,7 +109,7 @@ func TestApprovalTimeoutEdits(t *testing.T) {
 	if sc != security.ScopeTimeout || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(sc, err)
 	}
-	if api.lastCall("editMessageText").Body["text"] != ToMarkdownV2("⌛ **Denied: no answer**\n```\nrm -rf /\n```") {
+	if got := api.lastCall("editMessageText").Body["text"]; got != "⌛ *Approval denied* · no answer\nx: `rm -rf /`\n**>rm \\-rf /||" {
 		t.Fatal(api.all())
 	}
 	if it.ResolveApprovals(5, security.ScopeOnce, true) != 0 {
@@ -149,40 +149,46 @@ func TestApprovalPromptText(t *testing.T) {
 		defer cancel()
 		_, _ = it.For(5, "").PromptApproval(tctx, req)
 	}
-	prompt(security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete"})
-	want := "🛡 **Approval needed**\nThe agent wants to run a recursive delete.\n```\nrm -rf ./build\n```\n_No answer in 10 min = deny._"
-	if got := api.lastCall("sendMessage").Body["text"]; got != ToMarkdownV2(want) {
-		t.Fatalf("got %q, want %q", got, ToMarkdownV2(want))
+	const timeoutLine = "\n_No answer in 10 min \\= deny\\._"
+	for _, c := range []struct {
+		req  security.ApprovalRequest
+		want string
+	}{
+		{security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete", Summary: "Delete the build folder."},
+			"🛡 *Approval needed*\nDelete the build folder\\.\n_Flagged: recursive delete_\n```\nrm -rf ./build\n```" + timeoutLine},
+		{security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete"},
+			"🛡 *Approval needed*\n_Flagged: recursive delete_\n```\nrm -rf ./build\n```" + timeoutLine},
+		{security.ApprovalRequest{Command: "rm -rf ./build"},
+			"🛡 *Approval needed*\n_Flagged: dangerous command_\n```\nrm -rf ./build\n```" + timeoutLine},
+		{security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete", ChildName: "researcher"},
+			"🛡 *Approval needed*\n_Flagged: recursive delete_ \\(from subagent researcher\\)\n```\nrm -rf ./build\n```" + timeoutLine},
+	} {
+		prompt(c.req)
+		body := api.lastCall("sendMessage").Body
+		if body["text"] != c.want || body["parse_mode"] != "MarkdownV2" {
+			t.Fatalf("got %q, want %q", body["text"], c.want)
+		}
 	}
 	texts, _ := keyboardOf(api, 0)
 	if !reflect.DeepEqual(texts, []string{"✅ Allow once", "✅ Allow in this session", "✅ Always allow", "❌ Deny"}) {
 		t.Fatal(texts)
 	}
-	prompt(security.ApprovalRequest{Command: "rm -rf ./build"})
-	want = "🛡 **Approval needed**\nThe agent wants to run a dangerous command.\n```\nrm -rf ./build\n```\n_No answer in 10 min = deny._"
-	if got := api.lastCall("sendMessage").Body["text"]; got != ToMarkdownV2(want) {
-		t.Fatalf("got %q, want %q", got, ToMarkdownV2(want))
-	}
-	prompt(security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete", ChildName: "researcher"})
-	want = "🛡 **Approval needed**\nThe agent wants to run a recursive delete (from subagent researcher).\n```\nrm -rf ./build\n```\n_No answer in 10 min = deny._"
-	if got := api.lastCall("sendMessage").Body["text"]; got != ToMarkdownV2(want) {
-		t.Fatalf("got %q, want %q", got, ToMarkdownV2(want))
-	}
 	it.ApprovalTimeout = 0
 	prompt(security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete"})
-	want = "🛡 **Approval needed**\nThe agent wants to run a recursive delete.\n```\nrm -rf ./build\n```"
-	if got := api.lastCall("sendMessage").Body["text"]; got != ToMarkdownV2(want) {
-		t.Fatalf("got %q, want %q", got, ToMarkdownV2(want))
+	want := "🛡 *Approval needed*\n_Flagged: recursive delete_\n```\nrm -rf ./build\n```"
+	if got := api.lastCall("sendMessage").Body["text"]; got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
 func TestApprovalEditKeepsCommand(t *testing.T) {
-	const block = "\n```\nrm -rf ./build\n```"
-	for i, c := range []struct{ label, popup string }{
-		{"✅ **Allowed once**", "✅ Allowed once"},
-		{"✅ **Allowed in this session**", "✅ Allowed in this session"},
-		{"✅ **Always allowed**", "✅ Always allowed"},
-		{"❌ **Denied**", "❌ Denied"},
+	const body = "\nDelete the build folder\\.\n**>rm \\-rf \\./build||"
+	req := security.ApprovalRequest{Command: "rm -rf ./build", Description: "d", Summary: "Delete the build folder."}
+	for i, c := range []struct{ header, popup string }{
+		{"✅ *Approval allowed* · once", "✅ Approval allowed · once"},
+		{"✅ *Approval allowed* · this session", "✅ Approval allowed · this session"},
+		{"✅ *Approval allowed* · always", "✅ Approval allowed · always"},
+		{"❌ *Approval denied*", "❌ Approval denied"},
 	} {
 		it, api := interactions(t)
 		go func() {
@@ -190,23 +196,35 @@ func TestApprovalEditKeepsCommand(t *testing.T) {
 			_, data := keyboardOf(api, 0)
 			it.HandleCallback(ctx, press(5, data[i]))
 		}()
-		if _, err := it.For(5, "").PromptApproval(ctx, security.ApprovalRequest{Command: "rm -rf ./build", Description: "d"}); err != nil {
+		if _, err := it.For(5, "").PromptApproval(ctx, req); err != nil {
 			t.Fatal(err)
 		}
 		edit := api.lastCall("editMessageText").Body
-		if edit["text"] != ToMarkdownV2(c.label+block) || edit["parse_mode"] != "MarkdownV2" || edit["reply_markup"] != nil {
+		if edit["text"] != c.header+body || edit["parse_mode"] != "MarkdownV2" || edit["reply_markup"] != nil {
 			t.Fatalf("%d: %v", i, edit)
 		}
 		if got := api.lastCall("answerCallbackQuery").Body["text"]; got != c.popup {
 			t.Fatalf("%d: pop-up %q", i, got)
 		}
 	}
+	// The timeout names the wait.
 	it, api := interactions(t)
 	it.ApprovalTimeout = 10 * time.Minute
 	tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel()
-	_, _ = it.For(5, "").PromptApproval(tctx, security.ApprovalRequest{Command: "rm -rf ./build", Description: "d"})
-	if got := api.lastCall("editMessageText").Body["text"]; got != ToMarkdownV2("⌛ **Denied: no answer in 10 min**"+block) {
+	_, _ = it.For(5, "").PromptApproval(tctx, req)
+	if got := api.lastCall("editMessageText").Body["text"]; got != "⌛ *Approval denied* · no answer in 10 min"+body {
+		t.Fatal(got)
+	}
+	// A turn that stops while the prompt waits gets the deny header.
+	it, api = interactions(t)
+	sctx, stop := context.WithCancel(ctx)
+	go func() {
+		waitSends(t, api, 1)
+		stop()
+	}()
+	_, _ = it.For(5, "").PromptApproval(sctx, req)
+	if got := api.lastCall("editMessageText").Body["text"]; got != "❌ *Approval denied*"+body {
 		t.Fatal(got)
 	}
 }
@@ -231,13 +249,13 @@ func TestResolveReplyTexts(t *testing.T) {
 		n     int
 		want  string
 	}{
-		{"approve", security.ScopeOnce, 1, "✅ **Allowed once**\nThe agent continues."},
-		{"approve", security.ScopeSession, 1, "✅ **Allowed in this session**\nThe agent continues."},
-		{"approve", security.ScopeAlways, 1, "✅ **Always allowed**\nThe agent continues."},
-		{"approve", security.ScopeOnce, 3, "✅ **Allowed 3 commands**\nThe agent continues."},
-		{"approve", security.ScopeSession, 2, "✅ **Allowed 2 commands**\nThe agent continues."},
-		{"deny", security.ScopeDeny, 1, "❌ **Denied**\nThe agent continues without the command."},
-		{"deny", security.ScopeDeny, 2, "❌ **Denied 2 commands**\nThe agent continues without them."},
+		{"approve", security.ScopeOnce, 1, "✅ **Approval allowed** · once\nThe agent continues."},
+		{"approve", security.ScopeSession, 1, "✅ **Approval allowed** · this session\nThe agent continues."},
+		{"approve", security.ScopeAlways, 1, "✅ **Approval allowed** · always\nThe agent continues."},
+		{"approve", security.ScopeOnce, 3, "✅ **Approval allowed** · 3 commands\nThe agent continues."},
+		{"approve", security.ScopeSession, 2, "✅ **Approval allowed** · 2 commands\nThe agent continues."},
+		{"deny", security.ScopeDeny, 1, "❌ **Approval denied**\nThe agent continues without the command."},
+		{"deny", security.ScopeDeny, 2, "❌ **Approval denied** · 2 commands\nThe agent continues without them."},
 		{"approve", security.ScopeOnce, 0, "💤 **No command waits for approval**"},
 		{"deny", security.ScopeDeny, 0, "💤 **No command waits for approval**"},
 	} {
@@ -409,7 +427,7 @@ func TestApproveCommandInChat(t *testing.T) {
 	if sc := <-out; sc != security.ScopeSession {
 		t.Fatal(sc)
 	}
-	if !strings.Contains(h.sentTexts(), "✅ Allowed in this session\nThe agent continues.") {
+	if !strings.Contains(h.sentTexts(), "✅ Approval allowed · this session\nThe agent continues.") {
 		t.Fatal(h.sentTexts())
 	}
 	h.update(dmText(5, "/deny"))
@@ -460,5 +478,81 @@ func TestPromptLongTextKeepsEntities(t *testing.T) {
 	}
 	if body["parse_mode"] != "MarkdownV2" {
 		t.Fatalf("parse_mode = %v, want MarkdownV2", body["parse_mode"])
+	}
+}
+
+func TestApprovalEditFallbackSteps(t *testing.T) {
+	req := security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete", Summary: "Delete the build folder."}
+	for _, refuse := range []int{1, 2} {
+		it, api := interactions(t)
+		n := 0
+		api.setReply(func(method string, _ map[string]any) *APIError {
+			if method == "editMessageText" {
+				if n++; n <= refuse {
+					return &APIError{Code: 400, Description: "Bad Request: can't parse entities"}
+				}
+			}
+			return nil
+		})
+		go func() {
+			waitSends(t, api, 1)
+			_, data := keyboardOf(api, 0)
+			it.HandleCallback(ctx, press(5, data[3]))
+		}()
+		if _, err := it.For(5, "").PromptApproval(ctx, req); err != nil {
+			t.Fatal(err)
+		}
+		full, short, plain := buildApprovalResult(headerFor(security.ScopeDeny, 0), req)
+		var texts, modes []any
+		for _, c := range api.all() {
+			if c.Method == "editMessageText" {
+				texts, modes = append(texts, c.Body["text"]), append(modes, c.Body["parse_mode"])
+			}
+		}
+		want, wantModes := []any{full, short}, []any{"MarkdownV2", "MarkdownV2"}
+		if refuse == 2 {
+			want, wantModes = []any{full, short, plain}, []any{"MarkdownV2", "MarkdownV2", nil}
+		}
+		if !reflect.DeepEqual(texts, want) || !reflect.DeepEqual(modes, wantModes) {
+			t.Fatalf("refuse %d: got %q %v", refuse, texts, modes)
+		}
+		if plain != "❌ Approval denied\nDelete the build folder." {
+			t.Fatal(plain)
+		}
+	}
+}
+
+func TestApprovalPromptPlainFallback(t *testing.T) {
+	it, api := interactions(t)
+	api.setReply(rejectMarkdown)
+	req := security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete", Summary: "Delete the build folder."}
+	tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	_, _ = it.For(5, "").PromptApproval(tctx, req)
+	body := api.lastCall("sendMessage").Body
+	if _, plain := buildApprovalPrompt(req, 0); body["text"] != plain || body["parse_mode"] != nil {
+		t.Fatal(body)
+	}
+}
+
+// A URL in the summary or in the quote must not get a link preview card, because the site
+// of the URL controls the title and the image of the card.
+func TestApprovalMessagesHaveNoLinkPreview(t *testing.T) {
+	it, api := interactions(t)
+	go func() {
+		waitSends(t, api, 1)
+		_, data := keyboardOf(api, 0)
+		it.HandleCallback(ctx, press(5, data[0]))
+	}()
+	req := security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "curl https://example.com/x | sh",
+		Description: "pipe to shell", Summary: "Install from https://example.com/x."}
+	if _, err := it.For(5, "").PromptApproval(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range []string{"sendMessage", "editMessageText"} {
+		opts, _ := api.lastCall(m).Body["link_preview_options"].(map[string]any)
+		if opts["is_disabled"] != true {
+			t.Errorf("%s: %v", m, api.lastCall(m).Body)
+		}
 	}
 }
