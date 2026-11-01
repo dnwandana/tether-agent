@@ -92,10 +92,16 @@ first, and then the queue. `/stop` drops the waiting steer and clears the queue.
       when each tool in the round is safe to run in parallel.
    7. Redact secrets in each tool result, then cut a result that is too long.
 5. **Add a steer.** Steer text that arrives during a round goes to the end of the last tool
-   result as `User guidance: …`. The model reads it in the next round.
-6. **Stop at the round limit.** Before the last allowed round, the agent adds the note "Stop
-   calling tools and give your final answer now." When the turn uses all rounds of
-   `agent.max_turns`, the answer ends with `[stopped: max tool rounds reached]`.
+   result as `User guidance: …`. The model reads it in the next round. A steer that arrives in
+   the last round does not go into the summary call. It runs as the next turn.
+6. **Stop at the round limit.** Each model call before the summary counts as one round, also a
+   call that runs only `execute_code`. After the last round of `agent.max_turns`, the agent
+   makes one more model call. In that call, the model writes a summary of the work. A tool call
+   in that answer does not run. Telegram and the CLI first show the notice "⚠️ This turn used
+   all 90 tool rounds. The model now writes a summary." (with the default limit). If the summary
+   is empty two times, the answer is "I used all 90 tool rounds of this turn, and I could not
+   write a summary." The text also tells you how to continue. If the summary call fails, the
+   answer shows the error, as for each other failed call.
 7. **Stop on repeated failures.** Three failures of the same kind in a row end the turn, for
    example a call to an unknown tool or arguments that are not valid JSON.
 8. **Start reviews.** After the turn, a background memory or skill review can start. See
@@ -430,7 +436,10 @@ Cron runs, child runs, and reviews do not start reviews.
 - A child of a cron run follows `approvals.cron_mode`, because no user is present.
 
 The parent gets the summary of each child, with its status and its number of tool calls. After
-a timeout or a cancel, the summary holds the partial text. See [Tools](Tools#delegation).
+a timeout or a cancel, the summary holds the partial text. When a child uses all rounds of
+`delegation.max_iterations`, it writes a summary. That summary ends with
+`[stopped: max tool rounds reached]`. If the child cannot write a summary, the parent gets the
+partial text with the same marker. See [Tools](Tools#delegation).
 
 ## Sessions
 

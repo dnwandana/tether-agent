@@ -140,7 +140,7 @@ These keys are the ones that most users change. The full list is in
 |---|---|---|
 | `providers.primary.*` | `""` | The main model endpoint. Necessary. |
 | `agent.fallback` | absent | The ordered list of entries for an outage of the primary provider. When the key is absent, the list is the entry `fallback`, if it exists. `[]` turns off the fallback chain. |
-| `agent.max_turns` | `90` | The maximum number of tool rounds in one turn. |
+| `agent.max_turns` | `90` | The maximum number of tool rounds in one turn. After the last round, the model writes a summary. |
 | `agent.tool_concurrency` | `4` | The maximum number of tool calls that run at the same time in one round. |
 | `agent.delegation_provider` | `""` | The provider for child runs. `""` uses the provider of the parent. |
 | `agent.vision_provider` | `""` | The provider for `view_image`. `""` uses `primary` when it has `vision: true`. |

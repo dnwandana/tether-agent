@@ -216,7 +216,8 @@ A plain text message goes into the running task as guidance.
 3. The bot replies "↪️ Got it. I'll do this after the current step." with a **⚡ Do this now**
    button.
 
-If the turn ends before the agent reads the steer, the text runs as the next turn.
+If the turn ends before the agent reads the steer, the text runs as the next turn. This also
+applies to a steer that arrives in the last tool round of a turn.
 
 ### Media waits in the queue
 

@@ -111,7 +111,7 @@ gives the order, the failures that move a call to the next entry, and the wait t
 
 | Key | Default | Effect |
 |---|---|---|
-| `agent.max_turns` | `90` | The maximum number of tool rounds in one turn. |
+| `agent.max_turns` | `90` | The maximum number of tool rounds in one turn. After the last round, the model writes a summary. |
 | `agent.tool_concurrency` | `4` | The maximum number of tool calls that run at the same time in one round. |
 | `agent.vision_provider` | `""` | The provider entry for `view_image`. `""` uses the default chain when `primary` has `vision: true`. Else the agent has no `view_image` tool. `primary` uses the default chain. In the default chain, the call goes only to the entries with `vision: true`. Another name uses that entry alone, with no fallback. |
 | `agent.delegation_provider` | `""` | The provider for child runs of `delegate_task`, as `name` or `name:model`. The value is the pin of the child session, so that entry is first in the chain of the child. `""` uses the pin of the parent session. |

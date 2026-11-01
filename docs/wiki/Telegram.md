@@ -264,6 +264,8 @@ The final answer has these rules:
 - If Telegram refuses the markup, the bot sends plain text.
 - If the preview is older than 60 seconds, the final answer goes out as a new message.
 - A tool round splits the answer into separate messages.
+- When a turn uses all its tool rounds, a ⚠️ notice comes first. Then the summary of the work
+  follows as the answer. See [One turn, step by step](How-It-Works#one-turn-step-by-step).
 
 ### Approval buttons
 
