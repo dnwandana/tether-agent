@@ -243,14 +243,19 @@ func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args st
 }
 
 // AgentTurn runs one agent turn with tools. It streams the answer and the dim tool
-// progress lines to out.
+// progress lines to out. The fixed text of a turn with no summary does not stream, so
+// AgentTurn prints it.
 func (c *CLI) AgentTurn(ctx context.Context, sess *sessions.Session, text string, out io.Writer) error {
 	d := c.deps()
 	sink := &CLISink{W: out, Line: d.toolLine}
 	// A review notice, for example "💾 Memory updated", shows after the answer.
 	notify, release := agent.HoldNotices(sink.Notice)
-	_, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify})
+	res, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify})
 	sink.Finish()
+	// The stream already showed each other final text.
+	if res.NoSummary {
+		fmt.Fprintln(out, res.Final)
+	}
 	release()
 	return err
 }

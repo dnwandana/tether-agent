@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -163,10 +165,12 @@ func TestCLITurnSeam(t *testing.T) {
 	}
 }
 
-// step is one scripted answer of fakeProv: a text, tool calls, or both.
+// step is one scripted answer of fakeProv: a text, tool calls, or both. A non-nil err
+// ends the stream with an EventError after the text and the calls.
 type step struct {
 	text  string
 	calls []provider.ToolCall
+	err   error
 }
 
 // fakeProv is a scripted provider. Each call takes the next step; after the script it
@@ -211,6 +215,10 @@ func (f *fakeProv) Stream(ctx context.Context, req provider.Request) (<-chan pro
 		}
 		for i := range st.calls {
 			ch <- provider.Event{Type: provider.EventToolCall, ToolCall: &st.calls[i]}
+		}
+		if st.err != nil {
+			ch <- provider.Event{Type: provider.EventError, Err: st.err}
+			return
 		}
 		ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop", Usage: &provider.Usage{}}
 	}()
@@ -427,5 +435,50 @@ func TestCLIReplyHasNoMarkdownMarkers(t *testing.T) {
 	out := runCLI(t, testDeps(t, &fakeProv{}), "/t-md\n")
 	if !strings.Contains(out, "🧠 Model: default\n") || strings.Contains(out, "**") {
 		t.Fatal(out)
+	}
+}
+
+// readFileStep returns an answer that calls read_file on a new file.
+func readFileStep(t *testing.T) step {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(p, []byte("plan\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]string{"path": p})
+	return step{text: "Let me look.", calls: []provider.ToolCall{{ID: "c1", Name: "read_file", Args: string(args)}}}
+}
+
+// A CLI turn that uses all its tool rounds and gets two empty summary answers prints the
+// fixed text after the stream, because that text does not stream.
+func TestCLIAgentTurnNoSummary(t *testing.T) {
+	fp := &fakeProv{script: []step{readFileStep(t), {}, {}}}
+	d := testDeps(t, fp)
+	d.Cfg.Agent.MaxTurns = 1
+	out := runCLI(t, d, "read the file\n/exit\n")
+	want := fmt.Sprintf(agent.NoteNoSummary, 1)
+	if !strings.HasSuffix(out, want+"\n") || strings.Count(out, want) != 1 || strings.Contains(out, "error:") {
+		t.Fatalf("%q", out)
+	}
+	if i := strings.Index(out, "Let me look."); i < 0 || i > strings.Index(out, want) {
+		t.Fatalf("the fixed text comes after the stream: %q", out)
+	}
+	if n := len(fp.reqs); n != 3 {
+		t.Fatal("one round, the summary call, and the retry:", n)
+	}
+}
+
+// A failed summary call on the CLI shows the partial text one time and the error line,
+// as for each other failed call.
+func TestCLIAgentTurnSummaryError(t *testing.T) {
+	fp := &fakeProv{script: []step{readFileStep(t), {text: "partial", err: errors.New("summary boom")}}}
+	d := testDeps(t, fp)
+	d.Cfg.Agent.MaxTurns = 1
+	out := runCLI(t, d, "read the file\n/exit\n")
+	if !strings.Contains(out, "partial\nerror: agent: the model call to primary failed: summary boom\n") || strings.Count(out, "partial") != 1 {
+		t.Fatalf("%q", out)
+	}
+	if strings.Contains(out, fmt.Sprintf(agent.NoteNoSummary, 1)) {
+		t.Fatalf("a failed call is not a turn with no summary: %q", out)
 	}
 }
