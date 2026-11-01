@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -204,10 +205,31 @@ func TestChildMaxIterations50(t *testing.T) {
 	a, parent := newAgent(t, fp, echoTool{})
 	a.Cfg.Agent.MaxTurns = 3
 	r := a.RunChild(ctx, ChildSpec{Goal: "x", ParentSession: parent, ParentToolsets: all()})
-	if len(fp.requests) != a.Cfg.Delegation.MaxIterations || a.Cfg.Delegation.MaxIterations != 50 {
+	// 50 rounds, the summary call, and the retry.
+	if a.Cfg.Delegation.MaxIterations != 50 || len(fp.requests) != 52 {
 		t.Fatal(len(fp.requests))
 	}
-	if r.ToolCalls != 50 || !strings.Contains(r.Summary, NoteStopped) {
+	if r.Status != "ok" || r.ToolCalls != 50 || !strings.HasSuffix(r.Summary, NoteStopped) || strings.Contains(r.Summary, "could not write a summary") {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestChildLimitSummary(t *testing.T) {
+	fp := echoRounds(2, text("found it"))
+	a, parent := newAgent(t, fp, echoTool{})
+	a.Cfg.Delegation.MaxIterations = 2
+	r := a.RunChild(ctx, ChildSpec{Goal: "x", ParentSession: parent, ParentToolsets: all()})
+	if r.Status != "ok" || r.Summary != "found it\n\n"+NoteStopped || r.ToolCalls != 2 || len(fp.requests) != 3 {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestChildSummaryCallFails(t *testing.T) {
+	fp := echoRounds(1, step{err: errors.New("provider down")})
+	a, parent := newAgent(t, fp, echoTool{})
+	a.Cfg.Delegation.MaxIterations = 1
+	r := a.RunChild(ctx, ChildSpec{Goal: "x", ParentSession: parent, ParentToolsets: all()})
+	if r.Status != "error" || !strings.Contains(r.Error, "provider down") || !strings.Contains(r.Error, "the model call to") {
 		t.Fatalf("%+v", r)
 	}
 }

@@ -269,6 +269,40 @@ func TestNoReviewInsideReview(t *testing.T) {
 	}
 }
 
+func TestReviewLimitSummary(t *testing.T) {
+	a, sess, parentReq, _ := agentAfterTurn(t)
+	fp := a.Prov.(*fakeProv)
+	steps := make([]step, 0, reviewMaxTurns+1)
+	for i := range reviewMaxTurns {
+		steps = append(steps, toolCalls(tc(fmt.Sprintf("r%d", i+1), "memory", `{"action":"add","target":"memory","content":"VPS = hetzner"}`)))
+	}
+	fp.script = append(steps, text("Saved the VPS fact."))
+	if _, err := a.RunReview(ctx, ReviewRequest{Session: sess, View: reviewView(t, a, sess), System: parentReq.System, Tools: parentReq.Tools, Memory: true}); err != nil {
+		t.Fatal("a review at the limit must end without an error:", err)
+	}
+	if len(fp.requests) != reviewMaxTurns+1 {
+		t.Fatal(len(fp.requests))
+	}
+	last := fp.requests[reviewMaxTurns]
+	if m := last.Messages[len(last.Messages)-1]; m.Role != provider.RoleUser || m.Content != NoteSummaryRequest {
+		t.Fatalf("%+v", m)
+	}
+	if last.System != parentReq.System || !reflect.DeepEqual(last.Tools, parentReq.Tools) {
+		t.Fatal("the summary request of a review keeps the parent shape")
+	}
+	rows := childSessions(t, a, sess.ID)
+	if len(rows) != 1 {
+		t.Fatal(rows)
+	}
+	msgs := messages(t, a, rows[0].ID)
+	if hasNudge(msgs) {
+		t.Fatal("the nudge must not be saved")
+	}
+	if end := msgs[len(msgs)-1].Msg; end.Role != provider.RoleAssistant || end.Content != "Saved the VPS fact." {
+		t.Fatalf("%+v", end)
+	}
+}
+
 // reviewAgent returns an Agent with the memory, skill_manage, and echo tools, and a
 // recorder of the reviews that the triggers start. The recorder replaces RunReview.
 func reviewAgent(t *testing.T, fp *fakeProv) (*Agent, *sessions.Session, func() []ReviewRequest) {

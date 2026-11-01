@@ -254,16 +254,6 @@ func newAgent(t *testing.T, fp *fakeProv, ts ...tools.Tool) (*Agent, *sessions.S
 // all returns every toolset.
 func all() map[string]bool { return tools.Resolve([]string{tools.SetAll}, nil, nil) }
 
-// lastSystemNote returns the content of the last system message of req.
-func lastSystemNote(req provider.Request) string {
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == provider.RoleSystem {
-			return req.Messages[i].Content
-		}
-	}
-	return ""
-}
-
 // lastToolContent returns the content of the last tool message of req.
 func lastToolContent(req provider.Request) string {
 	for i := len(req.Messages) - 1; i >= 0; i-- {
@@ -315,31 +305,54 @@ func TestToolRoundThenFinal(t *testing.T) {
 	}
 }
 
-func TestMaxTurnsNudgeAt39(t *testing.T) {
+func TestMaxTurnsNoSystemNote(t *testing.T) {
 	fp := scriptedForever(step{text: "working", calls: []provider.ToolCall{tc("c", "echo", `{"s":"x"}`)}})
 	a, sess := newAgent(t, fp, echoTool{})
 	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: &recSink{}, MaxTurns: 40})
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || res.ToolRounds != 40 {
+		t.Fatal(res, err)
 	}
-	req39 := fp.requests[38]
-	if !strings.Contains(lastSystemNote(req39), "Stop calling tools and give your final answer now.") {
-		t.Fatal("nudge at round 39")
-	}
-	if lastSystemNote(fp.requests[37]) != "" || lastSystemNote(fp.requests[39]) != "" {
-		t.Fatal("the nudge goes to request 39 only")
-	}
-	if len(fp.requests) > 41 {
-		t.Fatal("hard stop after 40 rounds")
-	}
-	if res.ToolRounds != 40 || res.Final != "working\n\n[stopped: max tool rounds reached]" {
-		t.Fatalf("%+v", res)
-	}
-	for _, m := range messages(t, a, sess.ID) {
-		if m.Msg.Role == provider.RoleSystem {
-			t.Fatal("the nudge must not be saved")
+	for i, req := range fp.requests {
+		for _, m := range req.Messages {
+			if m.Role == provider.RoleSystem {
+				t.Fatalf("request %d has a system message: %q", i+1, m.Content)
+			}
 		}
 	}
+}
+
+// echoRounds returns a provider with n steps that each call echo, and then the steps of after.
+func echoRounds(n int, after ...step) *fakeProv {
+	steps := make([]step, 0, n+len(after))
+	for i := range n {
+		steps = append(steps, toolCalls(tc(fmt.Sprintf("c%d", i+1), "echo", `{"s":"x"}`)))
+	}
+	return scripted(append(steps, after...)...)
+}
+
+// afterLastTool returns the stored messages after the last tool message.
+func afterLastTool(msgs []sessions.StoredMessage) []provider.Message {
+	last := -1
+	for i, m := range msgs {
+		if m.Msg.Role == provider.RoleTool {
+			last = i
+		}
+	}
+	var out []provider.Message
+	for _, m := range msgs[last+1:] {
+		out = append(out, m.Msg)
+	}
+	return out
+}
+
+// hasNudge tells if a stored message holds NoteSummaryRequest.
+func hasNudge(msgs []sessions.StoredMessage) bool {
+	for _, m := range msgs {
+		if strings.Contains(m.Msg.Content, NoteSummaryRequest) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMaxTurnsFromConfig(t *testing.T) {
@@ -347,8 +360,238 @@ func TestMaxTurnsFromConfig(t *testing.T) {
 	a, sess := newAgent(t, fp, echoTool{})
 	a.Cfg.Agent.MaxTurns = 3
 	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: &recSink{}})
-	if err != nil || len(fp.requests) != 3 || res.ToolRounds != 3 || res.Final != "[stopped: max tool rounds reached]" {
+	// 3 rounds, the summary call, and the retry.
+	if err != nil || len(fp.requests) != 5 || res.ToolRounds != 3 || !res.HitLimit || !res.NoSummary {
 		t.Fatal(len(fp.requests), res, err)
+	}
+	if res.Final != fmt.Sprintf(NoteNoSummary, 3) {
+		t.Fatal(res.Final)
+	}
+}
+
+func TestMaxTurnsSummary(t *testing.T) {
+	fp := echoRounds(3, text("summary"))
+	a, sess := newAgent(t, fp, echoTool{})
+	sink := &noticeSink{}
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: sink, System: "SYS", MaxTurns: 3})
+	if err != nil || res.Final != "summary" || res.ToolRounds != 3 || !res.HitLimit || res.NoSummary {
+		t.Fatal(res, err)
+	}
+	if len(fp.requests) != 4 {
+		t.Fatal(len(fp.requests))
+	}
+	r3, r4 := fp.requests[2], fp.requests[3]
+	if r4.System != "SYS" || r4.System != r3.System || len(r4.Tools) != 1 || !reflect.DeepEqual(r4.Tools, r3.Tools) {
+		t.Fatalf("the summary request keeps the system prompt and the tools: %+v", r4)
+	}
+	if r4.CacheKey != r3.CacheKey || r4.Effort != r3.Effort || r4.StartAt != r3.StartAt {
+		t.Fatalf("%+v", r4)
+	}
+	// Request 4 is request 3, the answer and the tool result of round 3, and the nudge.
+	n := len(r3.Messages)
+	if len(r4.Messages) != n+3 || !reflect.DeepEqual(r4.Messages[:n], r3.Messages) || r4.Messages[n+1].Role != provider.RoleTool {
+		t.Fatal(len(r4.Messages), n)
+	}
+	if last := r4.Messages[n+2]; last.Role != provider.RoleUser || last.Content != NoteSummaryRequest {
+		t.Fatalf("%+v", last)
+	}
+	msgs := messages(t, a, sess.ID)
+	last := msgs[len(msgs)-1]
+	if last.Msg.Role != provider.RoleAssistant || last.Msg.Content != "summary" || len(last.Msg.ToolCalls) != 0 || last.Msg.Reasoning != nil {
+		t.Fatalf("%+v", last.Msg)
+	}
+	if last.Meta.Provider != "primary" || last.Meta.Model != "test-model" {
+		t.Fatalf("%+v", last.Meta)
+	}
+	if hasNudge(msgs) {
+		t.Fatal("the nudge must not be saved")
+	}
+	if len(sink.notices) != 1 || sink.notices[0] != fmt.Sprintf(NoteLimitNotice, 3) {
+		t.Fatal(sink.notices)
+	}
+}
+
+func TestMaxTurnsSummaryToolCallDiscarded(t *testing.T) {
+	fp := echoRounds(2, step{text: "done", calls: []provider.ToolCall{tc("c3", "echo", `{"s":"x"}`)}})
+	a, sess := newAgent(t, fp, echoTool{})
+	sink := &recSink{}
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: sink, MaxTurns: 2})
+	if err != nil || res.Final != "done" || !res.HitLimit || len(fp.requests) != 3 {
+		t.Fatal(len(fp.requests), res, err)
+	}
+	if len(sink.starts) != 2 {
+		t.Fatal("echo runs 2 times, not 3:", sink.starts)
+	}
+	got := afterLastTool(messages(t, a, sess.ID))
+	if len(got) != 1 || got[0].Role != provider.RoleAssistant || got[0].Content != "done" || len(got[0].ToolCalls) != 0 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestMaxTurnsSummaryEmptyRetry(t *testing.T) {
+	// A text with only white space is empty.
+	fp := echoRounds(2, text(" \n"), text("ok"))
+	a, sess := newAgent(t, fp, echoTool{})
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: &recSink{}, MaxTurns: 2})
+	if err != nil || res.Final != "ok" || !res.HitLimit || res.NoSummary || len(fp.requests) != 4 {
+		t.Fatal(len(fp.requests), res, err)
+	}
+	if !reflect.DeepEqual(fp.requests[3], fp.requests[2]) {
+		t.Fatal("the retry must send the same summary request")
+	}
+	got := afterLastTool(messages(t, a, sess.ID))
+	if len(got) != 1 || got[0].Content != "ok" {
+		t.Fatalf("no empty assistant message after the last tool result: %+v", got)
+	}
+}
+
+func TestMaxTurnsSummaryEmptyTwice(t *testing.T) {
+	// An answer with only tool calls is empty.
+	fp := echoRounds(2, text(""), toolCalls(tc("c3", "echo", `{"s":"x"}`)))
+	a, sess := newAgent(t, fp, echoTool{})
+	sink := &recSink{}
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: sink, MaxTurns: 2})
+	if err != nil || len(fp.requests) != 4 || !res.HitLimit || !res.NoSummary || res.ToolRounds != 2 {
+		t.Fatal(len(fp.requests), res, err)
+	}
+	if res.Final != fmt.Sprintf(NoteNoSummary, 2) {
+		t.Fatal(res.Final)
+	}
+	if len(sink.starts) != 2 {
+		t.Fatal(sink.starts)
+	}
+}
+
+func TestMaxTurnsSummaryCallFails(t *testing.T) {
+	boom := errors.New("provider down")
+	fp := echoRounds(2, step{text: "partial", err: boom})
+	a, sess := newAgent(t, fp, echoTool{})
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: &recSink{}, MaxTurns: 2})
+	if err == nil || !strings.Contains(err.Error(), "the model call to") || !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	// A call error gets no retry.
+	if len(fp.requests) != 3 || res.Final != "partial" || !res.HitLimit || res.NoSummary {
+		t.Fatal(len(fp.requests), res)
+	}
+	msgs := messages(t, a, sess.ID)
+	if last := msgs[len(msgs)-1].Msg; last.Role != provider.RoleAssistant || last.Content != "partial" {
+		t.Fatalf("%+v", last)
+	}
+}
+
+func TestMaxTurnsSummaryCancel(t *testing.T) {
+	fp := echoRounds(2, step{text: "half", stall: true})
+	a, sess := newAgent(t, fp, echoTool{})
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	fp.onRequest = func(i int) {
+		if i == 2 {
+			time.AfterFunc(50*time.Millisecond, cancel)
+		}
+	}
+	res, err := a.RunTurn(cctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: &recSink{}, MaxTurns: 2})
+	if !errors.Is(err, context.Canceled) || len(fp.requests) != 3 || res.Final != "half" {
+		t.Fatal(len(fp.requests), res, err)
+	}
+	msgs := messages(t, a, sess.ID)
+	if last := msgs[len(msgs)-1].Msg; last.Role != provider.RoleAssistant || last.Content != "half" {
+		t.Fatalf("%+v", last)
+	}
+}
+
+func TestMaxTurnsFailureStopNoSummary(t *testing.T) {
+	fp := scriptedForever(toolCalls(tc("c", "nope", `{}`)))
+	a, sess := newAgent(t, fp)
+	sink := &noticeSink{}
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "x", Toolsets: all(), Sink: sink, MaxTurns: 3})
+	if err == nil || !strings.Contains(err.Error(), "the model called an unknown tool 3 times in a row") || len(fp.requests) != 3 {
+		t.Fatal(len(fp.requests), err)
+	}
+	if res.HitLimit || len(sink.notices) != 0 {
+		t.Fatal(res, sink.notices)
+	}
+}
+
+func TestMaxTurnsSummaryCronText(t *testing.T) {
+	fp := echoRounds(1, text(""), text(""))
+	a, sess := newAgent(t, fp, echoTool{})
+	sess.Kind = "cron"
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: &recSink{}, MaxTurns: 1})
+	if err != nil || !res.NoSummary || res.Final != fmt.Sprintf(NoteNoSummaryCron, 1) {
+		t.Fatal(res, err)
+	}
+}
+
+func TestMaxTurnsSummaryNoReasoning(t *testing.T) {
+	r := &provider.Reasoning{Issuer: "responses http://d m", Output: []json.RawMessage{
+		json.RawMessage(`{"type":"function_call","call_id":"c2","name":"echo","arguments":"{}"}`),
+	}}
+	fp := echoRounds(1, step{text: "sum", calls: []provider.ToolCall{tc("c2", "echo", `{"s":"x"}`)}, reasoning: r}, text("next"))
+	a, sess := newAgent(t, fp, echoTool{})
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: &recSink{}, MaxTurns: 1}); err != nil {
+		t.Fatal(err)
+	}
+	got := afterLastTool(messages(t, a, sess.ID))
+	if len(got) != 1 || got[0].Content != "sum" || got[0].Reasoning != nil || len(got[0].ToolCalls) != 0 {
+		t.Fatalf("%+v", got)
+	}
+	// The next turn sends no assistant message with Reasoning after the last tool result.
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "more", Toolsets: all(), Sink: &recSink{}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fp.requests) != 3 {
+		t.Fatal(len(fp.requests))
+	}
+	req := fp.requests[2]
+	lastTool := -1
+	for i, m := range req.Messages {
+		if m.Role == provider.RoleTool {
+			lastTool = i
+		}
+	}
+	for _, m := range req.Messages[lastTool+1:] {
+		if m.Role == provider.RoleAssistant && (m.Reasoning != nil || len(m.ToolCalls) != 0) {
+			t.Fatalf("%+v", m)
+		}
+	}
+}
+
+func TestMaxTurnsNextTurnHistory(t *testing.T) {
+	fp := echoRounds(1, text("summary"), text("next answer"))
+	a, sess := newAgent(t, fp, echoTool{})
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, MaxTurns: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "and now?", Toolsets: all(), Sink: &recSink{}}); err != nil {
+		t.Fatal(err)
+	}
+	req := fp.requests[2]
+	want := []provider.Role{provider.RoleUser, provider.RoleAssistant, provider.RoleTool, provider.RoleAssistant, provider.RoleUser}
+	if len(req.Messages) != len(want) {
+		t.Fatalf("%+v", req.Messages)
+	}
+	for i, m := range req.Messages {
+		if m.Role != want[i] || strings.Contains(m.Content, NoteSummaryRequest) {
+			t.Fatalf("message %d: %+v", i, m)
+		}
+	}
+	if req.Messages[3].Content != "summary" || !strings.HasSuffix(req.Messages[4].Content, "and now?") {
+		t.Fatalf("%+v", req.Messages)
+	}
+}
+
+func TestMaxTurnsSummaryHook(t *testing.T) {
+	fp := echoRounds(2, text(""), text("ok"))
+	a, sess := newAgent(t, fp, echoTool{})
+	var rounds []int
+	a.beforeCall = func(round int) { rounds = append(rounds, round) }
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "loop", Toolsets: all(), Sink: &recSink{}, MaxTurns: 2})
+	if err != nil || res.Final != "ok" || len(fp.requests) != 4 {
+		t.Fatal(len(fp.requests), res, err)
+	}
+	if !reflect.DeepEqual(rounds, []int{1, 2, 3}) {
+		t.Fatal("the hook gets 1, 2, and 3, and the retry does not call it:", rounds)
 	}
 }
 
@@ -1124,5 +1367,66 @@ func TestEffortState(t *testing.T) {
 	sess.Effort = ""
 	if got := a.EffortState(sess); got.Rejected {
 		t.Fatalf("an empty level is never rejected: %+v", got)
+	}
+}
+
+// The summary row carries the usage of the empty attempt and of the good attempt, so the
+// usage report and the cost count both calls.
+func TestMaxTurnsSummaryUsageSum(t *testing.T) {
+	u1 := provider.Usage{InputTokens: 1000, OutputTokens: 10}
+	u2 := provider.Usage{InputTokens: 2000, OutputTokens: 100}
+	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), step{usage: u1}, step{text: "ok", usage: u2})
+	a, sess := newAgent(t, fp, echoTool{})
+	a.Cfg.Pricing.Overrides = map[string]config.PriceOverride{"test-model": {Input: 2, Output: 10}}
+	a.Prices = pricing.NewService(a.Cfg, t.TempDir(), nil, nil, nil)
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, MaxTurns: 1})
+	if err != nil || res.Final != "ok" || !res.HitLimit || res.NoSummary {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if res.Usage.InputTokens != 3000 || res.Usage.OutputTokens != 110 {
+		t.Fatalf("each attempt counts one time in the turn usage: %+v", res.Usage)
+	}
+	if len(fp.requests) != 3 || fp.requests[2].Messages[len(fp.requests[2].Messages)-1].Content != NoteSummaryRequest {
+		t.Fatal("the retry sends the summary request again:", len(fp.requests))
+	}
+	msgs := messages(t, a, sess.ID) // user, assistant(tool call), tool, summary
+	if len(msgs) != 4 || msgs[2].Msg.Role != provider.RoleTool {
+		t.Fatal("one stored row after the tool result:", msgs)
+	}
+	row := msgs[3]
+	if row.Msg.Role != provider.RoleAssistant || row.Msg.Content != "ok" {
+		t.Fatalf("%+v", row.Msg)
+	}
+	if u := row.Meta.Usage; u.InputTokens != 3000 || u.OutputTokens != 110 {
+		t.Fatalf("the summary row has U1 + U2: %+v", u)
+	}
+	if got, want := row.Meta.CostUSD, 3000*2e-6+110*10e-6; got < want-1e-12 || got > want+1e-12 {
+		t.Fatal("the cost is the cost of the sum:", got, want)
+	}
+}
+
+// After two empty summary attempts, one empty assistant row carries the usage of both.
+func TestMaxTurnsSummaryUsageEmptyTwice(t *testing.T) {
+	u1 := provider.Usage{InputTokens: 500, OutputTokens: 3, CacheReadTokens: 400}
+	u2 := provider.Usage{InputTokens: 600, OutputTokens: 4, CacheReadTokens: 450}
+	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), step{usage: u1}, step{usage: u2})
+	a, sess := newAgent(t, fp, echoTool{})
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, MaxTurns: 1})
+	if err != nil || res.Final != fmt.Sprintf(NoteNoSummary, 1) || !res.HitLimit || !res.NoSummary {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if len(fp.requests) != 3 {
+		t.Fatal(len(fp.requests))
+	}
+	msgs := messages(t, a, sess.ID) // user, assistant(tool call), tool, empty assistant
+	if len(msgs) != 4 || msgs[2].Msg.Role != provider.RoleTool {
+		t.Fatal("one stored row after the tool result:", msgs)
+	}
+	row := msgs[3]
+	if row.Msg.Role != provider.RoleAssistant || row.Msg.Content != "" || len(row.Msg.ToolCalls) != 0 || row.Msg.Reasoning != nil {
+		t.Fatalf("one empty assistant row: %+v", row.Msg)
+	}
+	if u := row.Meta.Usage; u.InputTokens != 1100 || u.OutputTokens != 7 || u.CacheReadTokens != 850 {
+		t.Fatalf("the empty row has U1 + U2: %+v", u)
 	}
 }

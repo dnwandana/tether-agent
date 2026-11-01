@@ -226,3 +226,75 @@ func TestStopCancelsTurn(t *testing.T) {
 		t.Fatal("each call keeps a result after a stop:", msgs)
 	}
 }
+
+// noSteerText fails the test when a request or a stored message of the session has text.
+func noSteerText(t *testing.T, a *Agent, sessID string, fp *fakeProv, text string) {
+	t.Helper()
+	for i, r := range fp.requests {
+		for _, m := range r.Messages {
+			if strings.Contains(m.Content, text) {
+				t.Fatalf("request %d has the steer: %+v", i, m)
+			}
+		}
+	}
+	for _, m := range messages(t, a, sessID) {
+		if strings.Contains(m.Msg.Content, text) || strings.Contains(m.Msg.Content, SteerMarker) {
+			t.Fatalf("a stored message has the steer: %+v", m.Msg)
+		}
+	}
+}
+
+// A steer that arrives in the last round does not go into the last tool result. The
+// summary call does not read it, and the turn returns it for the next turn.
+func TestMaxTurnsSteerHeldInLastRound(t *testing.T) {
+	q := NewSteerQueue()
+	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), toolCalls(tc("c2", "echo", `{"s":"y"}`)), text("summary"))
+	// The push runs after the pre-call drain of round 2, so the steer arrives during the
+	// round-2 tools and reaches the drain after the tool results.
+	fp.onRequest = func(i int) {
+		if i == 1 {
+			q.Push("check the backups too")
+		}
+	}
+	a, sess := newAgent(t, fp, echoTool{})
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, Steer: q, MaxTurns: 2})
+	if err != nil || res.Final != "summary" || !res.HitLimit {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if len(fp.requests) != 3 {
+		t.Fatal(len(fp.requests))
+	}
+	sum := fp.requests[2].Messages
+	if sum[len(sum)-1].Content != NoteSummaryRequest {
+		t.Fatal("request 3 is the summary request:", sum[len(sum)-1])
+	}
+	noSteerText(t, a, sess.ID, fp, "check the backups too")
+	if res.PendingSteer != "check the backups too" || q.Pending() != "" {
+		t.Fatalf("got %q, queue %q", res.PendingSteer, q.Pending())
+	}
+}
+
+// A steer that arrives after the round-2 tools and before the summary call is not put
+// into the stored tool result. The turn returns it for the next turn.
+func TestMaxTurnsSteerNotStoredBeforeSummary(t *testing.T) {
+	q := NewSteerQueue()
+	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), toolCalls(tc("c2", "echo", `{"s":"y"}`)), text("summary"))
+	a, sess := newAgent(t, fp, echoTool{})
+	// The hook runs in the summary pass with round 3, before the pre-call steps.
+	a.beforeCall = func(round int) {
+		if round == 3 {
+			q.Push("late note")
+		}
+	}
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, Steer: q, MaxTurns: 2})
+	if err != nil || res.Final != "summary" || !res.HitLimit {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if len(fp.requests) != 3 {
+		t.Fatal(len(fp.requests))
+	}
+	noSteerText(t, a, sess.ID, fp, "late note")
+	if res.PendingSteer != "late note" || q.Pending() != "" {
+		t.Fatalf("got %q, queue %q", res.PendingSteer, q.Pending())
+	}
+}

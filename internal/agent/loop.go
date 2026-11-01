@@ -23,11 +23,22 @@ import (
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
-// NoteMaxTurns is the system note of the request before the last allowed tool round.
-const NoteMaxTurns = "Stop calling tools and give your final answer now."
-
-// NoteStopped ends the final text when the turn used all its tool rounds.
+// NoteStopped ends the summary of a child that used all its tool rounds.
 const NoteStopped = "[stopped: max tool rounds reached]"
+
+// NoteSummaryRequest is the user message at the end of the summary request. The loop sends
+// it but does not save it. The text is the Hermes text, word for word
+// (agent/context_compressor.py:342-345).
+const NoteSummaryRequest = "You've reached the maximum number of tool-calling iterations allowed. Please provide a final response summarizing what you've found and accomplished so far, without calling any more tools."
+
+// NoteLimitNotice is the notice to the user before the summary call. %d is the limit.
+const NoteLimitNotice = "⚠️ This turn used all %d tool rounds. The model now writes a summary."
+
+// NoteNoSummary is the final text after two empty summary answers. %d is the limit.
+const NoteNoSummary = "I used all %d tool rounds of this turn, and I could not write a summary. Send \"continue\" to go on, or increase `agent.max_turns` in the config."
+
+// NoteNoSummaryCron replaces NoteNoSummary in a cron run, which cannot continue.
+const NoteNoSummaryCron = "I used all %d tool rounds of this run, and I could not write a summary. Increase `agent.max_turns` in the config."
 
 // streamIdleTimeout ends a model call when its stream sends no event for this time. A
 // connection can stay open and send nothing. That connection must not hang the turn.
@@ -163,6 +174,12 @@ type TurnResult struct {
 	// text_to_speech, with the voice directive first when a result asks for a voice note.
 	// Final does not include them. A messaging channel adds them with AppendMediaTags.
 	Media []string
+	// HitLimit is true when the turn used all its tool rounds and the summary pass ended
+	// with a summary, a fixed text, or a failed call.
+	HitLimit bool
+	// NoSummary is true when the summary was empty two times. Then Final is NoteNoSummary
+	// or NoteNoSummaryCron.
+	NoSummary bool
 
 	// usedMemory and usedSkills tell that the turn called memory or skill_manage. Such a
 	// call resets the review count (Hermes).
@@ -274,13 +291,23 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		failures failureTracker
 	)
 	for round := 1; ; round++ {
+		// The pass after the last round makes the summary call.
+		summary := round == maxTurns+1
 		if err := ctx.Err(); err != nil {
 			return res, err
+		}
+		if summary {
+			sink.Notice(fmt.Sprintf(NoteLimitNotice, maxTurns))
+			a.logger().Info("agent: the turn used all tool rounds, so the model writes a summary", "session", ts.sessionID, "rounds", maxTurns)
 		}
 		if a.beforeCall != nil {
 			a.beforeCall(round)
 		}
-		a.steerStored(dbCtx, t.Steer, ts)
+		// The summary pass leaves the steer in the queue, so the gateway runs it as the
+		// next turn.
+		if !summary {
+			a.steerStored(dbCtx, t.Steer, ts)
+		}
 		if a.compact(ctx, t, prov, sink) && t.System == "" {
 			// The compaction count is part of the prompt key, so the prompt is rebuilt.
 			system, _ = a.turnSystem(ctx, t, channel)
@@ -294,11 +321,56 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		}
 		req := provider.Request{System: system, Messages: msgs, Tools: schemas,
 			CacheKey: cacheKey, Effort: t.Session.Effort, StartAt: ts.served}
-		if round == maxTurns-1 {
-			req.Messages = append(req.Messages, provider.Message{Role: provider.RoleSystem, Content: NoteMaxTurns})
+		if summary {
+			// The nudge goes only into the request. It is never saved.
+			req.Messages = append(req.Messages, provider.Message{Role: provider.RoleUser, Content: NoteSummaryRequest})
 		}
 
 		lastReq = req
+		if summary {
+			// The pass saves at most one row, and that row has the usage of all attempts.
+			// The usage report reads only the stored assistant rows, so it does not count an
+			// attempt that has no row.
+			out, usage, cerr := a.callSummary(ctx, prov, req, sink)
+			addUsage(&res.Usage, usage, false)
+			out.Usage = usage
+			meta := a.meta(prov, out)
+			switch {
+			case cerr != nil:
+				// The rule of a failed round: only the text is saved.
+				if out.Text != "" {
+					res.Final = out.Text
+					if _, err := a.save(dbCtx, ts, provider.Message{Role: provider.RoleAssistant, Content: out.Text}, meta); err != nil {
+						a.logger().Error("agent: cannot save the partial answer", "session", ts.sessionID, "err", err.Error())
+					}
+				}
+				if ctx.Err() != nil {
+					return res, ctx.Err()
+				}
+				res.HitLimit = true
+				return res, fmt.Errorf("agent: the model call to %s failed: %w", meta.Provider, cerr)
+			case strings.TrimSpace(out.Text) == "":
+				a.logger().Warn("agent: the summary at the round limit was empty two times, so the turn ends with a fixed text", "session", ts.sessionID)
+				// The empty row keeps the usage. It has no text, no tool calls, and no reasoning.
+				if _, err := a.save(dbCtx, ts, provider.Message{Role: provider.RoleAssistant, Content: ""}, meta); err != nil {
+					return res, err
+				}
+				note := NoteNoSummary
+				if t.Session.Kind == "cron" {
+					note = NoteNoSummaryCron
+				}
+				res.Final = fmt.Sprintf(note, maxTurns)
+				res.HitLimit, res.NoSummary = true, true
+				return res, nil
+			}
+			// The tool calls and the reasoning of the summary answer are discarded. A tool
+			// call with no result, or a replayed reasoning item, breaks the next request.
+			if _, err := a.save(dbCtx, ts, provider.Message{Role: provider.RoleAssistant, Content: out.Text}, meta); err != nil {
+				return res, err
+			}
+			res.Final, res.HitLimit = out.Text, true
+			return res, nil
+		}
 		out, cerr := a.callModel(ctx, prov, req, sink)
 		addUsage(&res.Usage, out.Usage, round == 1)
 		meta := a.meta(prov, out)
@@ -350,12 +422,15 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		}
 		// The steer goes into the last result before the save, so no update is necessary.
 		// After a cancel, the text goes back into the queue, so the turn returns it as
-		// undelivered.
-		if g := t.Steer.Drain(); g != "" {
-			if ctx.Err() == nil {
-				contents[len(contents)-1] += SteerMarker + g
-			} else {
-				t.Steer.restash(g)
+		// undelivered. In the last round, the steer stays in the queue, so the summary call
+		// does not read it, and the turn returns it in PendingSteer.
+		if round < maxTurns {
+			if g := t.Steer.Drain(); g != "" {
+				if ctx.Err() == nil {
+					contents[len(contents)-1] += SteerMarker + g
+				} else {
+					t.Steer.restash(g)
+				}
 			}
 		}
 		for i, c := range out.ToolCalls {
@@ -370,10 +445,6 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		if stop {
 			res.Final = lastText
 			return res, failures.Err()
-		}
-		if round >= maxTurns {
-			res.Final = joinNote(lastText, NoteStopped)
-			return res, nil
 		}
 	}
 }
@@ -730,6 +801,17 @@ func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provi
 		err = fmt.Errorf("provider %s: the stream sent no data for %s", name, streamIdleTimeout)
 	}
 	return res, err
+}
+
+// callSummary makes the summary call, and one more call when the text is empty.
+func (a *Agent) callSummary(ctx context.Context, prov provider.Provider, req provider.Request, sink Sink) (out provider.Result, usage provider.Usage, err error) {
+	for attempt := 1; ; attempt++ {
+		out, err = a.callModel(ctx, prov, req, sink)
+		addUsage(&usage, out.Usage, attempt == 1)
+		if err != nil || strings.TrimSpace(out.Text) != "" || attempt == 2 {
+			return out, usage, err
+		}
+	}
 }
 
 // meta returns the stored data of one model response. The row names the provider that

@@ -133,6 +133,14 @@ func (a *Agent) RunChild(ctx context.Context, spec ChildSpec) (res ChildResult) 
 	switch {
 	case err == nil:
 		res.Status, res.Summary = ChildOK, tr.Final
+		// The marker tells the parent that the child stopped at its limit. The partial text
+		// replaces the fixed text for the user, which does not help the parent.
+		switch {
+		case tr.HitLimit && tr.NoSummary:
+			res.Summary = joinNote(partial, NoteStopped)
+		case tr.HitLimit:
+			res.Summary = joinNote(tr.Final, NoteStopped)
+		}
 		if strings.TrimSpace(tr.Final) == "" {
 			res.Status, res.Error = ChildError, "the child ended without a final answer"
 		}
