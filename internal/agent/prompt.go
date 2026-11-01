@@ -116,6 +116,7 @@ const (
 	noteCurl    = "To call an API, use curl through the terminal tool: curl -sS -w '\\n%{http_code}' ...; put JSON bodies in a file and use --data @file."
 	notePDF     = "For a PDF, download it with curl and convert it with pdftotext."
 	noteBrowser = "If web_search or web_fetch fails, use the browser tools."
+	noteTodo    = "Track multi-step work with todo_list."
 )
 
 // DefaultToolNotes returns the tool notes for the visible tools, in a fixed order.
@@ -129,6 +130,9 @@ func DefaultToolNotes(visible map[string]bool) []string {
 	}
 	if visible["browser_navigate"] {
 		out = append(out, noteBrowser)
+	}
+	if visible["todo_list"] {
+		out = append(out, noteTodo)
 	}
 	return out
 }

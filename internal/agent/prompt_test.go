@@ -15,6 +15,20 @@ func containsAny(notes []string, sub string) bool {
 	return false
 }
 
+func TestToolNoteTodoOnlyWhenVisible(t *testing.T) {
+	n := DefaultToolNotes(map[string]bool{"todo_list": true})
+	if len(n) != 1 || n[0] != "Track multi-step work with todo_list." {
+		t.Fatal(n)
+	}
+	n = DefaultToolNotes(map[string]bool{"terminal": true, "web_fetch": true, "browser_navigate": true, "todo_list": true})
+	if len(n) != 4 || n[3] != noteTodo {
+		t.Fatal("the todo note comes after the other notes:", n)
+	}
+	if containsAny(DefaultToolNotes(map[string]bool{"terminal": true}), "todo_list") {
+		t.Fatal("no todo_list → no todo note")
+	}
+}
+
 func TestSectionOrderAndEmptySectionsOmitted(t *testing.T) {
 	s := BuildSystemPrompt(PromptInput{Base: "BASE", Memory: "m1", SkillsIndex: []SkillLine{{"deploy", "Deploy steps. Use when deploying."}},
 		Now: time.Date(2026, 10, 27, 9, 14, 0, 0, time.FixedZone("+07", 7*3600)), WorkDir: "/w", Channel: "cli"})

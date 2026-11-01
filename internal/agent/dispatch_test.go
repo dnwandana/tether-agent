@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -55,6 +57,67 @@ func vis(names ...string) map[string]bool {
 		out[n] = true
 	}
 	return out
+}
+
+// planRecSink records the Plan calls of a turn.
+type planRecSink struct {
+	nopSink
+	mu    sync.Mutex
+	plans [][]tools.TodoItem
+}
+
+func (p *planRecSink) Plan(items []tools.TodoItem) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.plans = append(p.plans, items)
+}
+
+func (p *planRecSink) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.plans)
+}
+
+// todoFake is a todo_list tool that writes one item to the store of the session.
+type todoFake struct{ fail bool }
+
+func (todoFake) Name() string       { return "todo_list" }
+func (todoFake) Toolset() string    { return tools.SetFile }
+func (todoFake) ParallelSafe() bool { return false }
+func (todoFake) Schema() provider.ToolSchema {
+	return provider.ToolSchema{Name: "todo_list", Description: "todo", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+func (f todoFake) Run(_ context.Context, _ json.RawMessage, env *tools.Env) (string, error) {
+	if f.fail {
+		return "", errors.New("boom")
+	}
+	raw := []json.RawMessage{json.RawMessage(`{"id":"1","content":"Find the flaky test","status":"in_progress"}`)}
+	return `{"todos":[]}`, tools.TodoStoreFor(env.Values).Write(raw, false)
+}
+
+func TestPlanSinkAfterTodoListCall(t *testing.T) {
+	a := agentWith(t, todoFake{}, slowTool{name: "read_file"})
+	s := &planRecSink{}
+	a.runRound(ctx, []provider.ToolCall{tc("1", "read_file", `{}`), tc("2", "todo_list", `{}`)}, env(), vis("read_file", "todo_list"), s, "")
+	if s.count() != 1 || len(s.plans[0]) != 1 || s.plans[0][0].Content != "Find the flaky test" {
+		t.Fatalf("%+v", s.plans)
+	}
+}
+
+func TestPlanSinkNotInChildAndNotAfterError(t *testing.T) {
+	s := &planRecSink{}
+	child := env()
+	child.Kind = KindSubagent
+	agentWith(t, todoFake{}).runRound(ctx, []provider.ToolCall{tc("1", "todo_list", `{}`)}, child, vis("todo_list"), s, "")
+	if s.count() != 0 {
+		t.Fatal("a child must not call Plan")
+	}
+	agentWith(t, todoFake{fail: true}).runRound(ctx, []provider.ToolCall{tc("1", "todo_list", `{}`)}, env(), vis("todo_list"), s, "")
+	if s.count() != 0 {
+		t.Fatal("a failed call must not call Plan")
+	}
+	// A sink with no Plan method gets no call and no panic.
+	agentWith(t, todoFake{}).runRound(ctx, []provider.ToolCall{tc("1", "todo_list", `{}`)}, env(), vis("todo_list"), &recSink{}, "")
 }
 
 func TestParallelOnlyWhenAllSafe(t *testing.T) {

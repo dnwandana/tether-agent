@@ -44,6 +44,11 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 			results[i] = a.dispatch(ctx, c, env, visible)
 		}
 		ls.ToolEnd(c.Name, results[i].IsError)
+		// todo_list is not parallel-safe, so no other call of the round writes the list now.
+		if c.Name == "todo_list" && !results[i].IsError && env != nil && env.Kind != KindSubagent {
+			items, _, _ := tools.TodoStoreFor(env.Values).Items()
+			ls.Plan(items)
+		}
 	}
 	if len(calls) < 2 || !a.allParallelSafe(calls, visible) {
 		for i := range calls {
@@ -151,4 +156,13 @@ func (l *lockedSink) ToolEnd(name string, isError bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.s.ToolEnd(name, isError)
+}
+
+// Plan forwards the task list when the inner sink is a PlanSink. Else it does nothing.
+func (l *lockedSink) Plan(items []tools.TodoItem) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if p, ok := l.s.(PlanSink); ok {
+		p.Plan(items)
+	}
 }

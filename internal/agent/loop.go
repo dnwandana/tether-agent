@@ -61,6 +61,13 @@ type Sink interface {
 	Notice(text string)
 }
 
+// PlanSink is an optional Sink that shows the task list of the session. The main loop calls
+// Plan after each todo_list call. A child run never calls it, so the plan of a child does not
+// go into the bubble of its parent.
+type PlanSink interface {
+	Plan(items []tools.TodoItem)
+}
+
 // Agent runs the turns of all sessions. One Agent is shared by all channels.
 type Agent struct {
 	// Prov is the default provider.
@@ -856,6 +863,12 @@ func (a *Agent) meta(prov provider.Provider, out provider.Result) sessions.Messa
 	return m
 }
 
+// Meta returns the stored data of one model response, with the cost. The goal judge uses
+// it for the rows of its hidden session.
+func (a *Agent) Meta(prov provider.Provider, out provider.Result) sessions.MessageMeta {
+	return a.meta(prov, out)
+}
+
 // toolText returns the stored text of one tool result: redacted, then truncated.
 func (a *Agent) toolText(s string) string {
 	s = a.Redactor.Redact(s)
@@ -898,6 +911,12 @@ func (a *Agent) providerFor(s *sessions.Session) provider.Provider {
 		return p
 	}
 	return pinned{Provider: p, model: model}
+}
+
+// ProviderFor returns the provider of the session s, with its /model pin. The goal judge
+// uses it when goals.judge_provider is empty.
+func (a *Agent) ProviderFor(s *sessions.Session) provider.Provider {
+	return a.providerFor(s)
 }
 
 // chainFor returns the chain of the session s from Chains. A pin "name:model" puts name

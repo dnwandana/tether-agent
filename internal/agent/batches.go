@@ -201,6 +201,17 @@ func (b *Batches) CancelKey(sessionKey string) {
 	}
 }
 
+// Running returns the number of running background batches of the session key. The goal
+// judge reads it, and a timed wait on batches lifts when it goes down. A nil b has none.
+func (b *Batches) Running(key string) int {
+	if b == nil {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.running[key])
+}
+
 // RecoverLost runs at startup. A restart loses the running background children, so for each
 // background batch that is still "running", it enqueues "[Background delegation <id> was lost
 // in a restart]" on the key of the batch and marks the row "lost". It skips the batches that
