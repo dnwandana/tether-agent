@@ -8,10 +8,14 @@ import (
 	"time"
 )
 
+// KindGoalJudge is the kind of the hidden session that records the judge calls and the draft
+// calls of one goal.
+const KindGoalJudge = "goal_judge"
+
 // AutomaticKinds are the session kinds that the program makes without a user: one session
-// for each cron run, each delegate_task child, and each background review. PruneAutomatic
-// deletes only these kinds. It never deletes a chat session.
-var AutomaticKinds = []string{"cron", "subagent", "review"}
+// for each cron run, each delegate_task child, each background review, and each goal judge.
+// PruneAutomatic deletes only these kinds. It never deletes a chat session.
+var AutomaticKinds = []string{"cron", "subagent", "review", KindGoalJudge}
 
 // pruneBatch is the maximum number of sessions that one transaction of PruneAutomatic
 // deletes. Small transactions keep the write lock of state.db short.
@@ -74,6 +78,7 @@ func (s *Store) pruneOnce(ctx context.Context, cutoff time.Time) ([]string, erro
 // deleteSessions removes the sessions with ids and their related rows inside tx:
 //   - the messages (the FTS triggers remove their index rows),
 //   - the compaction rows and the key mappings,
+//   - the goal rows,
 //   - the delegation batches that the sessions started and that do not run now.
 //
 // It keeps the child sessions (forks, children, reviews) and clears their parent_id, as
@@ -89,6 +94,7 @@ func deleteSessions(ctx context.Context, tx *sql.Tx, ids []string) error {
 		`DELETE FROM messages WHERE session_id IN (` + in + `)`,
 		`DELETE FROM compactions WHERE session_id IN (` + in + `)`,
 		`DELETE FROM active_session WHERE session_id IN (` + in + `)`,
+		`DELETE FROM goals WHERE session_id IN (` + in + `)`,
 	} {
 		if _, err := tx.ExecContext(ctx, q, idArgs...); err != nil {
 			return err

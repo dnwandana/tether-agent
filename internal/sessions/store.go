@@ -440,6 +440,51 @@ func (s *Store) Messages(ctx context.Context, sessionID string) ([]StoredMessage
 	return out, nil
 }
 
+// ToolResultRow is the content of one stored tool result. Paired is true when an
+// earlier assistant row of the session has a tool call with the same id and name.
+type ToolResultRow struct {
+	Content string
+	Paired  bool
+}
+
+// LatestToolResults returns up to limit tool results of toolName in the session,
+// newest first. Paired lets a caller skip a forged row that no tool call made.
+// A limit of 0 or less returns no row.
+func (s *Store) LatestToolResults(ctx context.Context, sessionID, toolName string, limit int) ([]ToolResultRow, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT m.content, EXISTS (
+			SELECT 1 FROM messages a, json_each(a.tool_calls) j
+			WHERE a.session_id = m.session_id AND a.role = 'assistant' AND a.id < m.id
+				AND m.tool_call_id != ''
+				AND json_extract(j.value, '$.ID') = m.tool_call_id
+				AND json_extract(j.value, '$.Name') = m.tool_name)
+		FROM messages m
+		WHERE m.session_id = ? AND m.role = 'tool' AND m.tool_name = ?
+		ORDER BY m.id DESC LIMIT ?`, sessionID, toolName, limit)
+	if err != nil {
+		return nil, fmt.Errorf("sessions: tool results of %s: %w", sessionID, err)
+	}
+	defer rows.Close()
+	var out []ToolResultRow
+	for rows.Next() {
+		var (
+			r      ToolResultRow
+			paired int
+		)
+		if err := rows.Scan(&r.Content, &paired); err != nil {
+			return nil, fmt.Errorf("sessions: tool results of %s: %w", sessionID, err)
+		}
+		r.Paired = paired != 0
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("sessions: tool results of %s: %w", sessionID, err)
+	}
+	return out, nil
+}
+
 // scanner is a *sql.Row or a *sql.Rows.
 type scanner interface{ Scan(dest ...any) error }
 

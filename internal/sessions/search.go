@@ -22,7 +22,9 @@ type Hit struct {
 
 // Search runs the FTS5 query over the content of all messages, observed and
 // archived ones included. It returns at most limit hits, newest first. The
-// snippet marks the matches with "[" and "]" and holds about 12 tokens.
+// snippet marks the matches with "[" and "]" and holds about 12 tokens. It
+// skips the goal_judge sessions, because each judge prompt repeats a part of a
+// chat reply.
 func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("sessions: search: the query is empty")
@@ -34,7 +36,7 @@ func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, err
 		snippet(messages_fts, 0, '[', ']', '…', 12)
 		FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.id = m.session_id
-		WHERE messages_fts MATCH ? ORDER BY m.id DESC LIMIT ?`, query, limit)
+		WHERE messages_fts MATCH ? AND s.kind != ? ORDER BY m.id DESC LIMIT ?`, query, KindGoalJudge, limit)
 	if err != nil {
 		return nil, searchErr(err)
 	}

@@ -70,3 +70,23 @@ func TestMarkerTouchAndDelete(t *testing.T) {
 	must(t, s.TouchMarker(ctx, "missing", later))
 	must(t, s.DeleteMarker(ctx, "missing"))
 }
+
+func TestMarkerInStep(t *testing.T) {
+	s := New(openTestDB(t))
+	ctx, now := context.Background(), time.UnixMilli(1_000_000)
+	must(t, s.UpsertMarker(ctx, "k", "s1", nil, now))
+	if m := markers(t, s); len(m) != 1 || m[0].InStep {
+		t.Fatalf("a new marker must not be in the step: %+v", m)
+	}
+	must(t, s.SetMarkerInStep(ctx, "k", true))
+	// A marker write of a queued message keeps the flag.
+	must(t, s.UpsertMarker(ctx, "k", "s1", []QueuedText{{Text: "hi"}}, now.Add(time.Second)))
+	if m := markers(t, s); len(m) != 1 || !m[0].InStep {
+		t.Fatalf("%+v", m)
+	}
+	must(t, s.SetMarkerInStep(ctx, "k", false))
+	if m := markers(t, s); m[0].InStep {
+		t.Fatalf("%+v", m)
+	}
+	must(t, s.SetMarkerInStep(ctx, "missing", true))
+}

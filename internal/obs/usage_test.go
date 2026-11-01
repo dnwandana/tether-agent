@@ -292,3 +292,26 @@ func TestUsageTotalCost(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionScopeCountsGoalJudgeRows(t *testing.T) {
+	ctx := context.Background()
+	d := openUsageDB(t)
+	for _, s := range []struct{ id, kind, parent string }{
+		{"g1", "chat", ""}, {"j1", "goal_judge", "g1"}, {"j2", "goal_judge", "g2"}, {"r1", "review", "g1"},
+	} {
+		if _, err := d.Exec(`INSERT INTO sessions (id, kind, parent_id) VALUES (?, ?, ?)`, s.id, s.kind, s.parent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, s := range []string{"g1", "j1", "j1", "j2", "r1"} {
+		insertUsage(t, d, usageRow{session: s, model: "m", prov: "p", out: 5})
+	}
+	rows, _, err := UsageReport(ctx, d, time.Time{}, "g1")
+	if err != nil || len(rows) != 1 || rows[0].Calls != 3 || rows[0].OutTok != 15 {
+		t.Fatalf("the session range counts g1 and its goal judge j1 only: %+v %v", rows, err)
+	}
+	rows, _, err = UsageReport(ctx, d, time.Time{}, "")
+	if err != nil || len(rows) != 1 || rows[0].Calls != 5 {
+		t.Fatalf("the time range counts every row: %+v %v", rows, err)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
 // UsageRow is the usage of one model through one provider in a time range.
@@ -27,8 +28,9 @@ type UsageRow struct {
 }
 
 // UsageReport returns the usage of each model since the time, from the stored assistant
-// messages. A sessionID that is not empty limits the report to that session. The second
-// value is the number of compactions in the same scope.
+// messages. A sessionID that is not empty limits the report to that session. The session
+// range also counts the goal_judge sessions whose parent is the session. The second value is
+// the number of compactions in the same scope.
 //
 // The report reads the stored cost_usd and never prices old rows again.
 func UsageReport(ctx context.Context, d *db.DB, since time.Time, sessionID string) ([]UsageRow, int, error) {
@@ -46,8 +48,8 @@ func UsageReport(ctx context.Context, d *db.DB, since time.Time, sessionID strin
 		FROM messages WHERE role = 'assistant' AND model != '' AND timestamp >= ?`
 	args := []any{sinceMS}
 	if sessionID != "" {
-		q += ` AND session_id = ?`
-		args = append(args, sessionID)
+		q += ` AND (session_id = ? OR session_id IN (SELECT id FROM sessions WHERE kind = ? AND parent_id = ?))`
+		args = append(args, sessionID, sessions.KindGoalJudge, sessionID)
 	}
 	q += ` GROUP BY model, provider ORDER BY COUNT(*) DESC, model, provider`
 	rows, err := d.QueryContext(ctx, q, args...)

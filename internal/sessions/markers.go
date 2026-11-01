@@ -21,6 +21,8 @@ type TurnMarker struct {
 	UpdatedAt             time.Time
 	Resumes               int
 	Queued                []QueuedText
+	// InStep is true while the gateway runs the goal step after the reply of the turn.
+	InStep bool
 }
 
 // UpsertMarker writes the marker of a busy key. A new row starts with zero resumes. An
@@ -62,6 +64,19 @@ func (s *Store) SetMarkerResumes(ctx context.Context, key string, resumes int) e
 	return nil
 }
 
+// SetMarkerInStep sets the in_step flag of a marker. A missing marker is not an error.
+func (s *Store) SetMarkerInStep(ctx context.Context, key string, inStep bool) error {
+	v := 0
+	if inStep {
+		v = 1
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE turn_markers SET in_step = ? WHERE session_key = ?`,
+		v, key); err != nil {
+		return fmt.Errorf("set in_step of marker %s: %w", key, err)
+	}
+	return nil
+}
+
 // DeleteMarker removes a marker. A missing marker is not an error.
 func (s *Store) DeleteMarker(ctx context.Context, key string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM turn_markers WHERE session_key = ?`, key); err != nil {
@@ -73,7 +88,7 @@ func (s *Store) DeleteMarker(ctx context.Context, key string) error {
 // Markers returns all markers ordered by session key. It closes the rows before it returns,
 // because the database has one connection.
 func (s *Store) Markers(ctx context.Context) ([]TurnMarker, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT session_key, session_id, updated_at, resumes, queued
+	rows, err := s.db.QueryContext(ctx, `SELECT session_key, session_id, updated_at, resumes, queued, in_step
 		FROM turn_markers ORDER BY session_key`)
 	if err != nil {
 		return nil, fmt.Errorf("read markers: %w", err)
@@ -82,12 +97,13 @@ func (s *Store) Markers(ctx context.Context) ([]TurnMarker, error) {
 	var out []TurnMarker
 	for rows.Next() {
 		var m TurnMarker
-		var ms int64
+		var ms, inStep int64
 		var q string
-		if err := rows.Scan(&m.SessionKey, &m.SessionID, &ms, &m.Resumes, &q); err != nil {
+		if err := rows.Scan(&m.SessionKey, &m.SessionID, &ms, &m.Resumes, &q, &inStep); err != nil {
 			return nil, fmt.Errorf("read markers: %w", err)
 		}
 		m.UpdatedAt = time.UnixMilli(ms)
+		m.InStep = inStep != 0
 		if err := json.Unmarshal([]byte(q), &m.Queued); err != nil {
 			return nil, fmt.Errorf("decode the queue of marker %s: %w", m.SessionKey, err)
 		}

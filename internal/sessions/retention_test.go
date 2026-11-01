@@ -56,7 +56,8 @@ func related(t *testing.T, d *db.DB, id string) int {
 	return rowCount(t, d, `SELECT count(*) FROM messages WHERE session_id = ?`, id) +
 		rowCount(t, d, `SELECT count(*) FROM compactions WHERE session_id = ?`, id) +
 		rowCount(t, d, `SELECT count(*) FROM active_session WHERE session_id = ?`, id) +
-		rowCount(t, d, `SELECT count(*) FROM delegation_batches WHERE parent_session_id = ?`, id)
+		rowCount(t, d, `SELECT count(*) FROM delegation_batches WHERE parent_session_id = ?`, id) +
+		rowCount(t, d, `SELECT count(*) FROM goals WHERE session_id = ?`, id)
 }
 
 func addBatch(t *testing.T, d *db.DB, id, parentID, status string) {
@@ -249,5 +250,52 @@ func TestDeleteOrphansChildSessions(t *testing.T) {
 	}
 	if n := rowCount(t, d, `SELECT count(*) FROM delegation_batches WHERE id = 'b-run'`); n != 1 {
 		t.Fatal("the running batch must stay")
+	}
+}
+
+func TestGoalJudgeIsAutomatic(t *testing.T) {
+	if KindGoalJudge != "goal_judge" || !slices.Contains(AutomaticKinds, KindGoalJudge) {
+		t.Fatal(KindGoalJudge, AutomaticKinds)
+	}
+}
+
+func TestPruneDeletesOldGoalJudgeSessions(t *testing.T) {
+	d := openTestDB(t)
+	s := New(d)
+	day := 24 * time.Hour
+	old := agedSession(t, d, s, KindGoalJudge, "telegram", 91*day)
+	fresh := agedSession(t, d, s, KindGoalJudge, "telegram", 10*day)
+	got, err := s.PruneAutomatic(context.Background(), retNow.Add(-90*day))
+	if err != nil || len(got) != 1 || got[0] != old.ID {
+		t.Fatalf("pruned %v, want [%s]: %v", got, old.ID, err)
+	}
+	if n := related(t, d, old.ID); n != 0 {
+		t.Fatalf("the judge session left %d related rows", n)
+	}
+	if _, err := s.Get(context.Background(), fresh.ID); err != nil {
+		t.Fatalf("a fresh judge session must stay: %v", err)
+	}
+}
+
+func TestDeleteRemovesGoalRow(t *testing.T) {
+	d := openTestDB(t)
+	s := New(d)
+	ctx := context.Background()
+	sess, _ := s.Create(ctx, Session{Key: "telegram:1", Source: "telegram"})
+	other, _ := s.Create(ctx, Session{Key: "telegram:2", Source: "telegram"})
+	for _, id := range []string{sess.ID, other.ID} {
+		if _, err := d.ExecContext(ctx, `INSERT INTO goals (session_id, state, revision, updated_at)
+			VALUES (?, '{"goal":"g","status":"active"}', 1, 0)`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Delete(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := rowCount(t, d, `SELECT count(*) FROM goals WHERE session_id = ?`, sess.ID); n != 0 {
+		t.Fatalf("Delete left %d goal rows", n)
+	}
+	if n := rowCount(t, d, `SELECT count(*) FROM goals WHERE session_id = ?`, other.ID); n != 1 {
+		t.Fatal("Delete must keep the goal of another session")
 	}
 }

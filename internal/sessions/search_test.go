@@ -140,3 +140,19 @@ func TestBadFTSQueryIsHelpfulError(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchSkipsGoalJudgeSessions(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	chat, _ := s.Create(ctx, Session{Key: "telegram:1", Source: "telegram", Title: "cron fix"})
+	judge, _ := s.Create(ctx, Session{Source: "telegram", Kind: KindGoalJudge, ParentID: chat.ID})
+	for _, id := range []string{chat.ID, judge.ID} {
+		if _, err := s.Append(ctx, id, provider.Message{Role: provider.RoleUser, Content: "the zebracron test is flaky"}, MessageMeta{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hits, err := s.Search(ctx, "zebracron", 10)
+	if err != nil || len(hits) != 1 || hits[0].SessionID != chat.ID {
+		t.Fatalf("%+v %v", hits, err)
+	}
+}
