@@ -140,3 +140,51 @@ func TestValidateAcceptsZeroRestartKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestGoalsDefaults(t *testing.T) {
+	g := Default().Goals
+	if g != (GoalsConfig{MaxTurns: 20, JudgeProvider: "", JudgeTimeoutS: 30}) {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestGoalsFromYAML(t *testing.T) {
+	p := writeTemp(t, minimal+"  judge:\n    format: openai\n    base_url: u\n    api_key: k\n    model: m2\n"+
+		"goals:\n  max_turns: 5\n  judge_provider: judge\n")
+	c, err := Load(p, mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Goals.MaxTurns, 5)
+	eq(t, c.Goals.JudgeProvider, "judge")
+	eq(t, c.Goals.JudgeTimeoutS, 30) // default kept
+}
+
+func TestValidateGoals(t *testing.T) {
+	cases := []struct {
+		mut  func(*Config)
+		want string
+	}{
+		{func(c *Config) { c.Goals.MaxTurns = 0 }, "config: goals.max_turns is 0. Use 1 or more turns"},
+		{func(c *Config) { c.Goals.JudgeTimeoutS = 0 }, "config: goals.judge_timeout_s is 0. Use 1 or more seconds"},
+		{func(c *Config) { c.Goals.JudgeProvider = "nope" }, `config: goals.judge_provider names "nope", which is not in providers`},
+	}
+	for _, tc := range cases {
+		c := Default()
+		c.Providers["primary"] = Provider{Format: "openai"}
+		tc.mut(&c)
+		err := c.Validate()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: got %v", tc.want, err)
+		}
+	}
+	for _, name := range []string{"", "primary", "judge"} {
+		c := Default()
+		c.Providers["primary"] = Provider{Format: "openai"}
+		c.Providers["judge"] = Provider{Format: "anthropic"}
+		c.Goals.JudgeProvider = name
+		if err := c.Validate(); err != nil {
+			t.Fatalf("judge_provider %q must be valid: %v", name, err)
+		}
+	}
+}

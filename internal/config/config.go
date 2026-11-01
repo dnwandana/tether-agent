@@ -25,6 +25,7 @@ type Config struct {
 	CodeExecution CodeExecConfig      `yaml:"code_execution"`
 	Delegation    DelegationConfig    `yaml:"delegation"`
 	Approvals     ApprovalsConfig     `yaml:"approvals"`
+	Goals         GoalsConfig         `yaml:"goals"`
 	Toolsets      map[string][]string `yaml:"toolsets"`
 	Cron          CronConfig          `yaml:"cron"`
 	Telegram      TelegramConfig      `yaml:"telegram"`
@@ -159,6 +160,17 @@ type ApprovalsConfig struct {
 	Mode     string `yaml:"mode"`
 	TimeoutS int    `yaml:"timeout_s"`
 	CronMode string `yaml:"cron_mode"`
+}
+
+// GoalsConfig sets the /goal loop.
+type GoalsConfig struct {
+	// MaxTurns is the turn budget of a new goal.
+	MaxTurns int `yaml:"max_turns"`
+	// JudgeProvider is the provider entry of the goal judge and of /goal draft. "" uses the
+	// chain of the session.
+	JudgeProvider string `yaml:"judge_provider"`
+	// JudgeTimeoutS is the timeout of one judge call or draft call, in seconds.
+	JudgeTimeoutS int `yaml:"judge_timeout_s"`
 }
 
 // CronConfig sets the cron scheduler.
@@ -348,6 +360,7 @@ func Default() Config {
 			TimeoutS: 600,
 			CronMode: "deny",
 		},
+		Goals: GoalsConfig{MaxTurns: 20, JudgeTimeoutS: 30},
 		Toolsets: map[string][]string{
 			"cli":      {"all"},
 			"telegram": {"all"},

@@ -274,6 +274,17 @@ func (c *Config) Validate() error {
 	if c.Agent.ResumeFreshnessS < 0 {
 		errs = append(errs, fmt.Errorf("config: agent.resume_freshness_s is %d, which is negative. Use 0 to turn off the resume, or a number of seconds", c.Agent.ResumeFreshnessS))
 	}
+	if c.Goals.MaxTurns < 1 {
+		errs = append(errs, fmt.Errorf("config: goals.max_turns is %d. Use 1 or more turns", c.Goals.MaxTurns))
+	}
+	if c.Goals.JudgeTimeoutS < 1 {
+		errs = append(errs, fmt.Errorf("config: goals.judge_timeout_s is %d. Use 1 or more seconds", c.Goals.JudgeTimeoutS))
+	}
+	if name := c.Goals.JudgeProvider; name != "" {
+		if _, ok := c.Providers[name]; !ok {
+			errs = append(errs, fmt.Errorf("config: goals.judge_provider names %q, which is not in providers", name))
+		}
+	}
 	errs = append(errs,
 		oneOf("approvals.mode", c.Approvals.Mode, "manual", "smart", "off"),
 		oneOf("approvals.cron_mode", c.Approvals.CronMode, "deny", "approve"),

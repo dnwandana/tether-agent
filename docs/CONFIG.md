@@ -117,7 +117,7 @@ gives the order, the failures that move a call to the next entry, and the wait t
 | `agent.delegation_provider` | `""` | The provider for child runs of `delegate_task`, as `name` or `name:model`. The value is the pin of the child session, so that entry is first in the chain of the child. `""` uses the pin of the parent session. |
 | `agent.restart_drain_timeout_s` | `180` | The maximum time in seconds that a stop or a restart waits for the running turns. The turns that still run after it are cancelled, and they continue after the restart. `tether setup` writes `TimeoutStopSec` from this value. |
 | `agent.fallback` | `[]` | The ordered list of entry names after `primary` in the chain (see "The fallback chain"). Each name must be an entry in `providers`. The list must not contain `primary` or a name two times. The default is no key. With no key, the list is the entry `fallback` when it exists, else there is no fallback. An explicit `[]` turns off the fallback. |
-| `agent.resume_freshness_s` | `3600` | A turn that a restart or a crash cut continues at the next start when the cut is not older than this time, in seconds. `0` turns off the resume. |
+| `agent.resume_freshness_s` | `3600` | A turn that a restart or a crash cut continues at the next start when the cut is not older than this time, in seconds. `0` turns off the resume. An active goal also continues only within this time. Else it pauses. `0` pauses each goal. |
 
 ## context
 
@@ -142,11 +142,12 @@ kinds of session are automatic:
 - `cron`: one session for each cron run.
 - `subagent`: one session for each `delegate_task` child.
 - `review`: one session for each background review.
+- `goal_judge`: one session for the judge calls and the draft calls of each goal.
 
 The deletion also removes the messages, the search index rows, the compaction rows, the key
-mappings, and the finished delegation batches of the session. Chat sessions from the CLI and
-Telegram always stay. A session that a deleted session started, for example a fork, stays with
-no parent.
+mappings, the goal rows, and the finished delegation batches of the session. Chat sessions from
+the CLI and Telegram always stay. A session that a deleted session started, for example a fork,
+stays with no parent.
 
 ## memory
 
@@ -209,8 +210,16 @@ no parent.
 | Key | Default | Effect |
 |---|---|---|
 | `approvals.mode` | `manual` | The approval mode for dangerous commands: `manual`, `smart`, or `off`. |
-| `approvals.timeout_s` | `600` | The time that the gate waits for an answer, in seconds. No answer is a denial. |
+| `approvals.timeout_s` | `600` | The time that the gate waits for an answer, in seconds. No answer is a denial. It also ends the confirm of a dangerous goal gate. |
 | `approvals.cron_mode` | `deny` | The result for a dangerous command in a cron run: `deny` or `approve`. |
+
+## goals
+
+| Key | Default | Effect |
+|---|---|---|
+| `goals.max_turns` | `20` | The turn budget of a new goal. When the goal uses all its turns, it pauses. |
+| `goals.judge_provider` | `""` | The provider entry of the goal judge and of `/goal draft`. The chain is the entry, then `primary`, then `agent.fallback`. `""` uses the chain of the session. The name must be an entry in `providers`. |
+| `goals.judge_timeout_s` | `30` | The timeout of one judge call or draft call, in seconds. |
 
 ## toolsets
 
@@ -269,8 +278,8 @@ The gateway applies `cron.missed_runs` when it starts. The rules are:
 | `telegram.streaming.buffer_threshold` | `24` | An edit also occurs when this number of new characters is in the buffer. |
 | `telegram.streaming.cursor` | `" ▉"` | The text at the end of each edit while the answer streams. |
 | `telegram.streaming.fresh_final_after_s` | `60` | When the preview message is older than this number of seconds, the final answer goes out as a new message. |
-| `telegram.tool_progress` | `all` | The tool status lines: `off`, `new` (a line when the tool changes), `all` (one line per tool, with a count), or `verbose` (each call, with its arguments). |
-| `telegram.cleanup_progress` | `false` | When `true`, the bot deletes the status message after a successful run. |
+| `telegram.tool_progress` | `all` | The tool status lines: `off`, `new` (a line when the tool changes), `all` (one line per tool, with a count), or `verbose` (each call, with its arguments). With `off`, a goal turn still sends its goal line as one silent message. The plan block does not show. |
+| `telegram.cleanup_progress` | `false` | When `true`, the bot deletes the status message after a successful run. The goal line and the plan block go with the status message. |
 
 Four environment variables control the local files that an answer can send. Set them in `.env`
 or in the process environment. `docs/SECURITY.md` ("Files that the bot sends") gives the full rule.
