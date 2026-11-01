@@ -32,6 +32,14 @@ func TestArgPreview(t *testing.T) {
 		{"echo", `{"a":null,"b":"x"}`, "x"},
 		{"echo", `not json`, ""},
 		{"terminal", `{"command":"ls -la","timeout":`, "ls -la"},
+		{"todo_list", `{}`, "reading task list"},
+		{"todo_list", `{"todos":null,"merge":true}`, "reading task list"},
+		{"todo_list", `{"todos":[{"id":"1"},{"id":"2"},{"id":"3"}]}`, "planning 3 task(s)"},
+		{"todo_list", `{"todos":[{"id":"1"}],"merge":true}`, "updating 1 task(s)"},
+		{"todo_list", `{"todos":[],"merge":false}`, "planning 0 task(s)"},
+		{"todo_list", `{"todos":"[{\"id\":\"1\"},{\"id\":\"2\"}]"}`, "planning 2 task(s)"},
+		{"todo_list", `{"todos":42}`, "planning 0 task(s)"},
+		{"todo_list", `{"todos":[{"id":"1"}],"merge":`, "planning 1 task(s)"},
 	}
 	for _, c := range cases {
 		if got := ArgPreview(c.tool, c.args); got != c.want {

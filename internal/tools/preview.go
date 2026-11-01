@@ -18,6 +18,7 @@ const previewMax = 40
 //     file the tool reads.
 //
 // delegate_task maps to goal, and ArgPreview adds a rule for its tasks list.
+// todo_list has its own rule in ArgPreview, like delegate_task.
 var PreviewKeys = map[string]string{
 	"terminal":         "command",
 	"web_search":       "query",
@@ -65,6 +66,10 @@ func ArgPreview(tool, args string) string {
 		if p := delegatePreview(list); p != "" {
 			return p
 		}
+	}
+	if tool == "todo_list" {
+		// The rule never goes on to the generic keys, so no item of the list shows.
+		return todoPreview(list)
 	}
 	if key, ok := PreviewKeys[tool]; ok {
 		if p := valuePreview(argValue(list, key)); p != "" {
@@ -147,6 +152,28 @@ func delegatePreview(list []previewArg) string {
 		return fmt.Sprintf("%d tasks", len(tasks))
 	}
 	return ""
+}
+
+// todoPreview returns the preview of a todo_list call (Hermes). A call with no todos list
+// reads the list. Else the preview counts the items. A JSON string that holds an array
+// counts that array, and any other value counts 0.
+func todoPreview(list []previewArg) string {
+	todos := argValue(list, "todos")
+	if todos == nil || string(todos) == "null" {
+		return "reading task list"
+	}
+	var items []json.RawMessage
+	if json.Unmarshal(todos, &items) != nil {
+		var s string
+		if json.Unmarshal(todos, &s) == nil {
+			_ = json.Unmarshal([]byte(s), &items)
+		}
+	}
+	verb := "planning"
+	if string(argValue(list, "merge")) == "true" {
+		verb = "updating"
+	}
+	return fmt.Sprintf("%s %d task(s)", verb, len(items))
 }
 
 // valuePreview returns the preview of one argument value. A string gives its text. A list of

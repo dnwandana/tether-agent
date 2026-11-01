@@ -22,6 +22,7 @@ const (
 	SetDelegation    = "delegation"
 	SetCodeExecution = "code_execution"
 	SetMedia         = "media"
+	SetTodo          = "todo"
 	SetMCP           = "mcp"
 )
 
@@ -35,7 +36,8 @@ const mcpPrefix = SetMCP + "_"
 func AllToolsets() []string {
 	return []string{
 		SetTerminal, SetFile, SetWeb, SetBrowser, SetVision, SetAsk, SetMemory,
-		SetSkills, SetCron, SetDelegation, SetCodeExecution, SetMedia, SetMCP,
+		SetSkills, SetCron, SetDelegation, SetCodeExecution, SetMedia, SetTodo,
+		SetMCP,
 	}
 }
 
