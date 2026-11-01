@@ -44,6 +44,8 @@ type TerminalTool struct {
 	// InGateway is true in the gateway process. The child then gets GatewayEnv,
 	// except in a run that cron started.
 	InGateway bool
+	// Procs records the background processes of each session. Nil records nothing.
+	Procs *ProcRegistry
 }
 
 // GatewayEnv is the environment line that a child of the gateway gets. A script
@@ -200,7 +202,7 @@ func (t *TerminalTool) Exec(ctx context.Context, env *Env, command, workdir stri
 
 // startBackground starts command in a new session with its output in
 // SpillDir/bg-<pid>.log, and returns the pid and the log path as JSON. A
-// goroutine reaps the process.
+// goroutine reaps the process and records its exit in Procs.
 func (t *TerminalTool) startBackground(env *Env, command, workdir string) (string, error) {
 	dir, err := resolveWorkdir(env, workdir)
 	if err != nil {
@@ -242,7 +244,24 @@ func (t *TerminalTool) startBackground(env *Env, command, workdir string) (strin
 	if err := os.Rename(tmpPath, logPath); err != nil {
 		logPath = tmpPath
 	}
-	go func() { _ = cmd.Wait() }()
+	if t.Procs != nil {
+		sessionID := ""
+		if env != nil {
+			sessionID = env.SessionID
+		}
+		t.Procs.Add(sessionID, pid, command, logPath, time.Now())
+	}
+	go func() {
+		_ = cmd.Wait()
+		if t.Procs == nil {
+			return
+		}
+		code := -1
+		if cmd.ProcessState != nil {
+			code = cmd.ProcessState.ExitCode()
+		}
+		t.Procs.Exit(pid, code, time.Now())
+	}()
 	b, _ := json.Marshal(struct {
 		PID     int    `json:"pid"`
 		LogPath string `json:"log_path"`
