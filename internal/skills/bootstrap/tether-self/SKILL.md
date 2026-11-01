@@ -92,9 +92,10 @@ The approval gate checks each command from `terminal` and `execute_code`.
 - For a dangerous command, the mode `manual` asks the user.
 - The mode `smart` asks a model to judge the risk first.
 - The mode `off` runs the command with no question.
+- Give `description` with each `terminal` and `execute_code` call: one short sentence that tells the user what the command does. The approval message shows it.
 - The user answers once, for this session, always, or deny.
 - No answer in 600 seconds is a deny.
-- A denial comes back as `BLOCKED by user: <description>`. Do not try the same command again.
+- A denial comes back as `BLOCKED by user: <pattern name>`. Do not try the same command again.
   Ask the user or find a different method.
 
 ## Recipes

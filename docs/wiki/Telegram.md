@@ -269,16 +269,18 @@ The final answer has these rules:
 
 ### Approval buttons
 
-The agent asks you before it runs a dangerous command. The message shows the command and these
-buttons:
+The agent asks you before it runs a dangerous command. The message shows a short summary when the
+agent gives one, the reason for the flag, the command, and these buttons:
 
 - ✅ Allow once
 - ✅ Allow in this session
 - ✅ Always allow
 - ❌ Deny
 
-No answer in 10 minutes counts as a denial. `approvals.timeout_s` sets this time. You can also
-answer with a command:
+No answer in 10 minutes counts as a denial. `approvals.timeout_s` sets this time. After the answer
+or the timeout, the message shows the result, the summary, and the command in a closed quote.
+
+You can also answer with a command:
 
 - `/approve`, `/approve session`, or `/approve always`
 - `/deny`
@@ -301,8 +303,19 @@ does not start a second turn:
 
 The steer reply and the queue reply have a **⚡ Do this now** button. A tap stops the task and
 runs your waiting message at once, the same as `/now`. A button from an older turn stops
-nothing. The bot sends a maximum of one busy reply for each session every 30 seconds in one
-turn.
+nothing.
+
+The bot edits the steer reply when the steer is over: "✅ The agent read your note.",
+"↪️ The task ended first. Your note runs as a new message.", or "⏹ Not sent. The task stopped."
+It edits the queue reply to "▶️ The agent works on your message now." when your message starts,
+or to "⏹ Not sent. The task stopped." When the gateway restarts, the replies change to
+"↪️ Your note runs after the restart." and "⏳ Your message runs after the restart." The restart
+keeps only the text of a message, so the reply of a photo or a file changes to "⏳ After the
+restart, the agent gets your message without its photo or file." The button goes away with each
+edit.
+
+The bot sends a maximum of one steer reply and one queue reply for each session every 30 seconds
+in one turn. After the bot edits a reply, the next message gets a new reply at once.
 
 For `/stop`, `/stop keep`, `/now`, and `/steer`, see
 [Commands](Commands#while-the-agent-is-busy).
@@ -348,7 +361,9 @@ For the forms of the command, see [Commands](Commands#model-and-effort).
 ### Buttons and other users
 
 Only the user who sent a command can tap its buttons. Another user sees "⛔ This button is for
-another user." The buttons continue to work after a restart.
+another user." The buttons continue to work after a restart. The **⚡ Do this now** buttons of
+the busy replies are the exception. The bot removes them when the gateway stops, and the replies
+say that the message runs after the restart.
 
 A tap on a command button runs the action of the button as a typed command. Thus the busy rule
 applies to a button too.

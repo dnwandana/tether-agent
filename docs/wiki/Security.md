@@ -83,29 +83,41 @@ is a denial.
 | `once` | Permits this command only. |
 | `session` | Permits the same rule for the rest of the session. |
 | `always` | Permits the same rule from now on. The program saves it in `state.db`. |
-| `deny` | Refuses the command. The model gets `BLOCKED by user: <description>` and an instruction to stop and wait for you. |
+| `deny` | Refuses the command. The model gets `BLOCKED by user: <pattern name>` and an instruction to stop and wait for you. |
 
 ### What you see in the CLI
 
 ```
-⚠ Dangerous command: <description>
-<the command>
+⚠ Approval needed
+  <summary>
+  Flagged: <pattern name>
+  <the command>
 [o]nce / [s]ession / [a]lways / [d]eny:
 ```
 
+The summary is the `description` that the agent gives with the command. With no `description`,
+the CLI shows the pattern name and one line of the command.
+
 When a child agent asks, the question also shows `(from subagent N)`. Ctrl-D is a denial.
+
+The command shows each control or format character as a mark, for example `<U+202E>`. A line
+break and a tab stay. Such a character can hide a part of the command or change its order on the
+screen.
 
 ### What you see in Telegram
 
-The bot sends a message with the title **Approval needed**, the description, and the command. The
-message has four buttons:
+The bot sends a message with the title **Approval needed**, a short summary when the agent gives
+one, the reason for the flag, and the command. The message has four buttons:
 
 - ✅ Allow once
 - ✅ Allow in this session
 - ✅ Always allow
 - ❌ Deny
 
-After your answer, the bot edits the message to show the result.
+After your answer or after the timeout, the bot edits the message. It shows the result, for
+example "✅ **Approval allowed** · this session", the summary, and the command in a closed quote.
+Tap the quote to see the full command. Like the CLI, the message shows each control or format
+character of the command as a mark. A link in the message gets no preview.
 
 You can also answer with a typed command:
 

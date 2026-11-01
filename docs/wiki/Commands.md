@@ -215,18 +215,23 @@ A plain text message goes into the running task as guidance.
 2. The agent gets the text after the current tool step, as "User guidance: …".
 3. The bot replies "↪️ Got it. I'll do this after the current step." with a **⚡ Do this now**
    button.
+4. When the agent reads the text, the bot edits the reply to "✅ The agent read your note." and
+   removes the button.
 
-If the turn ends before the agent reads the steer, the text runs as the next turn. This also
-applies to a steer that arrives in the last tool round of a turn.
+If the turn ends before the agent reads the steer, the text runs as the next turn. Then the bot
+edits the reply to "↪️ The task ended first. Your note runs as a new message." This also applies
+to a steer that arrives in the last tool round of a turn.
 
 ### Media waits in the queue
 
 A photo, a file, or a voice note waits in the queue. The bot replies "⏳ Queued. I'll answer after
 the current task." with a **⚡ Do this now** button. The queued messages run after the task, one
-at a time.
+at a time. When the queued message starts, the bot edits its reply to "▶️ The agent works on your
+message now."
 
-The bot sends a maximum of one busy reply for each session every 30 seconds. A new turn can get
-a busy reply at once.
+The bot sends a maximum of one steer reply and one queue reply for each session every 30 seconds.
+A new turn can get a busy reply at once. After the bot edits a busy reply, the next message gets a
+new reply at once.
 
 ### Commands during a task
 
@@ -239,9 +244,9 @@ a busy reply at once.
 
 | Command | Effect |
 |---|---|
-| `/stop` | Stops the task. Clears the queue and the waiting steer. Stops the background subagents. The reply is "⏹ Stopped. The session is safe. Send a message to continue." |
-| `/stop keep` | Stops the task. Keeps the queue and the waiting steer. The waiting messages run one at a time. |
-| `/now` | Stops the task. The waiting steer runs first, and then the queue. The reply is "⚡ Taking over. The current answer stopped." |
+| `/stop` | Stops the task. Clears the queue and the waiting steer. Stops the background subagents. The reply is "⏹ Stopped. The session is safe. Send a message to continue." The steer reply and the queue replies change to "⏹ Not sent. The task stopped." |
+| `/stop keep` | Stops the task. Keeps the queue and the waiting steer. The waiting messages run one at a time. The steer reply changes to "↪️ The task ended first. Your note runs as a new message." |
+| `/now` | Stops the task. The waiting steer runs first, and then the queue. The reply is "⚡ Taking over. The current answer stopped." The steer reply changes to "↪️ The task ended first. Your note runs as a new message." |
 | `/steer <text>` | Adds the text to the running task, like a plain text. With no task, the text runs as a normal message. |
 
 `/now` does nothing when no message of yours waits. Then the task continues, and the reply is
@@ -251,7 +256,9 @@ a busy reply at once.
 - a message that the gateway made, for example a background result.
 
 The **⚡ Do this now** button sends `/now` for the turn of the reply. The bot edits the message of
-the button with the result. A button from an older turn stops nothing.
+the button with the result. A button from an older turn stops nothing. After such a tap, the bot
+still edits the message when the queued message starts. The button goes away when the steer or
+the queued message is over, and when the gateway restarts.
 
 When the agent did not start yet, `/steer <text>` replies "⏩ Note saved". The text then
 waits in the queue.

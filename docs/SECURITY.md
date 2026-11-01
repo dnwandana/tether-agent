@@ -89,13 +89,18 @@ background delegation, because the job ends before the children.
 The gate waits `approvals.timeout_s` seconds for an answer. The default is 600 seconds. No answer
 is a denial.
 
+The approval message shows a one-line summary that the model writes in the `description`
+parameter. The model can write a wrong summary, so the message also shows the command. Telegram
+shows at most 3800 characters of it. Decide from the command. The gate does not read the summary.
+Tether Agent removes control characters and format characters from the summary.
+
 The user answers with one of these scopes:
 
 - `once`: permits this command only.
 - `session`: permits the same rule for the rest of the session.
 - `always`: permits the same rule from now on. The program saves the rule id in the
   `approvals_always` table of `state.db`. The running agent never writes its own `config.yaml`.
-- `deny`: refuses the command. The model gets the result `BLOCKED by user: <description>`.
+- `deny`: refuses the command. The model gets the result `BLOCKED by user: <pattern name>`.
 
 ## Toolsets
 
