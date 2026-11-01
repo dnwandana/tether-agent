@@ -540,25 +540,33 @@ func (ch *Channel) commandCallback(ctx context.Context, gw *gateway.Gateway, cq 
 		newRenderer().AckReply(gateway.Reply{Text: "Not deleted.", Edit: true})
 		return
 	}
-	in := gateway.Inbound{
-		Key:      ch.sessionKey(n),
-		Source:   "telegram",
-		ChatID:   n.ChatID,
-		ThreadID: n.ThreadID,
-		UserID:   n.UserID,
-		UserName: n.UserName,
-		Text:     CanonicalCommand(action),
-		IsText:   true,
-		Target:   gateway.Target{Source: "telegram", ChatID: n.ChatID, ThreadID: n.ThreadID},
-	}
-	if ch.observeShared(n) {
-		in.UserID = ""
-	}
+	in := ch.callbackInbound(n, action, msg.MessageID)
 	gw.Submit(ctx, in, func() gateway.Renderer { return newRenderer() }, func(err error) {
 		if err != nil && ctx.Err() == nil {
 			ch.logger().Warn("telegram: the button command failed", "key", in.Key, "err", err.Error())
 		}
 	})
+}
+
+// callbackInbound builds the inbound message of a command button. msgID is the message of
+// the pressed button.
+func (ch *Channel) callbackInbound(n Normalized, action string, msgID int) gateway.Inbound {
+	in := gateway.Inbound{
+		Key:         ch.sessionKey(n),
+		Source:      "telegram",
+		ChatID:      n.ChatID,
+		ThreadID:    n.ThreadID,
+		UserID:      n.UserID,
+		UserName:    n.UserName,
+		Text:        CanonicalCommand(action),
+		IsText:      true,
+		Target:      gateway.Target{Source: "telegram", ChatID: n.ChatID, ThreadID: n.ThreadID},
+		ButtonMsgID: msgID,
+	}
+	if ch.observeShared(n) {
+		in.UserID = ""
+	}
+	return in
 }
 
 // callbackAuthorized reports whether the user who pressed a button may use the bot. A
@@ -843,8 +851,9 @@ type tgRenderer struct {
 }
 
 var (
-	_ gateway.Renderer      = (*tgRenderer)(nil)
-	_ gateway.ReplyRenderer = (*tgRenderer)(nil)
+	_ gateway.Renderer       = (*tgRenderer)(nil)
+	_ gateway.ReplyRenderer  = (*tgRenderer)(nil)
+	_ gateway.HandleRenderer = (*tgRenderer)(nil)
 )
 
 func (ch *Channel) newRenderer(ctx context.Context, chatID int64, threadID string, isDM bool) *tgRenderer {
@@ -951,6 +960,65 @@ func (r *tgRenderer) AckReply(rep gateway.Reply) {
 	if _, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, rep.Text, sendOpts{keyboard: kb}); err != nil {
 		r.ch.logger().Warn("telegram: cannot send the reply", "chat", r.chatID, "err", err.Error())
 	}
+}
+
+// AckReplyHandle sends a busy ack with its buttons and returns a handle to edit it later. A
+// reply with Rich or Edit set, or with no text, goes through AckReply and has no handle. A
+// failed send has no handle.
+func (r *tgRenderer) AckReplyHandle(rep gateway.Reply) gateway.AckHandle {
+	if rep.Rich != "" || rep.Edit || strings.TrimSpace(rep.Text) == "" {
+		r.AckReply(rep)
+		return nil
+	}
+	// An ack has one part, so sendText returns the ID of the ack message.
+	id, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, rep.Text, sendOpts{keyboard: cmdKeyboard(r.userID, rep.Buttons)})
+	if err != nil {
+		r.ch.logger().Warn("telegram: cannot send the reply", "chat", r.chatID, "err", err.Error())
+		return nil
+	}
+	return &tgAckHandle{ch: r.ch, chatID: r.chatID, threadID: r.threadID, msgID: id, done: make(chan struct{})}
+}
+
+// ackEditTimeout is the limit of one busy ack edit. It also ends the 429 retry of the client.
+const ackEditTimeout = 10 * time.Second
+
+// tgAckHandle edits a busy ack that tgRenderer sent.
+type tgAckHandle struct {
+	ch       *Channel
+	chatID   int64
+	threadID string
+	msgID    int
+	once     sync.Once
+	done     chan struct{}
+}
+
+func (h *tgAckHandle) MsgID() int { return h.msgID }
+
+// Close edits the ack in a goroutine with a limit of ackEditTimeout. The edit has no
+// keyboard, so the button goes away.
+func (h *tgAckHandle) Close(text string) <-chan struct{} {
+	h.once.Do(func() {
+		if strings.TrimSpace(text) == "" {
+			close(h.done)
+			return
+		}
+		go func() {
+			defer close(h.done)
+			ctx, cancel := context.WithTimeout(context.Background(), ackEditTimeout)
+			defer cancel()
+			p := EditMessageTextParams{ChatID: h.chatID, MessageID: h.msgID, Text: ToMarkdownV2(text), ParseMode: "MarkdownV2"}
+			_, err := h.ch.C.EditMessageText(ctx, p)
+			if err != nil && isBadRequest(err) && !isNotModified(err) {
+				logPlainFallback(h.ch.logger(), "ack_close", h.chatID, h.threadID, 1, 1, err)
+				p.Text, p.ParseMode = StripMarkdownV2(p.Text), ""
+				_, err = h.ch.C.EditMessageText(ctx, p)
+			}
+			if err != nil && !isNotModified(err) {
+				h.ch.logger().Info("telegram: cannot edit the busy reply", "chat", h.chatID, "message", h.msgID, "err", err.Error())
+			}
+		}()
+	})
+	return h.done
 }
 
 // editReply replaces the message of the pressed button with rep. An edit to the same text
