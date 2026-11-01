@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -53,6 +54,8 @@ type Inbound struct {
 	IsText                                           bool
 	// Target is the place of the answer.
 	Target Target
+	// ButtonMsgID is the message ID of the pressed button, or 0 for a typed message.
+	ButtonMsgID int
 }
 
 // Renderer shows one turn on a channel. The channel builds one for each turn.
@@ -68,6 +71,18 @@ type Renderer interface {
 // it gets the text of a Reply only.
 type ReplyRenderer interface{ AckReply(r Reply) }
 
+// AckHandle edits a busy ack that was sent.
+type AckHandle interface {
+	// MsgID returns the message ID of the ack.
+	MsgID() int
+	// Close edits the ack to text and removes its buttons. It runs once and does not
+	// block. The channel closes when the edit ends. Close("") closes with no edit.
+	Close(text string) <-chan struct{}
+}
+
+// HandleRenderer sends a reply with buttons and returns a handle to edit it later.
+type HandleRenderer interface{ AckReplyHandle(r Reply) AckHandle }
+
 // RunState describes the running turn of a key.
 type RunState struct {
 	// Cancel stops the turn (/stop).
@@ -81,6 +96,8 @@ type RunState struct {
 	// ended is true after the turn returned, and stopped is true after /stop. A run in
 	// either state takes no steer. Gateway.mu guards both.
 	ended, stopped bool
+	// steerAcks holds the steer acks of the run that are not closed. Gateway.mu guards it.
+	steerAcks []*ackSlot
 }
 
 // Gateway routes the inbound messages of all channels to the agent. It runs one turn for
@@ -100,9 +117,9 @@ type Gateway struct {
 	now func() time.Time
 	// debounce merges the busy texts of a key. Nil uses 350 ms and a hard cap of 1 s.
 	debounce *Debouncer
-	// lastAck holds one mark per session: the turn and the time of the last busy ack. Each
-	// new turn resets the limit.
-	lastAck map[string]ackMark
+	// lastAck holds one mark for each session and ack kind: the turn, the time, and the slot
+	// of the last busy ack. Each new turn resets the limit.
+	lastAck map[ackKey]ackMark
 	// markers writes the turn markers of the busy keys. Use markerW.
 	markers    *markerWriter
 	markerOnce sync.Once
@@ -111,10 +128,11 @@ type Gateway struct {
 	stopping atomic.Bool
 }
 
-// ackMark is the turn and the time of the last busy ack of a session.
+// ackMark is the turn, the time, and the slot of the last busy ack of one kind in a session.
 type ackMark struct {
 	turn int
 	at   time.Time
+	slot *ackSlot
 }
 
 // keyState is the state of one session key. Gateway.mu guards it.
@@ -161,6 +179,11 @@ type pendingTurn struct {
 	// turn is the number of the turn of the message in its key. It is 0 until the message
 	// takes the key. Gateway.mu guards it.
 	turn int
+	// ack is the queue ack slot that covers the message, or nil. Gateway.mu guards it.
+	ack *ackSlot
+	// steerAcks are the open steer acks of the steer text that /now moved into this
+	// message. Gateway.mu guards it.
+	steerAcks []*ackSlot
 }
 
 // take gives the key to p and gives p the next turn number. The caller holds Gateway.mu
@@ -273,13 +296,19 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	}
 	p := &pendingTurn{in: in, newRenderer: newRenderer, ready: make(chan struct{})}
 	ks.queue = append(ks.queue, p)
-	rs := ks.running
+	// A slash text is dropped when it leaves the queue, so it gets no ack.
+	var slot *ackSlot
+	send, turn := false, 0
+	if !isCommandText(in) {
+		slot, send = g.reserveAckLocked(ks.running, in.Key, ackQueue, 0)
+		p.ack = slot
+		turn = ks.currentTurn()
+	}
 	op := g.markerUpsertOp(ks, in.Key)
 	g.mu.Unlock()
 	g.sendMarker(op)
-	// A slash text is dropped when it leaves the queue, so it gets no ack.
-	if !isCommandText(in) {
-		g.ack(rs, in.Key, QueueAck, newRenderer())
+	if send {
+		g.sendAck(slot, QueueAck, turn, newRenderer())
 	}
 	return func() error {
 		select {
@@ -289,9 +318,15 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 			for i, q := range ks.queue {
 				if q == p {
 					ks.queue = append(ks.queue[:i], ks.queue[i+1:]...)
+					// While the gateway stops, BeginStopping owns the ack.
+					var left ackClose
+					if !g.stopping.Load() {
+						left = g.releaseAckLocked(p, NotSentAck)
+					}
 					op := g.markerUpsertOp(ks, in.Key)
 					g.mu.Unlock()
 					g.sendMarker(op)
+					left.run()
 					return ctx.Err()
 				}
 			}
@@ -420,11 +455,16 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 	g.mu.Lock()
 	ks := g.key(p.in.Key)
 	var pending string
+	var closes []ackClose
 	if rs := ks.running; rs != nil {
 		rs.ended = true
 		// The steer that the turn did not deliver is in the queue of the run. A steer that
 		// came after the last check of the agent is there too, so it is not lost.
 		pending = rs.Steer.Drain()
+		// While the gateway stops, BeginStopping closes the acks.
+		if text, ok := steerEndText(pending, p.discard, p.takeOver, g.stopping.Load()); ok {
+			closes = g.closeSteerAcksLocked(rs, math.MaxUint64, text)
+		}
 	}
 	ks.running = nil
 	if pending != "" && !p.discard && g.stopping.Load() {
@@ -441,6 +481,9 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 		ks.queue = append([]*pendingTurn{{in: in, newRenderer: p.newRenderer}}, ks.queue...)
 	}
 	g.next(ctx, p.in.Key, ks)
+	for _, c := range closes {
+		c.run()
+	}
 }
 
 // next gives the key to the next message in the queue, or frees the key. A queued slash
@@ -449,8 +492,15 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 // marker, and the key stays busy, so the marker stays.
 func (g *Gateway) next(ctx context.Context, key string, ks *keyState) {
 	var op markerOp
-	// Deferred calls run in reverse order, so the marker op is sent after the unlock.
+	var started []ackClose
+	// Deferred calls run in reverse order: the unlock first, then the ack edits and the
+	// marker op.
 	defer func() { g.sendMarker(op) }()
+	defer func() {
+		for _, c := range started {
+			c.run()
+		}
+	}()
 	defer g.mu.Unlock()
 	if g.stopping.Load() {
 		// The waiters stay in the queue and leave at the end of their context.
@@ -461,6 +511,8 @@ func (g *Gateway) next(ctx context.Context, key string, ks *keyState) {
 		ks.queue = ks.queue[1:]
 		if isCommandText(nx.in) {
 			nx.discard = true
+			started = append(started, g.releaseAckLocked(nx, NotSentAck))
+			started = append(started, g.releaseSteerAcksLocked(nx, NotSentAck)...)
 			g.logger().Info("gateway: a queued slash command is dropped", "key", nx.in.Key)
 			if nx.ready != nil {
 				close(nx.ready)
@@ -468,6 +520,9 @@ func (g *Gateway) next(ctx context.Context, key string, ks *keyState) {
 			continue
 		}
 		ks.take(nx)
+		started = append(started, g.releaseAckLocked(nx, QueueStartedAck))
+		// A steer that /now moved here runs as a new message now.
+		started = append(started, g.releaseSteerAcksLocked(nx, SteerLaterAck)...)
 		if nx.ready != nil {
 			// The waiter of nx runs it. Count it now, so Wait does not see zero turns
 			// before the waiter wakes up.
@@ -536,6 +591,7 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) {
 	notify, release := agent.HoldNotices(r.Ack)
 	res, err := g.Deps.Turn(tctx, sess, TurnInput{
 		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, Sink: r, Steer: rs.Steer, Notify: notify,
+		OnSteerRead: func(seq uint64) { g.steerRead(rs, seq) },
 	})
 	// Put the steer that the turn did not deliver back before the answer goes out. The send
 	// can take long, and BeginStopping in that time saves the steer queue in the marker.
@@ -594,7 +650,7 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 				}
 			},
 			StopKeep: func() (bool, int) { return g.stopKeepQueue(in.Key) },
-			Now:      func(turn int) (bool, int, bool) { return g.takeOver(in.Key, turn) },
+			Now:      func(turn int) (bool, int, bool) { return g.takeOver(in.Key, turn, in.ButtonMsgID) },
 			Steer:    func(text string) { rest = g.steerCommand(ctx, in, newRenderer, r, text) },
 		},
 	}

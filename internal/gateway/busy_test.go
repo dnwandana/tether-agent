@@ -967,7 +967,7 @@ func TestNowWhileTheGatewayStops(t *testing.T) {
 	_ = g.Handle(context.Background(), inb("k", "x"), f.new)
 	waitFor(t, func() bool { return rs.Steer.Pending() == "x" })
 	g.stopping.Store(true)
-	took, _, stopping := g.takeOver("k", 0)
+	took, _, stopping := g.takeOver("k", 0, 0)
 	pending := rs.Steer.Pending()
 	g.stopping.Store(false)
 	if took || !stopping || pending != "x" || g.stoppedRun(rs) {
@@ -1037,7 +1037,7 @@ func TestNowBeforeTheAgentStarts(t *testing.T) {
 	ks.take(first)
 	ks.queue = append(ks.queue, &pendingTurn{in: photo, newRenderer: f.new})
 	g.mu.Unlock()
-	took, waiting, _ := g.takeOver("k", 0)
+	took, waiting, _ := g.takeOver("k", 0, 0)
 	g.mu.Lock()
 	discard, takeOver := first.discard, first.takeOver
 	g.mu.Unlock()
@@ -1078,7 +1078,7 @@ func TestNowAfterStopDoesNothing(t *testing.T) {
 	g.mu.Lock()
 	first.discard, rs.stopped = true, true
 	g.mu.Unlock()
-	if took, waiting, _ := g.takeOver("k", first.turn); took || waiting != 0 {
+	if took, waiting, _ := g.takeOver("k", first.turn, 0); took || waiting != 0 {
 		t.Fatal(took, waiting)
 	}
 	g.mu.Lock()
@@ -1093,7 +1093,7 @@ func TestNowAfterStopDoesNothing(t *testing.T) {
 func TestStopAfterNowDropsTheSteer(t *testing.T) {
 	g, _ := gatewayWithSlowProvider(t, 0)
 	first, _ := stoppedKey(g)
-	if took, waiting, _ := g.takeOver("k", 0); !took || waiting != 2 {
+	if took, waiting, _ := g.takeOver("k", 0, 0); !took || waiting != 2 {
 		t.Fatal(took, waiting)
 	}
 	g.stopKey("k")

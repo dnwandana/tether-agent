@@ -52,6 +52,8 @@ type TurnInput struct {
 	// Notify receives the notices of the background reviews of the turn. Wrap the send
 	// function with agent.HoldNotices, so that a notice waits for the answer. It can be nil.
 	Notify func(text string)
+	// OnSteerRead runs after the agent reads the steer texts up to seq. It can be nil.
+	OnSteerRead func(seq uint64)
 }
 
 // Turn runs one agent turn for sess with the toolsets of the channel. After a turn with
@@ -59,13 +61,14 @@ type TurnInput struct {
 func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (agent.TurnResult, error) {
 	log := d.logger()
 	t := agent.Turn{
-		Session:  sess,
-		UserText: in.Text,
-		Images:   in.Images,
-		Toolsets: d.Toolsets(in.Channel),
-		Sink:     in.Sink,
-		Steer:    in.Steer,
-		Notify:   in.Notify,
+		Session:     sess,
+		UserText:    in.Text,
+		Images:      in.Images,
+		Toolsets:    d.Toolsets(in.Channel),
+		Sink:        in.Sink,
+		Steer:       in.Steer,
+		Notify:      in.Notify,
+		OnSteerRead: in.OnSteerRead,
 	}
 	if d.NewEnv != nil {
 		t.Env = d.NewEnv(sess, in.Channel)

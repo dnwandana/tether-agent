@@ -24,6 +24,12 @@ const (
 	nowOneReply     = "⚡ Taking over. The current answer stopped."
 	nowManyReply    = "⚡ Taking over. The current answer stopped. The waiting messages run now, one at a time."
 	nowNothingReply = "✅ Nothing waits. The agent already has your message."
+	// SteerReadAck, SteerLaterAck, and NotSentAck replace a steer ack when the steer is over.
+	SteerReadAck  = "✅ The agent read your note."
+	SteerLaterAck = "↪️ The task ended first. Your note runs as a new message."
+	NotSentAck    = "⏹ Not sent. The task stopped."
+	// QueueStartedAck replaces a queue ack when the last message that it covers starts.
+	QueueStartedAck = "▶️ The agent works on your message now."
 )
 
 // stopButton is on the reply to a command that cannot run during a task. It runs /stop.
@@ -36,12 +42,61 @@ func nowButton(turn int) []Button {
 }
 
 const (
-	// busyAckEvery is the minimum time between two busy acks of one session (Hermes).
+	// busyAckEvery is the minimum time between two busy acks of one kind in one session
+	// (Hermes).
 	busyAckEvery = 30 * time.Second
 	// debounceWindow and debounceHardCap merge the busy texts of a key (Hermes).
 	debounceWindow  = 350 * time.Millisecond
 	debounceHardCap = time.Second
 )
+
+// ackKind tells a steer ack from a queue ack. Each kind has its own busy limit.
+type ackKind int
+
+const (
+	ackSteer ackKind = iota
+	ackQueue
+)
+
+// ackSlot is one busy ack, from the reservation until its outcome. Gateway.mu guards it.
+type ackSlot struct {
+	kind ackKind
+	// seq is the highest steer sequence number that the ack covers. A queue ack has 0.
+	seq uint64
+	// pending counts the queued messages that a queue ack covers.
+	pending int
+	// outcome is the text of the close. It stays when the slot closes before its send
+	// returns, so sendAck can edit the ack then.
+	outcome string
+	// handle is nil until the send returns, and stays nil for a renderer with no handle.
+	handle AckHandle
+	closed bool
+	// markKey is the key of the busy limit mark of the slot. The /steer ack has no mark and
+	// a zero markKey.
+	markKey ackKey
+}
+
+// ackKey is the key of a busy limit mark: a session (or a key with no session yet) and a kind.
+type ackKey struct {
+	id   string
+	kind ackKind
+}
+
+// ackClose is an edit of an ack. Collect it under Gateway.mu and run it after the unlock.
+type ackClose struct {
+	h    AckHandle
+	text string
+}
+
+// run starts the edit. The channel closes when the edit ends. With no handle, it is closed.
+func (c ackClose) run() <-chan struct{} {
+	if c.h == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	return c.h.Close(c.text)
+}
 
 func init() {
 	Register(Command{Name: "stop", Help: "Stop the running task", Run: cmdStop, WhileBusy: true})
@@ -135,12 +190,24 @@ func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer
 	}
 	g.mu.Lock()
 	// BeginStopping saved the steer queue already, so a later steer would be lost.
-	ok := !g.stopping.Load() && rs.Steer != nil && !rs.ended && !rs.stopped && rs.Steer.Push(in.Text)
-	g.mu.Unlock()
-	if !ok {
+	if g.stopping.Load() || rs.Steer == nil || rs.ended || rs.stopped {
+		g.mu.Unlock()
 		return false
 	}
-	g.ack(rs, in.Key, SteerAck, r)
+	seq, ok := rs.Steer.PushSeq(in.Text)
+	if !ok {
+		g.mu.Unlock()
+		return false
+	}
+	turn := 0
+	if ks := g.keys[in.Key]; ks != nil {
+		turn = ks.currentTurn()
+	}
+	slot, send := g.reserveAckLocked(rs, in.Key, ackSteer, seq)
+	g.mu.Unlock()
+	if send {
+		g.sendAck(slot, SteerAck, turn, r)
+	}
 	return true
 }
 
@@ -178,12 +245,17 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 		g.mu.Unlock()
 		return
 	}
-	ks.queue = append(ks.queue, &pendingTurn{in: in, newRenderer: newRenderer})
-	rs = ks.running
+	p := &pendingTurn{in: in, newRenderer: newRenderer}
+	ks.queue = append(ks.queue, p)
+	slot, send := g.reserveAckLocked(ks.running, in.Key, ackQueue, 0)
+	p.ack = slot
+	turn := ks.currentTurn()
 	op := g.markerUpsertOp(ks, in.Key)
 	g.mu.Unlock()
 	g.sendMarker(op)
-	g.ack(rs, in.Key, QueueAck, r)
+	if send {
+		g.sendAck(slot, QueueAck, turn, r)
+	}
 }
 
 // steerCommand runs /steer text for the key of in. With a run, the text goes into the
@@ -199,11 +271,16 @@ func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func
 		g.mu.Unlock()
 		return g.acceptMessage(ctx, m, newRenderer)
 	}
-	if rs := ks.running; !g.stopping.Load() && rs != nil && rs.Steer != nil && !rs.ended && !rs.stopped && rs.Steer.Push(text) {
-		turn := ks.currentTurn()
-		g.mu.Unlock()
-		ackReply(r, Reply{Text: SteerAck, Buttons: [][]Button{nowButton(turn)}})
-		return rest
+	if rs := ks.running; !g.stopping.Load() && rs != nil && rs.Steer != nil && !rs.ended && !rs.stopped {
+		if seq, ok := rs.Steer.PushSeq(text); ok {
+			// The /steer ack has no busy limit, so its slot has no mark.
+			slot := &ackSlot{kind: ackSteer, seq: seq}
+			rs.steerAcks = append(rs.steerAcks, slot)
+			turn := ks.currentTurn()
+			g.mu.Unlock()
+			g.sendAck(slot, SteerAck, turn, r)
+			return rest
+		}
 	}
 	if g.stopping.Load() {
 		g.mu.Unlock()
@@ -234,13 +311,19 @@ func (g *Gateway) stopKey(key string) bool {
 	}
 	dropped := ks.queue
 	ks.queue = nil
+	var closes []ackClose
 	for _, p := range dropped {
 		p.discard = true
+		closes = append(closes, g.releaseAckLocked(p, NotSentAck))
+		closes = append(closes, g.releaseSteerAcksLocked(p, NotSentAck)...)
 	}
 	// A stopped turn does not continue after a restart.
 	op := g.markerRemoveOp(ks, key)
 	g.mu.Unlock()
 	g.sendMarker(op)
+	for _, c := range closes {
+		c.run()
+	}
 	for _, p := range dropped {
 		if p.ready != nil {
 			close(p.ready)
@@ -301,8 +384,10 @@ func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
 // the merged busy text become the next turn, before the queue. Queued slash commands and
 // Enqueue turns do not count, and they stay in their place. took is false when the turn
 // was already stopped, or when no message of the owner waits, and then nothing changes. waiting is the number of the turns that
-// wait now. stopping is true when the gateway stops, and then nothing changes.
-func (g *Gateway) takeOver(key string, turn int) (took bool, waiting int, stopping bool) {
+// wait now. stopping is true when the gateway stops, and then nothing changes. msgID is the
+// message ID of the pressed button, or 0. The open busy ack of that message closes with no
+// edit, because the /now reply goes into that message.
+func (g *Gateway) takeOver(key string, turn, msgID int) (took bool, waiting int, stopping bool) {
 	g.mu.Lock()
 	if g.stopping.Load() {
 		// BeginStopping saved the steer queue and the queue in the marker.
@@ -310,6 +395,13 @@ func (g *Gateway) takeOver(key string, turn int) (took bool, waiting int, stoppi
 		return false, 0, true
 	}
 	ks := g.key(key)
+	// The /now reply goes into the tapped message. The tapped ack closes with no edit only
+	// when /now takes the turn. When /now takes nothing, the ack stays open, so a later
+	// outcome can still edit it.
+	tapped := tappedSlotLocked(ks, msgID)
+	var tappedClose ackClose
+	// Each return unlocks g.mu first, so the deferred run comes after the unlock.
+	defer func() { tappedClose.run() }()
 	cur := ks.current
 	// A turn that /stop, /stop keep, or an earlier /now stopped does not go on, and its
 	// end already applies the rule for its steer.
@@ -319,10 +411,12 @@ func (g *Gateway) takeOver(key string, turn int) (took bool, waiting int, stoppi
 	}
 	// The agent drains the steer queue without g.mu, so the decision uses the drained text.
 	var parts []string
+	var drained uint64
 	rs := ks.running
 	if rs != nil {
-		if s := rs.Steer.Drain(); s != "" {
+		if s, seq := rs.Steer.DrainSeq(); s != "" {
 			parts = append(parts, s)
+			drained = seq
 		}
 	}
 	if s := g.debouncerLocked().Take(key); s != "" {
@@ -339,10 +433,14 @@ func (g *Gateway) takeOver(key string, turn int) (took bool, waiting int, stoppi
 		g.mu.Unlock()
 		return false, 0, false
 	}
+	tappedClose = g.closeSlotLocked(tapped, "")
 	if text != "" {
 		in := cur.in
 		in.Text, in.Images, in.Files, in.IsText = text, nil, nil, true
-		ks.queue = append([]*pendingTurn{{in: in, newRenderer: cur.newRenderer}}, ks.queue...)
+		// The agent cannot read the drained text now. Its steer acks move with the text, so
+		// the start, the drop, or a restart of the new message closes them.
+		moved := &pendingTurn{in: in, newRenderer: cur.newRenderer, steerAcks: takeSteerAcksLocked(rs, drained)}
+		ks.queue = append([]*pendingTurn{moved}, ks.queue...)
 		waiting++
 	}
 	// A turn that starts now runs no agent. The steer that the stopped turn holds becomes
@@ -362,39 +460,195 @@ func (g *Gateway) takeOver(key string, turn int) (took bool, waiting int, stoppi
 	return true, waiting, false
 }
 
-// ack sends text with the button of the turn that holds the key to r. In one turn of the
-// key, it sends at most one ack per session in busyAckEvery (Hermes). A new turn can get an
-// ack at once.
-func (g *Gateway) ack(rs *RunState, key, text string, r Renderer) {
-	now := g.clock()
+// reserveAckLocked reserves the busy ack of kind for a message of key. In one turn of the
+// key, one ack of each kind per session goes out in busyAckEvery (Hermes). A new turn can
+// get an ack at once. When send is false, the open slot of the mark covers the message. The
+// caller holds g.mu, and it calls sendAck after the unlock when send is true.
+func (g *Gateway) reserveAckLocked(rs *RunState, key string, kind ackKind, seq uint64) (slot *ackSlot, send bool) {
 	id := key
 	if rs != nil && rs.SessionID != "" {
 		id = rs.SessionID
 	}
-	g.mu.Lock()
 	turn := 0
 	if ks := g.keys[key]; ks != nil {
 		turn = ks.currentTurn()
 	}
-	if last, ok := g.lastAck[id]; ok && last.turn == turn && now.Sub(last.at) < busyAckEvery {
-		g.mu.Unlock()
-		return
+	k, now := ackKey{id: id, kind: kind}, g.clock()
+	if m, ok := g.lastAck[k]; ok && m.slot != nil && !m.slot.closed && m.turn == turn && now.Sub(m.at) < busyAckEvery {
+		// The open ack of this kind covers the new message.
+		if kind == ackSteer {
+			m.slot.seq = max(m.slot.seq, seq)
+		} else {
+			m.slot.pending++
+		}
+		return m.slot, false
+	}
+	slot = &ackSlot{kind: kind, seq: seq, markKey: k}
+	if kind == ackSteer {
+		rs.steerAcks = append(rs.steerAcks, slot)
+	} else {
+		slot.pending = 1
 	}
 	if g.lastAck == nil {
-		g.lastAck = map[string]ackMark{}
+		g.lastAck = map[ackKey]ackMark{}
 	}
-	g.lastAck[id] = ackMark{turn: turn, at: now}
-	g.mu.Unlock()
-	ackReply(r, Reply{Text: text, Buttons: [][]Button{nowButton(turn)}})
+	g.lastAck[k] = ackMark{turn: turn, at: now, slot: slot}
+	return slot, true
 }
 
-// ackReply sends rep with AckReply when r can show buttons, else it sends rep.Text with Ack.
-func ackReply(r Renderer, rep Reply) {
-	if rr, ok := r.(ReplyRenderer); ok {
-		rr.AckReply(rep)
+// sendAck sends text with the button of turn to r and attaches the handle to slot. When the
+// slot closed before the send returned, it edits the ack to the outcome at once. The caller
+// must not hold g.mu.
+func (g *Gateway) sendAck(slot *ackSlot, text string, turn int, r Renderer) {
+	h := ackReply(r, Reply{Text: text, Buttons: [][]Button{nowButton(turn)}})
+	if h == nil {
 		return
 	}
+	g.mu.Lock()
+	slot.handle = h
+	closed, outcome := slot.closed, slot.outcome
+	g.mu.Unlock()
+	if closed {
+		ackClose{h: h, text: outcome}.run()
+	}
+}
+
+// closeSlotLocked closes s with text, or with no edit when text is "". The first outcome
+// wins, so a second close returns a zero ackClose. The mark of s goes away only when it
+// still points to s, so a newer ack keeps its limit. The caller holds g.mu, and it runs the
+// result after the unlock.
+func (g *Gateway) closeSlotLocked(s *ackSlot, text string) ackClose {
+	if s == nil || s.closed {
+		return ackClose{}
+	}
+	s.closed, s.outcome = true, text
+	if m, ok := g.lastAck[s.markKey]; ok && m.slot == s {
+		delete(g.lastAck, s.markKey)
+	}
+	return ackClose{h: s.handle, text: text}
+}
+
+// closeSteerAcksLocked closes the open steer acks of rs with seq <= upTo and removes them
+// from rs.steerAcks. The caller holds g.mu, and it runs the result after the unlock.
+func (g *Gateway) closeSteerAcksLocked(rs *RunState, upTo uint64, text string) []ackClose {
+	var closes []ackClose
+	for _, s := range takeSteerAcksLocked(rs, upTo) {
+		closes = append(closes, g.closeSlotLocked(s, text))
+	}
+	return closes
+}
+
+// takeSteerAcksLocked removes the open steer acks of rs with seq <= upTo from rs.steerAcks
+// and returns them. It also removes the closed acks. The caller holds g.mu.
+func takeSteerAcksLocked(rs *RunState, upTo uint64) []*ackSlot {
+	if rs == nil {
+		return nil
+	}
+	var taken []*ackSlot
+	open := rs.steerAcks[:0]
+	for _, s := range rs.steerAcks {
+		switch {
+		case s.closed:
+		case s.seq <= upTo:
+			taken = append(taken, s)
+		default:
+			open = append(open, s)
+		}
+	}
+	clear(rs.steerAcks[len(open):])
+	rs.steerAcks = open
+	return taken
+}
+
+// releaseSteerAcksLocked closes the steer acks that moved with p, with text. The caller holds
+// g.mu, and it runs the result after the unlock.
+func (g *Gateway) releaseSteerAcksLocked(p *pendingTurn, text string) []ackClose {
+	var closes []ackClose
+	for _, s := range p.steerAcks {
+		closes = append(closes, g.closeSlotLocked(s, text))
+	}
+	p.steerAcks = nil
+	return closes
+}
+
+// releaseAckLocked counts the queued message p as over for its queue ack. When p is the
+// last message that the ack covers, it closes the slot with text. The caller holds g.mu.
+func (g *Gateway) releaseAckLocked(p *pendingTurn, text string) ackClose {
+	s := p.ack
+	if s == nil {
+		return ackClose{}
+	}
+	p.ack = nil
+	s.pending--
+	if s.pending > 0 {
+		return ackClose{}
+	}
+	return g.closeSlotLocked(s, text)
+}
+
+// tappedSlotLocked returns the open busy ack slot of ks whose message has the ID msgID,
+// or nil. The caller holds g.mu.
+func tappedSlotLocked(ks *keyState, msgID int) *ackSlot {
+	if msgID == 0 {
+		return nil
+	}
+	match := func(s *ackSlot) bool {
+		return s != nil && !s.closed && s.handle != nil && s.handle.MsgID() == msgID
+	}
+	if rs := ks.running; rs != nil {
+		for _, s := range rs.steerAcks {
+			if match(s) {
+				return s
+			}
+		}
+	}
+	for _, p := range ks.queue {
+		if match(p.ack) {
+			return p.ack
+		}
+	}
+	return nil
+}
+
+// steerRead closes the steer acks of rs that the agent read: the acks with seq <= seq.
+func (g *Gateway) steerRead(rs *RunState, seq uint64) {
+	g.mu.Lock()
+	closes := g.closeSteerAcksLocked(rs, seq, SteerReadAck)
+	g.mu.Unlock()
+	for _, c := range closes {
+		c.run()
+	}
+}
+
+// steerEndText returns the text for the open steer acks at the end of a run. pending is the
+// steer text that the agent did not read. ok is false while the gateway stops, because
+// BeginStopping closes the acks then. A read closes its acks before the run ends, so an open
+// ack with no pending text belongs to a lost steer, for example after a panic in the turn.
+func steerEndText(pending string, discard, takeOver, stopping bool) (text string, ok bool) {
+	switch {
+	case stopping:
+		return "", false
+	case discard && !takeOver:
+		return NotSentAck, true
+	case pending != "" || takeOver:
+		return SteerLaterAck, true
+	default:
+		return NotSentAck, true
+	}
+}
+
+// ackReply sends rep and returns a handle to edit it. The handle is nil when r cannot edit a
+// sent reply.
+func ackReply(r Renderer, rep Reply) AckHandle {
+	if hr, ok := r.(HandleRenderer); ok {
+		return hr.AckReplyHandle(rep)
+	}
+	if rr, ok := r.(ReplyRenderer); ok {
+		rr.AckReply(rep)
+		return nil
+	}
 	r.Ack(rep.Text)
+	return nil
 }
 
 // steerable reports whether in is a plain text that can go into a run as a steer.
@@ -460,6 +714,9 @@ func (l *lazyRenderer) AckReply(r Reply) {
 	}
 	l.get().Ack(r.Text)
 }
+
+// AckReplyHandle sends r with the inner renderer and returns its handle, or nil.
+func (l *lazyRenderer) AckReplyHandle(r Reply) AckHandle { return ackReply(l.get(), r) }
 
 // Debouncer merges the texts that arrive for one key within a short time. A text waits
 // for window. Each new text restarts the wait, but the merged text flushes at hardCap

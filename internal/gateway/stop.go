@@ -98,6 +98,19 @@ func (g *Gateway) NotifyStopping(ctx context.Context, text, skipKey string) {
 // ErrStopping is the error of Submit, Handle, and Enqueue after BeginStopping.
 var ErrStopping = errors.New("gateway: the gateway is stopping, so it takes no new work")
 
+// The texts of the busy acks at a stop of the gateway. The marker keeps the steer and the
+// queue, so they run after the restart. The marker keeps only the text of a message, so a
+// message with a photo or a file gets QueueRestartMediaAck.
+const (
+	SteerRestartAck      = "↪️ Your note runs after the restart."
+	QueueRestartAck      = "⏳ Your message runs after the restart."
+	QueueRestartMediaAck = "⏳ After the restart, the agent gets your message without its photo or file."
+)
+
+// restartAckWait is the longest time that BeginStopping waits for the edits of the busy
+// acks. Tests change it.
+var restartAckWait = 2 * time.Second
+
 // StopStarted sets the time of the marker of each busy key at the start of the stop, so the
 // next gateway finds the markers fresh.
 func (g *Gateway) StopStarted() {
@@ -122,6 +135,9 @@ func (g *Gateway) StopStarted() {
 // markers. So BeginStopping writes the last marker of each key with the texts that wait for
 // an answer, and then freezes the markers. From now on, the gateway takes no new work, no
 // queued turn starts, and no key becomes free.
+//
+// It also edits each open busy ack to say that the message runs after the restart, and it
+// waits at most 2 s for these edits.
 func (g *Gateway) BeginStopping(ctx context.Context) {
 	type final struct {
 		op markerOp
@@ -129,6 +145,7 @@ func (g *Gateway) BeginStopping(ctx context.Context) {
 		in Inbound
 	}
 	var finals []final
+	var acks []ackClose
 	g.mu.Lock()
 	g.stopping.Store(true)
 	d := g.debouncerLocked()
@@ -146,8 +163,13 @@ func (g *Gateway) BeginStopping(ctx context.Context) {
 			finals = append(finals, f)
 		}
 		bounds[key] = ks.markerSeq
+		// The same g.mu section sets g.stopping, so no new ack slot comes after this.
+		acks = append(acks, g.restartAcksLocked(ks)...)
 	}
 	g.mu.Unlock()
+	// The edits run while the markers are written. The stop waits for them at the end, at
+	// most restartAckWait from now.
+	defer waitAckEdits(runAckCloses(acks), time.Now().Add(restartAckWait))
 	w := g.markerW()
 	if w == nil {
 		return
@@ -173,6 +195,72 @@ func (g *Gateway) BeginStopping(ctx context.Context) {
 	}
 	if err := w.Flush(ctx); err != nil {
 		g.logger().Warn("gateway: the stop did not save all turn markers", "err", err)
+	}
+}
+
+// restartAcksLocked closes the open busy acks of ks with the restart texts: the steer acks
+// of the run and the acks of the queued messages. A stopped run (/stop or /stop keep) gets
+// NotSentAck for its steer acks, because stopQueued does not save its steer in the marker.
+// The acks of a steer that /now moved into the queue get SteerRestartAck, because the marker
+// saves the queue. The caller holds g.mu.
+func (g *Gateway) restartAcksLocked(ks *keyState) []ackClose {
+	var closes []ackClose
+	if rs := ks.running; rs != nil {
+		text := SteerRestartAck
+		if rs.stopped {
+			text = NotSentAck
+		}
+		for _, s := range rs.steerAcks {
+			closes = append(closes, g.closeSlotLocked(s, text))
+		}
+	}
+	// A queue ack can cover several messages. It gets the media text when one of them has a
+	// photo or a file, because the marker keeps only the text.
+	media := map[*ackSlot]bool{}
+	for _, p := range ks.queue {
+		if p.ack != nil && len(p.in.Images)+len(p.in.Files) > 0 {
+			media[p.ack] = true
+		}
+	}
+	for _, p := range ks.queue {
+		// closeSlotLocked skips a closed slot, so a slot that covers several queued
+		// messages closes once.
+		if p.ack != nil {
+			text := QueueRestartAck
+			if media[p.ack] {
+				text = QueueRestartMediaAck
+			}
+			closes = append(closes, g.closeSlotLocked(p.ack, text))
+		}
+		// The marker saves the steer that /now moved into the queue.
+		closes = append(closes, g.releaseSteerAcksLocked(p, SteerRestartAck)...)
+	}
+	return closes
+}
+
+// runAckCloses runs each close and returns the channels that close when the edits end.
+func runAckCloses(cs []ackClose) []<-chan struct{} {
+	dones := make([]<-chan struct{}, 0, len(cs))
+	for _, c := range cs {
+		dones = append(dones, c.run())
+	}
+	return dones
+}
+
+// waitAckEdits waits until each channel in dones is closed, or until deadline. One timer
+// covers all channels, so the total wait is at most the time to the deadline.
+func waitAckEdits(dones []<-chan struct{}, deadline time.Time) {
+	if len(dones) == 0 {
+		return
+	}
+	t := time.NewTimer(time.Until(deadline))
+	defer t.Stop()
+	for _, d := range dones {
+		select {
+		case <-d:
+		case <-t.C:
+			return
+		}
 	}
 }
 
