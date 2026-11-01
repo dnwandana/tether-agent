@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -90,11 +91,165 @@ func TestConcurrentPushKeepsAll(t *testing.T) {
 func TestRestashKeepsOrder(t *testing.T) {
 	q := NewSteerQueue()
 	q.Push("old")
-	got := q.Drain()
+	got, seq := q.DrainSeq()
 	q.Push("new")
-	q.restash(got)
+	q.restash(got, seq)
 	if q.Pending() != "old\nnew" {
 		t.Fatal(q.Pending())
+	}
+}
+
+func TestPushSeqAndDrainSeq(t *testing.T) {
+	q := NewSteerQueue()
+	if seq, ok := q.PushSeq("  "); ok || seq != 0 {
+		t.Fatal(seq, ok)
+	}
+	s1, ok1 := q.PushSeq("one")
+	s2, ok2 := q.PushSeq(" two ")
+	if !ok1 || !ok2 || s1 != 1 || s2 != 2 {
+		t.Fatal(s1, ok1, s2, ok2)
+	}
+	if !q.Push("three") {
+		t.Fatal("push")
+	}
+	if text, seq := q.DrainSeq(); text != "one\ntwo\nthree" || seq != 3 {
+		t.Fatalf("%q %d", text, seq)
+	}
+	if text, seq := q.DrainSeq(); text != "" || seq != 0 {
+		t.Fatalf("an empty queue: %q %d", text, seq)
+	}
+	// The numbers do not reset after a drain. A restashed text keeps its number.
+	if s4, _ := q.PushSeq("four"); s4 != 4 {
+		t.Fatal(s4)
+	}
+	got, seq := q.DrainSeq()
+	q.restash(got, seq)
+	if text, seq := q.DrainSeq(); text != "four" || seq != 4 {
+		t.Fatalf("%q %d", text, seq)
+	}
+	// The drain reports the highest number, also when a restashed text is first.
+	q.PushSeq("five")
+	got, seq = q.DrainSeq()
+	q.PushSeq("six")
+	q.restash(got, seq)
+	if text, seq := q.DrainSeq(); text != "five\nsix" || seq != 6 {
+		t.Fatalf("%q %d", text, seq)
+	}
+	var nq *SteerQueue
+	if seq, ok := nq.PushSeq("x"); ok || seq != 0 {
+		t.Fatal(seq, ok)
+	}
+	if text, seq := nq.DrainSeq(); text != "" || seq != 0 {
+		t.Fatalf("%q %d", text, seq)
+	}
+}
+
+// steerReads returns an OnSteerRead callback and a function that returns its calls.
+func steerReads() (func(seq uint64), func() []uint64) {
+	var mu sync.Mutex
+	var got []uint64
+	return func(seq uint64) {
+			mu.Lock()
+			got = append(got, seq)
+			mu.Unlock()
+		}, func() []uint64 {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(got)
+		}
+}
+
+func TestOnSteerReadAfterToolBatch(t *testing.T) {
+	q := NewSteerQueue()
+	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), text("ok"))
+	fp.onRequest = func(i int) {
+		if i == 0 {
+			q.Push("one")
+			q.Push("two")
+		}
+	}
+	a, sess := newAgent(t, fp, echoTool{})
+	onRead, reads := steerReads()
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, Steer: q, OnSteerRead: onRead}); err != nil {
+		t.Fatal(err)
+	}
+	if got := reads(); !slices.Equal(got, []uint64{2}) {
+		t.Fatal(got)
+	}
+}
+
+func TestOnSteerReadBeforeCall(t *testing.T) {
+	q := NewSteerQueue()
+	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), text("ok"))
+	a, sess := newAgent(t, fp, echoTool{})
+	a.beforeCall = func(round int) {
+		if round == 2 {
+			q.Push("late note")
+		}
+	}
+	onRead, reads := steerReads()
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, Steer: q, OnSteerRead: onRead}); err != nil {
+		t.Fatal(err)
+	}
+	if got := reads(); !slices.Equal(got, []uint64{1}) {
+		t.Fatal(got)
+	}
+}
+
+// The drain before the first model call finds no tool message and restashes the text.
+// Only the drain after the tool results reads it.
+func TestOnSteerReadNotAfterRestash(t *testing.T) {
+	q := NewSteerQueue()
+	q.Push("early steer")
+	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), text("ok"))
+	a, sess := newAgent(t, fp, echoTool{})
+	onRead, reads := steerReads()
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, Steer: q, OnSteerRead: onRead}); err != nil {
+		t.Fatal(err)
+	}
+	if got := reads(); !slices.Equal(got, []uint64{1}) {
+		t.Fatal(got)
+	}
+}
+
+func TestOnSteerReadNotAfterCancel(t *testing.T) {
+	fp := scripted(toolCalls(tc("c1", "write_file", `{}`)), text("never"))
+	a, sess := newAgent(t, fp, slowTool{name: "write_file", d: 5 * time.Second})
+	cctx, cancel := context.WithCancel(ctx)
+	q := NewSteerQueue()
+	go func() { time.Sleep(100 * time.Millisecond); q.Push("dropped"); cancel() }()
+	onRead, reads := steerReads()
+	res, err := a.RunTurn(cctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, Steer: q, OnSteerRead: onRead})
+	if !errors.Is(err, context.Canceled) || res.PendingSteer != "dropped" {
+		t.Fatal(res, err)
+	}
+	if got := reads(); len(got) != 0 {
+		t.Fatal(got)
+	}
+}
+
+// A steer in the last round, and a steer before the summary call, stay in the queue.
+func TestOnSteerReadNotAtRoundLimit(t *testing.T) {
+	q := NewSteerQueue()
+	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), toolCalls(tc("c2", "echo", `{"s":"y"}`)), text("summary"))
+	fp.onRequest = func(i int) {
+		if i == 1 {
+			q.Push("check the backups too")
+		}
+	}
+	a, sess := newAgent(t, fp, echoTool{})
+	a.beforeCall = func(round int) {
+		if round == 3 {
+			q.Push("late note")
+		}
+	}
+	onRead, reads := steerReads()
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}, Steer: q, MaxTurns: 2, OnSteerRead: onRead})
+	if err != nil || !res.HitLimit || res.PendingSteer != "check the backups too\nlate note" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if got := reads(); len(got) != 0 {
+		t.Fatal(got)
 	}
 }
 

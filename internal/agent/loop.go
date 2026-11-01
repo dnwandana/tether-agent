@@ -138,6 +138,9 @@ type Turn struct {
 	MaxTurns int
 	// Steer holds the user guidance that arrives during the turn. It can be nil.
 	Steer *SteerQueue
+	// OnSteerRead runs after the turn puts the steer texts into a tool result. seq is the
+	// highest sequence number of those texts (SteerQueue.PushSeq). It can be nil.
+	OnSteerRead func(seq uint64)
 	// Notify receives the notices of the background reviews that the turn starts, for
 	// example "💾 Memory updated". Wrap the send function with HoldNotices, so that a
 	// notice waits for the answer. Nil drops the notices.
@@ -306,7 +309,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		// The summary pass leaves the steer in the queue, so the gateway runs it as the
 		// next turn.
 		if !summary {
-			a.steerStored(dbCtx, t.Steer, ts)
+			a.steerStored(dbCtx, t.Steer, ts, t.OnSteerRead)
 		}
 		if a.compact(ctx, t, prov, sink) && t.System == "" {
 			// The compaction count is part of the prompt key, so the prompt is rebuilt.
@@ -425,11 +428,14 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		// undelivered. In the last round, the steer stays in the queue, so the summary call
 		// does not read it, and the turn returns it in PendingSteer.
 		if round < maxTurns {
-			if g := t.Steer.Drain(); g != "" {
+			if g, seq := t.Steer.DrainSeq(); g != "" {
 				if ctx.Err() == nil {
 					contents[len(contents)-1] += SteerMarker + g
+					if t.OnSteerRead != nil {
+						t.OnSteerRead(seq)
+					}
 				} else {
-					t.Steer.restash(g)
+					t.Steer.restash(g, seq)
 				}
 			}
 		}
@@ -691,21 +697,26 @@ func (a *Agent) modelWindow(name, model string) int {
 
 // steerStored delivers the pending steer text into the last tool message of the turn,
 // which is already stored. It updates the stored message, so the transcript matches what
-// the model sees. With no tool message in the turn, the text stays pending.
-func (a *Agent) steerStored(ctx context.Context, q *SteerQueue, ts *turnState) {
-	text := q.Drain()
+// the model sees. With no tool message in the turn, the text stays pending. onRead gets the
+// highest sequence number of the delivered texts. It can be nil.
+func (a *Agent) steerStored(ctx context.Context, q *SteerQueue, ts *turnState, onRead func(seq uint64)) {
+	text, seq := q.DrainSeq()
 	if text == "" {
 		return
 	}
 	out, ok := InjectSteer(ts.msgs, text)
 	if !ok {
-		q.restash(text)
+		q.restash(text, seq)
 		return
 	}
 	i := lastToolIndex(out)
 	ts.msgs = out
 	id := ts.ids[i]
 	ts.patched[id] = out[i].Content
+	// The model sees the text from this point, also when the database update fails.
+	if onRead != nil {
+		onRead(seq)
+	}
 	if a.DB == nil {
 		a.logger().Warn("agent: no database; the steer text is not saved in the transcript", "session", ts.sessionID)
 		return
