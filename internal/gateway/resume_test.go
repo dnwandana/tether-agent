@@ -80,7 +80,7 @@ func TestResumeRunsNoteThenQueuedTexts(t *testing.T) {
 	putMarker(t, g.Deps.Store, "k", sess.ID, []sessions.QueuedText{
 		{Text: "steer me"}, {Text: "look", Lost: 1}, {Text: "", Lost: 2},
 	}, time.Now(), 0)
-	if err := g.ResumeInterrupted(ctx, time.Now(), time.Hour); err != nil {
+	if _, err := g.ResumeInterrupted(ctx, time.Now(), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { _, ok := g.Running("k"); return ok })
@@ -103,7 +103,7 @@ func TestResumeDropsOldMarkers(t *testing.T) {
 	ctx := context.Background()
 	g, fp, _, logs, sess := resumeGateway(t, 0)
 	putMarker(t, g.Deps.Store, "k", sess.ID, nil, time.Now(), 0)
-	if err := g.ResumeInterrupted(ctx, time.Now().Add(-2*time.Hour), time.Hour); err != nil {
+	if _, err := g.ResumeInterrupted(ctx, time.Now().Add(-2*time.Hour), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	noTurn(t, g, fp)
@@ -117,7 +117,7 @@ func TestResumeFallsBackToUpdatedAt(t *testing.T) {
 	ctx := context.Background()
 	g, fp, _, _, sess := resumeGateway(t, 0)
 	putMarker(t, g.Deps.Store, "k", sess.ID, nil, time.Now().Add(-10*time.Minute), 0)
-	if err := g.ResumeInterrupted(ctx, time.Time{}, time.Hour); err != nil {
+	if _, err := g.ResumeInterrupted(ctx, time.Time{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 1 })
@@ -133,7 +133,7 @@ func TestResumeFallsBackToAnOldUpdatedAt(t *testing.T) {
 	ctx := context.Background()
 	g, fp, _, _, sess := resumeGateway(t, 0)
 	putMarker(t, g.Deps.Store, "k", sess.ID, nil, time.Now().Add(-2*time.Hour), 0)
-	if err := g.ResumeInterrupted(ctx, time.Time{}, time.Hour); err != nil {
+	if _, err := g.ResumeInterrupted(ctx, time.Time{}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	noTurn(t, g, fp)
@@ -144,7 +144,7 @@ func TestResumeLoopGuard(t *testing.T) {
 	ctx := context.Background()
 	g, fp, ch, _, sess := resumeGateway(t, 0)
 	putMarker(t, g.Deps.Store, "k", sess.ID, []sessions.QueuedText{{Text: "x"}}, time.Now(), 3)
-	if err := g.ResumeInterrupted(ctx, time.Now(), time.Hour); err != nil {
+	if _, err := g.ResumeInterrupted(ctx, time.Now(), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	noTurn(t, g, fp)
@@ -175,7 +175,7 @@ func TestResumeSkipsAChangedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	putMarker(t, g.Deps.Store, "k", s1.ID, nil, time.Now(), 0)
-	if err := g.ResumeInterrupted(ctx, time.Now(), time.Hour); err != nil {
+	if _, err := g.ResumeInterrupted(ctx, time.Now(), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	noTurn(t, g, fp)
@@ -187,7 +187,7 @@ func TestResumeOffDeletesAll(t *testing.T) {
 	g, fp, _, _, sess := resumeGateway(t, 0)
 	putMarker(t, g.Deps.Store, "k", sess.ID, nil, time.Now(), 0)
 	putMarker(t, g.Deps.Store, "k2", sess.ID, nil, time.Now(), 0)
-	if err := g.ResumeInterrupted(ctx, time.Now(), 0); err != nil {
+	if _, err := g.ResumeInterrupted(ctx, time.Now(), 0); err != nil {
 		t.Fatal(err)
 	}
 	noTurn(t, g, fp)
@@ -200,7 +200,7 @@ func TestResumeEnqueueFailureDeletesTheMarker(t *testing.T) {
 	// Key "a" has no session, so its Enqueue fails. It comes before "k" in the key order.
 	putMarker(t, g.Deps.Store, "a", sess.ID, []sessions.QueuedText{{Text: "x"}}, time.Now(), 0)
 	putMarker(t, g.Deps.Store, "k", sess.ID, nil, time.Now(), 0)
-	if err := g.ResumeInterrupted(ctx, time.Now(), time.Hour); err != nil {
+	if _, err := g.ResumeInterrupted(ctx, time.Now(), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if markerOf(t, g.Deps.Store, "a") != nil {

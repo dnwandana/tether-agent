@@ -25,6 +25,7 @@ the description and the JSON schema of the parameters that the model sees.
 | `memory` | `memory`, `session_search` |
 | `skills` | `skill_manage`, `skill_view`, `skills_list` |
 | `terminal` | `terminal` |
+| `todo` | `todo_list` |
 | `vision` | `view_image` |
 | `web` | `web_fetch`, `web_search` |
 
@@ -471,7 +472,7 @@ IMPORTANT:
       "type": "array"
     },
     "toolsets": {
-      "description": "Toolsets for the subagent. They can only narrow your own toolsets. Default: your toolsets. Available: terminal, file, web, browser, vision, ask, memory, skills, cron, delegation, code_execution, media, mcp.",
+      "description": "Toolsets for the subagent. They can only narrow your own toolsets. Default: your toolsets. Available: terminal, file, web, browser, vision, ask, memory, skills, cron, delegation, code_execution, media, todo, mcp.",
       "items": {
         "type": "string"
       },
@@ -868,6 +869,61 @@ Run a shell command with bash -c on the host. The result is stdout and stderr to
   "required": [
     "command"
   ]
+}
+```
+
+## todo
+
+### todo_list
+
+Track a task list for multi-step work (3+ steps). Use for complex tasks with 3+ steps or when the user provides multiple tasks. For 'all N items' tasks, enumerate every instance as its own checklist item so none are silently dropped. Call with no parameters to read the current list.
+List order is priority. Only ONE item in_progress at a time. Break large phases into subtasks via parent. Mark an item completed only after the work is verified done, never based on intent. If something fails, cancel it and add a revised item. Always returns the full current list.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "todos": {
+      "type": "array",
+      "description": "Task items to write.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string",
+            "description": "Task description"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "cancelled"
+            ]
+          },
+          "parent": {
+            "type": "string",
+            "description": "Optional id of another item, making this a nested subtask. Omit for top-level."
+          }
+        },
+        "required": [
+          "id",
+          "content",
+          "status"
+        ]
+      }
+    },
+    "merge": {
+      "type": "boolean",
+      "description": "true: update existing items by id, add new ones. false (default): replace the entire list with a fresh plan.",
+      "default": false
+    }
+  },
+  "required": []
 }
 ```
 

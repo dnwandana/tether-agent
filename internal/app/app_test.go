@@ -79,7 +79,7 @@ func TestNewRegistersCoreToolsAndDirs(t *testing.T) {
 	defer a.Close()
 	for _, n := range []string{
 		"terminal", "read_file", "write_file", "patch", "web_fetch", "web_search",
-		"memory", "clarify", "session_search", "skill_view", "skills_list", "skill_manage", "cronjob",
+		"memory", "clarify", "session_search", "todo_list", "skill_view", "skills_list", "skill_manage", "cronjob",
 		"browser_navigate", "browser_click", "browser_fill", "browser_read", "browser_take_screenshot",
 		"browser_run_js", "browser_cookies", "text_to_speech", "transcribe_audio", "generate_image",
 	} {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/goals"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
@@ -40,6 +41,12 @@ type Deps struct {
 	// CLIAsk is the approval prompt and the clarify prompt of the CLI. CLI.Run makes it
 	// read through the REPL input. It can be nil.
 	CLIAsk *CLIAsk
+	// Goals runs the /goal loop. Nil turns the feature off, so a gateway with no goals works
+	// as before.
+	Goals *goals.Manager
+	// SendNotice sends a goal notice that has no turn, for example after a restart or a
+	// wake, with the buttons of r for the user of sess. Nil sends the text only.
+	SendNotice func(ctx context.Context, key string, sess *sessions.Session, r Reply) error
 }
 
 // TurnInput is the input of one agent turn that a channel starts.

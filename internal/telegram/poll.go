@@ -178,7 +178,7 @@ func (p *Poller) RegisterCommands(ctx context.Context) error {
 
 // BotCommands returns the bot command menu. The most-used commands come first. Telegram does
 // not allow "-" in a command name, so "/reload-mcp" is "reload_mcp" here. "/start",
-// "/reset", and "/resume" still work, but they are not in the menu.
+// "/reset", "/resume", and "/subgoal" still work, but they are not in the menu.
 func BotCommands() []BotCommand {
 	return []BotCommand{
 		{Command: "new", Description: "Start a new session"},
@@ -186,6 +186,8 @@ func BotCommands() []BotCommand {
 		{Command: "stop", Description: "Stop the current task"},
 		{Command: "steer", Description: "Send a note to the current task"},
 		{Command: "now", Description: "Do my waiting message now"},
+		{Command: "goal", Description: "Work toward a goal"},
+		{Command: "todo", Description: "Show the task list"},
 		{Command: "model", Description: "Change the model"},
 		{Command: "effort", Description: "Change the reasoning effort"},
 		{Command: "usage", Description: "See tokens and cost"},

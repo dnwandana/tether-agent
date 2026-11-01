@@ -192,6 +192,8 @@ func TestBotCommandsMenu(t *testing.T) {
 		{Command: "stop", Description: "Stop the current task"},
 		{Command: "steer", Description: "Send a note to the current task"},
 		{Command: "now", Description: "Do my waiting message now"},
+		{Command: "goal", Description: "Work toward a goal"},
+		{Command: "todo", Description: "Show the task list"},
 		{Command: "model", Description: "Change the model"},
 		{Command: "effort", Description: "Change the reasoning effort"},
 		{Command: "usage", Description: "See tokens and cost"},

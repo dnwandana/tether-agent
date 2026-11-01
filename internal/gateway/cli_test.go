@@ -152,10 +152,10 @@ func TestCLITurnSeam(t *testing.T) {
 	var out bytes.Buffer
 	var got []string
 	c := &CLI{In: strings.NewReader("a\nb\n"), Out: &out, Store: st, Key: "cli:test",
-		Turn: func(_ context.Context, sess *sessions.Session, text string, w io.Writer) error {
+		Turn: func(_ context.Context, sess *sessions.Session, text string, w io.Writer) (agent.TurnResult, error) {
 			got = append(got, sess.Key+"|"+text)
 			_, err := io.WriteString(w, "ok\n")
-			return err
+			return agent.TurnResult{Final: "ok"}, err
 		}}
 	if err := c.Run(context.Background()); err != nil {
 		t.Fatal(err)
@@ -312,6 +312,37 @@ func TestCLISinkLines(t *testing.T) {
 	}
 }
 
+func TestCLISinkPlanRow(t *testing.T) {
+	items := []tools.TodoItem{
+		{ID: "1", Content: "a", Status: "completed"},
+		{ID: "2", Content: "b", Status: "in_progress"},
+		{ID: "3", Content: "c", Status: "pending"},
+	}
+	cases := []struct {
+		preview string
+		items   []tools.TodoItem
+		want    string
+	}{
+		{"planning 3 task(s)", items, "┊ 📋 plan      1/3 task(s)"},
+		{"planning 2 task(s)", items[1:], "┊ 📋 plan      2 task(s)"},
+		{"updating 1 task(s)", items, "┊ 📋 plan      update 1/3 ✓"},
+		{"updating 1 task(s)", items[1:], "┊ 📋 plan      update 2 task(s)"},
+		{"reading task list", items, "┊ 📋 plan      reading tasks"},
+	}
+	for _, c := range cases {
+		var b strings.Builder
+		s := &CLISink{W: &b, Line: func(tool, preview string) string { return tool }}
+		s.ToolStart("todo_list", c.preview)
+		s.Plan(c.items)
+		lines := strings.Split(strings.TrimSpace(b.String()), "\n")
+		got := strings.TrimSuffix(strings.TrimPrefix(lines[len(lines)-1], ansiDim), ansiReset)
+		if got != c.want {
+			t.Errorf("%q: got %q, want %q", c.preview, got, c.want)
+		}
+	}
+	var _ agent.PlanSink = (*CLISink)(nil)
+}
+
 func TestCLISinkStripsControlCharacters(t *testing.T) {
 	// Model text and tool previews must not move the cursor, clear the screen, or set the
 	// terminal title.
@@ -337,14 +368,14 @@ func TestCLICtrlCDuringTurnStopsTurnOnly(t *testing.T) {
 	var got []string
 	var out bytes.Buffer
 	c := &CLI{In: strings.NewReader("slow\nnext\n"), Out: &out, Store: st, Key: "cli:test", Interrupts: ints,
-		Turn: func(ctx context.Context, _ *sessions.Session, text string, _ io.Writer) error {
+		Turn: func(ctx context.Context, _ *sessions.Session, text string, _ io.Writer) (agent.TurnResult, error) {
 			got = append(got, text)
 			if text == "slow" {
 				close(started)
 				<-ctx.Done()
-				return ctx.Err()
+				return agent.TurnResult{}, ctx.Err()
 			}
-			return nil
+			return agent.TurnResult{}, nil
 		}}
 	go func() { <-started; ints <- os.Interrupt }()
 	if err := c.Run(context.Background()); err != nil {
@@ -365,7 +396,10 @@ func TestCLICtrlCAtPromptExits(t *testing.T) {
 	ints := make(chan os.Signal, 1)
 	ints <- os.Interrupt
 	c := &CLI{In: pr, Out: io.Discard, Store: st, Key: "cli:test", Interrupts: ints,
-		Turn: func(context.Context, *sessions.Session, string, io.Writer) error { t.Fatal("no turn"); return nil }}
+		Turn: func(context.Context, *sessions.Session, string, io.Writer) (agent.TurnResult, error) {
+			t.Fatal("no turn")
+			return agent.TurnResult{}, nil
+		}}
 	done := make(chan error, 1)
 	go func() { done <- c.Run(context.Background()) }()
 	select {
@@ -375,6 +409,22 @@ func TestCLICtrlCAtPromptExits(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Ctrl-C at the prompt must end the chat")
+	}
+}
+
+// AgentTurn returns the result of the agent turn, so that the goal step can read the answer.
+func TestCLIAgentTurnReturnsResult(t *testing.T) {
+	d := testDeps(t, &fakeProv{script: []step{{text: "done"}}})
+	ctx := context.Background()
+	sess, err := d.Store.ActiveOrCreate(ctx, "cli:test", sessions.Session{Source: "cli", Kind: "chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &CLI{Out: io.Discard, Key: "cli:test", Deps: d}
+	var out bytes.Buffer
+	res, err := c.AgentTurn(ctx, sess, "hi", &out)
+	if err != nil || res.Final != "done" || out.String() != "done\n" {
+		t.Fatalf("%+v %v %q", res, err, out.String())
 	}
 }
 

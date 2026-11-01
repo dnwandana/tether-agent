@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ var ToolEmoji = map[string]string{
 	"browser_read":            "📸",  // browser_snapshot
 	"browser_take_screenshot": "👁️", // browser_vision
 	"browser_run_js":          "🖥️", // browser_console
+	"todo_list":               "📋",  // todo
 }
 
 const (
@@ -62,6 +64,10 @@ const (
 	// maxClosedEditTries is the number of tries for the last edit of a
 	// closed bubble, the first try included.
 	maxClosedEditTries = 3
+	// planMaxItems is the largest number of item lines in the plan block.
+	planMaxItems = 8
+	// planRule ends the plan block, above the tool lines.
+	planRule = "───"
 )
 
 // ToolLine returns the status line for one tool call.
@@ -187,6 +193,12 @@ type Status struct {
 	timer      *time.Timer
 	flushCtx   context.Context
 	closed     bool
+	// goalLine and plan start each bubble of the turn. openBubble keeps them.
+	goalLine string
+	plan     []tools.TodoItem
+	// headOpen lets flush send a bubble with no tool line. A setter sets it, and
+	// openBubble clears it, so a bubble after a Reset waits for a tool line.
+	headOpen bool
 }
 
 // Add adds the line for one tool call from src. The main agent gets the
@@ -233,7 +245,7 @@ func (s *Status) Add(ctx context.Context, src Source, tool, preview, args string
 	if g, ok := s.groups[key]; ok && mode == "all" {
 		old := s.lines[g.idx]
 		s.lines[g.idx] = fmt.Sprintf("%s (×%d)", line, g.count+1)
-		if UTF16Len(strings.Join(s.lines, "\n")) <= statusTextLimit {
+		if s.fits(s.lines) {
 			g.count++
 			s.groups[key] = g
 			s.flush(ctx, false)
@@ -245,7 +257,7 @@ func (s *Status) Add(ctx context.Context, src Source, tool, preview, args string
 		if s.split(ctx) {
 			return
 		}
-	} else if len(s.lines) > 0 && UTF16Len(strings.Join(s.lines, "\n")+"\n"+line) > statusTextLimit {
+	} else if len(s.lines) > 0 && !s.fits(append(slices.Clone(s.lines), line)) {
 		if s.split(ctx) {
 			return
 		}
@@ -258,6 +270,140 @@ func (s *Status) Add(ctx context.Context, src Source, tool, preview, args string
 	}
 	s.lines = append(s.lines, line)
 	s.flush(ctx, false)
+}
+
+// SetGoalLine sets the goal line of the turn and shows the bubble at once, also with no
+// tool line. In "off" mode no bubble exists, so the line goes out as one silent message.
+func (s *Status) SetGoalLine(ctx context.Context, line string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	line = cutUTF16(line, statusTextLimit)
+	if s.mode() == "off" {
+		// The cleanup does not delete this message, so its ID is not kept.
+		if _, err := s.send(ctx, line, true); err != nil {
+			s.logger().Info("telegram status send of the goal line failed", "err", err.Error())
+		}
+		return
+	}
+	s.flushCtx = context.WithoutCancel(ctx)
+	s.goalLine = line
+	if s.noEdit {
+		s.sendLine(ctx, line)
+		return
+	}
+	s.headOpen = true
+	s.flush(ctx, false)
+}
+
+// SetPlan sets the plan block of the turn. Each later call replaces it. "off" mode
+// shows no plan.
+func (s *Status) SetPlan(ctx context.Context, items []tools.TodoItem) {
+	if s.mode() == "off" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.flushCtx = context.WithoutCancel(ctx)
+	s.plan = slices.Clone(items)
+	if s.noEdit {
+		if len(items) > 0 {
+			s.sendLine(ctx, cutUTF16(strings.Join(planLines(items, planMaxItems), "\n"), statusTextLimit))
+		}
+		return
+	}
+	s.headOpen = true
+	s.flush(ctx, false)
+}
+
+// textOf returns the text of a bubble with lines: the goal line, the plan block, and
+// then lines, at most statusTextLimit UTF-16 units. s.mu is held.
+func (s *Status) textOf(lines []string) string {
+	text, _ := s.compose(lines)
+	return cutUTF16(text, statusTextLimit)
+}
+
+// fits reports whether the text of a bubble with lines fits in statusTextLimit with no
+// cut. The plan block can give up item lines for the fit. s.mu is held.
+func (s *Status) fits(lines []string) bool {
+	_, ok := s.compose(lines)
+	return ok
+}
+
+// compose returns the text of a bubble with lines before the cut. When the text is too
+// long, the plan block gives up its last item lines until the text fits or no item line
+// is left. ok is true when the text fits. s.mu is held.
+func (s *Status) compose(lines []string) (text string, ok bool) {
+	keep := min(len(s.plan), planMaxItems)
+	for {
+		var parts []string
+		if s.goalLine != "" {
+			parts = append(parts, s.goalLine)
+		}
+		if len(s.plan) > 0 {
+			parts = append(parts, planLines(s.plan, keep)...)
+			parts = append(parts, planRule)
+		}
+		parts = append(parts, lines...)
+		text = strings.Join(parts, "\n")
+		if UTF16Len(text) <= statusTextLimit {
+			return text, true
+		}
+		if keep <= 0 || len(s.plan) == 0 {
+			return text, false
+		}
+		keep--
+	}
+}
+
+// planLines returns the lines of the plan block of items, with no "───" line, and at
+// most keep item lines.
+func planLines(items []tools.TodoItem, keep int) []string {
+	done, total := tools.TodoSummary(items)
+	shown := items
+	if len(items) > planMaxItems {
+		// The open items come first, so the work that is left shows.
+		shown = make([]tools.TodoItem, 0, len(items))
+		for _, it := range items {
+			if it.Status == "pending" || it.Status == "in_progress" {
+				shown = append(shown, it)
+			}
+		}
+		for _, it := range items {
+			if it.Status != "pending" && it.Status != "in_progress" {
+				shown = append(shown, it)
+			}
+		}
+		shown = shown[:planMaxItems]
+	}
+	shown = shown[:max(0, min(keep, len(shown)))]
+	out := []string{fmt.Sprintf("📋 Plan %d/%d", done, total)}
+	for _, it := range shown {
+		out = append(out, planMarker(it.Status)+" "+oneLine(it.Content))
+	}
+	if more := len(items) - len(shown); more > 0 {
+		out = append(out, fmt.Sprintf("+%d more", more))
+	}
+	return out
+}
+
+// planMarker returns the marker of an item line for status.
+func planMarker(status string) string {
+	switch status {
+	case "completed":
+		return "[x]"
+	case "in_progress":
+		return "[>]"
+	case "cancelled":
+		return "[~]"
+	default:
+		return "[ ]"
+	}
 }
 
 // split closes the full bubble with its last lines, and opens a new one. It
@@ -301,7 +447,7 @@ func (s *Status) Close(ctx context.Context, success bool) {
 		return
 	}
 	s.closed = true
-	if !s.noEdit && len(s.lines) > 0 {
+	if !s.noEdit && s.textOf(s.lines) != "" {
 		s.flush(ctx, true)
 		s.keepFailedEdit()
 	}
@@ -324,7 +470,7 @@ func (s *Status) Close(ctx context.Context, success bool) {
 // for the timer. A permanent error set noEdit, and a send error left no
 // message to edit. s.mu is held.
 func (s *Status) keepFailedEdit() {
-	text := strings.Join(s.lines, "\n")
+	text := s.textOf(s.lines)
 	if s.msgID == 0 || s.noEdit || text == s.shown {
 		return
 	}
@@ -334,6 +480,7 @@ func (s *Status) keepFailedEdit() {
 func (s *Status) openBubble() {
 	s.stopTimer()
 	s.lines, s.msgID, s.shown, s.groups = nil, 0, "", nil
+	s.headOpen = false
 	if len(s.waiting) > 0 {
 		s.armTimer(s.editWait())
 	}
@@ -393,14 +540,14 @@ func (s *Status) editWait() time.Duration {
 // flush shows the open bubble text. Without force, an edit waits for the
 // interval and for a flood wait, and a timer sends it later. s.mu is held.
 func (s *Status) flush(ctx context.Context, force bool) {
-	text := strings.Join(s.lines, "\n")
-	if text == "" || text == s.shown {
+	text := s.textOf(s.lines)
+	if text == "" || text == s.shown || (s.msgID == 0 && len(s.lines) == 0 && !s.headOpen) {
 		s.stopIdleTimer()
 		return
 	}
 	now := s.now()
 	if s.msgID == 0 {
-		m, err := s.send(ctx, text)
+		m, err := s.send(ctx, text, false)
 		if err != nil {
 			s.logger().Info("telegram status send failed", "err", err.Error())
 			return
@@ -469,7 +616,7 @@ func (s *Status) noEditLine() string {
 }
 
 func (s *Status) sendLine(ctx context.Context, line string) {
-	m, err := s.send(ctx, line)
+	m, err := s.send(ctx, line, false)
 	if err != nil {
 		s.logger().Info("telegram status send failed", "err", err.Error())
 		return
@@ -477,8 +624,9 @@ func (s *Status) sendLine(ctx context.Context, line string) {
 	s.ids = append(s.ids, m.MessageID)
 }
 
-func (s *Status) send(ctx context.Context, text string) (Message, error) {
-	p := SendMessageParams{ChatID: s.ChatID, Text: text}
+// send sends text as a new message. A silent message makes no sound.
+func (s *Status) send(ctx context.Context, text string, silent bool) (Message, error) {
+	p := SendMessageParams{ChatID: s.ChatID, Text: text, DisableNotification: silent}
 	if id, ok := ThreadParam(s.ThreadID, false); ok {
 		p.MessageThreadID = id
 	}

@@ -2,11 +2,15 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/goals"
+	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
 // The busy texts of Tether Agent, in Markdown. A busy ack is one plain line.
@@ -30,6 +34,21 @@ const (
 	NotSentAck    = "⏹ Not sent. The task stopped."
 	// QueueStartedAck replaces a queue ack when the last message that it covers starts.
 	QueueStartedAck = "▶️ The agent works on your message now."
+)
+
+// GoalPausedLine goes after the reply to /stop and /stop keep when they pause a goal.
+const GoalPausedLine = "⏸ Goal paused. Use /goal resume to continue."
+
+// GoalBusyLine goes after BusyCommandReply when the key has an active goal. The key stays
+// busy from one goal turn to the next.
+const GoalBusyLine = "A goal runs. Send /goal pause first."
+
+// The paused reasons of the goal code.
+const (
+	ReasonStopped        = "stopped by /stop"
+	ReasonSessionChanged = "the session changed"
+	ReasonChatEnded      = "the chat ended"
+	ReasonLoop           = "the turn crashed the gateway 3 times"
 )
 
 // stopButton is on the reply to a command that cannot run during a task. It runs /stop.
@@ -137,6 +156,63 @@ func stopKeep(c *CommandCtx) {
 	default:
 		c.reply("%s", StopReply)
 	}
+}
+
+// errGoalNotActive tells pauseGoal that the session has no active goal, so the update
+// writes nothing.
+var errGoalNotActive = errors.New("gateway: the goal is not active")
+
+// pauseGoal pauses the goal of the session with reason when its status is active. A
+// parked goal is active, so it pauses too, and its wait barrier is cleared. It returns
+// false when the session has no active goal, or when d has no goal manager.
+func pauseGoal(ctx context.Context, d *Deps, sessionID, reason string) (bool, error) {
+	if d == nil || d.Goals == nil {
+		return false, nil
+	}
+	_, err := d.Goals.Update(ctx, sessionID, func(st *goals.State, exists bool) error {
+		if !exists || st.Status != goals.StatusActive {
+			return errGoalNotActive
+		}
+		st.SetStatus(goals.StatusPaused, reason)
+		st.ClearWait()
+		return nil
+	})
+	// A wake timer of the goal stays. IsCurrent is false for the new epoch, so the timer
+	// does nothing when it fires.
+	switch {
+	case errors.Is(err, errGoalNotActive):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	return true, nil
+}
+
+// stopGoalText returns the reply to /stop or /stop keep. When a goal paused, a reply with
+// no task becomes GoalPausedLine, and another reply gets GoalPausedLine as a new line.
+func stopGoalText(reply string, paused bool) string {
+	switch {
+	case !paused:
+		return reply
+	case reply == NoTaskReply:
+		return GoalPausedLine
+	default:
+		return reply + "\n" + GoalPausedLine
+	}
+}
+
+// pauseGoalForStop pauses the active goal of sess for /stop and /stop keep, and removes
+// the queued goal turns of key. A failure is logged, and the stop goes on.
+func (g *Gateway) pauseGoalForStop(ctx context.Context, key string, sess *sessions.Session) bool {
+	if g.Deps == nil || g.Deps.Goals == nil || sess == nil {
+		return false
+	}
+	paused, err := pauseGoal(ctx, g.Deps, sess.ID, ReasonStopped)
+	if err != nil {
+		g.logger().Warn("gateway: cannot pause the goal for /stop", "key", key, "session", sess.ID, "err", err.Error())
+	}
+	g.dropGoalTurns(key)
+	return paused
 }
 
 // cmdSteer gives the text to the Steer hook of the channel, which sends the reply.
@@ -301,13 +377,17 @@ func (g *Gateway) stopKey(key string) bool {
 	g.mu.Lock()
 	ks := g.key(key)
 	had := ks.current != nil || ks.running != nil
+	var workCancel context.CancelFunc
 	if ks.current != nil {
 		// A stop after /now or /stop keep also drops the steer that the turn holds.
 		ks.current.discard, ks.current.takeOver = true, false
+		workCancel = ks.current.cancel
 	}
 	rs := ks.running
+	var stepCancel context.CancelFunc
 	if rs != nil {
 		rs.stopped = true
+		stepCancel = rs.StepCancel
 	}
 	dropped := ks.queue
 	ks.queue = nil
@@ -332,6 +412,14 @@ func (g *Gateway) stopKey(key string) bool {
 	if rs != nil {
 		rs.Cancel()
 	}
+	// This ends the judge call and the gates of a running goal step.
+	if stepCancel != nil {
+		stepCancel()
+	}
+	// This ends the draft call of /goal draft, so the key does not wait for the model.
+	if workCancel != nil {
+		workCancel()
+	}
 	if g.Deps.CancelKey != nil {
 		g.Deps.CancelKey(key)
 	}
@@ -350,15 +438,19 @@ func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
 	g.mu.Lock()
 	ks := g.key(key)
 	stopped = ks.current != nil || ks.running != nil
+	var workCancel context.CancelFunc
 	if ks.current != nil {
 		// A turn that starts now runs no agent. The steer that the turn holds becomes the
 		// next turn.
 		ks.current.discard = true
 		ks.current.takeOver = true
+		workCancel = ks.current.cancel
 	}
 	rs := ks.running
+	var stepCancel context.CancelFunc
 	if rs != nil {
 		rs.stopped = true
+		stepCancel = rs.StepCancel
 	}
 	for _, p := range ks.queue {
 		// next drops a queued slash command, so it does not count.
@@ -372,6 +464,14 @@ func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
 	g.sendMarker(op)
 	if rs != nil {
 		rs.Cancel()
+	}
+	// This ends the judge call and the gates of a running goal step.
+	if stepCancel != nil {
+		stepCancel()
+	}
+	// This ends the draft call of /goal draft, so the queue goes on at once.
+	if workCancel != nil {
+		workCancel()
 	}
 	if stopped {
 		g.logger().Info("gateway: the run is stopped, the queue stays", "key", key, "waiting", waiting)

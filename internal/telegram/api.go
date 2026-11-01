@@ -257,6 +257,9 @@ type SendMessageParams struct {
 	ReplyMarkup        *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 	ReplyParameters    *ReplyParameters      `json:"reply_parameters,omitempty"`
 	LinkPreviewOptions *LinkPreviewOptions   `json:"link_preview_options,omitempty"`
+	// DisableNotification sends the message with no sound. The goal line of a turn in
+	// "off" mode uses it.
+	DisableNotification bool `json:"disable_notification,omitempty"`
 }
 
 // LinkPreviewOptions are the link preview options of a message.

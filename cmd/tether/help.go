@@ -84,8 +84,8 @@ Examples:
 		Summary: "Start the interactive chat in this terminal.",
 		Usage:   "tether chat [flags]",
 		Body: `Start the interactive chat in this terminal. Type /exit or press Ctrl-D to stop.
-Ctrl-C stops the running turn. At the prompt, Ctrl-C ends the chat. A chat can
-run next to the gateway.
+Ctrl-C stops the running turn and pauses an active goal. At the prompt, Ctrl-C
+ends the chat. A chat can run next to the gateway.
 
 Flags:
   --data-dir DIR       The data folder. The default is TETHER_HOME, then

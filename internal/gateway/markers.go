@@ -202,11 +202,12 @@ func (w *markerWriter) run(op markerOp) {
 
 // queuedTexts returns the texts of the queued messages for a marker. A slash command is
 // left out, because the queue drops it. Lost counts the images and the files of a message,
-// because the marker keeps the text only.
+// because the marker keeps the text only. A goal turn is left out, so a restart does not
+// run an old continuation. The goal state makes the continuation again.
 func queuedTexts(q []*pendingTurn) []sessions.QueuedText {
 	var out []sessions.QueuedText
 	for _, p := range q {
-		if isCommandText(p.in) {
+		if p.goalTurn || isCommandText(p.in) {
 			continue
 		}
 		out = append(out, sessions.QueuedText{Text: p.in.Text, Lost: len(p.in.Images) + len(p.in.Files)})

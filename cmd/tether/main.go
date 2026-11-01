@@ -197,6 +197,8 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 		HistoryFile: filepath.Join(dir, ".history"),
 		Deps:        a.Deps(),
 	}
+	// A process exit wakes a goal of the chat through the waker of the CLI.
+	a.AttachCLI(cli)
 	if err := cli.Run(ctx); err != nil {
 		a.Log.Error("chat failed", "err", err.Error())
 		fmt.Fprintf(stderr, "chat: %v\n", err)

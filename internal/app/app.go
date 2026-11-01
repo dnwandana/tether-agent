@@ -29,6 +29,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/goals"
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/obs"
@@ -120,8 +121,20 @@ type App struct {
 	// Batches runs the background delegation batches. It is nil outside the gateway role,
 	// because only the gateway router can deliver the results as a new turn.
 	Batches *agent.Batches
+	// Goals keeps the standing goal of each session and runs the step after each turn.
+	Goals *goals.Manager
+	// Procs records the background processes of the terminal tool. A process exit wakes a
+	// goal that waits on it.
+	Procs *tools.ProcRegistry
 
 	telegramBaseURL string
+	// terminal is the registered terminal tool. The goal gates run through it.
+	terminal *tools.TerminalTool
+	// gatewayRole is true when New got Options.Gateway.
+	gatewayRole bool
+	// cliWaker is the goal waker of the CLI that AttachCLI attached. It stays nil in the
+	// gateway role.
+	cliWaker atomic.Pointer[gateway.GoalWaker]
 
 	logFile io.Closer
 	gwOnce  sync.Once
@@ -231,6 +244,8 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	}
 
 	a.Registry = tools.NewRegistry()
+	a.gatewayRole = opts.Gateway
+	a.Procs = tools.NewProcRegistry()
 	a.registerTools(opts.Gateway)
 	a.startMCP(ctx, cfgPath)
 	if opts.Gateway {
@@ -265,7 +280,106 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	// The chat type and the topic of a Telegram session go into its system prompt.
 	a.Agent.ChatInfo = telegram.ChatInfo(a.Cfg.Telegram, telegram.User{})
 	a.registerDelegation(opts.Gateway)
+	// The open items of the todo list go to the end of a compaction summary.
+	a.Agent.Compactor.Todo = a.todoSnapshot
+	a.Goals = goals.NewManager(a.goalDeps())
+	// A process exit can lift the barrier of a goal that waits on that process.
+	a.Procs.OnExit(func(sessionID string, _ int) { a.wakeGoal(context.Background(), sessionID) })
 	return a, nil
+}
+
+// goalDeps returns the deps of the goal manager. Only the gateway role runs background
+// batches, so the chat role counts no batch.
+func (a *App) goalDeps() goals.Deps {
+	d := goals.Deps{
+		Store:       &goals.Store{DB: a.DB},
+		Sessions:    a.Store,
+		Cfg:         func() config.GoalsConfig { return a.Cfg.Goals },
+		ProviderFor: a.Agent.ProviderFor,
+		ChainFor:    func(entry string) provider.Provider { return a.Set.ChainFor(entry, "") },
+		Meta:        a.Agent.Meta,
+		Procs:       a.Procs,
+		Exec:        a.goalExec,
+		TodoOpen:    a.todoOpen,
+		Alive:       goals.PIDAlive,
+		Now:         time.Now,
+		Log:         a.Log,
+	}
+	if a.gatewayRole {
+		d.RunningBatches = a.Batches.Running
+	}
+	return d
+}
+
+// goalExec runs a gate command of the goal of sess through the terminal tool. The gate gets
+// the folder of the process and the child environment with no .env secrets.
+func (a *App) goalExec(ctx context.Context, sess *sessions.Session, command string, timeout time.Duration) (string, int, error) {
+	return a.terminal.Exec(ctx, a.NewEnv(sess, sess.Source), command, "", timeout)
+}
+
+// todoItems returns the todo list of a session. A load error logs a warning and gives no
+// items.
+func (a *App) todoItems(ctx context.Context, sessionID string) []tools.TodoItem {
+	values, err := a.todoValues(ctx, sessionID)
+	if err != nil {
+		a.Log.Warn("todo: cannot read the session of the task list", "session", sessionID, "err", err.Error())
+		return nil
+	}
+	items, err := tools.LoadTodos(ctx, a.Store, values, sessionID)
+	if err != nil {
+		a.Log.Warn("todo: cannot restore the task list from the history", "session", sessionID, "err", err.Error())
+		return nil
+	}
+	return items
+}
+
+// todoValues returns the Values map that holds the todo list of a session. A delegate_task
+// child keeps its list in the Values map of its own run, not in a.values. Thus a child gets a
+// new empty map each time: the load reads the newest stored result and adds no a.values entry.
+func (a *App) todoValues(ctx context.Context, sessionID string) (map[string]any, error) {
+	a.valuesMu.Lock()
+	v, ok := a.values[sessionID]
+	a.valuesMu.Unlock()
+	if ok {
+		return v, nil
+	}
+	sess, err := a.Store.Get(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if sess.Kind == agent.KindSubagent {
+		return map[string]any{}, nil
+	}
+	return a.sessionValues(sessionID), nil
+}
+
+// todoSnapshot returns the open items of the todo list for a compaction summary, or "".
+func (a *App) todoSnapshot(ctx context.Context, sessionID string) string {
+	return tools.FormatTodoSnapshot(a.todoItems(ctx, sessionID))
+}
+
+// todoOpen returns the open items of the todo list for the goal judge, or "".
+func (a *App) todoOpen(ctx context.Context, sessionID string) string {
+	return tools.FormatOpenTodos(a.todoItems(ctx, sessionID), 2000)
+}
+
+// wakeGoal checks the barrier of the goal of sessionID after an event, for example a
+// process exit or a batch result. The gateway role uses the waker of the gateway. The chat
+// role uses the waker of the attached CLI, and does nothing when no CLI is attached.
+func (a *App) wakeGoal(ctx context.Context, sessionID string) {
+	if a.gatewayRole {
+		a.Gateway().GoalWaker().Wake(ctx, sessionID)
+		return
+	}
+	if w := a.cliWaker.Load(); w != nil {
+		w.Wake(ctx, sessionID)
+	}
+}
+
+// AttachCLI keeps the goal waker of c, so that an event wakes a goal of the CLI. The app does
+// not build the CLI.
+func (a *App) AttachCLI(c *gateway.CLI) {
+	a.cliWaker.Store(c.GoalWaker())
 }
 
 // registerDelegation registers delegate_task over the agent. Only the gateway
@@ -279,7 +393,14 @@ func (a *App) registerDelegation(gatewayRole bool) {
 			DB:  a.DB,
 			Log: a.Log,
 			Enqueue: func(ctx context.Context, key, text string) error {
-				return a.Gateway().Enqueue(ctx, key, text)
+				if err := a.Gateway().Enqueue(ctx, key, text); err != nil {
+					return err
+				}
+				// A batch result can lift the barrier of a goal that waits on the batches.
+				if sess, err := a.Store.Active(ctx, key); err == nil && sess != nil {
+					a.wakeGoal(ctx, sess.ID)
+				}
+				return nil
 			},
 			// RecoverLost reports only the batches of the channels of this process.
 			Owns: func(key string) bool {
@@ -508,7 +629,7 @@ func (a *App) registerTools(gatewayRole bool) {
 	cfg := a.Cfg
 	spill := filepath.Join(a.DataDir, "cache", "spill")
 	a.WebClient = tools.GuardedClient(cfg.Web.BlockPrivateNetworks, 30*time.Second, 3)
-	a.RegisterTool(&tools.TerminalTool{
+	a.terminal = &tools.TerminalTool{
 		DefaultTimeout: time.Duration(cfg.Terminal.DefaultTimeoutS) * time.Second,
 		DotEnv:         a.DotEnv,
 		// The skill RequiredEnv names of the session reach the child too.
@@ -517,7 +638,9 @@ func (a *App) registerTools(gatewayRole bool) {
 		},
 		SpillDir:  spill,
 		InGateway: gatewayRole,
-	})
+		Procs:     a.Procs,
+	}
+	a.RegisterTool(a.terminal)
 	a.RegisterTool(tools.ReadFileTool{})
 	// With Protected nil, the file tools refuse the protected paths of env.DataDir.
 	a.RegisterTool(tools.WriteFileTool{})
@@ -527,6 +650,8 @@ func (a *App) registerTools(gatewayRole bool) {
 	a.RegisterTool(tools.MemoryTool{Store: a.Memory})
 	a.RegisterTool(tools.ClarifyTool{Timeout: time.Duration(cfg.Approvals.TimeoutS) * time.Second})
 	a.RegisterTool(tools.SessionSearchTool{Store: a.Store, MaxChars: cfg.Context.ToolOutputMaxChars})
+	// Sessions lets the first call after a restart restore the list from the history.
+	a.RegisterTool(tools.TodoTool{Sessions: a.Store})
 	a.RegisterTool(tools.SkillViewTool{Catalog: a.Skills})
 	a.RegisterTool(tools.SkillsListTool{Catalog: a.Skills})
 	a.RegisterTool(tools.SkillManageTool{Mgr: &skills.Manager{Dir: a.Skills.Dir, Guard: cfg.Skills.Guard}, Catalog: a.Skills})
@@ -657,20 +782,26 @@ func (a *App) NewEnv(sess *sessions.Session, channel string) *tools.Env {
 		return env
 	}
 	env.SessionID, env.SessionKey, env.Kind = sess.ID, sess.Key, sess.Kind
+	env.Values = a.sessionValues(sess.ID)
+	return env
+}
+
+// sessionValues returns the Values map of the tool context of a session. It makes the map
+// when it is missing.
+func (a *App) sessionValues(sessionID string) map[string]any {
 	a.valuesMu.Lock()
-	v, ok := a.values[sess.ID]
+	defer a.valuesMu.Unlock()
+	v, ok := a.values[sessionID]
 	if !ok {
 		v = map[string]any{}
-		a.values[sess.ID] = v
+		a.values[sessionID] = v
 	}
-	a.valuesMu.Unlock()
-	env.Values = v
-	return env
+	return v
 }
 
 // Deps returns the parts that the channels and the slash commands use.
 func (a *App) Deps() *gateway.Deps {
-	return &gateway.Deps{
+	d := &gateway.Deps{
 		Cfg:       a.Cfg,
 		Store:     a.Store,
 		Agent:     a.Agent,
@@ -687,7 +818,14 @@ func (a *App) Deps() *gateway.Deps {
 		// /stop, /new, and /reset cancel the background delegation children of the key.
 		CancelKey: a.cancelKey,
 		ToolLine:  func(tool, preview string) string { return telegram.ToolLine("all", tool, preview, "") },
+		Goals:     a.Goals,
 	}
+	// A goal notice with no turn goes to Telegram with its buttons. AddTelegram sets
+	// a.Telegram before its first call of Gateway, so the gateway gets this path.
+	if a.Telegram != nil {
+		d.SendNotice = a.Telegram.SendNotice
+	}
+	return d
 }
 
 // beforeNew starts the review of the session that /new or /reset replaces. The review
@@ -829,8 +967,14 @@ func (a *App) Housekeeping(ctx context.Context) {
 	// The cut turns resume before the lost batches are reported. The turn of a lost-batch
 	// notice writes the marker of its key, so it replaces the queued texts of the marker.
 	freshness := time.Duration(a.Cfg.Agent.ResumeFreshnessS) * time.Second
-	if err := a.Gateway().ResumeInterrupted(ctx, cut, freshness); err != nil {
+	outcomes, err := a.Gateway().ResumeInterrupted(ctx, cut, freshness)
+	if err != nil {
 		a.Log.Warn("housekeeping: cannot resume the cut turns", "err", err.Error())
+	}
+	// The goal restart step reads the outcomes, so a goal turn that resumed gets no second
+	// continuation.
+	if err := a.Gateway().ResumeGoals(ctx, cut, freshness, outcomes); err != nil {
+		a.Log.Warn("housekeeping: cannot restart the goals", "err", err.Error())
 	}
 	// A restart loses the running background children. Each parent key gets a notice turn.
 	if a.Batches != nil {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/goals"
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/provider"
@@ -65,6 +66,14 @@ type CommandHooks struct {
 	// turn of 0 is the current turn. It returns false when nothing waits, the number of
 	// the turns that wait, and true for stopping when the gateway stops.
 	Now func(turn int) (took bool, waiting int, stopping bool)
+	// StartGoalTurn starts a goal turn of the key: the kick turn of a new goal, or the
+	// turn of /goal resume. On a busy key, the turn waits at the end of the queue. Nil
+	// starts no turn.
+	StartGoalTurn func(c goals.Continuation)
+	// DropGoalTurns removes the queued goal turns of the key. Nil does nothing.
+	DropGoalTurns func()
+	// ArmWake arms the waker of the key for a goal that waits on a barrier. Nil does nothing.
+	ArmWake func(sessionID string, st goals.State)
 }
 
 // Command is one slash command.
@@ -286,11 +295,21 @@ func cmdResume(ctx context.Context, c *CommandCtx, args string) error {
 	if err != nil {
 		return err
 	}
+	old := c.Session
+	moved := old != nil && old.ID != s.ID
+	if moved {
+		pauseOldGoal(ctx, c, old)
+	}
 	if err := c.store().SetActive(ctx, c.Key, s.ID); err != nil {
 		return err
 	}
 	c.Session = s
 	c.send(backReply(s, n, nowFunc()))
+	// The back reply goes out first, and then the goal turn starts. A resume of the
+	// same session keeps its goal and starts no turn.
+	if moved {
+		continueGoal(ctx, c, s)
+	}
 	return nil
 }
 
@@ -323,6 +342,7 @@ func cmdNew(ctx context.Context, c *CommandCtx, _ string) error {
 			c.Deps.Agent.ReviewBeforeNew(ctx, old)
 		}
 	}
+	pauseOldGoal(ctx, c, old)
 	tmpl := sessionTemplate(c.Key, old)
 	tmpl.Key = c.Key
 	s, err := c.store().Create(ctx, tmpl)
@@ -406,6 +426,7 @@ func cmdArchive(ctx context.Context, c *CommandCtx, _ string) error {
 		return err
 	}
 	s.Archived = true
+	pauseOldGoal(ctx, c, s)
 	text := fmt.Sprintf("🗄 **Archived \"%s\"**\nThe session list does not show it now.", sessionTitle(s.Title))
 	if !c.interactive() {
 		text += fmt.Sprintf("\nSend /resume %s to undo.", s.ID)
@@ -824,6 +845,8 @@ func cmdFork(ctx context.Context, c *CommandCtx, args string) error {
 	if err != nil {
 		return err
 	}
+	// The fork gets no goal row.
+	pauseOldGoal(ctx, c, s)
 	if err := c.store().SetActive(ctx, c.Key, f.ID); err != nil {
 		return err
 	}
@@ -876,6 +899,7 @@ const helpTelegram = "📖 **Commands**\n\n" +
 	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
+	"/goal · keep working toward a goal\n/todo · see the task list\n" +
 	"/approve · /deny · answer an approval\n\n" +
 	"**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 
@@ -887,7 +911,8 @@ const helpCLI = "📖 **Commands**\n\n" +
 	"/delete · delete a session\n\n" +
 	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
-	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n\n" +
+	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
+	"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
 	"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
 
 func cmdHelp(_ context.Context, c *CommandCtx, _ string) error {

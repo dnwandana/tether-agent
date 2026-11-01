@@ -13,12 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
+	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
 // The kv keys of the home channel.
@@ -147,6 +149,24 @@ func (ch *Channel) Send(ctx context.Context, to gateway.Target, msg gateway.Outb
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// SendNotice sends a goal notice that has no turn, for example a restart pause or a
+// wake. The text is common Markdown. The buttons are command buttons for the user of
+// the session, so only that user can tap them. A session with no user ID gets no
+// buttons.
+func (ch *Channel) SendNotice(ctx context.Context, key string, sess *sessions.Session, r gateway.Reply) error {
+	if sess == nil {
+		return fmt.Errorf("telegram notice for key %s: no session", key)
+	}
+	chatID, err := strconv.ParseInt(sess.ChatID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("telegram notice: the chat id %q is not a number", sess.ChatID)
+	}
+	// Send puts the raw action into a button, and commandCallback refuses data with no
+	// "cmd:" head. So a notice uses cmdKeyboard and not Send.
+	_, err = ch.sendText(ctx, chatID, sess.ThreadID, r.Text, sendOpts{keyboard: cmdKeyboard(sess.UserID, r.Buttons)})
+	return err
 }
 
 // handleUpdate handles one update. The order is: the free-text answer hook, the gate, the
@@ -851,9 +871,11 @@ type tgRenderer struct {
 }
 
 var (
-	_ gateway.Renderer       = (*tgRenderer)(nil)
-	_ gateway.ReplyRenderer  = (*tgRenderer)(nil)
-	_ gateway.HandleRenderer = (*tgRenderer)(nil)
+	_ gateway.Renderer         = (*tgRenderer)(nil)
+	_ gateway.ReplyRenderer    = (*tgRenderer)(nil)
+	_ gateway.HandleRenderer   = (*tgRenderer)(nil)
+	_ gateway.GoalLineRenderer = (*tgRenderer)(nil)
+	_ agent.PlanSink           = (*tgRenderer)(nil)
 )
 
 func (ch *Channel) newRenderer(ctx context.Context, chatID int64, threadID string, isDM bool) *tgRenderer {
@@ -900,6 +922,20 @@ func (r *tgRenderer) Delta(text string) {
 func (r *tgRenderer) ToolStart(name, preview string) {
 	if r.begin() {
 		r.status.Add(r.ctx, Source{}, name, preview, "")
+	}
+}
+
+// GoalLine shows the goal line of a goal turn at the start of the turn.
+func (r *tgRenderer) GoalLine(line string) {
+	if r.begin() {
+		r.status.SetGoalLine(r.ctx, line)
+	}
+}
+
+// Plan shows the plan block after a todo_list call of the main agent.
+func (r *tgRenderer) Plan(items []tools.TodoItem) {
+	if r.begin() {
+		r.status.SetPlan(r.ctx, items)
 	}
 }
 

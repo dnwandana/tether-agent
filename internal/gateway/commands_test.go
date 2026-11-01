@@ -536,6 +536,7 @@ func TestHelpTelegram(t *testing.T) {
 		"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/delete · delete a session\n\n" +
 		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
+		"/goal · keep working toward a goal\n/todo · see the task list\n" +
 		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 	run(t, c, "/help")
 	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
@@ -552,7 +553,8 @@ func TestHelpCLI(t *testing.T) {
 	want := "📖 **Commands**\n\n**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
 		"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/delete · delete a session\n\n" +
 		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
-		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n\n" +
+		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
+		"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
 		"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat\n"
 	if out.String() != want {
 		t.Fatalf("got:\n%s", out)

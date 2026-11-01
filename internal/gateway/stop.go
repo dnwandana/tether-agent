@@ -139,6 +139,9 @@ func (g *Gateway) StopStarted() {
 // It also edits each open busy ack to say that the message runs after the restart, and it
 // waits at most 2 s for these edits.
 func (g *Gateway) BeginStopping(ctx context.Context) {
+	// No wake may enqueue a turn after the stop. A parked goal keeps its barrier, and the
+	// restart arms its timers again.
+	g.GoalWaker().Stop()
 	type final struct {
 		op markerOp
 		// in gives the session of a key that has no marker session yet.
