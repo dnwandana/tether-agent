@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
@@ -17,6 +18,21 @@ import (
 
 // SummaryPrefix starts the message that replaces the compacted messages in the model view.
 const SummaryPrefix = "[conversation summary]\n"
+
+// TodoSnapshotHeader starts the task list at the end of a summary. The next compaction
+// removes the list from this header to the end, so the summary keeps one list (Hermes
+// TODO_INJECTION_HEADER).
+const TodoSnapshotHeader = "[Your active task list was preserved across context compression]"
+
+// StripTodoSnapshot returns summary without the task list snapshot: it removes the text
+// from the first TodoSnapshotHeader to the end, and the white space before the header.
+func StripTodoSnapshot(summary string) string {
+	before, _, found := strings.Cut(summary, TodoSnapshotHeader)
+	if !found {
+		return summary
+	}
+	return strings.TrimRightFunc(before, unicode.IsSpace)
+}
 
 // maxFailures is the number of failed compactions in a row after which the user is told.
 const maxFailures = 3
@@ -105,6 +121,9 @@ type Compactor struct {
 	// OnCompact runs in its own goroutine when a compaction starts. view is the full model
 	// view, and view[start:end] is the part that the summary replaces. It can be nil.
 	OnCompact func(ctx context.Context, s *sessions.Session, view []provider.Message, start, end int)
+	// Todo returns the task list snapshot of the session for the end of the summary, or "".
+	// It can be nil.
+	Todo func(ctx context.Context, sessionID string) string
 
 	mu       sync.Mutex
 	failures map[string]int
@@ -162,6 +181,14 @@ func (c *Compactor) Maybe(ctx context.Context, s *sessions.Session, prov provide
 			return false, nil
 		}
 		return false, c.fail(s.ID, err)
+	}
+	// A summary model can copy the old snapshot, and the summary must keep one snapshot.
+	// The snapshot is part of the stored summary, so each later request has the same bytes.
+	summary = StripTodoSnapshot(summary)
+	if c.Todo != nil {
+		if snap := c.Todo(ctx, s.ID); snap != "" {
+			summary += "\n\n" + snap
+		}
 	}
 	if _, err := c.DB.ExecContext(context.WithoutCancel(ctx), `INSERT INTO compactions
 		(session_id, from_message_id, upto_message_id, summary, created_at) VALUES (?, ?, ?, ?, ?)`,
@@ -342,7 +369,8 @@ func serialize(msgs []provider.Message) string {
 		content := cutMiddle(m.Content)
 		switch {
 		case m.Role == provider.RoleUser && strings.HasPrefix(m.Content, SummaryPrefix):
-			parts = append(parts, "[PREVIOUS SUMMARY]:\n"+strings.TrimPrefix(m.Content, SummaryPrefix))
+			// The old snapshot does not go to the summary model. Maybe adds a new one.
+			parts = append(parts, "[PREVIOUS SUMMARY]:\n"+StripTodoSnapshot(strings.TrimPrefix(m.Content, SummaryPrefix)))
 		case m.Role == provider.RoleTool:
 			parts = append(parts, fmt.Sprintf("[TOOL RESULT %s]: %s", m.ToolCallID, content))
 		case m.Role == provider.RoleAssistant:

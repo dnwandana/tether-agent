@@ -295,3 +295,69 @@ func TestBuildViewWithoutCompactionIsStored(t *testing.T) {
 		t.Fatal(v)
 	}
 }
+
+const testSnap = TodoSnapshotHeader + "\n- [ ] 3. Run the cron tests 20 times (pending)"
+
+func TestCompactionAddsOneTodoSnapshot(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	var asked []string
+	c.Todo = func(_ context.Context, id string) string { asked = append(asked, id); return testSnap }
+	if did, err := c.Maybe(ctx, sess, fp, 1_000_000, true); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	comps, _ := LoadCompactions(ctx, c.DB, sess.ID)
+	if len(comps) != 1 || comps[0].Summary != "S\n\n"+testSnap || len(asked) != 1 || asked[0] != sess.ID {
+		t.Fatalf("%+v %v", comps, asked)
+	}
+}
+
+func TestCompactionWithNoOpenItemAddsNothing(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	c.Todo = func(context.Context, string) string { return "" }
+	if did, _ := c.Maybe(ctx, sess, fp, 1_000_000, true); !did {
+		t.Fatal("no compaction")
+	}
+	if comps, _ := LoadCompactions(ctx, c.DB, sess.ID); comps[0].Summary != "S" {
+		t.Fatalf("%q", comps[0].Summary)
+	}
+}
+
+func TestSecondCompactionStripsTheOldSnapshot(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	c.Todo = func(context.Context, string) string { return testSnap }
+	if did, _ := c.Maybe(ctx, sess, fp, 2000, false); !did {
+		t.Fatal("first")
+	}
+	appendPlain(t, c.Store, sess.ID, 80, 40)
+	// The summary model copies the old snapshot into its reply.
+	fp.reply = "S2\n\n" + TodoSnapshotHeader + "\n- [ ] 1. old item (pending)"
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal("second", err)
+	}
+	body := fp.requests[1].Messages[0].Content
+	if !strings.Contains(body, "[PREVIOUS SUMMARY]:\nS\n") || strings.Contains(body, TodoSnapshotHeader) {
+		t.Fatalf("the old snapshot must not go to the summary model: %q", body)
+	}
+	view := viewOf(t, c, sess)
+	if summaries(view) != 1 {
+		t.Fatal(summaries(view))
+	}
+	for _, m := range view {
+		if strings.HasPrefix(m.Content, SummaryPrefix) && (m.Content != SummaryPrefix+"S2\n\n"+testSnap || strings.Count(m.Content, TodoSnapshotHeader) != 1) {
+			t.Fatalf("%q", m.Content)
+		}
+	}
+}
+
+func TestStripTodoSnapshot(t *testing.T) {
+	for in, want := range map[string]string{
+		"S\n\n" + testSnap:                 "S",
+		"S":                                "S",
+		testSnap:                           "",
+		"a\n" + TodoSnapshotHeader + "\nb": "a",
+	} {
+		if got := StripTodoSnapshot(in); got != want {
+			t.Errorf("StripTodoSnapshot(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
