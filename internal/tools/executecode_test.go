@@ -241,7 +241,7 @@ except ToolError as e:
 // gateFunc is an Approver from a function.
 type gateFunc func(cmd string) error
 
-func (g gateFunc) CheckCommand(_ context.Context, _ *Env, cmd string) error { return g(cmd) }
+func (g gateFunc) CheckCommand(_ context.Context, _ *Env, cmd, _ string) error { return g(cmd) }
 
 func TestLongScratchRootKeepsTheSocketShort(t *testing.T) {
 	pythonOrSkip(t)
@@ -288,5 +288,61 @@ func TestExecuteCodeChildEnvInGateway(t *testing.T) {
 	}
 	if has(ExecuteCodeTool{}.childEnv(&Env{Kind: "chat"})) {
 		t.Fatal("outside the gateway, no TETHER_GATEWAY")
+	}
+}
+
+func TestExecuteCodePassesCleanSummary(t *testing.T) {
+	var got []string
+	env := visEnv()
+	env.Gate = recApprover{summaries: &got}
+	tool := ExecuteCodeTool{Python: "/usr/bin/python3", ScratchRoot: t.TempDir()}
+	runToolEnvErr(t, tool, `{"code":"print(1)","description":"Print\u200B one.\n"}`, env)
+	runToolEnvErr(t, tool, `{"code":"print(1)"}`, env)
+	if !slices.Equal(got, []string{"Print one.", ""}) {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestDescriptionIsLastSchemaProperty(t *testing.T) {
+	for _, tc := range []struct {
+		schema         json.RawMessage
+		required, word string
+	}{
+		{(&TerminalTool{}).Schema().Parameters, "command", "command"},
+		{ExecuteCodeTool{}.Schema().Parameters, "code", "script"},
+	} {
+		var keys struct {
+			Properties orderedKeys `json:"properties"`
+			Required   []string    `json:"required"`
+		}
+		if err := json.Unmarshal(tc.schema, &keys); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(keys.Properties); n == 0 || keys.Properties[n-1] != "description" {
+			t.Fatalf("description must be the last property: %v", keys.Properties)
+		}
+		if !slices.Equal(keys.Required, []string{tc.required}) {
+			t.Fatalf("required changed: %v", keys.Required)
+		}
+		var props struct {
+			Properties map[string]struct{ Type, Description string } `json:"properties"`
+		}
+		if err := json.Unmarshal(tc.schema, &props); err != nil {
+			t.Fatal(err)
+		}
+		want := "One short sentence for the user that tells what the " + tc.word +
+			` does, for example "Check that 6 Solana addresses use only base58 characters." The approval message shows it.`
+		if d := props.Properties["description"]; d.Type != "string" || d.Description != want {
+			t.Fatalf("%+v", d)
+		}
+	}
+}
+
+func TestTerminalStubKeepsTimeoutBeforeDescription(t *testing.T) {
+	// A script call such as terminal("ls", 30) must keep its meaning.
+	got := pySignature((&TerminalTool{}).Schema().Parameters)
+	want := "command, timeout_s=None, workdir=None, background=None, description=None, **kwargs"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

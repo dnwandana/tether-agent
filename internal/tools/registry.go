@@ -89,9 +89,10 @@ type Asker interface {
 	Ask(ctx context.Context, q Question) (Answer, error)
 }
 
-// Approver checks a shell command against the approval gate.
+// Approver checks a shell command against the approval gate. summary is the cleaned
+// description of the model, or empty.
 type Approver interface {
-	CheckCommand(ctx context.Context, env *Env, command string) error
+	CheckCommand(ctx context.Context, env *Env, command, summary string) error
 }
 
 // Result is the result of one tool call for the model.

@@ -148,7 +148,7 @@ func jsonString(s string) string {
 // allowAll is an Approver that lets each command run.
 type allowAll struct{}
 
-func (allowAll) CheckCommand(context.Context, *Env, string) error { return nil }
+func (allowAll) CheckCommand(context.Context, *Env, string, string) error { return nil }
 
 // denyAll is an Approver that blocks each command with reason and records the commands.
 type denyAll struct {
@@ -156,7 +156,7 @@ type denyAll struct {
 	seen   *[]string
 }
 
-func (d denyAll) CheckCommand(_ context.Context, _ *Env, command string) error {
+func (d denyAll) CheckCommand(_ context.Context, _ *Env, command, _ string) error {
 	if d.seen != nil {
 		*d.seen = append(*d.seen, command)
 	}
@@ -238,7 +238,7 @@ func TestGateApproverBuildsRequest(t *testing.T) {
 	p := &recPrompter{scope: security.ScopeDeny}
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
 	env := &Env{SessionID: "s1", SessionKey: "cli:ana", Kind: "subagent", Values: map[string]any{"child_name": "2/3"}}
-	err := g.CheckCommand(ctx, env, "rm -rf /tmp/x")
+	err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", "")
 	var be *security.BlockedError
 	if !errors.As(err, &be) || !strings.Contains(be.Reason, "BLOCKED by user") {
 		t.Fatal(err)
@@ -251,8 +251,27 @@ func TestGateApproverBuildsRequest(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	// A safe command needs no question.
-	if err := g.CheckCommand(ctx, env, "ls -la"); err != nil || len(p.reqs) != 1 {
+	if err := g.CheckCommand(ctx, env, "ls -la", ""); err != nil || len(p.reqs) != 1 {
 		t.Fatal(err, p.reqs)
+	}
+}
+
+func TestGateApproverPassesSummary(t *testing.T) {
+	p := &recPrompter{scope: security.ScopeDeny}
+	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
+	err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x", "Delete the old build folder.")
+	if len(p.reqs) != 1 || p.reqs[0].Summary != "Delete the old build folder." {
+		t.Fatalf("%+v", p.reqs)
+	}
+	// The gate does not read the summary. The text for the model keeps the pattern name.
+	if err == nil || !strings.Contains(err.Error(), "BLOCKED by user: delete in root path.") ||
+		strings.Contains(err.Error(), "old build folder") {
+		t.Fatal(err)
+	}
+	// An empty summary gives an empty field.
+	_ = g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x", "")
+	if len(p.reqs) != 2 || p.reqs[1].Summary != "" {
+		t.Fatalf("%+v", p.reqs)
 	}
 }
 
@@ -260,7 +279,7 @@ func TestGateApproverPassesRootKind(t *testing.T) {
 	p := &recPrompter{scope: security.ScopeDeny}
 	g := GateApprover{Gate: &security.Gate{Mode: "manual", CronMode: "approve"}, Prompter: p}
 	env := &Env{SessionID: "c1", Kind: "subagent", RootKind: "cron"}
-	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x"); err != nil || len(p.reqs) != 0 {
+	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", ""); err != nil || len(p.reqs) != 0 {
 		t.Fatal("a child of a cron run follows cron_mode:", err, p.reqs)
 	}
 }
@@ -269,11 +288,11 @@ func TestGateApproverResetSession(t *testing.T) {
 	p := &recPrompter{scope: security.ScopeSession}
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
 	env := &Env{SessionID: "s1"}
-	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x"); err != nil {
+	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", ""); err != nil {
 		t.Fatal(err)
 	}
 	g.ResetSession("s1")
-	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x"); err != nil || len(p.reqs) != 2 {
+	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", ""); err != nil || len(p.reqs) != 2 {
 		t.Fatal("the reset must remove the session answer:", err, len(p.reqs))
 	}
 	(GateApprover{}).ResetSession("s1")
@@ -284,7 +303,7 @@ func TestGateApproverSessionScopeHoldsForSession(t *testing.T) {
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
 	env := &Env{SessionID: "s1"}
 	for range 2 {
-		if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x"); err != nil {
+		if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -295,16 +314,16 @@ func TestGateApproverSessionScopeHoldsForSession(t *testing.T) {
 
 func TestGateApproverNoPrompterBlocksDangerous(t *testing.T) {
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}}
-	if err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x"); err == nil || !strings.Contains(err.Error(), "no user is present") {
+	if err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x", ""); err == nil || !strings.Contains(err.Error(), "no user is present") {
 		t.Fatal(err)
 	}
-	if err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, "echo hi"); err != nil {
+	if err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, "echo hi", ""); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestGateApproverNilGateFailsClosed(t *testing.T) {
-	if err := (GateApprover{}).CheckCommand(ctx, &Env{}, "echo hi"); err == nil || !strings.Contains(err.Error(), "approval gate missing") {
+	if err := (GateApprover{}).CheckCommand(ctx, &Env{}, "echo hi", ""); err == nil || !strings.Contains(err.Error(), "approval gate missing") {
 		t.Fatal(err)
 	}
 }
@@ -329,5 +348,25 @@ func TestTerminalChildEnvInGateway(t *testing.T) {
 	}
 	if has((&TerminalTool{}).childEnv(&Env{Kind: "chat"})) {
 		t.Fatal("outside the gateway, no TETHER_GATEWAY")
+	}
+}
+
+// recApprover blocks each command and records the summary that it gets.
+type recApprover struct{ summaries *[]string }
+
+func (r recApprover) CheckCommand(_ context.Context, _ *Env, _, summary string) error {
+	*r.summaries = append(*r.summaries, summary)
+	return &security.BlockedError{Reason: "BLOCKED"}
+}
+
+func TestTerminalPassesCleanSummary(t *testing.T) {
+	var got []string
+	env := newEnv(t)
+	env.Gate = recApprover{summaries: &got}
+	tool := &TerminalTool{DefaultTimeout: time.Minute}
+	runToolEnvErr(t, tool, `{"command":"ls","description":"  List\tthe\nfiles.\u202E "}`, env)
+	runToolEnvErr(t, tool, `{"command":"ls"}`, env)
+	if !slices.Equal(got, []string{"List the files.", ""}) {
+		t.Fatalf("%q", got)
 	}
 }

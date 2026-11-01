@@ -62,6 +62,9 @@ type ExecuteCodeTool struct {
 type executeCodeArgs struct {
 	Code     string `json:"code"`
 	TimeoutS int    `json:"timeout_s"`
+	// Description is the summary for the approval message. It is model text, so
+	// Run cleans it before the gate gets it.
+	Description string `json:"description"`
 }
 
 // Name returns "execute_code".
@@ -94,7 +97,8 @@ func (t ExecuteCodeTool) Schema() provider.ToolSchema {
   "type": "object",
   "properties": {
     "code": {"type": "string", "description": "The Python 3 script."},
-    "timeout_s": {"type": "integer", "description": "The timeout in seconds. The maximum and the default is ` + fmt.Sprint(timeout) + `."}
+    "timeout_s": {"type": "integer", "description": "The timeout in seconds. The maximum and the default is ` + fmt.Sprint(timeout) + `."},
+    "description": {"type": "string", "description": "One short sentence for the user that tells what the script does, for example \"Check that 6 Solana addresses use only base58 characters.\" The approval message shows it."}
   },
   "required": ["code"]
 }`),
@@ -128,7 +132,7 @@ func (t ExecuteCodeTool) Run(ctx context.Context, raw json.RawMessage, env *Env)
 	if env == nil || env.Gate == nil {
 		return "", toolErr("approval gate missing: execute_code cannot run a script without the approval gate")
 	}
-	if err := env.Gate.CheckCommand(ctx, env, a.Code); err != nil {
+	if err := env.Gate.CheckCommand(ctx, env, a.Code, security.CleanSummary(a.Description)); err != nil {
 		return "", toolErr("%s", err.Error())
 	}
 

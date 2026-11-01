@@ -252,6 +252,10 @@ LIMITS: 300 s, 50 tool calls, and 50000 bytes of stdout. The script runs in a sc
     "timeout_s": {
       "type": "integer",
       "description": "The timeout in seconds. The maximum and the default is 300."
+    },
+    "description": {
+      "type": "string",
+      "description": "One short sentence for the user that tells what the script does, for example \"Check that 6 Solana addresses use only base58 characters.\" The approval message shows it."
     }
   },
   "required": [
@@ -855,6 +859,10 @@ Run a shell command with bash -c on the host. The result is stdout and stderr to
     "background": {
       "type": "boolean",
       "description": "Start the command in the background and return its pid and log path at once."
+    },
+    "description": {
+      "type": "string",
+      "description": "One short sentence for the user that tells what the command does, for example \"Check that 6 Solana addresses use only base58 characters.\" The approval message shows it."
     }
   },
   "required": [

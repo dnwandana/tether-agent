@@ -279,7 +279,7 @@ type resetGate struct {
 	reset []string
 }
 
-func (g *resetGate) CheckCommand(context.Context, *tools.Env, string) error { return nil }
+func (g *resetGate) CheckCommand(context.Context, *tools.Env, string, string) error { return nil }
 
 func (g *resetGate) ResetSession(id string) {
 	g.mu.Lock()

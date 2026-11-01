@@ -56,6 +56,9 @@ type execArgs struct {
 	TimeoutS   int    `json:"timeout_s"`
 	Workdir    string `json:"workdir"`
 	Background bool   `json:"background"`
+	// Description is the summary for the approval message. It is model text, so
+	// Run cleans it before the gate gets it.
+	Description string `json:"description"`
 }
 
 // Name returns "terminal".
@@ -80,7 +83,8 @@ func (t *TerminalTool) Schema() provider.ToolSchema {
     "command": {"type": "string", "description": "The shell command to run."},
     "timeout_s": {"type": "integer", "description": "The timeout in seconds. The default is ` + strconv.Itoa(int(t.defaultTimeout().Seconds())) + `."},
     "workdir": {"type": "string", "description": "The working folder. A relative path starts at the session working folder."},
-    "background": {"type": "boolean", "description": "Start the command in the background and return its pid and log path at once."}
+    "background": {"type": "boolean", "description": "Start the command in the background and return its pid and log path at once."},
+    "description": {"type": "string", "description": "One short sentence for the user that tells what the command does, for example \"Check that 6 Solana addresses use only base58 characters.\" The approval message shows it."}
   },
   "required": ["command"]
 }`),
@@ -108,7 +112,7 @@ func (t *TerminalTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (
 	if env == nil || env.Gate == nil {
 		return "", toolErr("approval gate missing: terminal cannot run a command without the approval gate")
 	}
-	if err := env.Gate.CheckCommand(ctx, env, a.Command); err != nil {
+	if err := env.Gate.CheckCommand(ctx, env, a.Command, security.CleanSummary(a.Description)); err != nil {
 		return "", toolErr("%s", err.Error())
 	}
 	if a.Background {
@@ -255,11 +259,11 @@ type GateApprover struct {
 
 // CheckCommand builds the approval request from env and returns nil when command may
 // run. Otherwise it returns the reason for the model.
-func (g GateApprover) CheckCommand(ctx context.Context, env *Env, command string) error {
+func (g GateApprover) CheckCommand(ctx context.Context, env *Env, command, summary string) error {
 	if g.Gate == nil {
 		return errors.New("approval gate missing: the command cannot run without the approval gate")
 	}
-	req := security.ApprovalRequest{Command: command}
+	req := security.ApprovalRequest{Command: command, Summary: summary}
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
 		req.ChildName = childName(env)
