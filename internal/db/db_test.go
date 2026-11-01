@@ -57,7 +57,7 @@ func TestOpenCreatesSchemaAndWAL(t *testing.T) {
 		t.Fatal(mode)
 	}
 	for _, tbl := range []string{"sessions", "messages", "messages_fts", "compactions", "cron_jobs",
-		"approvals_always", "pairing", "active_session", "delegation_batches", "kv", "schema_version"} {
+		"approvals_always", "pairing", "active_session", "delegation_batches", "kv", "schema_version", "goals"} {
 		var n int
 		if err := d.QueryRow("SELECT count(*) FROM sqlite_master WHERE name=?", tbl).Scan(&n); err != nil {
 			t.Fatal(err)
@@ -65,6 +65,21 @@ func TestOpenCreatesSchemaAndWAL(t *testing.T) {
 		if n != 1 {
 			t.Fatal("missing table", tbl)
 		}
+	}
+}
+
+func TestTurnMarkersHaveInStep(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := d.Exec(`INSERT INTO turn_markers (session_key, session_id, updated_at) VALUES ('k', 's', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	var inStep int
+	if err := d.QueryRow(`SELECT in_step FROM turn_markers WHERE session_key = 'k'`).Scan(&inStep); err != nil || inStep != 0 {
+		t.Fatal(inStep, err)
 	}
 }
 
@@ -296,7 +311,7 @@ func TestMigrationTurnMarkers(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows.Close()
-	want := []string{"session_key", "session_id", "updated_at", "resumes", "queued"}
+	want := []string{"session_key", "session_id", "updated_at", "resumes", "queued", "in_step"}
 	if fmt.Sprint(cols) != fmt.Sprint(want) {
 		t.Fatalf("columns = %v, want %v", cols, want)
 	}
@@ -356,7 +371,7 @@ func TestMigrationReasoningEffortFrom002(t *testing.T) {
 	if effort != "" {
 		t.Fatalf("effort = %q, want ''", effort)
 	}
-	if v, err := d.SchemaVersion(ctx); err != nil || v != 3 {
+	if v, err := d.SchemaVersion(ctx); err != nil || v != LatestVersion() {
 		t.Fatal(v, err)
 	}
 }

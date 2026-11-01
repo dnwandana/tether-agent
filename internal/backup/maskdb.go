@@ -21,6 +21,7 @@ var freeTextColumns = map[string][]string{
 	"cron_jobs":          {"prompt", "last_output"},
 	"delegation_batches": {"tasks", "results"},
 	"turn_markers":       {"queued"},
+	"goals":              {"state"},
 }
 
 // stateColumns lists every other TEXT column of the schema. maskDB never masks these columns.
@@ -41,6 +42,7 @@ var stateColumns = map[string][]string{
 	"delegation_batches": {"id", "parent_session_key", "parent_session_id", "status"},
 	"kv":                 {"key", "value"},
 	"schema_version":     {"name"},
+	"goals":              {"session_id"},
 }
 
 // maskCell is one cell that maskDB changes.

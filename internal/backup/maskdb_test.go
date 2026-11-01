@@ -68,6 +68,9 @@ func maskTextColumns(t *testing.T, d *db.DB) map[string][]string {
 		}
 		tables = append(tables, n)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +92,9 @@ func maskTextColumns(t *testing.T, d *db.DB) map[string][]string {
 			if strings.EqualFold(typ, "TEXT") {
 				out[tbl] = append(out[tbl], name)
 			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
 		}
 		if err := rows.Close(); err != nil {
 			t.Fatal(err)
@@ -265,4 +271,19 @@ func TestMaskDBMasksReasoning(t *testing.T) {
 		t.Fatal(n, err)
 	}
 	maskAssertNoCell(t, d, maskSecret)
+}
+
+func TestMaskDBMasksGoalState(t *testing.T) {
+	d := maskOpenDB(t)
+	maskExec(t, d, `INSERT INTO goals (session_id, state, revision, updated_at) VALUES ('s1', ?, 1, 0)`,
+		`{"goal":"deploy with `+maskSecret+`","gates":[{"command":"curl -H `+maskSecret+`"}]}`)
+	n, err := maskDB(context.Background(), d, []string{maskSecret})
+	if err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	maskAssertNoCell(t, d, maskSecret)
+	var id string
+	if err := d.QueryRow(`SELECT session_id FROM goals`).Scan(&id); err != nil || id != "s1" {
+		t.Fatal(id, err)
+	}
 }
