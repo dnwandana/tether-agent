@@ -63,6 +63,7 @@ The full steps are in [Getting Started](Getting-Started).
 | [Tools](Tools) | See the toolsets, the browser, MCP servers, media, and delegation. |
 | [Skills](Skills) | Write, install, and manage skills, and learn what the skill guard does. |
 | [Cron](Cron) | Schedule jobs and send their results to Telegram. |
+| [Goals](Goals) | Keep the agent at work toward a goal, and follow its task list. |
 | [Security](Security) | Learn the approval gate, protected paths, secret redaction, and the rules for provider keys. |
 | [Running as a Service](Running-as-a-Service) | Run the gateway with systemd, update the binary, and back up your data. |
 | [Troubleshooting](Troubleshooting) | Fix common problems with the help of `tether doctor`. |

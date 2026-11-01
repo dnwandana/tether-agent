@@ -27,6 +27,7 @@ The code is in `internal/`. These are the main packages:
 |---|---|
 | `app` | Builds the program: config, database, providers, tools, MCP, and the agent. |
 | `gateway` | Runs one turn for each session key, the queue, the steer, the slash commands, and the CLI channel. |
+| `goals` | The goal state, the judge, the gates, and the after-turn step of `/goal`. |
 | `agent` | The turn loop, the system prompt, child runs, and background reviews. |
 | `tools` | The tool registry and the built-in tools. |
 | `config` | The config file, the defaults, and the table of provider presets. |
@@ -72,6 +73,10 @@ flowchart LR
 first, and then the queue. `/stop` drops the waiting steer and clears the queue. See
 [Commands](Commands#stop-or-take-over).
 
+When the session has an active goal, the goal step runs after each turn. It checks the wait,
+runs the gates, and calls the judge. On `continue`, a continuation turn goes to the end of
+the queue, so your waiting messages run first. See [Goals](Goals).
+
 ## One turn, step by step
 
 1. **Choose the chain.** A `/model` pin of the session puts its entry first. Then come
@@ -106,6 +111,8 @@ first, and then the queue. `/stop` drops the waiting steer and clears the queue.
    example a call to an unknown tool or arguments that are not valid JSON.
 8. **Start reviews.** After the turn, a background memory or skill review can start. See
    [Background reviews](#background-reviews).
+9. **Check the goal.** When the session has an active goal, the judge checks the answer.
+   See [Goals](Goals).
 
 When a restart cuts a turn, the gateway can continue the turn at the next start. See
 [Running as a Service](Running-as-a-Service).
@@ -231,6 +238,7 @@ turn starts at the first entry again. The reasoning replay needs this rule. See
 | A background review | The chain of the parent session. The review session copies the `/model` pin of the parent. |
 | A cron run | The chain that starts at the model pin of the job. A job with no pin uses the default chain. |
 | The judge of the `smart` approval mode | The default chain, which starts at `primary`. |
+| The goal judge and `/goal draft` | The chain that starts at `goals.judge_provider`. When the key is `""`, the chain of the session. |
 | `view_image` with no `agent.vision_provider` | The default chain, only when `primary` has `vision: true`. Only the entries with `vision: true` get the call. When `primary` has no vision, the agent does not register `view_image`. |
 | `view_image` with `agent.vision_provider` | That entry only, with no fallback chain. |
 | A media tool with the `endpoint` backend | That entry only, with no fallback chain. |
@@ -252,6 +260,8 @@ gets the call, else no value:
 - the compaction summary
 - the judge of the `smart` approval mode
 - `view_image`
+
+The goal judge and `/goal draft` always send the effort `low`.
 
 The levels are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The effort style
 of the preset tells the adapter how to send a level. The adapter changes the level to the
@@ -396,7 +406,7 @@ The writes are atomic and use a file lock. A memory change shows in the system p
 next session. See [Why the prompt stays the same](#why-the-prompt-stays-the-same).
 
 The `session_search` tool searches all past sessions with SQLite full text search. The agent uses
-it to find an old conversation.
+it to find an old conversation. It skips the goal judge sessions.
 
 ## Background reviews
 
@@ -451,6 +461,7 @@ A session is one conversation. Each session has a kind:
 | `cron` | One cron run. |
 | `subagent` | One `delegate_task` child run. |
 | `review` | One background review. |
+| `goal_judge` | The judge calls and the draft calls of one goal. |
 
 A **session key** names the place where a conversation occurs. Each key points to its current
 session. Examples of keys:
@@ -462,8 +473,8 @@ session. Examples of keys:
 `/new` starts a new session on the same key. `/sessions`, `/resume`, and `/fork` move between
 sessions. See [Commands](Commands).
 
-The gateway deletes `cron`, `subagent`, and `review` sessions after `sessions.retention_days`
-(default 90). Chat sessions always stay.
+The gateway deletes `cron`, `subagent`, `review`, and `goal_judge` sessions after
+`sessions.retention_days` (default 90). Chat sessions always stay.
 
 ## Compaction
 
@@ -478,7 +489,8 @@ smaller.
   a tool call from its result.
 - **What changes:** the chain of the session writes a structured summary of the messages in
   the middle. The summary has parts such as the active task, the goal, and the constraints. An
-  earlier summary goes into the new summary, so early facts are not lost.
+  earlier summary goes into the new summary, so early facts are not lost. An open task list of
+  `todo_list` goes at the end of the summary.
 - **Storage:** the stored messages never change. A row in the `compactions` table replaces a
   range of messages with the summary in the view that goes to the model.
 - **Failures:** after 3 failures in a row, you see a warning.
@@ -500,6 +512,7 @@ in name order when the program opens the database:
 - `001_init.sql` makes the main tables.
 - `002_turn_markers.sql` adds the `turn_markers` table.
 - `003_reasoning_effort.sql` adds `messages.reasoning` and `sessions.effort`.
+- `004_goals.sql` adds the `goals` table and `turn_markers.in_step`.
 
 Do not run a second query while the rows of a query are open. The database has one connection,
 so the second query waits for ever.
@@ -516,6 +529,7 @@ so the second query waits for ever.
 | `active_session` | The current session of each session key. |
 | `delegation_batches` | Background `delegate_task` batches. |
 | `turn_markers` | The running turns, so that a restart can continue them. |
+| `goals` | The goal of each session: the text, the status, the turns, the contract, the gates, and the wait. |
 | `kv` | Small values, for example the Telegram update offset and the home chat. |
 
 ## Cost tracking
@@ -545,6 +559,10 @@ To see the usage, use one of these commands:
 
 - `tether usage [today|7d|30d]` in a terminal.
 - `/usage [today|7d|30d|session]` in a chat.
+
+Each goal judge call and each `/goal draft` call is saved in a hidden `goal_judge` session.
+`/usage` and `tether usage` count it. `/usage session` counts the judge calls of the
+session.
 
 ## Heavy parts start late
 

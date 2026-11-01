@@ -22,6 +22,13 @@ copied from Hermes Agent. These parts include:
 - The skill install flow, the trust policy, the TRUSTED_REPOS list, the lockfile
 shape, and the install disclaimer text (internal/skills/, from
 tools/skills_hub.py, tools/skills_guard.py, and hermes_cli/skills_hub.py).
+- The /goal loop, the goal judge and draft prompts, the continuation prompts, the
+  contract parser, the gates, and the wait barriers (internal/goals/,
+  internal/gateway/, from hermes_cli/goals.py and hermes_cli/goal_command.py).
+- The todo_list tool, its compaction snapshot, its history restore, and its
+  tool note (internal/tools/todo*.go, internal/agent/prompt.go, from
+  tools/todo_tool.py, run_agent.py (the history restore, _hydrate_todo_store),
+  and agent/coding_context.py).
 - Test cases from the Hermes Agent test suite.
 
 Comments in the source code that name "Hermes" point to the origin of a rule

@@ -40,9 +40,12 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   2. `gateway.Gateway` runs one turn per session key. On a busy key, a plain text goes into
      the running turn as a steer (`agent.SteerQueue`), and other messages wait in the queue.
   3. `agent.Agent.RunTurn` runs the loop. It saves each message as soon as the message exists.
-  4. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool and the script text
+  4. When the session has an active goal, `goals.Manager` runs the after-turn step: the wait
+     check, the gates, and the judge. On `continue`, the gateway adds a continuation turn to
+     the end of the queue. The CLI runs it at once.
+  5. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool and the script text
      of `execute_code` go through `security.Gate.Check` (the approval gate).
-  5. `provider` streams the answer (`openai`, `anthropic`, or `responses` wire format). Each
+  6. `provider` streams the answer (`openai`, `anthropic`, or `responses` wire format). Each
      model call goes through a `provider.Chain` from `provider.Set.ChainFor`. The chain order
      is the pinned entry, `primary`, and then `agent.fallback`. The chain goes to the next
      entry only on an error that wraps `provider.ErrBeforeFirstByte`. `provider.Health` keeps
@@ -53,6 +56,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   (embedded, applied in name order). The gateway holds a `flock` on `gateway.lock`.
 - Import rules: `tools` cannot import `agent` (`tools.ChildSpecLite` mirrors
   `agent.ChildSpec`), and `gateway` cannot import `app` (`app` builds `gateway.Deps`).
+  `goals` cannot import `gateway`, `agent`, or `app`. `app` gives it the provider, cost, and
+  batch functions.
 - The browser, MCP servers, and media programs start on the first call and stop when idle.
   `app.New` must not do network work, because `TestStartupUnder100ms` measures startup. For
   example, `provider.ModelCache` makes no call before the first `/model <entry>`.

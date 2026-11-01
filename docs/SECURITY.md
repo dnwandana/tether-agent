@@ -16,6 +16,8 @@ limits. Read the limits before you give the agent access to a machine that holds
 - A cron script job runs with no approval. Only files in `~/.tether/scripts/` can run as
   cron scripts. The file tools cannot write in that folder, and a shell write to it needs an
   approval.
+- A goal gate runs before each judge call with no approval prompt. The owner writes the gate,
+  and the gate is checked once when the owner adds it.
 - In the default mode, the bot can send any local file that is not protected and not in a denied
   folder (see "Files that the bot sends"). Use strict mode for a bot that other people use.
 - The browser tools have no check for private addresses. All sessions share one Chrome profile.
@@ -102,6 +104,36 @@ The user answers with one of these scopes:
   `approvals_always` table of `state.db`. The running agent never writes its own `config.yaml`.
 - `deny`: refuses the command. The model gets the result `BLOCKED by user: <pattern name>`.
 
+### Goal gates
+
+A goal gate is a shell command that must pass before the goal judge runs. The owner adds a
+gate with `/goal gate add <command>`. Tether Agent checks the command one time, when the
+owner adds it. The checks are in this order:
+
+1. **Hardline list and gateway self-stop.** A command of the hardline list is refused. In the
+   gateway, a command that stops or restarts the gateway itself is also refused. The reply
+   gives the description of the pattern and "This command cannot be a gate."
+2. **Sudo guard.** When no sudo password is set, a `sudo -S` command is refused with "sudo
+   with a password on stdin cannot be a gate." When a sudo password is set, this check does
+   not refuse the command, and the next check applies.
+3. **Dangerous rules.** A command that matches a dangerous rule needs a confirmation. An
+   example is `sudo -S`, which matches the rule "sudo with privilege flag". Telegram shows the
+   **Add gate** and **Cancel** buttons. The buttons stop working after `approvals.timeout_s`,
+   and then the gate is not added. The CLI asks with `[y/N]`. The add check does not read
+   `approvals.mode`.
+4. **No match.** The gate is added at once.
+
+After the add check, these rules apply:
+
+- The gate runs before each judge call, with no approval prompt.
+- The gate gets the child environment, with no secrets. See
+  [The child environment](#the-child-environment). In the gateway, it also gets
+  `TETHER_GATEWAY=1`.
+- The gate runs in the folder where the Tether Agent process started, like a `terminal`
+  call with no `workdir`. Write `cd /path && <command>` for another folder.
+- The timeout is 300 seconds. A timeout and a cancel count as exit -1.
+- Only the owner can add a gate. Each paired user is an owner.
+
 ## Toolsets
 
 Each tool belongs to one named toolset, for example `terminal`, `file`, or `web`.
@@ -135,6 +167,7 @@ These child processes get an environment with no secrets:
 - cron scripts
 - MCP stdio servers
 - media commands
+- goal gates
 
 A name is a secret when `.env` has it, or when it ends in `_KEY`, `_TOKEN`, or `_SECRET`. A name
 that contains `PASSWORD` is also a secret. The check ignores case.
@@ -319,7 +352,8 @@ When no allowlist is set and `allow_all_users` is `false`, the bot permits nobod
 - A tap runs the command through the same queue as a typed command, so a busy session refuses
   the same commands.
 - A tap with data that is not a command gets `⚠️ This button is too old. Send the command again.`
-  A tap never starts a model turn.
+  Only the **Resume** button of a goal notice starts a model turn, the same as `/goal resume`.
+  A notice with no command message encodes the user ID of the session.
 
 ### Pairing codes
 

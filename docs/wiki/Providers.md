@@ -491,6 +491,7 @@ An entry other than `primary` can serve a special job:
 | `agent.delegation_provider` | The entry for `delegate_task` child runs. The child chain starts at this entry. `""` uses the `/model` pin of the parent session, with its entry and its model. A parent with no pin gives a child with no pin. |
 | `agent.vision_provider` | The entry for the `view_image` tool. `""` uses `primary` when it has `vision: true`. Else the agent has no `view_image` tool. |
 | `media.tts.provider`, `media.stt.provider`, `media.image.provider` | The entry for the `endpoint` backend of a media tool. `""` uses `primary`. |
+| `goals.judge_provider` | The entry for the goal judge and `/goal draft`. The chain is the entry, then `primary`, then `agent.fallback`. `""` uses the chain of the session. |
 
 ```yaml
 providers:

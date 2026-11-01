@@ -145,16 +145,19 @@ These keys are the ones that most users change. The full list is in
 | `agent.delegation_provider` | `""` | The provider for child runs. `""` uses the provider of the parent. |
 | `agent.vision_provider` | `""` | The provider for `view_image`. `""` uses `primary` when it has `vision: true`. |
 | `agent.restart_drain_timeout_s` | `180` | The maximum time in seconds that a stop or a restart waits for the running turns. |
-| `agent.resume_freshness_s` | `3600` | A turn that a restart or a crash cut continues at the next start when the cut is not older than this time, in seconds. `0` turns off the resume. |
+| `agent.resume_freshness_s` | `3600` | A turn that a restart or a crash cut continues at the next start when the cut is not older than this time, in seconds. `0` turns off the resume. An active goal also continues only within this time. Else it pauses. `0` pauses each goal. |
 | `context.compact_threshold` | `0.5` | Compaction starts when the context is above this part of the context window. |
 | `context.tool_output_max_chars` | `50000` | A longer tool output keeps its head and tail. The full output goes to a spill file. |
 | `memory.review_interval_turns` | `10` | A background memory review starts after this number of user turns. `0` stops the reviews. |
 | `approvals.mode` | `manual` | The approval mode for dangerous commands: `manual`, `smart`, or `off`. |
 | `approvals.cron_mode` | `deny` | The result for a dangerous command in a cron run: `deny` or `approve`. |
+| `goals.max_turns` | `20` | The turn budget of a new goal. |
+| `goals.judge_provider` | `""` | The provider entry of the goal judge and of `/goal draft`. `""` uses the chain of the session. |
+| `goals.judge_timeout_s` | `30` | The timeout of one judge call or draft call, in seconds. |
 | `toolsets.<channel>` | `[all]` | The toolsets for the channels `cli`, `telegram`, and `cron`. |
 | `telegram.enabled` | `false` | When `true`, the gateway runs the Telegram channel. |
 | `telegram.allowed_users` | `[]` | The Telegram user ids that can use the bot. |
-| `sessions.retention_days` | `90` | The gateway deletes cron, subagent, and review sessions after this number of days. Chat sessions always stay. |
+| `sessions.retention_days` | `90` | The gateway deletes cron, subagent, review, and goal judge sessions after this number of days. Chat sessions always stay. |
 | `log.level` | `info` | The log level: `debug`, `info`, `warn`, or `error`. |
 
 ## Toolsets per channel

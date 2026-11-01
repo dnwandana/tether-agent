@@ -439,7 +439,7 @@ Type a message and press Enter. The answer streams into the terminal. Each tool 
 one dim line.
 
 - To stop a running answer, press **Ctrl-C**. The session stays, and you can type the next
-  message.
+  message. Ctrl-C also pauses an active goal.
 - To quit, type `/exit`, press **Ctrl-D**, or press **Ctrl-C** at the prompt.
 - To see the slash commands, type `/help`. Refer to [Commands](Commands).
 

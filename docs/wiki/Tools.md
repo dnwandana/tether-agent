@@ -24,6 +24,7 @@ gives the default of each key on this page.
 | `delegation` | Start child agents. | `delegate_task` | The gateway, for background batches. |
 | `code_execution` | Run a Python script that calls tools. | `execute_code` | `python3` in `PATH`. |
 | `media` | Make images, speech, and transcripts. | `generate_image`, `text_to_speech`, `transcribe_audio` | A backend in `media.*`. |
+| `todo` | Keep a task list for work with many steps. | `todo_list` | None. |
 | `mcp` | The tools of all MCP servers. | `mcp_<server>_<tool>` | The servers in `mcp.servers`. |
 
 Each MCP server also has its own toolset, `mcp_<server>`.

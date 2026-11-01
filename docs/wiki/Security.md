@@ -165,6 +165,7 @@ These child processes get an environment with no secrets:
 - cron scripts
 - MCP stdio servers
 - media commands
+- goal gates
 
 A name is a secret when one of these is true:
 
@@ -264,6 +265,8 @@ itself. Refer to [Skills](Skills#the-skill-guard).
   `agent.fallback`.
 - **Cron scripts run with no approval.** Only files in `~/.tether/scripts/` can run as cron
   scripts, and the agent cannot write there without an approval.
+- **Goal gates run with no approval prompt.** You write each gate with `/goal gate add`. The
+  gate is checked once when you add it.
 
 ## Recommended settings for a VPS
 

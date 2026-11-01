@@ -137,6 +137,9 @@ tool call again. Photos and files in a waiting message are lost, and the agent g
 about the loss. After 3 resumes in a row, the gateway stops the automatic resume and tells
 you.
 
+An active goal continues when the gateway was down for less than `agent.resume_freshness_s`.
+Else it pauses, and the chat gets a notice with Resume and Clear buttons.
+
 There are three ways to restart the gateway:
 
 | Method | Command |

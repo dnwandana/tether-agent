@@ -63,28 +63,31 @@ task runs.
 
 | Command | Arguments | Effect | Telegram buttons | Busy |
 |---|---|---|---|---|
-| `/new`, `/reset` | | Stops the task, clears the queue, and starts a new session. The new session has no `/model` pin, no `/effort` level, and no `/prompt` text. Only `/fork` copies them. The reply shows the model and the context size. | | yes |
+| `/new`, `/reset` | | Stops the task, clears the queue, and starts a new session. The new session has no `/model` pin, no `/effort` level, and no `/prompt` text. Only `/fork` copies them. The reply shows the model and the context size. An active goal of the old session pauses. | | yes |
 | `/sessions` | `[page] [search]` or `archived` | Lists the sessions of this chat, 8 for each page. | A number button for each session. ◀ Prev and Next ▶. | yes |
-| `/resume` | `[<id>]` or `[page] [search]` | Changes to another session. With no ID, it shows the list. It also takes a session out of the archive. | Number buttons | no |
+| `/resume` | `[<id>]` or `[page] [search]` | Changes to another session. With no ID, it shows the list. It also takes a session out of the archive. An active goal of the current session pauses. An active goal of the session that you change to continues. | Number buttons | no |
 | `/rename` | `<title>` | Changes the title of the session. With no argument, it shows the title. | | no |
-| `/archive` | | Hides the session from `/sessions`. | ↩️ Undo, 🆕 New session | no |
-| `/delete` | `[<id>] [confirm]` | Deletes a session after a confirmation. With no ID, it shows the list. | 🗑 Delete, Cancel | no |
+| `/archive` | | Hides the session from `/sessions`. An active goal of the current session pauses. | ↩️ Undo, 🆕 New session | no |
+| `/delete` | `[<id>] [confirm]` | Deletes a session after a confirmation. With no ID, it shows the list. It also deletes the goal of the session. | 🗑 Delete, Cancel | no |
 | `/model` | `[<provider>[:<model>]]`, `<provider> config`, `providers`, or `clear` | With no argument or with `providers`, it shows the provider entries and the model that answers now. `/model <provider>` shows the model list of the entry. A model from the list, `config`, or `<provider>:<model>` sets the model for this session. `clear` uses the primary provider again. | One button for each provider entry. The list has 8 model buttons for each page, ◀ Prev and Next ▶, ↩ Providers, and ↻ Refresh. After a change, ↺ Use the default. | no |
 | `/effort` | `[<level>]` or `default` | Sets the reasoning effort for this session. See [/model and /effort](#model-and-effort). | `default` and the seven levels. After a change, ↺ Use the default. | no |
 | `/prompt` | `set <text>`, `show`, or `clear` | Replaces the base prompt for this session only. | 🧹 Use the base prompt | no |
-| `/fork` | `[title]` | Copies the session and changes to the copy. | `↩️ Back to "<title>"` | no |
+| `/fork` | `[title]` | Copies the session and changes to the copy. An active goal of the current session pauses. | `↩️ Back to "<title>"` | no |
 | `/compact` | | Summarizes the older messages now. | | no |
 | `/reload-mcp` | | Reloads the MCP servers. The next request does not use the prompt cache. | | no |
-| `/usage` | `[today\|7d\|30d\|session]` | Shows the tokens and the cost for each model. The default range is `today`. `session` also shows the number of compactions. | Today, 7 days, 30 days, Session | yes |
+| `/usage` | `[today\|7d\|30d\|session]` | Shows the tokens and the cost for each model. The default range is `today`. `session` also shows the number of compactions. `session` also counts the goal judge calls of the session. | Today, 7 days, 30 days, Session | yes |
 | `/help` | | Shows the main commands. | | yes |
-| `/stop` | `[keep]` | Stops the task. `keep` keeps the waiting messages. | | yes |
+| `/stop` | `[keep]` | Stops the task. `keep` keeps the waiting messages. It also pauses an active goal. | | yes |
 | `/steer` | `<text>` | Adds guidance to the running task. | ⚡ Do this now | yes |
 | `/now` | | Stops the task and runs your waiting message now. | | yes |
+| `/goal` | `[<text>]`, `status`, `show`, `draft <text>`, `pause`, `resume`, `clear`, `wait <pid> [reason]`, `unwait`, or `gate list\|add <command>\|remove <n>\|clear` | Sets a goal and starts the first goal turn. After each turn, a judge model checks the answer, and the next goal turn starts until the goal is done. With no argument, it shows the status. See [Goals](Goals). | Pause and Clear for an active goal. Resume and Clear for a paused goal. On a goal pause notice: Resume and Clear. For a dangerous gate: Add gate and Cancel. | yes, except a new goal text and `draft` |
+| `/subgoal` | `[<text>]`, `remove <n>`, or `clear` | Adds a criterion to the goal. With no argument, it lists the criteria. See [Goals](Goals). | | yes |
+| `/todo` | | Shows the task list of the session. It makes no model call. See [Goals](Goals#the-task-list). | | yes |
 | `/restart` | | Restarts the gateway. It waits for the running turns first. | | yes |
 
 In the Telegram command menu, `/reload-mcp` is `/reload_mcp`, because Telegram does not permit
 `-` in a command name. The two names do the same thing. The menu does not show `/start`,
-`/reset`, and `/resume`, but they work.
+`/reset`, `/resume`, and `/subgoal`, but they work.
 
 ### /model and /effort
 
@@ -240,13 +243,16 @@ new reply at once.
   answer, or stop the task." with a **⏹ Stop the task** button.
 - The gateway never keeps a slash command in the queue for later.
 
+During a goal, the session stays busy from one goal turn to the next. A command that does
+not work while a task runs gets the line "A goal runs. Send /goal pause first."
+
 ### Stop or take over
 
 | Command | Effect |
 |---|---|
-| `/stop` | Stops the task. Clears the queue and the waiting steer. Stops the background subagents. The reply is "⏹ Stopped. The session is safe. Send a message to continue." The steer reply and the queue replies change to "⏹ Not sent. The task stopped." |
-| `/stop keep` | Stops the task. Keeps the queue and the waiting steer. The waiting messages run one at a time. The steer reply changes to "↪️ The task ended first. Your note runs as a new message." |
-| `/now` | Stops the task. The waiting steer runs first, and then the queue. The reply is "⚡ Taking over. The current answer stopped." The steer reply changes to "↪️ The task ended first. Your note runs as a new message." |
+| `/stop` | Stops the task. Clears the queue and the waiting steer. Stops the background subagents. The reply is "⏹ Stopped. The session is safe. Send a message to continue." The steer reply and the queue replies change to "⏹ Not sent. The task stopped." An active goal pauses, also when no task runs. The reply adds "⏸ Goal paused. Use /goal resume to continue." With no task, the reply is only this line. |
+| `/stop keep` | Stops the task. Keeps the queue and the waiting steer. The waiting messages run one at a time. The steer reply changes to "↪️ The task ended first. Your note runs as a new message." An active goal pauses, also when no task runs. The reply adds "⏸ Goal paused. Use /goal resume to continue." With no task, the reply is only this line. |
+| `/now` | Stops the task. The waiting steer runs first, and then the queue. The reply is "⚡ Taking over. The current answer stopped." The steer reply changes to "↪️ The task ended first. Your note runs as a new message." An active goal stays active. |
 | `/steer <text>` | Adds the text to the running task, like a plain text. With no task, the text runs as a normal message. |
 
 `/now` does nothing when no message of yours waits. Then the task continues, and the reply is
@@ -271,7 +277,16 @@ no steer.
 - Ctrl-C during a turn stops the turn. The CLI prints "⚡ Stopped. You can continue this
   session."
 - Ctrl-C at the prompt, Ctrl-D, `/exit`, or `/quit` ends the chat.
-- `/stop` replies "💤 No task to stop".
+- Ctrl-C during a goal turn also pauses the goal. The CLI prints "⏸ Goal paused — turn was
+  interrupted. Use /goal resume to continue, or /goal clear to stop."
+- A goal runs its turns one after the other, with no input between them.
+- The end of the chat, for example with `/exit`, pauses an active goal. The CLI prints "⏸ Goal
+  paused. Use /goal resume to continue."
+- All `tether chat` processes of one OS user share one active session. The start and the end
+  of a second `tether chat` also pause the goal of the first chat. Run one `tether chat` at a
+  time for a goal, or send `/goal resume` in the first chat.
+- `/stop` and `/stop keep` reply "💤 No task to stop". When a goal waits at the prompt, they
+  pause the goal and reply "⏸ Goal paused. Use /goal resume to continue." instead.
 - `/now` replies "✅ Nothing waits. The agent already has your message."
 - `/steer <text>` runs the text as a normal message.
 

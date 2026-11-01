@@ -36,6 +36,7 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 | `delegation` | `delegate_task` |
 | `code_execution` | `execute_code` |
 | `media` | `text_to_speech`, `transcribe_audio`, `generate_image` |
+| `todo` | `todo_list` |
 | `mcp_<server>` | the tools of one MCP server |
 
 ## Main config keys
@@ -56,6 +57,7 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 - It keeps the system prompt, the first 3 messages, and the last 20 messages.
 - A summary from the same model replaces the messages between them.
 - The stored transcript does not change. The `/compact` command starts compaction at once.
+- An open task list of `todo_list` stays after a compaction.
 - Write important facts into memory or a skill. A summary can lose details.
 
 ## Cron
@@ -83,6 +85,13 @@ Use `delegate_task` to give a separate task to a child agent.
 - A child stops after 50 tool rounds or 600 seconds. A child that uses all its rounds returns a summary that ends with `[stopped: max tool rounds reached]`. If the child cannot write a summary, you get its partial text with that marker.
 - Set `background: true` to continue your turn. The results come back later.
 - You see only the summary of each child.
+
+## Goals
+
+The owner can set a goal with `/goal <text>`. Then a judge model checks each answer. When
+the goal is not done, the next turn starts with "[Continuing toward your standing goal]".
+Take the next concrete step. When the goal is done, show the evidence. When you need the
+owner, say so and stop.
 
 ## Approvals
 

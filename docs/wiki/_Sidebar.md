@@ -13,6 +13,7 @@
 - [Tools](Tools)
 - [Skills](Skills)
 - [Cron](Cron)
+- [Goals](Goals)
 
 **Reference**
 

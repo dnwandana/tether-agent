@@ -200,13 +200,13 @@ message.
 The gateway sets the bot command menu when it starts. The menu shows these commands, in this
 order:
 
-`/new`, `/sessions`, `/stop`, `/steer`, `/now`, `/model`, `/effort`, `/usage`, `/help`,
-`/rename`, `/fork`, `/compact`, `/prompt`, `/archive`, `/delete`, `/approve`, `/deny`,
+`/new`, `/sessions`, `/stop`, `/steer`, `/now`, `/goal`, `/todo`, `/model`, `/effort`, `/usage`,
+`/help`, `/rename`, `/fork`, `/compact`, `/prompt`, `/archive`, `/delete`, `/approve`, `/deny`,
 `/sethome`, `/reload_mcp`, and `/restart`.
 
 Telegram does not permit `-` in a command name, so the menu shows `/reload-mcp` as
-`/reload_mcp`. Both names work. `/start`, `/reset`, and `/resume` are not in the menu, but they
-work. See [Commands](Commands) for each command.
+`/reload_mcp`. Both names work. `/start`, `/reset`, `/resume`, and `/subgoal` are not in the
+menu, but they work. See [Commands](Commands) for each command.
 
 `/start` shows a welcome message with 📋 Sessions, 🧠 Model, and 📊 Usage buttons.
 
@@ -246,6 +246,28 @@ The status lines have these rules:
 | `verbose` | Each call, with the argument names and the arguments as JSON on the next line. |
 
 Set `telegram.cleanup_progress: true` to delete the status message after a successful run.
+
+A goal turn has two more parts in the status message. See [Goals](Goals).
+
+- The first line is the goal line of the turn: "↻ Goal n/max: reason",
+  "↻ Goal n/max: retry after a failed turn.", or "▶ Goal barrier lifted — resuming."
+- A goal turn always sends its status message, also when it makes no tool call.
+- When the agent uses `todo_list`, the plan block shows at the top of the status message,
+  after the goal line. It shows at most 8 items:
+
+  ```text
+  📋 Plan 1/3
+  [x] Find the flaky test
+  [>] Replace the real clock with a fake clock
+  [ ] Run the cron tests 20 times
+  ───
+  ```
+
+  A list with more than 8 items shows the open items first, and then a "+N more" line.
+- With `telegram.tool_progress: off`, the goal line goes out as one silent message. The
+  plan block does not show. Send `/todo` to see the list.
+- With `telegram.cleanup_progress: true`, the goal line and the plan block go with the
+  status message.
 
 ### Streamed answers
 
@@ -366,7 +388,7 @@ the busy replies are the exception. The bot removes them when the gateway stops,
 say that the message runs after the restart.
 
 A tap on a command button runs the action of the button as a typed command. Thus the busy rule
-applies to a button too.
+applies to a button too. The **Resume** button of a goal notice starts the next goal turn.
 
 ## Media that you send
 
