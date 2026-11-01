@@ -17,6 +17,15 @@ import (
 // ApprovalPrompt is the input prompt of the CLI approval question.
 const ApprovalPrompt = "[o]nce / [s]ession / [a]lways / [d]eny: "
 
+// The result lines of the CLI approval question. The Telegram headers have the same words.
+const (
+	cliAllowedOnce    = "✅ Approval allowed · once"
+	cliAllowedSession = "✅ Approval allowed · this session"
+	cliAllowedAlways  = "✅ Approval allowed · always"
+	cliDenied         = "❌ Approval denied"
+	cliNoAnswer       = "⌛ Approval denied · no answer"
+)
+
 // CLIAsk asks the user on the terminal. It is the approval Prompter and the clarify
 // Asker of the CLI. It asks one question at a time. While CLI.Run runs, CLIAsk reads its
 // lines through the input of the REPL, so the two never read the same line.
@@ -38,14 +47,16 @@ var (
 	_ tools.Asker       = (*CLIAsk)(nil)
 )
 
-// PromptApproval shows the dangerous command and reads the answer. An unknown answer
-// asks again. The end of the input denies the command. When ctx ends first, it returns
+// PromptApproval shows the summary, the reason for the flag, and the dangerous command,
+// and reads the answer. An unknown answer asks again. The end of the input denies the command. When ctx ends first, it returns
 // ScopeTimeout and ctx.Err().
 func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalRequest) (security.Scope, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := c.out()
-	fmt.Fprintf(out, "⚠ Dangerous command: %s\n  %s\n", req.Description, strings.ReplaceAll(req.Command, "\n", "\n  "))
+	pattern, _, _ := req.FallbackParts()
+	fmt.Fprintf(out, "⚠ Approval needed\n  %s\n  Flagged: %s\n  %s\n",
+		cliSummary(req), pattern, strings.ReplaceAll(security.ShowHidden(req.Command), "\n", "\n  "))
 	if req.ChildName != "" {
 		fmt.Fprintf(out, "  (from subagent %s)\n", req.ChildName)
 	}
@@ -54,31 +65,49 @@ func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalReques
 		switch {
 		case ctx.Err() != nil:
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				fmt.Fprintln(out, "\n❌ Denied (timeout)")
+				fmt.Fprintln(out, "\n"+cliNoAnswer)
 			}
 			return security.ScopeTimeout, ctx.Err()
 		case errors.Is(err, io.EOF):
-			fmt.Fprintln(out, "\n❌ Denied")
+			fmt.Fprintln(out, "\n"+cliDenied)
 			return security.ScopeDeny, nil
 		case err != nil:
 			return security.ScopeDeny, err
 		}
 		switch strings.ToLower(strings.TrimSpace(line)) {
 		case "o", "once":
-			fmt.Fprintln(out, "✅ Approved once")
+			fmt.Fprintln(out, cliAllowedOnce)
 			return security.ScopeOnce, nil
 		case "s", "session":
-			fmt.Fprintln(out, "✅ Approved for session")
+			fmt.Fprintln(out, cliAllowedSession)
 			return security.ScopeSession, nil
 		case "a", "always":
-			fmt.Fprintln(out, "✅ Approved permanently")
+			fmt.Fprintln(out, cliAllowedAlways)
 			return security.ScopeAlways, nil
 		case "d", "deny":
-			fmt.Fprintln(out, "❌ Denied")
+			fmt.Fprintln(out, cliDenied)
 			return security.ScopeDeny, nil
 		}
 		fmt.Fprintln(out, "Type o, s, a, or d.")
 	}
+}
+
+// cliSummary returns the summary line of the CLI approval question: the clean summary of
+// the model, or the pattern name and one line of the command when the model gave none.
+func cliSummary(req security.ApprovalRequest) string {
+	// A terminal runs ANSI escapes and bidi controls, so clean the summary again here.
+	if s := security.CleanSummary(req.Summary); s != "" {
+		return s
+	}
+	pattern, line, more := req.FallbackParts()
+	s := pattern
+	if line != "" {
+		s += ": " + line
+	}
+	if more > 0 {
+		s += fmt.Sprintf(" (+%d lines)", more)
+	}
+	return s
 }
 
 // Ask shows the question and its numbered choices, and reads the answer. A valid choice

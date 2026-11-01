@@ -36,13 +36,45 @@ func TestCLIPromptScopes(t *testing.T) {
 }
 
 func TestCLIPromptText(t *testing.T) {
-	var out bytes.Buffer
-	c := &CLIAsk{In: bufio.NewReader(strings.NewReader("o\n")), Out: &out}
-	if _, err := c.PromptApproval(context.Background(), security.ApprovalRequest{Command: "rm -rf /tmp/x", Description: "recursive delete"}); err != nil {
-		t.Fatal(err)
+	for _, c := range []struct {
+		req  security.ApprovalRequest
+		want string
+	}{
+		{security.ApprovalRequest{Command: "rm -rf /tmp/x", Description: "recursive delete", Summary: "Delete the temp folder."},
+			"⚠ Approval needed\n  Delete the temp folder.\n  Flagged: recursive delete\n  rm -rf /tmp/x\n"},
+		{security.ApprovalRequest{Command: "cd /x\nrm -rf /\necho done", Description: "recursive delete of root filesystem"},
+			"⚠ Approval needed\n  recursive delete of root filesystem: rm -rf / (+2 lines)\n  Flagged: recursive delete of root filesystem\n  cd /x\n  rm -rf /\n  echo done\n"},
+		{security.ApprovalRequest{Command: "rm -rf /tmp/x"},
+			"⚠ Approval needed\n  dangerous command: rm -rf /tmp/x\n  Flagged: dangerous command\n  rm -rf /tmp/x\n"},
+		// The ESC bytes and U+202E do not reach the terminal.
+		{security.ApprovalRequest{Command: "rm -rf /tmp/x", Description: "recursive delete", Summary: "\x1b[31mDelete\x1b[0m the \u202etemp folder."},
+			"⚠ Approval needed\n  Delete the temp folder.\n  Flagged: recursive delete\n  rm -rf /tmp/x\n"},
+	} {
+		var out bytes.Buffer
+		ask := &CLIAsk{In: bufio.NewReader(strings.NewReader("o\n")), Out: &out}
+		if _, err := ask.PromptApproval(context.Background(), c.req); err != nil {
+			t.Fatal(err)
+		}
+		if want := c.want + ApprovalPrompt + "✅ Approval allowed · once\n"; out.String() != want {
+			t.Fatalf("got %q, want %q", out.String(), want)
+		}
 	}
-	if !strings.HasPrefix(out.String(), "⚠ Dangerous command: recursive delete\n  rm -rf /tmp/x\n[o]nce / [s]ession / [a]lways / [d]eny: ") {
-		t.Fatalf("%q", out.String())
+}
+
+func TestCLIPromptResultLines(t *testing.T) {
+	for in, want := range map[string]string{
+		"o\n": "✅ Approval allowed · once\n",
+		"s\n": "✅ Approval allowed · this session\n",
+		"a\n": "✅ Approval allowed · always\n",
+		"d\n": "❌ Approval denied\n",
+		"":    "\n❌ Approval denied\n",
+	} {
+		var out bytes.Buffer
+		c := &CLIAsk{In: bufio.NewReader(strings.NewReader(in)), Out: &out}
+		_, _ = c.PromptApproval(context.Background(), security.ApprovalRequest{Command: "rm -rf /tmp/x", Description: "recursive delete"})
+		if !strings.HasSuffix(out.String(), ApprovalPrompt+want) {
+			t.Errorf("%q: got %q", in, out.String())
+		}
 	}
 }
 
@@ -66,7 +98,7 @@ func TestCLIPromptTimeoutReturnsScopeTimeout(t *testing.T) {
 	if got != security.ScopeTimeout || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(got, err)
 	}
-	if !strings.Contains(out.String(), "Denied (timeout)") {
+	if !strings.Contains(out.String(), ApprovalPrompt+"\n⌛ Approval denied · no answer\n") {
 		t.Fatal(out.String())
 	}
 	// The line that the user types later goes to the next question, not to a lost read.
@@ -181,7 +213,8 @@ func TestCLIApprovalPromptSharesInputWithREPL(t *testing.T) {
 	}}
 	d := approvalDeps(t, fp)
 	out := runCLI(t, d, "clean up\no\nnext question\n/exit\n")
-	if !strings.Contains(out, "⚠ Dangerous command:") || !strings.Contains(out, "[o]nce / [s]ession / [a]lways / [d]eny: ") {
+	if !strings.Contains(out, "⚠ Approval needed\n  ") || !strings.Contains(out, "\n  Flagged: ") ||
+		!strings.Contains(out, "[o]nce / [s]ession / [a]lways / [d]eny: ") || !strings.Contains(out, "✅ Approval allowed · once\n") {
 		t.Fatal(out)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -253,4 +286,17 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// A bidi rune or an ESC byte in the command must not reach the terminal.
+func TestCLIPromptShowsHiddenRunesInCommand(t *testing.T) {
+	var out bytes.Buffer
+	ask := &CLIAsk{In: bufio.NewReader(strings.NewReader("d\n")), Out: &out}
+	req := security.ApprovalRequest{Command: "rm -rf /tmp/\u202ex\x1b[2K", Description: "recursive delete"}
+	if _, err := ask.PromptApproval(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if s := out.String(); strings.ContainsAny(s, "\u202e\x1b") || !strings.Contains(s, "  rm -rf /tmp/<U+202E>x<U+001B>[2K\n") {
+		t.Fatalf("%q", s)
+	}
 }
