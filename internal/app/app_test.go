@@ -23,6 +23,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
+	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/telegram"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -1026,5 +1027,27 @@ func TestGatewayAppRestoresTheCommandTable(t *testing.T) {
 	})
 	if _, ok := gateway.Commands()["restart"]; ok != had {
 		t.Fatalf("/restart in the table: %v, before the test: %v", ok, had)
+	}
+}
+
+// Deps.Skills reads the skill folders on each call. app.New does not call it, so a skill
+// that is new after New is visible.
+func TestDepsSkillsReadsTheCatalog(t *testing.T) {
+	a := newApp(t)
+	d := a.Deps()
+	if d.Skills == nil {
+		t.Fatal("Deps.Skills is not set")
+	}
+	sd := filepath.Join(a.Skills.Dir, "test-skill-cmd")
+	if err := os.MkdirAll(sd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	md := "---\nname: test-skill-cmd\ndescription: A test skill.\n---\nDo the test.\n"
+	if err := os.WriteFile(filepath.Join(sd, "SKILL.md"), []byte(md), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	list, _, err := d.Skills()
+	if err != nil || !slices.ContainsFunc(list, func(s skills.Skill) bool { return s.Name == "test-skill-cmd" }) {
+		t.Fatal(list, err)
 	}
 }

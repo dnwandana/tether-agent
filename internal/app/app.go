@@ -819,6 +819,8 @@ func (a *App) Deps() *gateway.Deps {
 		CancelKey: a.cancelKey,
 		ToolLine:  func(tool, preview string) string { return telegram.ToolLine("all", tool, preview, "") },
 		Goals:     a.Goals,
+		// The skill commands read the skill folders at the start of a turn, never in New.
+		Skills: a.Skills.Load,
 	}
 	// A goal notice with no turn goes to Telegram with its buttons. AddTelegram sets
 	// a.Telegram before its first call of Gateway, so the gateway gets this path.

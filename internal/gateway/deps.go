@@ -2,14 +2,17 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/goals"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
+	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
@@ -47,6 +50,10 @@ type Deps struct {
 	// SendNotice sends a goal notice that has no turn, for example after a restart or a
 	// wake, with the buttons of r for the user of sess. Nil sends the text only.
 	SendNotice func(ctx context.Context, key string, sess *sessions.Session, r Reply) error
+	// Skills loads the skills for the skill commands. The app sets it to the Load method of
+	// the skill catalog. Nil turns the skill commands off. It reads the skill folders, so
+	// the gateway does not call it in accept, under Gateway.mu, or at startup.
+	Skills func() ([]skills.Skill, []skills.Warning, error)
 }
 
 // TurnInput is the input of one agent turn that a channel starts.
@@ -61,6 +68,10 @@ type TurnInput struct {
 	Notify func(text string)
 	// OnSteerRead runs after the agent reads the steer texts up to seq. It can be nil.
 	OnSteerRead func(seq uint64)
+	// Slash is true when the owner typed Text as a slash command that is not a built-in.
+	// Turn then runs the skill of the command, when the channel has one. A goal text, a
+	// steer, or a system text has Slash false, also when it starts with "/".
+	Slash bool
 }
 
 // Turn runs one agent turn for sess with the toolsets of the channel. After a turn with
@@ -80,6 +91,7 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 	if d.NewEnv != nil {
 		t.Env = d.NewEnv(sess, in.Channel)
 	}
+	t.UserText = d.userText(sess, in, t.Env)
 	// The progress lines of the delegate_task children go through the CLI sink. Its lock
 	// keeps each line apart from the streamed answer text. The CLI does not group the
 	// lines, so it does not use the batch number. A channel with its own progress
@@ -105,6 +117,58 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 		}
 	}
 	return res, err
+}
+
+// userText returns the user text of the turn. A marked slash text that names a skill of
+// the channel gives the skill invocation text, and the env names of the skill go into
+// env. Any other text stays as it is.
+func (d *Deps) userText(sess *sessions.Session, in TurnInput, env *tools.Env) string {
+	if !in.Slash {
+		return in.Text
+	}
+	name, args, ok := IsCommand(in.Text)
+	if !ok {
+		return in.Text
+	}
+	// This is the only read of the skill folders in the turn.
+	sc, ok := ResolveSkill(d.SkillCommandsFor(in.Channel), name)
+	if !ok {
+		return in.Text
+	}
+	body := skills.SubstituteTemplateVars(sc.Skill.Body, sc.Skill.Dir, sess.ID)
+	body = d.cutSkillBody(body)
+	if env != nil {
+		tools.AddPassthrough(env, sc.Skill.RequiredEnv)
+	}
+	d.logger().Info("skill command", "session", sess.ID, "skill", sc.Skill.Name, "channel", in.Channel)
+	return tools.SkillInvocationText(sc.Skill, body, args)
+}
+
+// cutSkillBody cuts a skill body to the limit of a tool output, like a skill_view result.
+// The full body goes to a spill file. When the spill write fails, the body is cut with no
+// copy.
+func (d *Deps) cutSkillBody(body string) string {
+	max := config.Default().Context.ToolOutputMaxChars
+	if d.Cfg != nil {
+		max = d.Cfg.Context.ToolOutputMaxChars
+	}
+	out, err := ctxmgr.Truncate(body, max, d.Agent.SpillDir)
+	if err == nil {
+		return out
+	}
+	d.logger().Warn("skill command: cannot write the spill file; the skill body is cut without a copy",
+		"dir", d.Agent.SpillDir, "err", err.Error())
+	return cutBodyNoSpill(ctxmgr.SanitizeUTF8(body), max)
+}
+
+// cutBodyNoSpill keeps the head (60%) and the tail (30%) of s, with a marker and no spill
+// path. The marker is the one of a tool output that the agent cannot spill.
+func cutBodyNoSpill(s string, max int) string {
+	r := []rune(s)
+	head, tail := max*6/10, max*3/10
+	return string(r[:head]) +
+		fmt.Sprintf("\n[… %d chars omitted. The full output could not be saved.]\n", len(r)-head-tail) +
+		string(r[len(r)-tail:])
 }
 
 // Toolsets returns the allowed toolsets of the channel from the toolsets config.
