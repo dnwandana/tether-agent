@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/gateway"
 )
 
 // offsetKey is the kv key that holds the next getUpdates offset.
@@ -171,15 +172,83 @@ func (c *chatQueues) run(ctx context.Context, u Update) {
 	c.handle(ctx, u)
 }
 
-// RegisterCommands sets the bot command menu.
-func (p *Poller) RegisterCommands(ctx context.Context) error {
-	return p.C.SetMyCommands(ctx, BotCommands())
+// RegisterCommands sets the bot menu with the built-in commands and the skill commands
+// cmds. When Telegram refuses the menu with the skills, it sets the built-in commands only,
+// so one bad skill entry does not remove the menu.
+func (p *Poller) RegisterCommands(ctx context.Context, cmds []gateway.SkillCommand) error {
+	menu, hidden := botMenu(cmds)
+	if hidden > 0 {
+		p.logger().Info(fmt.Sprintf("telegram: the bot menu hides %d skill commands; send /help skills to see all", hidden))
+	}
+	err := p.C.SetMyCommands(ctx, menu)
+	builtins := builtinCommands()
+	// A canceled ctx is a stop of the gateway, not a refusal of the menu.
+	if err == nil || len(menu) == len(builtins) || ctx.Err() != nil {
+		return err
+	}
+	p.logger().Warn("telegram: cannot set the skill commands in the bot menu; the menu gets the built-in commands only",
+		"err", err.Error())
+	return p.C.SetMyCommands(ctx, builtins)
 }
 
-// BotCommands returns the bot command menu. The most-used commands come first. Telegram does
+// menuMax is the maximum number of entries in the bot menu (the Hermes default).
+const menuMax = 60
+
+// menuNameMax is the Telegram limit for the length of a command name.
+const menuNameMax = 32
+
+// menuDashes changes the Unicode dashes to "-", because BotFather rejects them (Hermes).
+var menuDashes = strings.NewReplacer("\u2010", "-", "\u2011", "-", "\u2012", "-", "\u2013", "-",
+	"\u2014", "-", "\u2015", "-", "\u2212", "-")
+
+// BotCommands returns the bot menu: the built-in commands, and then the skill commands of
+// cmds in their order. cmds is the skill command table, in slug order.
+func BotCommands(cmds []gateway.SkillCommand) []BotCommand {
+	menu, _ := botMenu(cmds)
+	return menu
+}
+
+// botMenu returns the bot menu and the number of skill commands that the cap leaves out. A
+// skill with a menu name over 32 characters, or with a name already in the menu, is left
+// out. Its typed command still works.
+func botMenu(cmds []gateway.SkillCommand) ([]BotCommand, int) {
+	menu := builtinCommands()
+	seen := make(map[string]bool, len(menu)+len(cmds))
+	for _, b := range menu {
+		seen[b.Command] = true
+	}
+	hidden := 0
+	for _, c := range cmds {
+		if len(c.MenuName) > menuNameMax || seen[c.MenuName] {
+			continue
+		}
+		if len(menu) >= menuMax {
+			hidden++
+			continue
+		}
+		seen[c.MenuName] = true
+		menu = append(menu, BotCommand{Command: c.MenuName, Description: menuDescription(c)})
+	}
+	return menu, hidden
+}
+
+// menuDescription returns the menu text of a skill command: the description on one line,
+// with ASCII dashes, cut to 37 runes plus "..." (Hermes).
+func menuDescription(c gateway.SkillCommand) string {
+	d := menuDashes.Replace(oneLine(c.Skill.Description))
+	if r := []rune(d); len(r) > 40 {
+		d = string(r[:37]) + "..."
+	}
+	if d == "" {
+		d = "Run the " + c.Slug + " skill"
+	}
+	return d
+}
+
+// builtinCommands returns the bot command menu. The most-used commands come first. Telegram does
 // not allow "-" in a command name, so "/reload-mcp" is "reload_mcp" here. "/start",
 // "/reset", "/resume", and "/subgoal" still work, but they are not in the menu.
-func BotCommands() []BotCommand {
+func builtinCommands() []BotCommand {
 	return []BotCommand{
 		{Command: "new", Description: "Start a new session"},
 		{Command: "sessions", Description: "See and resume sessions"},

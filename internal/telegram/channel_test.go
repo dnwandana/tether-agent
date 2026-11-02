@@ -259,6 +259,44 @@ func TestTypingStopsAfterTurn(t *testing.T) {
 	}
 }
 
+func TestTypingStartsForSkillSlashText(t *testing.T) {
+	h := harness(t, &tgProv{delay: time.Second}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	h.update(dmText(5, "/arxiv x"))
+	// The turn sends its first event after 1 s. The typing action must show before it.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for h.api.count("sendChatAction") == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("no typing action before the turn answers:", h.api.methods())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	h.waitIdle()
+}
+
+func TestNoTypingForBuiltinCommand(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	h.update(dmText(5, "/new"))
+	h.waitIdle()
+	if n := h.api.count("sendChatAction"); n != 0 || prov.count() != 0 {
+		t.Fatalf("typing actions %d, model calls %d: %v", n, prov.count(), h.api.methods())
+	}
+}
+
+func TestObservedChatSlashTextHasNoSenderLine(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) {
+		c.RequireMention = false
+		c.ObserveUnmentionedGroupMessages = true
+		c.GroupAllowedChats = []string{"-100"}
+	})
+	h.update(group("/arxiv x"))
+	h.waitIdle()
+	msgs := h.messages(h.session("telegram:group:-100"))
+	if len(msgs) == 0 || msgs[0].Msg.Content != "/arxiv x" {
+		t.Fatalf("%+v", msgs)
+	}
+}
+
 func TestUnknownDMGetsPairingCode(t *testing.T) {
 	prov := &tgProv{}
 	h := harness(t, prov, nil)

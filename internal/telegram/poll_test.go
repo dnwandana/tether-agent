@@ -210,10 +210,10 @@ func TestBotCommandsMenu(t *testing.T) {
 		{Command: "reload_mcp", Description: "Reload the MCP servers"},
 		{Command: "restart", Description: "Restart the gateway"},
 	}
-	if got := BotCommands(); !reflect.DeepEqual(got, want) {
+	if got := BotCommands(nil); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
-	for _, c := range BotCommands() {
+	for _, c := range BotCommands(nil) {
 		for _, r := range c.Description {
 			if r > 0x2000 {
 				t.Errorf("the description of %q has the icon %q", c.Command, r)
@@ -250,10 +250,10 @@ func TestRegisterCommands(t *testing.T) {
 		}
 		return true
 	})
-	if err := (&Poller{C: client(srv)}).RegisterCommands(ctx); err != nil {
+	if err := (&Poller{C: client(srv)}).RegisterCommands(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != len(BotCommands()) {
+	if len(got) != len(BotCommands(nil)) {
 		t.Fatal(got)
 	}
 }
@@ -433,7 +433,7 @@ func TestPollerHandleCtxOutlivesTheRunContext(t *testing.T) {
 }
 
 func TestBotMenuHasRestart(t *testing.T) {
-	for _, c := range BotCommands() {
+	for _, c := range BotCommands(nil) {
 		if c.Command == "restart" {
 			if c.Description != "Restart the gateway" {
 				t.Fatal(c)

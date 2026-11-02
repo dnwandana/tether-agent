@@ -102,11 +102,23 @@ func (ch *Channel) Run(ctx context.Context, gw *gateway.Gateway) error {
 		ch.UI.Authorized = ch.callbackAuthorized
 	}
 	p := ch.poller()
-	if err := p.RegisterCommands(ctx); err != nil {
-		ch.logger().Warn("telegram: cannot register the bot commands", "err", err.Error())
-	}
+	go ch.registerMenu(ctx, p, gw)
 	ch.logger().Info("telegram channel started", "bot", ch.Bot.Username)
 	return p.Run(ctx, func(ctx context.Context, u Update) { ch.handleUpdate(ctx, gw, u) })
+}
+
+// registerMenu sets the bot menu with the skill commands of the telegram channel. Run calls
+// it in a goroutine, because the skill load reads the skill folders and must not delay the
+// first poll.
+func (ch *Channel) registerMenu(ctx context.Context, p *Poller, gw *gateway.Gateway) {
+	var cmds []gateway.SkillCommand
+	if gw != nil && gw.Deps != nil {
+		cmds = gw.Deps.SkillCommandsFor("telegram")
+	}
+	// A stop of the gateway cancels ctx while the call runs. That error is not a fault.
+	if err := p.RegisterCommands(ctx, cmds); err != nil && ctx.Err() == nil {
+		ch.logger().Warn("telegram: cannot register the bot commands", "err", err.Error())
+	}
 }
 
 // SetTurnContext sets the context of the update handlers and the turns. Then the context
@@ -332,9 +344,11 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 	chatID := msgs[0].Chat.ID
 	// The typing action shows from now until the turn of this message takes it over. It
 	// also covers the download and the transcription of the media. A steer, a queued
-	// message, or a command releases it when the gateway is done with the message.
+	// message, or a command releases it when the gateway is done with the message. A built-in
+	// command gets no typing action. A slash text that is not a built-in, for example a skill
+	// command, becomes a turn, so it gets the typing action.
 	release := func() {}
-	if !isCmd {
+	if !isCmd || gateway.SlashCandidate(text) {
 		release = ch.startTyping(ctx, chatID, n.ThreadID)
 	}
 	submitted := false
