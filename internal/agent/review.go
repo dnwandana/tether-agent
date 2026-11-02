@@ -218,15 +218,15 @@ type ReviewRequest struct {
 	Memory, Skills bool
 	// FocusRange is View[start:end], the part that a compaction removes. It can be nil.
 	FocusRange *[2]int
-	// Notify receives one notice for each saved change. It can be nil.
+	// Notify receives one summary text of the saved changes after the review. It can be nil.
 	Notify func(text string)
 	// ParentEnv gives the work dir, the data dir, and the logger of the parent. It can be nil.
 	ParentEnv *tools.Env
 }
 
 // RunReview runs one review: a fork of the parent conversation that can only save memory
-// and skills. The parent session never changes. It returns the notices of the
-// saved changes, and sends each notice to r.Notify.
+// and skills. The parent session never changes. It returns the notices of the saved
+// changes, and sends one summary of them to r.Notify.
 func (a *Agent) RunReview(ctx context.Context, r ReviewRequest) (saved []string, err error) {
 	if r.Session == nil {
 		return nil, errors.New("agent: the review has no session")
@@ -262,11 +262,13 @@ func (a *Agent) RunReview(ctx context.Context, r ReviewRequest) (saved []string,
 			saved = append(saved, n)
 		}
 	}
+	// The defer also sends the summary when the review fails or times out.
 	defer func() {
-		if r.Notify != nil {
-			for _, n := range saved {
-				r.Notify(n)
-			}
+		if r.Notify == nil {
+			return
+		}
+		if text := reviewSummary(saved); text != "" {
+			r.Notify(text)
 		}
 	}()
 	limits := delegationLimits(a.config())
@@ -334,14 +336,70 @@ func reviewNotice(c provider.ToolCall, res tools.Result) string {
 		name := strings.TrimSpace(args.Name)
 		switch args.Action {
 		case "create":
-			return "🧩 Skill created: " + name
+			return skillCreatedPrefix + name
 		case "delete":
-			return "🧩 Skill deleted: " + name
+			return skillDeletedPrefix + name
 		default:
-			return "🧩 Skill updated: " + name
+			return skillUpdatedPrefix + name
 		}
 	}
 	return ""
+}
+
+// The prefixes of the skill notices. reviewSummary finds a skill notice by its prefix.
+const (
+	skillCreatedPrefix = "🧩 Skill created: "
+	skillUpdatedPrefix = "🧩 Skill updated: "
+	skillDeletedPrefix = "🧩 Skill deleted: "
+)
+
+// skillPrefixes pairs each singular skill prefix with its plural text.
+var skillPrefixes = [...]struct{ one, many string }{
+	{skillCreatedPrefix, "🧩 Skills created: "},
+	{skillUpdatedPrefix, "🧩 Skills updated: "},
+	{skillDeletedPrefix, "🧩 Skills deleted: "},
+}
+
+// reviewSummary returns one text for the notices of one review, or "" for no notice.
+// It puts the skill names of each prefix on one line, at the place of the first notice
+// of that prefix. Each other notice is a line of its own. The names keep their order.
+func reviewSummary(saved []string) string {
+	type line struct {
+		prefix int // index in skillPrefixes, or -1 for a line of its own
+		text   string
+		names  []string
+	}
+	var lines []line
+	group := map[int]int{} // index in skillPrefixes to index in lines
+next:
+	for _, s := range saved {
+		for p, sp := range skillPrefixes {
+			name, ok := strings.CutPrefix(s, sp.one)
+			if !ok {
+				continue
+			}
+			if i, ok := group[p]; ok {
+				lines[i].names = append(lines[i].names, name)
+			} else {
+				group[p] = len(lines)
+				lines = append(lines, line{prefix: p, names: []string{name}})
+			}
+			continue next
+		}
+		lines = append(lines, line{prefix: -1, text: s})
+	}
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		switch {
+		case l.prefix < 0:
+			out[i] = l.text
+		case len(l.names) == 1:
+			out[i] = skillPrefixes[l.prefix].one + l.names[0]
+		default:
+			out[i] = skillPrefixes[l.prefix].many + strings.Join(l.names, ", ")
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // HoldNotices holds the review notices until the main answer is delivered. A

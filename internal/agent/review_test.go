@@ -89,6 +89,47 @@ func TestReviewUsesParentToolsAndSystem(t *testing.T) {
 	}
 }
 
+func TestReviewSendsOneSummary(t *testing.T) {
+	fp := scripted(text("ok"))
+	a, sess, _ := reviewAgent(t, fp)
+	userTurn(t, a, sess, "hi")
+	fp.script = []step{toolCalls(
+		tc("r1", "skill_manage", `{"action":"patch","name":"a"}`),
+		tc("r2", "skill_manage", `{"action":"write_file","name":"a","file":"references/x.md","content":"x"}`),
+		tc("r3", "skill_manage", `{"action":"patch","name":"b"}`),
+		tc("r4", "memory", `{"action":"add","target":"memory","content":"x"}`),
+	), text("done")}
+	var notified []string
+	saved, err := a.RunReview(ctx, ReviewRequest{Session: sess, System: "SYS", Memory: true, Skills: true,
+		Notify: func(s string) { notified = append(notified, s) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(saved) != 3 {
+		t.Fatal("one notice for each distinct change:", saved)
+	}
+	want := "🧩 Skills updated: a, b\n💾 Memory updated"
+	if len(notified) != 1 || notified[0] != want {
+		t.Fatalf("want one notify call with %q, got %q", want, notified)
+	}
+}
+
+func TestReviewFailureStillNotifies(t *testing.T) {
+	fp := scripted(text("ok"))
+	a, sess, _ := reviewAgent(t, fp)
+	userTurn(t, a, sess, "hi")
+	fp.script = []step{toolCalls(tc("r1", "skill_manage", `{"action":"patch","name":"a"}`)), {err: errors.New("boom")}}
+	var notified []string
+	saved, err := a.RunReview(ctx, ReviewRequest{Session: sess, System: "SYS", Skills: true,
+		Notify: func(s string) { notified = append(notified, s) }})
+	if err == nil {
+		t.Fatal("want the error of the provider")
+	}
+	if len(saved) != 1 || len(notified) != 1 || notified[0] != "🧩 Skill updated: a" {
+		t.Fatal("a failed review sends the changes that it saved:", saved, notified)
+	}
+}
+
 func TestReviewDispatchWhitelist(t *testing.T) {
 	a, sess, parentReq, cmd := agentAfterTurn(t)
 	fp := a.Prov.(*fakeProv)
@@ -163,6 +204,42 @@ func TestSkillNotices(t *testing.T) {
 	}
 	if got := reviewNotice(tc("c", "skill_view", `{"name":"x"}`), tools.Result{Text: "ok"}); got != "" {
 		t.Fatal(got)
+	}
+}
+
+func TestReviewSummary(t *testing.T) {
+	cases := []struct {
+		name  string
+		saved []string
+		want  string
+	}{
+		{"none", nil, ""},
+		{"one skill", []string{"🧩 Skill updated: vps-services"}, "🧩 Skill updated: vps-services"},
+		{"one memory", []string{"💾 Memory updated"}, "💾 Memory updated"},
+		{"plural and memory",
+			[]string{"🧩 Skill updated: a", "🧩 Skill updated: b", "💾 Memory updated"},
+			"🧩 Skills updated: a, b\n💾 Memory updated"},
+		{"order of first notice",
+			[]string{"💾 User profile updated", "🧩 Skill created: c", "🧩 Skill updated: a", "🧩 Skill updated: b"},
+			"💾 User profile updated\n🧩 Skill created: c\n🧩 Skills updated: a, b"},
+		{"singular and plural deleted",
+			[]string{"🧩 Skill updated: a", "🧩 Skill deleted: d", "🧩 Skill deleted: e"},
+			"🧩 Skill updated: a\n🧩 Skills deleted: d, e"},
+		{"created then updated",
+			[]string{"🧩 Skill created: x", "🧩 Skill updated: x"},
+			"🧩 Skill created: x\n🧩 Skill updated: x"},
+		{"group after memory keeps its first place",
+			[]string{"🧩 Skill updated: a", "💾 Memory updated", "🧩 Skill updated: b"},
+			"🧩 Skills updated: a, b\n💾 Memory updated"},
+		{"four updates (the screenshot)",
+			[]string{"🧩 Skill updated: crypto-gainer-wallet-reports", "🧩 Skill updated: solana-launch-sniping",
+				"🧩 Skill updated: subagent-driven-development", "🧩 Skill updated: vps-services"},
+			"🧩 Skills updated: crypto-gainer-wallet-reports, solana-launch-sniping, subagent-driven-development, vps-services"},
+	}
+	for _, c := range cases {
+		if got := reviewSummary(c.saved); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
 	}
 }
 
