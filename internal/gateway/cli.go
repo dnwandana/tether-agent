@@ -55,6 +55,9 @@ type CLI struct {
 	waker    *GoalWaker
 	// wakes gives the continuations of the waker to the REPL loop. It holds one wake.
 	wakes chan goals.Continuation
+	// slashText is the slash text of the skill command that runs now. AgentTurn marks the
+	// turn with this text as a slash command, and then clears the field.
+	slashText string
 }
 
 // refresher is a lineReader that can show its prompt again, for example readline.
@@ -166,7 +169,7 @@ func (c *CLI) Run(ctx context.Context) error {
 			return nil
 		}
 		if name, args, ok := IsCommand(text); ok {
-			sess, err = c.command(ctx, sess, name, args, feed, ints, turn)
+			sess, err = c.command(ctx, sess, name, args, text, feed, ints, turn)
 			if err != nil {
 				return err
 			}
@@ -463,12 +466,11 @@ func (c *CLI) askReader(lr lineReader, feed *lineFeed) func(ctx context.Context,
 }
 
 // command runs one slash command and returns the session that the key uses after it.
-func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args string, feed *lineFeed,
+func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args, text string, feed *lineFeed,
 	ints <-chan os.Signal, turn cliTurnFunc) (*sessions.Session, error) {
 	cmd, ok := lookupCommand(name)
 	if !ok {
-		fmt.Fprintf(c.Out, "Unknown command /%s. Send /help to see the commands.\n", name)
-		return sess, nil
+		return c.skillCommand(ctx, sess, name, text, ints, turn), nil
 	}
 	// A goal turn that the command starts runs after the reply of the command.
 	var kick *goals.Continuation
@@ -521,6 +523,24 @@ func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args st
 	return c.store().ActiveOrCreate(ctx, c.Key, sessions.Session{Source: "cli", Kind: "chat"})
 }
 
+// skillCommand runs text as a skill turn when name is a skill command of the CLI. Else it
+// prints the Unknown command line. It returns the session of the key.
+func (c *CLI) skillCommand(ctx context.Context, sess *sessions.Session, name, text string,
+	ints <-chan os.Signal, turn cliTurnFunc) *sessions.Session {
+	sc, ok := ResolveSkill(c.deps().SkillCommandsFor("cli"), name)
+	if !ok {
+		fmt.Fprintf(c.Out, "Unknown command /%s. Send /help to see the commands.\n", name)
+		return sess
+	}
+	_, _ = io.WriteString(c.Out, ansiDim+termSafe("⚡ Loading skill: "+sc.Skill.Name)+ansiReset+"\n")
+	// Deps.Turn resolves the skill again and builds the text, because the turn is marked.
+	c.slashText = text
+	c.turnLoop(ctx, turn, sess, text, "", ints)
+	// A custom Turn does not call AgentTurn, so the field is cleared here too.
+	c.slashText = ""
+	return sess
+}
+
 // AgentTurn runs one agent turn with tools. It streams the answer and the dim tool
 // progress lines to out. The fixed text of a turn with no summary does not stream, so
 // AgentTurn prints it.
@@ -530,7 +550,11 @@ func (c *CLI) AgentTurn(ctx context.Context, sess *sessions.Session, text string
 	// A review notice, for example "💾 Memory updated", shows after the answer. A summary
 	// with several lines prints one dim line for each line.
 	notify, release := agent.HoldNotices(sink.Notices)
-	res, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify})
+	// Only the first turn after a skill command is marked. A goal continuation of the loop
+	// has another text, and the field is empty then.
+	slash := text != "" && text == c.slashText
+	c.slashText = ""
+	res, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify, Slash: slash})
 	sink.Finish()
 	// The stream already showed each other final text.
 	if res.NoSummary {
