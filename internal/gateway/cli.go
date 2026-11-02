@@ -527,8 +527,9 @@ func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args st
 func (c *CLI) AgentTurn(ctx context.Context, sess *sessions.Session, text string, out io.Writer) (agent.TurnResult, error) {
 	d := c.deps()
 	sink := &CLISink{W: out, Line: d.toolLine}
-	// A review notice, for example "💾 Memory updated", shows after the answer.
-	notify, release := agent.HoldNotices(sink.Notice)
+	// A review notice, for example "💾 Memory updated", shows after the answer. A summary
+	// with several lines prints one dim line for each line.
+	notify, release := agent.HoldNotices(sink.Notices)
 	res, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify})
 	sink.Finish()
 	// The stream already showed each other final text.
@@ -814,6 +815,22 @@ func (s *CLISink) Boundary() {
 
 // Notice writes a status text as a dim line.
 func (s *CLISink) Notice(text string) { s.dimLine(text) }
+
+// Notices prints each line of text as a dim line, in one write. A review summary uses it,
+// so its lines stay together.
+func (s *CLISink) Notices(text string) {
+	var b strings.Builder
+	for line := range strings.SplitSeq(text, "\n") {
+		b.WriteString(ansiDim)
+		b.WriteString(termSafe(line))
+		b.WriteString(ansiReset)
+		b.WriteString("\n")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.endLine()
+	_, _ = io.WriteString(s.W, b.String())
+}
 
 // Finish ends the last line of the answer.
 func (s *CLISink) Finish() {

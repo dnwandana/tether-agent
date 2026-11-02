@@ -312,6 +312,40 @@ func TestCLISinkLines(t *testing.T) {
 	}
 }
 
+func TestCLISinkNotices(t *testing.T) {
+	var out bytes.Buffer
+	s := &CLISink{W: &out}
+	s.Delta("abc")
+	s.Notices("🧩 Skills updated: a, b\n💾 Memory updated")
+	want := "abc\n\x1b[2m🧩 Skills updated: a, b\x1b[0m\n\x1b[2m💾 Memory updated\x1b[0m\n"
+	if out.String() != want {
+		t.Fatalf("%q", out.String())
+	}
+}
+
+// countWriter counts the Write and WriteString calls. io.WriteString calls WriteString of
+// the embedded bytes.Buffer, so countWriter must count it too.
+type countWriter struct {
+	bytes.Buffer
+	n int
+}
+
+func (w *countWriter) Write(p []byte) (int, error) { w.n++; return w.Buffer.Write(p) }
+
+func (w *countWriter) WriteString(p string) (int, error) { w.n++; return w.Buffer.WriteString(p) }
+
+func TestCLISinkNoticesOneWrite(t *testing.T) {
+	w := &countWriter{}
+	s := &CLISink{W: w}
+	s.Notices("line one\nline two\x1b[31m")
+	if w.n != 1 {
+		t.Fatal("want one write for all lines, got", w.n)
+	}
+	if want := "\x1b[2mline one\x1b[0m\n\x1b[2mline two\x1b[0m\n"; w.String() != want {
+		t.Fatalf("termSafe must remove the escape: %q", w.String())
+	}
+}
+
 func TestCLISinkPlanRow(t *testing.T) {
 	items := []tools.TodoItem{
 		{ID: "1", Content: "a", Status: "completed"},
