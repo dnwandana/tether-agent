@@ -107,7 +107,7 @@ func init() {
 		{Name: "compact", Help: "Replace the older messages of this session with a summary now", Run: cmdCompact},
 		ReloadMCPCommand(nil),
 		{Name: "usage", Help: "Show the token use and the cost of each model: /usage [today|7d|30d|session]", Run: cmdUsage, WhileBusy: true},
-		{Name: "help", Help: "Show all commands", Run: cmdHelp, WhileBusy: true},
+		{Name: "help", Help: "Show all commands: /help [skills]", Run: cmdHelp, WhileBusy: true},
 	} {
 		Register(c)
 	}
@@ -915,13 +915,61 @@ const helpCLI = "📖 **Commands**\n\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
 	"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
 
-func cmdHelp(_ context.Context, c *CommandCtx, _ string) error {
-	text := helpCLI
+// helpSkillsMax is the number of skill commands that /help shows with no argument.
+const helpSkillsMax = 10
+
+// helpDescMax is the maximum length of a skill description in /help, in runes.
+const helpDescMax = 60
+
+// cmdHelp sends the main commands and the first skill commands. "/help skills" sends all
+// skill commands. Another argument gives the normal reply.
+func cmdHelp(_ context.Context, c *CommandCtx, args string) error {
+	text, channel := helpCLI, "cli"
 	if c.interactive() {
-		text = helpTelegram
+		text, channel = helpTelegram, "telegram"
+	}
+	cmds := c.Deps.SkillCommandsFor(channel)
+	lines := skillHelpLines(cmds, c.interactive())
+	if strings.EqualFold(strings.TrimSpace(args), "skills") {
+		if len(cmds) == 0 {
+			c.send(Reply{Text: "⚡ **No skill commands**\nAdd a skill with tether skills install, or ask the agent to make one."})
+			return nil
+		}
+		c.send(Reply{Text: fmt.Sprintf("⚡ **Skills** (%d)\n", len(cmds)) + strings.Join(lines, "\n") +
+			"\n\nSend /<skill> <request> to run a skill."})
+		return nil
+	}
+	if len(cmds) > 0 {
+		text += fmt.Sprintf("\n\n⚡ **Skills** (%d)\n", len(cmds)) + strings.Join(lines[:min(len(lines), helpSkillsMax)], "\n")
+		if n := len(cmds) - helpSkillsMax; n > 0 {
+			text += fmt.Sprintf("\n… and %d more. Send /help skills to see all.", n)
+		}
 	}
 	c.send(Reply{Text: text})
 	return nil
+}
+
+// skillHelpLines returns one line "/<name> · <description>" for each skill command. With
+// menuNames, the name is the Telegram menu name, else the slug.
+func skillHelpLines(cmds []SkillCommand, menuNames bool) []string {
+	lines := make([]string, 0, len(cmds))
+	for _, cmd := range cmds {
+		name := cmd.Slug
+		if menuNames {
+			name = cmd.MenuName
+		}
+		desc := strings.Join(strings.Fields(cmd.Skill.Description), " ")
+		if r := []rune(desc); len(r) > helpDescMax {
+			desc = string(r[:helpDescMax-1]) + "…"
+		}
+		// Escape after the cut, so that the cut never separates a "\" from its character.
+		line := "/" + EscapeMarkdown(name)
+		if desc != "" {
+			line += " · " + EscapeMarkdown(desc)
+		}
+		lines = append(lines, line)
+	}
+	return lines
 }
 
 // ReloadMCPCommand returns the /reload-mcp command for the MCP manager m. The app

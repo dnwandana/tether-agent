@@ -542,7 +542,7 @@ func TestHelpTelegram(t *testing.T) {
 	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
 		t.Fatalf("got:\n%s", r.Text)
 	}
-	if cmd := Commands()["help"]; !cmd.WhileBusy || cmd.Help != "Show all commands" {
+	if cmd := Commands()["help"]; !cmd.WhileBusy || cmd.Help != "Show all commands: /help [skills]" {
 		t.Fatalf("%+v", cmd)
 	}
 }
