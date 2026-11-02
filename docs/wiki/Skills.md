@@ -59,7 +59,8 @@ The file tools cannot write in `~/.tether/skills/`. Only `skill_manage` can writ
 After a number of tool rounds, a background review reads the conversation again. The default is
 10 rounds (`skills.review_interval_tool_rounds`). The review can create or patch a skill, so the
 agent learns from the work. You see a short notice after the answer, for example
-`🧩 Skill created: deploy`.
+`🧩 Skill created: deploy`. One review sends one message, with one line for each kind of change,
+for example `🧩 Skills updated: deploy, release-notes`.
 
 Set `skills.review_interval_tool_rounds` to `0` to stop the reviews.
 

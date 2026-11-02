@@ -421,8 +421,9 @@ After some turns, a background review looks at the conversation and saves what i
 
 A review is a copy of the conversation in a separate `review` session. It sends the same tool
 schemas as its parent and the session id of its parent as the cache key, so the prompt cache
-hits. It can use only the `memory`, `skill_view`, and `skill_manage` tools. You see a short
-notice after the answer, for example `💾 Memory updated` or `🧩 Skill created: <name>`.
+hits. It can use only the `memory`, `skill_view`, and `skill_manage` tools. A review sends one
+notice after the answer, with one line for each kind of change, for example
+`🧩 Skills updated: <name>, <name>` and `💾 Memory updated`.
 
 Cron runs, child runs, and reviews do not start reviews.
 
