@@ -208,6 +208,16 @@ Telegram does not permit `-` in a command name, so the menu shows `/reload-mcp` 
 `/reload_mcp`. Both names work. `/start`, `/reset`, `/resume`, and `/subgoal` are not in the
 menu, but they work. See [Commands](Commands) for each command.
 
+After the built-in commands, the menu shows the skill commands in name order, with `_` in place
+of `-`. See [Skills](Skills#run-a-skill-with-a-slash-command). These rules apply:
+
+- The menu has a maximum of 60 entries. Send `/help skills` to see all skill commands.
+- A skill command with a name of more than 32 characters is not in the menu.
+- The gateway sets the menu only when it starts. A new skill shows in the menu after the next
+  start.
+- A skill command that is not in the menu still works when you type it.
+- When Telegram refuses the menu with the skills, the gateway sets the built-in commands only.
+
 `/start` shows a welcome message with 📋 Sessions, 🧠 Model, and 📊 Usage buttons.
 
 ## What you see in the chat

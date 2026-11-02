@@ -29,6 +29,11 @@ tools/skills_hub.py, tools/skills_guard.py, and hermes_cli/skills_hub.py).
   tool note (internal/tools/todo*.go, internal/agent/prompt.go, from
   tools/todo_tool.py, run_agent.py (the history restore, _hydrate_todo_store),
   and agent/coding_context.py).
+- The skill slash commands: the command slug, the skill message text, the
+  template tokens, and the rules for skills in the Telegram bot menu
+  (internal/skills/command.go, internal/tools/skills.go, internal/gateway/,
+  internal/telegram/poll.go, from agent/skill_commands.py,
+  agent/skill_preprocessing.py, and hermes_cli/commands_platforms.py).
 - Test cases from the Hermes Agent test suite.
 
 Comments in the source code that name "Hermes" point to the origin of a rule

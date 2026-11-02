@@ -32,6 +32,14 @@ A skill folder can also have two subfolders:
 - `references/` for longer documents that the skill points to.
 - `scripts/` for scripts that the skill runs.
 
+A skill body can use two template tokens from Hermes Agent. `skill_view` and a skill command
+replace them:
+
+- `${HERMES_SKILL_DIR}` becomes the folder of the skill.
+- `${HERMES_SESSION_ID}` becomes the ID of the session.
+
+A support file that the agent reads with `skill_view` keeps its tokens.
+
 ## Where skills live
 
 | Location | Content |
@@ -63,6 +71,56 @@ agent learns from the work. You see a short notice after the answer, for example
 for example `🧩 Skills updated: deploy, release-notes`.
 
 Set `skills.review_interval_tool_rounds` to `0` to stop the reviews.
+
+## Run a skill with a slash command
+
+Send `/<skill> [request]` to run a skill. For example, `/arxiv transformers 2026` starts a turn
+with the full `arxiv` skill and the request "transformers 2026". The command works in Telegram
+and in `tether chat`. The CLI prints `⚡ Loading skill: arxiv` before the turn.
+
+The command name comes from the skill name, as in Hermes Agent:
+
+1. The name changes to lower case.
+2. Each space and each `_` changes to `-`.
+3. Each character other than `a` to `z`, `0` to `9`, and `-` goes away.
+4. A run of `-` becomes one `-`. A `-` at the start or at the end goes away.
+
+| Skill name | Command |
+|---|---|
+| `arxiv` | `/arxiv` |
+| `Git Helper` | `/git-helper` |
+| `git_helper` | `/git-helper` |
+| `pdf.tools` | `/pdftools` |
+
+These rules apply:
+
+- `_` works in place of `-`. `/git_helper` runs the `git-helper` skill. The Telegram menu uses
+  this form, because Telegram does not permit `-` in a command name.
+- A built-in command always wins. A skill with the name of a built-in command gets no command.
+  The names `/exit`, `/quit`, `/start`, `/sethome`, `/approve`, `/deny`, and `/restart` are
+  also reserved. The log has a warning for each skill that gets no command.
+- When two skills have the same command, a skill in `~/.tether/skills/` wins over an external
+  skill. In one group, the first name in sort order wins.
+- A skill name with no ASCII letter or digit gets no command. A skill name with a `"` or a
+  control character also gets no command.
+- A new skill works as a command at once. You do not need `/new`.
+- When a task runs, the skill command waits in the queue. The bot replies "⏳ Queued. I'll
+  answer after the current task." The skill turn runs after the task. `/stop` and `/new` remove
+  it, and `/stop keep` keeps it.
+- A channel has skill commands only when the `skill_view` tool is available on that channel. A
+  `toolsets` limit that removes the skill tools also removes the skill commands.
+- The skill text in the message has the limit of a `skill_view` result,
+  `context.tool_output_max_chars`. A longer skill is cut. The full text goes to a file, and the
+  message gives the path of the file.
+- The skill text stays in the session as a user message. The session title is the command that
+  you typed.
+
+To see the skill commands:
+
+- `/help` shows the first 10 skill commands after the built-in commands.
+- `/help skills` shows all skill commands.
+- The Telegram command menu shows the skill commands after the built-in commands. See
+  [Telegram](Telegram#the-command-menu).
 
 ## Manage skills with `tether skills`
 

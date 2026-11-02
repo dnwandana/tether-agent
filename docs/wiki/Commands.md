@@ -76,7 +76,7 @@ task runs.
 | `/compact` | | Summarizes the older messages now. | | no |
 | `/reload-mcp` | | Reloads the MCP servers. The next request does not use the prompt cache. | | no |
 | `/usage` | `[today\|7d\|30d\|session]` | Shows the tokens and the cost for each model. The default range is `today`. `session` also shows the number of compactions. `session` also counts the goal judge calls of the session. | Today, 7 days, 30 days, Session | yes |
-| `/help` | | Shows the main commands. | | yes |
+| `/help` | `[skills]` | Shows the main commands and the first 10 skill commands. `/help skills` shows all skill commands. | | yes |
 | `/stop` | `[keep]` | Stops the task. `keep` keeps the waiting messages. It also pauses an active goal. | | yes |
 | `/steer` | `<text>` | Adds guidance to the running task. | ⚡ Do this now | yes |
 | `/now` | | Stops the task and runs your waiting message now. | | yes |
@@ -88,6 +88,14 @@ task runs.
 In the Telegram command menu, `/reload-mcp` is `/reload_mcp`, because Telegram does not permit
 `-` in a command name. The two names do the same thing. The menu does not show `/start`,
 `/reset`, `/resume`, and `/subgoal`, but they work.
+
+### Skill commands
+
+Each skill also has a slash command. `/<skill> [request]` runs the skill with the request, for
+example `/arxiv transformers 2026`. A built-in command wins over a skill with the same name. In
+the CLI, an unknown name gets `Unknown command /<name>. Send /help to see the commands.` In
+Telegram, a slash text that is not a command and not a skill goes to the agent as a normal
+message. See [Skills](Skills#run-a-skill-with-a-slash-command).
 
 ### /model and /effort
 
@@ -241,7 +249,8 @@ new reply at once.
 - A command with "yes" in the Busy column runs at once.
 - Another command gets the reply "⏳ **Busy** `/x` cannot run during a task. Wait for the
   answer, or stop the task." with a **⏹ Stop the task** button.
-- The gateway never keeps a slash command in the queue for later.
+- A slash text that is not a command, for example a skill command, waits in the queue like a
+  normal message. The bot replies "⏳ Queued. I'll answer after the current task."
 
 During a goal, the session stays busy from one goal turn to the next. A command that does
 not work while a task runs gets the line "A goal runs. Send /goal pause first."
@@ -256,10 +265,9 @@ not work while a task runs gets the line "A goal runs. Send /goal pause first."
 | `/steer <text>` | Adds the text to the running task, like a plain text. With no task, the text runs as a normal message. |
 
 `/now` does nothing when no message of yours waits. Then the task continues, and the reply is
-"✅ Nothing waits. The agent already has your message." These messages do not count as waiting:
-
-- a slash command in the queue,
-- a message that the gateway made, for example a background result.
+"✅ Nothing waits. The agent already has your message." A message that the gateway made, for
+example a background result, does not count as waiting. A skill command in the queue counts as
+waiting.
 
 The **⚡ Do this now** button sends `/now` for the turn of the reply. The bot edits the message of
 the button with the result. A button from an older turn stops nothing. After such a tap, the bot
