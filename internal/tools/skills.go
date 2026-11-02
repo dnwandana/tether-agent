@@ -69,8 +69,10 @@ type passthroughSet struct {
 	names []string
 }
 
-// addPassthrough registers names for the session of env.
-func addPassthrough(env *Env, names []string) {
+// AddPassthrough registers names for the session of env. The terminal tool
+// passes these env names to a child process of the session. A nil env does
+// nothing.
+func AddPassthrough(env *Env, names []string) {
 	if env == nil || len(names) == 0 {
 		return
 	}
@@ -93,8 +95,8 @@ func addPassthrough(env *Env, names []string) {
 	}
 }
 
-// PassthroughFor returns the env names that the skill_view calls of the
-// session of env registered, sorted. TerminalTool.Passthrough adds them to
+// PassthroughFor returns the env names that skill_view and the skill commands
+// of the session of env registered, sorted. TerminalTool.Passthrough adds them to
 // terminal.env_passthrough, so a child process of this session keeps them.
 func PassthroughFor(env *Env) []string {
 	if env == nil {
@@ -168,10 +170,15 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 	if strings.TrimSpace(a.File) != "" {
 		return readSkillFile(s, a.File)
 	}
-	addPassthrough(env, s.RequiredEnv)
+	sessionID := ""
+	if env != nil {
+		sessionID = env.SessionID
+	}
+	body := skills.SubstituteTemplateVars(s.Body, s.Dir, sessionID)
+	AddPassthrough(env, s.RequiredEnv)
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "skill %s: %s\nfolder: %s\n\n%s", s.Name, s.Description, s.Dir, strings.TrimLeft(s.Body, "\n"))
+	fmt.Fprintf(&b, "skill %s: %s\nfolder: %s\n\n%s", s.Name, s.Description, s.Dir, strings.TrimLeft(body, "\n"))
 	if !strings.HasSuffix(b.String(), "\n") {
 		b.WriteString("\n")
 	}
@@ -261,6 +268,38 @@ func linkedFiles(dir string) []string {
 	})
 	sort.Strings(out)
 	return out
+}
+
+// SkillInvocationText returns the user message of a skill command. body is the
+// prepared skill body, and args is the text after the command. The text follows
+// Hermes _build_skill_message. The skill_view hint uses the Tether Agent
+// arguments name and file.
+func SkillInvocationText(s skills.Skill, body, args string) string {
+	parts := []string{
+		fmt.Sprintf(`[IMPORTANT: The user has invoked the "%s" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]`, s.Name),
+		"",
+		strings.TrimSpace(body),
+		"",
+		"[Skill directory: " + s.Dir + "]",
+		"Resolve any relative paths in this skill (e.g. `scripts/foo.js`, `templates/config.yaml`) against that directory, then run them with the terminal tool using the absolute path.",
+	}
+	if len(s.RequiredEnv) > 0 {
+		parts = append(parts, "",
+			"[Required environment variables (the terminal tool gets them in this session): "+strings.Join(s.RequiredEnv, ", ")+"]")
+	}
+	if files := linkedFiles(s.Dir); len(files) > 0 {
+		parts = append(parts, "", "[This skill has supporting files (paths relative to the skill directory above):]")
+		for _, f := range files {
+			parts = append(parts, "- "+f)
+		}
+		parts = append(parts, "",
+			fmt.Sprintf(`Load any of these with skill_view(name="%s", file="<path>"), or run scripts directly by absolute path (e.g. `, s.Name)+
+				"`node "+s.Dir+"/scripts/foo.js`).")
+	}
+	if args != "" {
+		parts = append(parts, "", "The user has provided the following instruction alongside the skill invocation: "+args)
+	}
+	return strings.Join(parts, "\n")
 }
 
 // SkillsListTool is the skills_list tool.

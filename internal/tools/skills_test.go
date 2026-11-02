@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -241,5 +243,94 @@ func TestSkillManageBadArgs(t *testing.T) {
 	}
 	if tool.Name() != "skill_manage" || tool.Toolset() != SetSkills || tool.ParallelSafe() {
 		t.Fatal("bad tool metadata")
+	}
+}
+
+func TestSkillInvocationText(t *testing.T) {
+	const header = `[IMPORTANT: The user has invoked the "arxiv" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]`
+	const resolve = "Resolve any relative paths in this skill (e.g. `scripts/foo.js`, `templates/config.yaml`) against that directory, then run them with the terminal tool using the absolute path."
+
+	t.Run("no env, no files, no args", func(t *testing.T) {
+		dir := t.TempDir()
+		s := skills.Skill{Name: "arxiv", Description: "Search arXiv.", Body: "raw body", Dir: dir}
+		got := SkillInvocationText(s, "\n  # arXiv\nSearch papers.\n\n", "")
+		want := strings.Join([]string{
+			header,
+			"",
+			"# arXiv\nSearch papers.",
+			"",
+			"[Skill directory: " + dir + "]",
+			resolve,
+		}, "\n")
+		if got != want {
+			t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("env, files, and args", func(t *testing.T) {
+		root := t.TempDir()
+		writeSkill(t, root, "arxiv", "Search arXiv.", "", "raw body", map[string]string{
+			"scripts/search.py": "print(1)",
+			"references/api.md": "API",
+			".env":              "SECRET=1",
+		})
+		dir := filepath.Join(root, "arxiv")
+		s := skills.Skill{Name: "arxiv", Body: "raw body", Dir: dir, RequiredEnv: []string{"ARXIV_KEY", "ARXIV_USER"}}
+		got := SkillInvocationText(s, "Search papers.", "transformers 2026\nonly new papers")
+		want := strings.Join([]string{
+			header,
+			"",
+			"Search papers.",
+			"",
+			"[Skill directory: " + dir + "]",
+			resolve,
+			"",
+			"[Required environment variables (the terminal tool gets them in this session): ARXIV_KEY, ARXIV_USER]",
+			"",
+			"[This skill has supporting files (paths relative to the skill directory above):]",
+			"- references/api.md",
+			"- scripts/search.py",
+			"",
+			`Load any of these with skill_view(name="arxiv", file="<path>"), or run scripts directly by absolute path (e.g. ` + "`node " + dir + "/scripts/foo.js`).",
+			"",
+			"The user has provided the following instruction alongside the skill invocation: transformers 2026\nonly new papers",
+		}, "\n")
+		if got != want {
+			t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+}
+
+func TestAddPassthroughExported(t *testing.T) {
+	env := &Env{Values: map[string]any{}}
+	AddPassthrough(env, []string{"B_KEY", "A_KEY", "B_KEY"})
+	if got := PassthroughFor(env); !slices.Equal(got, []string{"A_KEY", "B_KEY"}) {
+		t.Fatal(got)
+	}
+	AddPassthrough(nil, []string{"A_KEY"}) // A nil env is a no-op.
+}
+
+func TestSkillViewReplacesTemplateTokens(t *testing.T) {
+	cat := catalogWith(t, "deploy", "Deploy steps.",
+		"Run ${HERMES_SKILL_DIR}/scripts/run.sh for ${HERMES_SESSION_ID}.",
+		map[string]string{"scripts/notes.md": "See ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID}."})
+	all, _, err := cat.Load()
+	if err != nil || len(all) != 1 {
+		t.Fatal(all, err)
+	}
+	dir := all[0].Dir
+	env := &Env{SessionID: "sess-42", Values: map[string]any{}}
+	out := runToolEnv(t, SkillViewTool{cat}, `{"name":"deploy"}`, env)
+	if !strings.Contains(out, "Run "+dir+"/scripts/run.sh for sess-42.") {
+		t.Fatal(out)
+	}
+	// A support file read with file does not change.
+	if out := runToolEnv(t, SkillViewTool{cat}, `{"name":"deploy","file":"scripts/notes.md"}`, env); out != "See ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID}." {
+		t.Fatal(out)
+	}
+	// With a nil env, the session ID is empty, so its token stays.
+	out, err = SkillViewTool{cat}.Run(context.Background(), json.RawMessage(`{"name":"deploy"}`), nil)
+	if err != nil || !strings.Contains(out, "Run "+dir+"/scripts/run.sh for ${HERMES_SESSION_ID}.") {
+		t.Fatal(out, err)
 	}
 }
