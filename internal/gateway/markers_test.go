@@ -98,12 +98,12 @@ func TestMarkerQueuedFollowsTheQueue(t *testing.T) {
 	gone.IsText = false
 	g.Submit(cctx, gone, f.new, nil)
 	flushMarkers(t, g)
-	want := []sessions.QueuedText{{Text: "look", Lost: 1}, {Text: "gone"}}
+	want := []sessions.QueuedText{{Text: "look", Lost: 1}, {Text: "/nosuch"}, {Text: "gone"}}
 	if m := markerOf(t, g.Deps.Store, "k"); m == nil || !reflect.DeepEqual(m.Queued, want) {
 		t.Fatalf("%+v", m)
 	}
 	cancel()
-	want = want[:1]
+	want = want[:2]
 	waitFor(t, func() bool {
 		flushMarkers(t, g)
 		m := markerOf(t, g.Deps.Store, "k")

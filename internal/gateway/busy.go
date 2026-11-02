@@ -536,7 +536,7 @@ func (g *Gateway) takeOver(key string, turn, msgID int) (took bool, waiting int,
 	tappedClose = g.closeSlotLocked(tapped, "")
 	if text != "" {
 		in := cur.in
-		in.Text, in.Images, in.Files, in.IsText = text, nil, nil, true
+		in.Text, in.Images, in.Files, in.IsText, in.Slash = text, nil, nil, true, false
 		// The agent cannot read the drained text now. Its steer acks move with the text, so
 		// the start, the drop, or a restart of the new message closes them.
 		moved := &pendingTurn{in: in, newRenderer: cur.newRenderer, steerAcks: takeSteerAcksLocked(rs, drained)}
@@ -751,14 +751,19 @@ func ackReply(r Renderer, rep Reply) AckHandle {
 	return nil
 }
 
-// steerable reports whether in is a plain text that can go into a run as a steer.
+// steerable reports whether in is a plain text that can go into a run as a steer. A
+// slash text is never a steer.
 func steerable(in Inbound) bool {
 	return in.IsText && len(in.Images) == 0 && len(in.Files) == 0 &&
-		strings.TrimSpace(in.Text) != "" && !isCommandText(in)
+		strings.TrimSpace(in.Text) != "" && !in.Slash && !isCommandText(in)
 }
 
-// isCommandText reports whether the text of in is a slash command.
+// isCommandText reports whether the text of in is a slash command that the queue drops.
+// A marked slash text (Inbound.Slash) is a message.
 func isCommandText(in Inbound) bool {
+	if in.Slash {
+		return false
+	}
 	_, _, ok := IsCommand(in.Text)
 	return ok
 }

@@ -58,6 +58,10 @@ type Inbound struct {
 	Target Target
 	// ButtonMsgID is the message ID of the pressed button, or 0 for a typed message.
 	ButtonMsgID int
+	// Slash is true when the owner typed a slash command that is not a built-in and not a
+	// reserved name. The gateway treats the text as a message. Deps.Turn runs the skill of
+	// the command at the start of the turn.
+	Slash bool
 }
 
 // Renderer shows one turn on a channel. The channel builds one for each turn.
@@ -280,6 +284,8 @@ func (g *Gateway) accept(ctx context.Context, in Inbound, newRenderer func() Ren
 			return g.runCommand(ctx, in, newRenderer, cmd, args)
 		}
 	}
+	// The check reads no skill folder. Deps.Turn resolves the skill when the turn starts.
+	in.Slash = SlashCandidate(in.Text)
 	return g.acceptMessage(ctx, in, newRenderer)
 }
 
@@ -320,7 +326,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	}
 	p := &pendingTurn{in: in, newRenderer: newRenderer, ready: make(chan struct{})}
 	ks.queue = append(ks.queue, p)
-	// A slash text is dropped when it leaves the queue, so it gets no ack.
+	// A built-in or reserved slash text is dropped when it leaves the queue, so it gets no ack.
 	var slot *ackSlot
 	send, turn := false, 0
 	if !isCommandText(in) {
@@ -469,6 +475,12 @@ func (g *Gateway) enqueueTurn(ctx context.Context, key string, p *pendingTurn) e
 		}
 	}
 	in.Key, in.Text, in.Images, in.Files, in.IsText = key, text, nil, nil, true
+	// in can be a copy of a skill command. Only a text of the owner can be a slash command,
+	// so a restart keeps a queued skill command, and a system text never is one. The restart
+	// marker does not keep the source of a text. So a steer text that the agent did not read
+	// before a restart, for example "/arxiv x" from "/steer /arxiv x", runs as a skill
+	// command after the restart.
+	in.Slash = !p.system && SlashCandidate(text)
 	p.in, p.newRenderer = in, newRenderer
 	g.mu.Lock()
 	if g.stopping.Load() {
@@ -593,6 +605,8 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 		// The steer that the turn did not deliver becomes the next turn, before the queue.
 		in := p.in
 		in.Text, in.Images, in.Files, in.IsText = pending, nil, nil, true
+		// p can be a skill command. A steer text is never one.
+		in.Slash = false
 		ks.queue = append([]*pendingTurn{{in: in, newRenderer: p.newRenderer}}, ks.queue...)
 	}
 	// The continuation goes to the end of the queue, after the leftover steer and each
@@ -746,6 +760,7 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 	end.ran = true
 	res, err := g.Deps.Turn(tctx, sess, TurnInput{
 		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, Sink: r, Steer: rs.Steer, Notify: notify,
+		Slash:       p.in.Slash,
 		OnSteerRead: func(seq uint64) { g.steerRead(rs, seq) },
 	})
 	end.res, end.err = res, err
