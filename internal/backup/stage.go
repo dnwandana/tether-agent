@@ -127,7 +127,7 @@ func readManifest(tr *tar.Reader) (Manifest, error) {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return m, fmt.Errorf("read manifest.json in the archive: %w", err)
 	}
-	if m.Format != FormatVersion {
+	if m.Format < 1 || m.Format > FormatVersion {
 		return m, fmt.Errorf("the archive has format %d, and this binary knows format %d. Run tether update first", m.Format, FormatVersion)
 	}
 	if latest := db.LatestVersion(); m.SchemaVersion > latest {

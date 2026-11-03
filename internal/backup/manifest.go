@@ -9,10 +9,13 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/memory"
 )
 
-// FormatVersion is the archive format that this binary writes and reads.
-const FormatVersion = 1
+// FormatVersion is the archive format that this binary writes. A restore also
+// reads format 1, which has no memory/notes.
+const FormatVersion = 2
 
 // ManifestName is the name of the first tar entry, which describes the archive.
 const ManifestName = "manifest.json"
@@ -46,14 +49,19 @@ type Manifest struct {
 // topItems are the top-level names of the allow list. The swap moves these names.
 var topItems = []string{"state.db", "config.yaml", "memory", "skills", "scripts"}
 
-// memoryFiles are the only files that the archive can hold under memory/.
+// memoryFiles are the tier-1 memory files. The archive can also hold
+// memory/notes and the note files in it. See allowed.
 var memoryFiles = []string{"memory/memory.md", "memory/user_profile.md"}
 
 // allowed reports whether name is in the allow list. name is a slash path
 // with no trailing "/".
 func allowed(name string) bool {
-	if slices.Contains(topItems, name) || slices.Contains(memoryFiles, name) {
+	if slices.Contains(topItems, name) || slices.Contains(memoryFiles, name) || name == "memory/notes" {
 		return true
+	}
+	// IsNoteName refuses a name with a "/", so a subfolder stays out.
+	if rest, ok := strings.CutPrefix(name, "memory/notes/"); ok {
+		return memory.IsNoteName(rest)
 	}
 	return strings.HasPrefix(name, "skills/") || strings.HasPrefix(name, "scripts/")
 }

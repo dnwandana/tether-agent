@@ -189,8 +189,10 @@ func TestStageRejects(t *testing.T) {
 		{"truncated", valid[:len(valid)/2], []string{"is not a gzip tar file", "does not match the manifest"}},
 		{"manifest not first", stageTarRaw(t, stateDB, stageManifestEntry(t, stageManifestFor([]stageTarEntry{stateDB}))),
 			[]string{"no manifest.json as its first entry"}},
-		{"format 2", withManifest(func(m *Manifest) { m.Format = 2 }, stateDB),
-			[]string{"format 2, and this binary knows format 1"}},
+		{"format 3", withManifest(func(m *Manifest) { m.Format = 3 }, stateDB),
+			[]string{"the archive has format 3, and this binary knows format 2. Run tether update first"}},
+		{"format 0", withManifest(func(m *Manifest) { m.Format = 0 }, stateDB),
+			[]string{"the archive has format 0, and this binary knows format 2. Run tether update first"}},
 		{"schema too new", withManifest(func(m *Manifest) { m.SchemaVersion = db.LatestVersion() + 1 }, stateDB),
 			[]string{"this binary knows schema"}},
 		{"symlink", bad("skills/x", tar.TypeSymlink), []string{"is a link or a special file"}},
@@ -271,5 +273,40 @@ func TestStageDropsSpecialBits(t *testing.T) {
 		if fi.Mode().Perm() != 0o700 || fi.Mode()&(fs.ModeSetuid|fs.ModeSetgid|fs.ModeSticky) != 0 {
 			t.Fatalf("the staged folder %s has mode %v, want 0700", d, fi.Mode())
 		}
+	}
+}
+
+func TestStageAcceptsFormat1And2(t *testing.T) {
+	stateDB := stageTarEntry{Name: "state.db", Type: tar.TypeReg, Mode: 0o600, Body: string(stageValidDB(t))}
+	note := "---\ntype: memory\nmodified: 2026-11-04T09:12:44Z\n---\nQuickNode free plan: 10M credits/month, 15 req/s\n"
+	cases := []struct {
+		format  int
+		entries []stageTarEntry
+		want    []string
+	}{
+		{1, []stageTarEntry{stateDB}, []string{"state.db"}},
+		{2, []stageTarEntry{stateDB,
+			{Name: "memory/", Type: tar.TypeDir, Mode: 0o700},
+			{Name: "memory/notes/", Type: tar.TypeDir, Mode: 0o700},
+			{Name: "memory/notes/rpc.md", Type: tar.TypeReg, Mode: 0o600, Body: note}},
+			[]string{"memory", "memory/notes", "memory/notes/rpc.md", "state.db"}},
+	}
+	for _, c := range cases {
+		m := stageManifestFor(c.entries)
+		m.Format = c.format
+		archive := stageTarRaw(t, append([]stageTarEntry{stageManifestEntry(t, m)}, c.entries...)...)
+		s, err := stage(ctx, bytes.NewReader(archive), t.TempDir())
+		if err != nil {
+			t.Fatalf("format %d: %v", c.format, err)
+		}
+		if s.Manifest.Format != c.format {
+			t.Fatalf("format = %d, want %d", s.Manifest.Format, c.format)
+		}
+		if names := stageListTree(t, s.Dir); !slices.Equal(names, c.want) {
+			t.Fatalf("format %d: names = %v, want %v", c.format, names, c.want)
+		}
+	}
+	if FormatVersion != 2 {
+		t.Fatal("FormatVersion =", FormatVersion)
 	}
 }

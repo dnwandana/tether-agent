@@ -40,7 +40,7 @@ func TestCheckEntryNameStripsFolderSlash(t *testing.T) {
 
 func TestManifestJSONKeys(t *testing.T) {
 	b, _ := json.Marshal(Manifest{Format: FormatVersion, Redacted: Redacted{ConfigKeys: []string{"providers.openai.api_key"}}})
-	for _, k := range []string{`"format":1`, `"tether_version"`, `"created_at"`, `"schema_version"`, `"files"`,
+	for _, k := range []string{`"format":2`, `"tether_version"`, `"created_at"`, `"schema_version"`, `"files"`,
 		`"config_keys"`, `"config_warnings"`, `"state_db"`} {
 		if !bytes.Contains(b, []byte(k)) {
 			t.Error("missing", k)
@@ -48,5 +48,27 @@ func TestManifestJSONKeys(t *testing.T) {
 	}
 	if modeString(0o4755) != "0755" {
 		t.Fatal(modeString(0o4755))
+	}
+}
+
+func TestAllowedNotes(t *testing.T) {
+	for _, n := range []string{"memory/notes", "memory/notes/a.md", "memory/notes/inbox-user.md"} {
+		if !allowed(n) {
+			t.Errorf("%s is not allowed", n)
+		}
+	}
+	for _, n := range []string{"memory/notes/a/b.md", "memory/notes/.x.md", "memory/notes/a.txt",
+		"memory/other.md", "memory/notes/RPC.md", "memory/notes/.md", "memory/notes/"} {
+		if allowed(n) {
+			t.Errorf("%s is allowed", n)
+		}
+	}
+	// A tar folder entry ends with "/".
+	if clean, err := checkEntryName("memory/notes/"); err != nil || clean != "memory/notes" {
+		t.Fatalf("clean=%q err=%v", clean, err)
+	}
+	if _, err := checkEntryName("memory/notes/a/b.md"); err == nil ||
+		!strings.Contains(err.Error(), "is not a tether data file. The archive is not safe") {
+		t.Fatal(err)
 	}
 }

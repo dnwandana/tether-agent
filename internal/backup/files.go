@@ -3,10 +3,14 @@ package backup
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 
+	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
@@ -29,9 +33,12 @@ type item struct {
 var walkedFolders = []string{"scripts", "skills"}
 
 // collectItems lists the allow-list items under memory/, scripts/, and
-// skills/ of dataDir. Create adds state.db and config.yaml. The order is
-// lexical, and each folder comes before its contents. skipped holds the Rel
-// of each symlink and each special file. collectItems does not follow links.
+// skills/ of dataDir. Create adds state.db and config.yaml. The memory/ items
+// come first, in this order: the folder, the tier-1 files, memory/notes, and
+// the notes in name order. The items of scripts/ and skills/ are in lexical
+// order, and each folder comes before its contents. skipped holds the Rel of
+// each symlink, each special file, and each entry of memory/notes/ that is
+// not a note. collectItems does not follow links.
 func collectItems(dataDir string) (items []item, skipped []string, err error) {
 	items, skipped, err = collectMemory(dataDir)
 	if err != nil {
@@ -48,8 +55,9 @@ func collectItems(dataDir string) (items []item, skipped []string, err error) {
 	return items, skipped, nil
 }
 
-// collectMemory returns the memory/ folder and the allow-list files in it.
-// The folder item is present only when one of those files exists.
+// collectMemory returns the memory/ folder, the tier-1 files, and
+// memory/notes with its note files. The folder item is present only when a
+// tier-1 file or a note exists.
 func collectMemory(dataDir string) (items []item, skipped []string, err error) {
 	dir := filepath.Join(dataDir, "memory")
 	fi, err := os.Lstat(dir)
@@ -75,8 +83,59 @@ func collectMemory(dataDir string) (items []item, skipped []string, err error) {
 		}
 		items = append(items, item{Rel: rel, Src: src, Mode: ffi.Mode()})
 	}
-	if len(items) > 0 {
-		items = append([]item{{Rel: "memory", Src: dir, Dir: true, Mode: fi.Mode()}}, items...)
+	notes, skip, err := collectNotes(dataDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	skipped = append(skipped, skip...)
+	files := len(items)
+	for _, it := range notes {
+		if !it.Dir {
+			files++
+		}
+	}
+	if files == 0 {
+		return nil, skipped, nil
+	}
+	items = append([]item{{Rel: "memory", Src: dir, Dir: true, Mode: fi.Mode()}}, items...)
+	return append(items, notes...), skipped, nil
+}
+
+// collectNotes returns the memory/notes folder and each regular file in it
+// with a note name, in name order. A missing folder gives no items. It does
+// not go into a subfolder.
+func collectNotes(dataDir string) (items []item, skipped []string, err error) {
+	dir := filepath.Join(dataDir, "memory", "notes")
+	fi, err := os.Lstat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil, nil
+	case err != nil:
+		return nil, nil, err
+	case !fi.IsDir():
+		// A symlink or a file at memory/notes: the store refuses it too.
+		return nil, []string{"memory/notes"}, nil
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	items = []item{{Rel: "memory/notes", Src: dir, Dir: true, Mode: fi.Mode()}}
+	for _, e := range ents {
+		rel := "memory/notes/" + e.Name()
+		if !e.Type().IsRegular() || !memory.IsNoteName(e.Name()) {
+			skipped = append(skipped, rel)
+			continue
+		}
+		info, err := e.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			// A store write removed the note after ReadDir.
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+		items = append(items, item{Rel: rel, Src: filepath.Join(dir, e.Name()), Mode: info.Mode()})
 	}
 	return items, skipped, nil
 }
@@ -127,10 +186,16 @@ func collectFolder(dataDir, top string) (items []item, skipped []string, err err
 // gets mode 0600. A file with a NUL byte in its first 8 KB is binary, so it
 // is copied with no change. changed reports whether the mask changed the text.
 func maskTextFile(src, dst string, r *security.Redactor) (changed bool, err error) {
-	// The memory, skill, and script files are small, so one full read is safe.
-	in, err := os.ReadFile(src)
+	sf, err := openRegular(src)
 	if err != nil {
 		return false, err
+	}
+	// A note has no size limit, but the memory store also reads and writes
+	// each note in full, so one full read is safe.
+	in, err := io.ReadAll(sf)
+	sf.Close()
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", src, err)
 	}
 	out := in
 	if bytes.IndexByte(in[:min(len(in), binarySniffLen)], 0) < 0 {
@@ -156,4 +221,29 @@ func maskTextFile(src, dst string, r *security.Redactor) (changed bool, err erro
 		return false, err
 	}
 	return changed, nil
+}
+
+// openRegular opens path for a read and refuses a file that is not a
+// regular file. The collect checks the type before the read, but a file can
+// change after that check. O_NOFOLLOW refuses a symlink, so the backup reads
+// no file outside the data dir. O_NONBLOCK stops the open of a FIFO from a
+// wait, and has no effect on a regular file.
+func openRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if errors.Is(err, syscall.ELOOP) {
+		return nil, fmt.Errorf("%s is a symlink, and the backup does not follow links", path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return f, nil
 }

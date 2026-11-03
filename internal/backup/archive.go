@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"time"
 )
 
@@ -18,7 +17,7 @@ const manifestMode = 0o600
 
 // hashFile returns the lower-case hex sha256 of the file at path and its size.
 func hashFile(path string) (sum string, size int64, err error) {
-	f, err := os.Open(path)
+	f, err := openRegular(path)
 	if err != nil {
 		return "", 0, err
 	}
@@ -114,17 +113,14 @@ func writeEntries(tw *tar.Writer, m Manifest, items []item) error {
 // writeFile writes one regular file to tw. The header size comes from the
 // open file, and it must be equal to want.
 func writeFile(tw *tar.Writer, it item, want int64, modTime time.Time) error {
-	f, err := os.Open(it.Src)
+	f, err := openRegular(it.Src)
 	if err != nil {
-		return err
+		return fmt.Errorf("read the file %s: %w", it.Rel, err)
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
 		return err
-	}
-	if !st.Mode().IsRegular() {
-		return fmt.Errorf("the file %s is not a regular file", it.Rel)
 	}
 	if st.Size() != want {
 		return fmt.Errorf("the file %s changed size during the backup (%d bytes, the manifest has %d). Run the backup again", it.Rel, st.Size(), want)

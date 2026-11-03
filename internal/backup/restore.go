@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
+	"github.com/dnwandana/tether-agent/internal/memory"
 )
 
 // Summary describes a verified archive before the swap. Confirm shows it to the owner.
@@ -115,6 +117,9 @@ func Restore(ctx context.Context, opts RestoreOptions) (*RestoreResult, error) {
 		return nil, ErrStopped
 	}
 
+	if err := addMemoryLock(st.Dir); err != nil {
+		return nil, err
+	}
 	moved, err := swap(dataDir, st.Dir, preDir)
 	if err != nil {
 		// After a failed undo the error names the stage folder, so it must stay.
@@ -126,6 +131,32 @@ func Restore(ctx context.Context, opts RestoreOptions) (*RestoreResult, error) {
 		res.PreRestoreDir = preDir
 	}
 	return res, nil
+}
+
+// addMemoryLock creates the memory folder and an empty lock file of the memory store in the
+// stage folder dir. The archive never holds the lock file, and a backup takes the memory lock
+// only when the lock file exists. Without this step a store write after the restore and a
+// backup could run at the same time until the first store write makes the file. The memory
+// store also creates its folder when it opens, so a restored data dir always has one.
+func addMemoryLock(dir string) error {
+	memDir := filepath.Join(dir, "memory")
+	if err := os.Mkdir(memDir, 0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("create the memory folder in the stage folder: %w", err)
+	}
+	path := filepath.Join(memDir, memory.LockFileName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create the memory lock file in the stage folder: %w", err)
+	}
+	// Chmod sets the mode that the umask can change.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return fmt.Errorf("set the mode of the memory lock file in the stage folder: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("create the memory lock file in the stage folder: %w", err)
+	}
+	return nil
 }
 
 // ctxReader stops the read when ctx ends, so a signal stops the copy of a large entry.

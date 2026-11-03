@@ -101,7 +101,7 @@ config.yaml   1 value looks like a secret and is in the archive
   Move the secret to .env, and use ${NAME} in config.yaml.
 Masked 2 known secret values in state.db.
 Masked the known secret values in 1 text file.
-Skipped the link skills/link.
+Skipped skills/link. The backup copies only regular files, and in memory/notes only files with a note name.
 Backup saved: /data/backups/tether-backup-20261028-174210.tar.gz (1.3 MB)
 The archive holds your messages. Keep it private.
 The archive does not hold .env. Copy .env on its own when you move to a new host.

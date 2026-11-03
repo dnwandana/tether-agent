@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -105,7 +106,7 @@ func TestWriteArchiveManifestFirst(t *testing.T) {
 	if got.Format != FormatVersion || len(got.Files) != 2 || got.Files[1] != files[1] {
 		t.Fatal(got)
 	}
-	if !bytes.Contains(raw, []byte("\n  \"format\": 1")) {
+	if !bytes.Contains(raw, []byte("\n  \"format\": 2")) {
 		t.Fatalf("manifest is not indented: %s", raw)
 	}
 }
@@ -151,5 +152,40 @@ func TestHashFile(t *testing.T) {
 	sum, n, err := hashFile(writeTmp(t, "abc"))
 	if err != nil || n != 3 || sum != "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" {
 		t.Fatal(sum, n, err)
+	}
+}
+
+func TestHashFileRefusesSymlink(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "SKILL.md")
+	if err := os.Symlink(writeTmp(t, "abc"), src); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := hashFile(src); err == nil {
+		t.Fatal("hashFile must refuse a symlink")
+	}
+}
+
+func TestWriteArchiveRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "skills/a/SKILL.md", "abc")
+	items := []item{{Rel: "skills/a/SKILL.md", Src: filepath.Join(dir, "skills", "a", "SKILL.md"), Mode: 0o600}}
+	files, err := fileEntries(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A file of the same size outside the data dir takes the place of the item.
+	if err := os.Remove(items[0].Src); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(writeTmp(t, "xyz"), items[0].Src); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	err = writeArchive(&buf, Manifest{Format: FormatVersion, Files: files}, items)
+	if err == nil {
+		t.Fatal("writeArchive must refuse a symlink")
+	}
+	if !strings.Contains(err.Error(), "skills/a/SKILL.md") && !strings.Contains(err.Error(), items[0].Src) {
+		t.Fatalf("the error does not name the file: %v", err)
 	}
 }

@@ -2,6 +2,7 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
@@ -43,7 +46,8 @@ type Result struct {
 	Size     int64
 	Manifest Manifest
 	Stats    DBStats
-	// Skipped holds the slash paths of the symlinks and special files that the archive omits.
+	// Skipped holds the slash paths of the symlinks, the special files, and the entries of
+	// memory/notes/ that are not notes. The archive omits them.
 	Skipped []string
 	// Replaced lists the literal secrets of config.yaml that the archive holds as ${NAME}.
 	Replaced []Replacement
@@ -114,6 +118,9 @@ func Create(ctx context.Context, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := checkManifestSize(*m); err != nil {
+		return nil, err
+	}
 	if testHookAfterPrepare != nil {
 		testHookAfterPrepare()
 	}
@@ -179,6 +186,13 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 		red.ConfigWarnings = append(red.ConfigWarnings, res.Warnings...)
 	}
 
+	// The shared lock stops the collect and the copies between the two writes of a memory
+	// change. The archive write reads the copies, so it does not hold the lock.
+	releaseMemory, err := lockMemory(ctx, opts.DataDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer releaseMemory()
 	found, skipped, err := collectItems(opts.DataDir)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("list the data files: %w", err)
@@ -198,11 +212,16 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("copy %s: %w", it.Rel, err)
 		}
-		if changed {
+		// A memory item always reads its copy, so the hash and the archive get the bytes
+		// that the lock protected.
+		if changed || strings.HasPrefix(it.Rel, "memory/") {
 			it.Src = dst
+		}
+		if changed {
 			red.Files++
 		}
 	}
+	releaseMemory()
 	items = append(items, found...)
 
 	files, err := fileEntries(items)
@@ -309,6 +328,76 @@ func lockBackups(dir string) (release func(), err error) {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		f.Close()
 	}, nil
+}
+
+// memoryLockPoll is the time between two tries of lockMemory.
+const memoryLockPoll = 50 * time.Millisecond
+
+// lockMemory takes a shared flock on the lock file of the memory store and waits for it. The
+// wait stops when ctx ends, so a signal stops a backup that waits for a long store write. It
+// does not create the lock file: a missing file means that no store write ran yet. So a
+// backup as root cannot make a lock file that the owner cannot open. A restore makes the
+// lock file. release is safe to call more than one time.
+func lockMemory(ctx context.Context, dataDir string) (release func(), err error) {
+	none := func() {}
+	dir := filepath.Join(dataDir, "memory")
+	if fi, err := os.Lstat(dir); err != nil || !fi.IsDir() {
+		return none, nil
+	}
+	path := filepath.Join(dir, memory.LockFileName)
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return none, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open the memory lock file %s: %w", path, err)
+	}
+	if err := flockShared(ctx, f); err != nil {
+		f.Close()
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			f.Close()
+		})
+	}, nil
+}
+
+// flockShared takes a shared flock on f. A blocked flock does not see ctx, so it tries
+// without a wait and sleeps between the tries.
+func flockShared(ctx context.Context, f *os.File) error {
+	t := time.NewTimer(0)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for the memory lock: %w", ctx.Err())
+		case <-t.C:
+		}
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			return fmt.Errorf("lock the memory files: %w", err)
+		}
+		t.Reset(memoryLockPoll)
+	}
+}
+
+// checkManifestSize returns an error when the manifest of m is larger than a restore reads.
+// It uses the same encoding as writeEntries.
+func checkManifestSize(m Manifest) error {
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode the manifest: %w", err)
+	}
+	if len(data) > manifestLimit {
+		return fmt.Errorf("the manifest of the archive is larger than %d bytes, so a restore cannot read it. Remove some files from memory/notes/, skills/, or scripts/, and then try again", manifestLimit)
+	}
+	return nil
 }
 
 // removeStaleTmp removes the .tmp-* entries in dir that a crashed run left. The caller holds

@@ -96,7 +96,7 @@ func printBackupReport(w io.Writer, r *backup.Result) {
 		fmt.Fprintf(w, "Masked the known secret values in %s.\n", countNoun(n, "text file", "text files"))
 	}
 	for _, rel := range r.Skipped {
-		fmt.Fprintf(w, "Skipped the link %s.\n", rel)
+		fmt.Fprintf(w, "Skipped %s. The backup copies only regular files, and in memory/notes only files with a note name.\n", rel)
 	}
 	if r.Path == "-" {
 		fmt.Fprintf(w, "Backup written to stdout (%s)\n", formatSize(r.Size))

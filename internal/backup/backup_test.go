@@ -9,15 +9,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/memory"
 )
 
 const createSecret = "sk-proj-secret-0123456789"
@@ -503,5 +506,176 @@ func TestCreateStopsOnCancel(t *testing.T) {
 	}
 	if len(ents) != 0 {
 		t.Fatalf("backups/ holds %v", ents)
+	}
+}
+
+func TestCreateHoldsNotes(t *testing.T) {
+	dir, _ := newDataDir(t)
+	write(t, dir, "memory/notes/rpc.md", "---\ntype: memory\nmodified: 2026-11-04T09:12:44Z\n---\n"+
+		"the key is "+createSecret+"\n§\nQuickNode free plan: 10M credits/month, 15 req/s\n")
+	inbox := "---\ntype: user\nmodified: 2026-11-04T09:12:44Z\n---\nprefers short replies\n"
+	write(t, dir, "memory/notes/inbox-user.md", inbox)
+	opts := createOpts(dir)
+	opts.DotEnv = map[string]string{"OPENAI_API_KEY": createSecret}
+	res, err := Create(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := createReadArchive(t, data)
+	wantNames := []string{"manifest.json", "state.db", "memory/", "memory/notes/",
+		"memory/notes/inbox-user.md", "memory/notes/rpc.md"}
+	if !slices.Equal(a.names, wantNames) {
+		t.Fatalf("names = %v, want %v", a.names, wantNames)
+	}
+	rpc := string(a.contents["memory/notes/rpc.md"])
+	if strings.Contains(rpc, createSecret) || !strings.Contains(rpc, "QuickNode free plan: 10M credits/month, 15 req/s") {
+		t.Fatalf("rpc.md = %q", rpc)
+	}
+	if got := string(a.contents["memory/notes/inbox-user.md"]); got != inbox {
+		t.Fatalf("inbox-user.md = %q", got)
+	}
+	if a.manifest.Format != 2 || a.manifest.Redacted.Files != 1 {
+		t.Fatalf("manifest = %+v", a.manifest)
+	}
+	// The backup does not make the lock file.
+	if _, err := os.Lstat(filepath.Join(dir, "memory", memory.LockFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the backup made the memory lock file:", err)
+	}
+}
+
+func TestCreateReadsMemoryCopy(t *testing.T) {
+	dir, _ := newDataDir(t)
+	write(t, dir, "memory/memory.md", "old fact\n")
+	testHookAfterPrepare = func() { write(t, dir, "memory/memory.md", "a longer fact that came after the prepare step\n") }
+	t.Cleanup(func() { testHookAfterPrepare = nil })
+	res, err := Create(ctx, createOpts(dir))
+	if err != nil {
+		t.Fatal("the archive read the live memory file:", err)
+	}
+	data, err := os.ReadFile(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(createReadArchive(t, data).contents["memory/memory.md"]); got != "old fact\n" {
+		t.Fatalf("memory.md = %q", got)
+	}
+}
+
+func TestCreateWaitsForMemoryLock(t *testing.T) {
+	dir, _ := newDataDir(t)
+	write(t, dir, "memory/memory.md", "old fact\n")
+	write(t, dir, "memory/notes/inbox-memory.md", "---\ntype: memory\n---\nnew fact\n")
+	f, err := os.OpenFile(filepath.Join(dir, "memory", memory.LockFileName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan []byte, 1)
+	go func() {
+		var buf bytes.Buffer
+		opts := createOpts(dir)
+		opts.OutPath, opts.Stdout = "-", &buf
+		if _, err := Create(ctx, opts); err != nil {
+			t.Error(err)
+		}
+		done <- buf.Bytes()
+	}()
+	select {
+	case <-done:
+		t.Fatal("Create did not wait for the memory lock")
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The second write of a replace spill: the old entry leaves tier 1.
+	write(t, dir, "memory/memory.md", "")
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	a := createReadArchive(t, <-done)
+	if got := string(a.contents["memory/memory.md"]); got != "" {
+		t.Fatalf("memory.md = %q, want the text after the spill", got)
+	}
+}
+
+func TestCreateStopsWhileWaitingForMemoryLock(t *testing.T) {
+	dir, _ := newDataDir(t)
+	write(t, dir, "memory/memory.md", "old fact\n")
+	f, err := os.OpenFile(filepath.Join(dir, "memory", memory.LockFileName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The unlock lets a Create that does not stop end, so the goroutine does not leak.
+	defer f.Close()
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := Create(cctx, createOpts(dir))
+		done <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	start := time.Now()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "wait for the memory lock") {
+			t.Fatalf("err = %v, want context.Canceled from the wait for the memory lock", err)
+		}
+		if d := time.Since(start); d > time.Second {
+			t.Fatalf("Create stopped after %v, want less than 1s", d)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Create did not stop when the context ended")
+	}
+}
+
+func TestCreateRefusesSymlinkAfterPrepare(t *testing.T) {
+	dir, _ := newDataDir(t)
+	write(t, dir, "skills/a/SKILL.md", "abc")
+	outside := writeTmp(t, "xyz")
+	skill := filepath.Join(dir, "skills", "a", "SKILL.md")
+	// The skill changes to a symlink after the type check of the collect.
+	testHookAfterPrepare = func() {
+		if err := os.Remove(skill); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(outside, skill); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { testHookAfterPrepare = nil })
+	var buf bytes.Buffer
+	opts := createOpts(dir)
+	opts.OutPath, opts.Stdout = "-", &buf
+	if _, err := Create(ctx, opts); err == nil {
+		t.Fatal("Create must refuse a symlink")
+	}
+	if bytes.Contains(buf.Bytes(), []byte("xyz")) {
+		t.Fatal("the archive holds the symlink target")
+	}
+}
+
+func TestCreateManifestTooLarge(t *testing.T) {
+	dir, _ := newDataDir(t)
+	// Each manifest entry of a 48-byte topic has about 217 bytes, so 6000 notes pass 1 MiB.
+	for i := range 6000 {
+		write(t, dir, fmt.Sprintf("memory/notes/note-%043d.md", i), "x\n")
+	}
+	_, err := Create(ctx, createOpts(dir))
+	if err == nil || !strings.Contains(err.Error(), "larger than 1048576 bytes") {
+		t.Fatalf("err = %v", err)
+	}
+	if got := restoreGlob(t, filepath.Join(dir, "backups"), "tether-backup-"); len(got) != 0 {
+		t.Fatal("an archive stays:", got)
 	}
 }

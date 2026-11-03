@@ -1,10 +1,15 @@
 package backup
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/security"
 )
@@ -183,5 +188,132 @@ func TestMaskTextFileBinary(t *testing.T) {
 	changed, err := maskTextFile(src, dst, r)
 	if err != nil || changed || readFile(t, dst) != in {
 		t.Fatal("a binary file changed", err)
+	}
+}
+
+func TestMaskTextFileRefusesSymlink(t *testing.T) {
+	r := security.NewRedactor(nil)
+	outside := writeTmp(t, "a file outside the data dir\n")
+	src := filepath.Join(t.TempDir(), "SKILL.md")
+	if err := os.Symlink(outside, src); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "out")
+	if _, err := maskTextFile(src, dst, r); err == nil {
+		t.Fatal("maskTextFile must refuse a symlink")
+	}
+	if _, err := os.Lstat(dst); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("maskTextFile wrote the copy of the symlink target:", err)
+	}
+}
+
+func TestMaskTextFileRefusesFIFO(t *testing.T) {
+	r := security.NewRedactor(nil)
+	src := filepath.Join(t.TempDir(), "run.sh")
+	if err := syscall.Mkfifo(src, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := maskTextFile(src, filepath.Join(t.TempDir(), "out"), r)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), src) {
+			t.Fatalf("err = %v, want an error that names %s", err, src)
+		}
+	case <-time.After(2 * time.Second):
+		// Open a writer, so the blocked open returns and the test ends.
+		if w, err := os.OpenFile(src, os.O_WRONLY, 0); err == nil {
+			w.Close()
+		}
+		t.Fatal("maskTextFile waits on a FIFO")
+	}
+}
+
+func TestCollectMemoryNotes(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "memory/memory.md", "m")
+	write(t, dir, "memory/user_profile.md", "u")
+	write(t, dir, "memory/notes/rpc.md", "r")
+	write(t, dir, "memory/notes/inbox-user.md", "i")
+	items, skipped, err := collectItems(dir)
+	if err != nil || len(skipped) != 0 {
+		t.Fatal(err, skipped)
+	}
+	want := []string{"memory", "memory/memory.md", "memory/user_profile.md",
+		"memory/notes", "memory/notes/inbox-user.md", "memory/notes/rpc.md"}
+	if got := rels(items); !slices.Equal(got, want) {
+		t.Fatal(got)
+	}
+	if it := find(items, "memory/notes"); !it.Dir {
+		t.Fatal("memory/notes is not a folder item")
+	}
+	if it := find(items, "memory/notes/rpc.md"); it.Dir || it.Src != filepath.Join(dir, "memory", "notes", "rpc.md") {
+		t.Fatal(it)
+	}
+}
+
+func TestCollectMemoryNotesOnly(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "memory/notes/rpc.md", "r")
+	items, skipped, err := collectItems(dir)
+	if err != nil || len(skipped) != 0 {
+		t.Fatal(err, skipped)
+	}
+	if got := rels(items); !slices.Equal(got, []string{"memory", "memory/notes", "memory/notes/rpc.md"}) {
+		t.Fatal(got)
+	}
+}
+
+func TestCollectMemoryNotesSkipped(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "memory/memory.md", "m")
+	write(t, dir, "memory/notes/rpc.md", "r")
+	write(t, dir, "memory/notes/a.txt", "x")
+	write(t, dir, "memory/notes/RPC.md", "x")
+	write(t, dir, "memory/notes/sub/b.md", "x")
+	if err := os.Symlink("/etc/passwd", filepath.Join(dir, "memory/notes/link.md")); err != nil {
+		t.Fatal(err)
+	}
+	items, skipped, err := collectItems(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSkipped := []string{"memory/notes/RPC.md", "memory/notes/a.txt", "memory/notes/link.md", "memory/notes/sub"}
+	if !slices.Equal(skipped, wantSkipped) {
+		t.Fatal(skipped)
+	}
+	if got := rels(items); !slices.Equal(got, []string{"memory", "memory/memory.md", "memory/notes", "memory/notes/rpc.md"}) {
+		t.Fatal(got)
+	}
+}
+
+func TestCollectMemoryNotesNotFolder(t *testing.T) {
+	for _, kind := range []string{"symlink", "file"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			write(t, dir, "memory/memory.md", "m")
+			if kind == "symlink" {
+				outside := t.TempDir()
+				write(t, outside, "rpc.md", "r")
+				if err := os.Symlink(outside, filepath.Join(dir, "memory/notes")); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				write(t, dir, "memory/notes", "x")
+			}
+			items, skipped, err := collectItems(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(skipped, []string{"memory/notes"}) {
+				t.Fatal(skipped)
+			}
+			if got := rels(items); !slices.Equal(got, []string{"memory", "memory/memory.md"}) {
+				t.Fatal(got)
+			}
+		})
 	}
 }

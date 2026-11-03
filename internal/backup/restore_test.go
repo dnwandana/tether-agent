@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
+	"github.com/dnwandana/tether-agent/internal/memory"
 )
 
 // restoreNow returns 2026-10-29 09:15:00 in the local time of the host.
@@ -457,5 +459,101 @@ func TestSwapEmptyDataDir(t *testing.T) {
 	}
 	if _, err := os.Stat(preDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("the empty pre-restore folder must go:", err)
+	}
+}
+
+func TestRestoreBringsNotesBack(t *testing.T) {
+	src, _ := newDataDir(t)
+	note := "---\ntype: memory\nmodified: 2026-11-04T09:12:44Z\n---\nQuickNode free plan: 10M credits/month, 15 req/s\n"
+	write(t, src, "memory/memory.md", "new memory")
+	write(t, src, "memory/notes/rpc.md", note)
+	data := restoreArchiveOf(t, src)
+	target := restoreTarget(t)
+	write(t, target, "memory/notes/old.md", "old note")
+	var sum Summary
+	opts := restoreOpts(target, data)
+	opts.Confirm = func(s Summary) bool { sum = s; return true }
+	res, err := Restore(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, filepath.Join(target, "memory", "notes", "rpc.md")); got != note {
+		t.Fatalf("rpc.md = %q", got)
+	}
+	// The restore summary counts each memory/ file of the manifest.
+	n := 0
+	for _, f := range sum.Manifest.Files {
+		if strings.HasPrefix(f.Path, "memory/") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("memory files in the summary = %d, want 2", n)
+	}
+	if got := readFile(t, filepath.Join(res.PreRestoreDir, "memory", "notes", "old.md")); got != "old note" {
+		t.Fatalf("old.md in the pre-restore folder = %q", got)
+	}
+}
+
+func TestRestoreMakesMemoryLock(t *testing.T) {
+	_, withMemory := restoreSource(t)
+	empty, _ := newDataDir(t)
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{"archive with memory", withMemory},
+		{"archive with no memory", restoreArchiveOf(t, empty)},
+	}
+	for _, c := range cases {
+		target := restoreTarget(t)
+		var sum Summary
+		opts := restoreOpts(target, c.data)
+		opts.Confirm = func(s Summary) bool { sum = s; return true }
+		if _, err := Restore(ctx, opts); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		fi, err := os.Lstat(filepath.Join(target, "memory", memory.LockFileName))
+		if err != nil {
+			t.Fatalf("%s: the memory lock file is missing: %v", c.name, err)
+		}
+		if !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 || fi.Size() != 0 {
+			t.Fatalf("%s: the memory lock file has mode %v and size %d, want an empty file with mode 0600", c.name, fi.Mode(), fi.Size())
+		}
+		// The summary counts only the files of the manifest, so the lock file is not a memory file.
+		for _, f := range sum.Manifest.Files {
+			if f.Path == "memory/"+memory.LockFileName {
+				t.Fatalf("%s: the manifest holds the lock file", c.name)
+			}
+		}
+	}
+}
+
+func TestRestoreFormat1MovesNotes(t *testing.T) {
+	entries := []stageTarEntry{
+		{Name: "state.db", Type: tar.TypeReg, Mode: 0o600, Body: string(stageValidDB(t))},
+		{Name: "memory/", Type: tar.TypeDir, Mode: 0o700},
+		{Name: "memory/memory.md", Type: tar.TypeReg, Mode: 0o600, Body: "format 1 memory"},
+	}
+	m := stageManifestFor(entries)
+	m.Format = 1
+	data := stageTarRaw(t, append([]stageTarEntry{stageManifestEntry(t, m)}, entries...)...)
+	target := restoreTarget(t)
+	write(t, target, "memory/notes/old.md", "old note")
+	res, err := Restore(ctx, restoreOpts(target, data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Manifest.Format != 1 {
+		t.Fatalf("format = %d, want 1", res.Manifest.Format)
+	}
+	if got := readFile(t, filepath.Join(target, "memory", "memory.md")); got != "format 1 memory" {
+		t.Fatalf("memory.md = %q", got)
+	}
+	if got := readFile(t, filepath.Join(res.PreRestoreDir, "memory", "notes", "old.md")); got != "old note" {
+		t.Fatalf("old.md in the pre-restore folder = %q", got)
+	}
+	if _, err := os.Lstat(filepath.Join(target, "memory", "notes")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("memory/notes is in the target:", err)
 	}
 }
