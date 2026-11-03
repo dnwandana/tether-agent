@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/dnwandana/tether-agent/internal/memory"
@@ -193,43 +194,59 @@ func collectFolder(dataDir, top string) (items []item, skipped []string, err err
 
 // maskTextFile copies src to dst with the known secret values masked. dst
 // gets mode 0600. A file with a NUL byte in its first 8 KB is binary, so it
-// is copied with no change. changed reports whether the mask changed the text.
-func maskTextFile(src, dst string, r *security.Redactor) (changed bool, err error) {
+// is copied with no change and with no full read into memory. changed reports
+// whether the mask changed the text. With always false, a file that the mask
+// does not change gets no copy, because the archive reads src.
+func maskTextFile(src, dst string, r *security.Redactor, always bool) (changed bool, err error) {
 	sf, err := openRegular(src)
 	if err != nil {
 		return false, err
 	}
-	// A note has no size limit, but the memory store also reads and writes
-	// each note in full, so one full read is safe.
-	in, err := io.ReadAll(sf)
-	sf.Close()
+	defer sf.Close()
+	head := make([]byte, binarySniffLen)
+	n, err := io.ReadFull(sf, head)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, fmt.Errorf("read %s: %w", src, err)
+	}
+	head = head[:n]
+	if bytes.IndexByte(head, 0) >= 0 {
+		if !always {
+			return false, nil
+		}
+		return false, writeCopy(dst, io.MultiReader(bytes.NewReader(head), sf), src)
+	}
+	// The mask needs the full text. A note has no size limit, but the memory store also
+	// reads and writes each note in full, so one full read is safe.
+	rest, err := io.ReadAll(sf)
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", src, err)
 	}
-	out := in
-	if bytes.IndexByte(in[:min(len(in), binarySniffLen)], 0) < 0 {
-		masked := r.RedactExact(string(in))
-		if masked != string(in) {
-			out, changed = []byte(masked), true
-		}
+	in := string(head) + string(rest)
+	out := r.RedactExact(in)
+	changed = out != in
+	if !changed && !always {
+		return false, nil
 	}
+	return changed, writeCopy(dst, strings.NewReader(out), src)
+}
+
+// writeCopy writes the bytes of in to dst with mode 0600. src is the name of the
+// source file for a read error.
+func writeCopy(dst string, in io.Reader, src string) error {
 	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return false, err
+		return err
 	}
 	// Chmod also fixes the mode of a dst that existed before.
 	if err := f.Chmod(0o600); err != nil {
 		f.Close()
-		return false, err
+		return err
 	}
-	if _, err := f.Write(out); err != nil {
+	if _, err := io.Copy(f, in); err != nil {
 		f.Close()
-		return false, err
+		return fmt.Errorf("copy %s: %w", src, err)
 	}
-	if err := f.Close(); err != nil {
-		return false, err
-	}
-	return changed, nil
+	return f.Close()
 }
 
 // openRegular opens path for a read and refuses a file that is not a
