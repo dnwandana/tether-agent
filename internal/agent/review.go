@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -313,7 +314,8 @@ func reviewPrompt(mem, skills bool, focus *[2]int) string {
 	return p + reviewToolNote
 }
 
-// reviewNotice returns the notice for one successful memory or skill write, or "".
+// reviewNotice returns the notice for one successful memory or skill write, or "". A memory
+// search, a memory read, and a memory write that changed nothing give "".
 func reviewNotice(c provider.ToolCall, res tools.Result) string {
 	if res.IsError {
 		return ""
@@ -328,6 +330,18 @@ func reviewNotice(c provider.ToolCall, res tools.Result) string {
 	}
 	switch c.Name {
 	case "memory":
+		// Check the action first: the first line of a read result also has "note <topic>".
+		if args.Action == "search" || args.Action == "read" {
+			return ""
+		}
+		first, _, _ := strings.Cut(res.Text, "\n")
+		if strings.HasPrefix(first, "The entry already exists") {
+			return ""
+		}
+		// The args do not show a spill, so the result text gives the note.
+		if topic := noteTopic(first); topic != "" {
+			return memoryNotePrefix + topic
+		}
 		if args.Target == "user" {
 			return "💾 User profile updated"
 		}
@@ -342,6 +356,22 @@ func reviewNotice(c provider.ToolCall, res tools.Result) string {
 		default:
 			return skillUpdatedPrefix + name
 		}
+	}
+	return ""
+}
+
+// memoryNotePrefix starts the notice of a memory write that changed a note.
+const memoryNotePrefix = "💾 Memory note updated: "
+
+// notePhrase finds the phrase "note <topic>" of a memory result that changed a note.
+var notePhrase = regexp.MustCompile(`(?:^|\s)note ([a-z0-9-]+)`)
+
+// noteTopic returns the topic of the phrase "note <topic>" in the first line of text, or "".
+// The lines after the first line can name a note that the call did not change.
+func noteTopic(text string) string {
+	first, _, _ := strings.Cut(text, "\n")
+	if m := notePhrase.FindStringSubmatch(first); m != nil {
+		return m[1]
 	}
 	return ""
 }
@@ -531,7 +561,8 @@ func noReviews(kind string) bool {
 //   - A review starts only after a turn with a final answer.
 //   - A cron, subagent, or review session never gets a review.
 //   - A count needs its tool (memory or skill_manage) in lastReq.Tools.
-//   - A turn that called the tool itself resets the count of the tool (Hermes).
+//   - A turn that called the tool itself resets the count of the tool (Hermes). A memory
+//     search or read does not count.
 //
 // The review gets notify. MaybeStartReviews does not wait for the review.
 func (a *Agent) MaybeStartReviews(ctx context.Context, sess *sessions.Session, lastReq provider.Request, res TurnResult, notify func(string)) {

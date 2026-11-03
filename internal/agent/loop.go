@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -191,8 +192,9 @@ type TurnResult struct {
 	// or NoteNoSummaryCron.
 	NoSummary bool
 
-	// usedMemory and usedSkills tell that the turn called memory or skill_manage. Such a
-	// call resets the review count (Hermes).
+	// usedMemory tells that the turn called memory with an action that is not search or
+	// read. usedSkills tells that the turn called skill_manage. Such a call resets the review
+	// count (Hermes).
 	usedMemory, usedSkills bool
 }
 
@@ -419,7 +421,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		}
 		res.ToolRounds = round
 		for _, c := range out.ToolCalls {
-			res.usedMemory = res.usedMemory || c.Name == "memory"
+			res.usedMemory = res.usedMemory || memoryUse(c)
 			res.usedSkills = res.usedSkills || c.Name == "skill_manage"
 		}
 		stop := false
@@ -460,6 +462,22 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			return res, failures.Err()
 		}
 	}
+}
+
+// memoryUse reports whether c is a memory call that resets the count of the memory review.
+// A search or a read does not reset it. A failed call, a denied call, and a call with bad JSON
+// reset it, because they can be a write.
+func memoryUse(c provider.ToolCall) bool {
+	if c.Name != "memory" {
+		return false
+	}
+	var args struct {
+		Action string `json:"action"`
+	}
+	if json.Unmarshal([]byte(c.Args), &args) != nil {
+		return true
+	}
+	return args.Action != "search" && args.Action != "read"
 }
 
 // View returns the model view of the session history, as the last turn sent it: the

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -204,6 +205,105 @@ func TestSkillNotices(t *testing.T) {
 	}
 	if got := reviewNotice(tc("c", "skill_view", `{"name":"x"}`), tools.Result{Text: "ok"}); got != "" {
 		t.Fatal(got)
+	}
+}
+
+// TestMemoryNotices runs the real memory tool through Registry.Dispatch, so the notice
+// follows the result texts of the store and not a copy of them.
+func TestMemoryNotices(t *testing.T) {
+	// long is too large for tier 1 with the limits of the test (2200 and 1375), but not
+	// too large for one entry.
+	long := strings.Repeat("y", 2300)
+	cases := []struct {
+		name  string
+		setup []string // the memory calls before the call under test
+		args  string
+		want  string
+	}{
+		{"add to memory", nil,
+			`{"action":"add","target":"memory","content":"VPS = hetzner"}`, "💾 Memory updated"},
+		{"add to user", nil,
+			`{"action":"add","target":"user","content":"The user prefers Go"}`, "💾 User profile updated"},
+		{"replace in memory", []string{`{"action":"add","target":"memory","content":"VPS = hetzner"}`},
+			`{"action":"replace","target":"memory","old_text":"hetzner","content":"VPS = ovh"}`, "💾 Memory updated"},
+		{"remove from user", []string{`{"action":"add","target":"user","content":"The user prefers Go"}`},
+			`{"action":"remove","target":"user","old_text":"Go"}`, "💾 User profile updated"},
+		{"add with a topic", nil,
+			`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`, "💾 Memory note updated: rpc"},
+		{"add spill", nil,
+			`{"action":"add","target":"memory","content":"` + long + `"}`, "💾 Memory note updated: inbox-memory"},
+		{"add spill to user", nil,
+			`{"action":"add","target":"user","content":"` + long + `"}`, "💾 Memory note updated: inbox-user"},
+		{"add with a topic that has no letters", nil,
+			`{"action":"add","target":"memory","topic":"!!!","content":"QuickNode free plan"}`, "💾 Memory note updated: inbox-memory"},
+		{"replace in a note", []string{`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`},
+			`{"action":"replace","target":"memory","topic":"rpc","old_text":"QuickNode","content":"QuickNode paid plan"}`, "💾 Memory note updated: rpc"},
+		{"replace in a note with no topic", []string{`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`},
+			`{"action":"replace","target":"memory","old_text":"QuickNode","content":"QuickNode paid plan"}`, "💾 Memory note updated: rpc"},
+		{"remove in a note", []string{
+			`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`,
+			`{"action":"add","target":"memory","topic":"rpc","content":"Helius RPC: 1M credits/day"}`},
+			`{"action":"remove","target":"memory","topic":"rpc","old_text":"QuickNode"}`, "💾 Memory note updated: rpc"},
+		{"remove the last entry of a note", []string{`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`},
+			`{"action":"remove","target":"memory","old_text":"QuickNode"}`, "💾 Memory note updated: rpc"},
+		{"replace spill", []string{`{"action":"add","target":"user","content":"The user prefers Go"}`},
+			`{"action":"replace","target":"user","old_text":"Go","content":"` + long + `"}`, "💾 Memory note updated: inbox-user"},
+		{"replace spill in memory", []string{`{"action":"add","target":"memory","content":"VPS = hetzner"}`},
+			`{"action":"replace","target":"memory","old_text":"hetzner","content":"` + long + `"}`, "💾 Memory note updated: inbox-memory"},
+		{"already exists in memory", []string{`{"action":"add","target":"memory","content":"VPS = hetzner"}`},
+			`{"action":"add","target":"memory","content":"VPS = hetzner"}`, ""},
+		{"already exists in a note", []string{`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`},
+			`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`, ""},
+		{"already exists in the inbox", []string{`{"action":"add","target":"memory","content":"` + long + `"}`},
+			`{"action":"add","target":"memory","content":"` + long + `"}`, ""},
+		{"search", []string{`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`},
+			`{"action":"search","query":"QuickNode"}`, ""},
+		{"read", []string{`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`},
+			`{"action":"read","topic":"rpc"}`, ""},
+		{"failed add", nil,
+			`{"action":"add","target":"memory"}`, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, err := memory.Open(t.TempDir(), 2200, 1375)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reg := tools.NewRegistry()
+			reg.Register(tools.MemoryTool{Store: m})
+			run := func(args string) tools.Result {
+				return reg.Dispatch(ctx, "memory", json.RawMessage(args), nil, map[string]bool{"memory": true})
+			}
+			for _, s := range c.setup {
+				if res := run(s); res.IsError {
+					t.Fatalf("setup %s: %s", s, res.Text)
+				}
+			}
+			res := run(c.args)
+			if got := reviewNotice(tc("c", "memory", c.args), res); got != c.want {
+				t.Errorf("notice %q, want %q; the result is %q", got, c.want, res.Text)
+			}
+		})
+	}
+}
+
+func TestMemoryUseRule(t *testing.T) {
+	cases := map[string]bool{
+		`{"action":"add","target":"memory"}`:   true,
+		`{"action":"replace","target":"user"}`: true,
+		`{"action":"remove"}`:                  true,
+		`{"action":"search","query":"rpc"}`:    false,
+		`{"action":"read","topic":"rpc"}`:      false,
+		`{}`:                                   true,
+		`{"action":`:                           true,
+	}
+	for args, want := range cases {
+		if got := memoryUse(tc("c", "memory", args)); got != want {
+			t.Errorf("%s: %v, want %v", args, got, want)
+		}
+	}
+	if memoryUse(tc("c", "skill_manage", `{"action":"create"}`)) {
+		t.Fatal("only a memory call is memory use")
 	}
 }
 
@@ -478,10 +578,55 @@ func TestMemoryToolUseResetsCounter(t *testing.T) {
 	fp := a.Prov.(*fakeProv)
 	fp.script = []step{toolCalls(tc("m1", "memory", `{"action":"add","target":"memory","content":"x"}`)), text("saved")}
 	userTurn(t, a, sess, "remember x")
-	time.Sleep(20 * time.Millisecond)
-	if len(reviews()) != 0 {
-		t.Fatal("a turn that used memory resets the memory counter")
+	checkMemoryReset(t, a, sess, reviews)
+}
+
+// memoryCount returns the user turns that the memory review of the session counted.
+func memoryCount(a *Agent, id string) int {
+	return a.Reviews.shape(id).userTurns
+}
+
+// checkMemoryReset fails the test when the last turn did not reset the memory counter.
+// The turn is turn 10, so a counter that did not reset starts a review. RunTurn calls
+// goReview before it returns, so WaitReviews also waits for that review.
+func checkMemoryReset(t *testing.T, a *Agent, sess *sessions.Session, reviews func() []ReviewRequest) {
+	t.Helper()
+	if !a.WaitReviews(5 * time.Second) {
+		t.Fatal("a review did not end")
 	}
+	if n := len(reviews()); n != 0 {
+		t.Fatal("the turn must reset the memory counter, but a review started:", n)
+	}
+	if n := memoryCount(a, sess.ID); n != 0 {
+		t.Fatal("the memory counter after the reset:", n)
+	}
+	userTurn(t, a, sess, "hi")
+	if n := memoryCount(a, sess.ID); n != 1 {
+		t.Fatal("the memory counter after the next turn:", n)
+	}
+}
+
+func TestMemorySearchDoesNotResetCounter(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	for range 9 {
+		userTurn(t, a, sess, "hi")
+	}
+	fp := a.Prov.(*fakeProv)
+	fp.script = []step{toolCalls(tc("m1", "memory", `{"action":"search","query":"rpc"}`),
+		tc("m2", "memory", `{"action":"read","topic":"rpc"}`)), text("found")}
+	userTurn(t, a, sess, "find rpc")
+	waitUntil(t, func() bool { return len(reviews()) == 1 })
+}
+
+func TestFailedMemoryAddResetsCounter(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	for range 9 {
+		userTurn(t, a, sess, "hi")
+	}
+	fp := a.Prov.(*fakeProv)
+	fp.script = []step{toolCalls(tc("m1", "memory", `{"action":"add","target":"memory"}`)), text("failed")}
+	userTurn(t, a, sess, "remember")
+	checkMemoryReset(t, a, sess, reviews)
 }
 
 func TestSkillReviewEvery10ToolRounds(t *testing.T) {
