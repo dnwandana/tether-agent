@@ -450,8 +450,10 @@ func (s *Status) DropCleanupEntries(success bool) {
 
 // Drain sends the queue, oldest first, and then a bubble that waits for its
 // first send. Thus the tool lines before an answer message go out above it. It
-// waits for each flood wait without s.mu, so the timer and the setters do not
-// block. It returns when the queue is empty, when ctx ends, or after
+// holds s.mu for one send at a time, so the timer and the setters can run
+// between two sends. A send can wait inline for a short flood wait
+// (maxInlineFloodWait) with s.mu held. Drain waits for a longer flood wait
+// without s.mu. It returns when the queue is empty, when ctx ends, or after
 // flushTimeout. The timer sends the entries that are left.
 func (s *Status) Drain(ctx context.Context) {
 	if ctx.Err() != nil {
@@ -460,14 +462,21 @@ func (s *Status) Drain(ctx context.Context) {
 	deadline := s.now().Add(flushTimeout)
 	for {
 		s.mu.Lock()
-		wait := s.sendQueue(ctx)
-		if wait == 0 {
+		wait := s.sendQueueN(ctx, 1)
+		more := wait == 0 && len(s.queue) > 0
+		if more && (ctx.Err() != nil || !s.now().Before(deadline)) {
+			// The timer sends the entries that are left.
+			wait, more = s.interval(), false
+		} else if wait == 0 && !more {
 			wait = s.sendHeld(ctx)
 		}
 		if wait > 0 && !s.closed {
 			s.armTimer(wait)
 		}
 		s.mu.Unlock()
+		if more {
+			continue
+		}
 		if wait <= 0 {
 			return
 		}
@@ -707,7 +716,14 @@ func (s *Status) enqueue(ctx context.Context, text string, silent, deletable boo
 // sendQueue sends the waiting messages, oldest first. It returns 0 when the
 // queue is empty, else the wait before the next try. s.mu is held.
 func (s *Status) sendQueue(ctx context.Context) time.Duration {
-	for len(s.queue) > 0 {
+	return s.sendQueueN(ctx, 0)
+}
+
+// sendQueueN is sendQueue that stops after n sent messages. n <= 0 means no
+// limit. It returns 0 also when it stops at n. s.mu is held.
+func (s *Status) sendQueueN(ctx context.Context, n int) time.Duration {
+	sent := 0
+	for len(s.queue) > 0 && (n <= 0 || sent < n) {
 		now := s.now()
 		if now.Before(s.floodUntil) {
 			return s.floodUntil.Sub(now)
@@ -724,6 +740,7 @@ func (s *Status) sendQueue(ctx context.Context) time.Duration {
 				s.ids = append(s.ids, m.MessageID)
 			}
 			s.queue = s.queue[1:]
+			sent++
 			continue
 		}
 		if wait, ok := floodWait(err); ok {
