@@ -240,8 +240,8 @@ back in the data folder.
 - The backup replaces a literal key in `providers.<p>.api_key`, `telegram.bot_token`,
   `mcp.servers.<s>.env`, and `mcp.servers.<s>.headers` with a `${NAME}` reference.
 - The backup masks each known secret value in the messages, the reasoning text of the
-  messages, the memory files, the skills, and the scripts. The list of known values is the same
-  list that the redactor uses.
+  messages, the memory files and the memory notes, the skills, and the scripts. The list of
+  known values is the same list that the redactor uses.
 - The backup replaces each known secret value in the other strings of `config.yaml` with a
   `${NAME}` reference to its variable. The value works again after a restore when `.env` has
   that name.

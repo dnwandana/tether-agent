@@ -197,8 +197,8 @@ and in the text that goes to the model.
 - The archive never contains `.env` or `.history`.
 - A literal key in `providers.<name>.api_key`, `telegram.bot_token`, or an MCP `env` or
   `headers` block becomes a `${NAME}` reference.
-- The backup masks each known secret value in the messages, the stored reasoning, the memory
-  files, the skills, and the scripts.
+- The backup masks each known secret value in the messages, the stored reasoning,
+  the memory files and the memory notes, the skills, and the scripts.
 - `tether restore` lists the variables that `.env` must contain. The list has each `${NAME}` of
   `config.yaml`, and the key env of each preset entry with no `api_key`.
 

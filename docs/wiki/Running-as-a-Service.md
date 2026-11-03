@@ -209,7 +209,7 @@ The archive contains these items:
 
 - `state.db` (a consistent copy, made with SQLite `VACUUM INTO`)
 - `config.yaml`
-- `memory/memory.md` and `memory/user_profile.md`
+- `memory/memory.md`, `memory/user_profile.md`, and the memory notes in `memory/notes/`
 - `skills/`
 - `scripts/`
 

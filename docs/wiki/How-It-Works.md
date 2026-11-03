@@ -35,7 +35,7 @@ The code is in `internal/`. These are the main packages:
 | `telegram` | The Telegram channel over the Bot API with plain `net/http`. |
 | `cron` | The scheduler, the job runs, and the delivery of results. |
 | `ctxmgr` | Compaction and the truncation of long tool output. |
-| `memory` | The two memory files. |
+| `memory` | The two memory files and the memory notes. |
 | `skills` | The skill loader, the skill install, and the skill guard. |
 | `security` | The approval gate, protected paths, and secret redaction. |
 
@@ -342,9 +342,12 @@ no header.
    `/prompt set <text>` replaces it for one session, and `/prompt clear` restores it.
 2. **`## MEMORY`**: the content of `memory/memory.md`.
 3. **`## USER PROFILE`**: the content of `memory/user_profile.md`.
-4. **`## SKILLS`**: one line for each skill, with its name and description.
-5. **`## TOOL NOTES`**: short fixed notes for some tools, when those tools are visible.
-6. **Context**: the date and time, the time zone, the working directory, the channel, and the
+4. **`## MEMORY TOPICS`**: the topics of the memory notes in `memory/notes/`, newest
+   first, at most 40. It has no note text. It shows only when the `memory` tool is
+   visible.
+5. **`## SKILLS`**: one line for each skill, with its name and description.
+6. **`## TOOL NOTES`**: short fixed notes for some tools, when those tools are visible.
+7. **Context**: the date and time, the time zone, the working directory, the channel, and the
    chat.
 
 There is no persona file. To change the behavior, edit the memory files, write a skill, or use
@@ -385,25 +388,64 @@ The adapters also help the provider prompt cache:
 
 ## Memory
 
-Memory is two plain text files in the data folder:
+Memory has two tiers in the data folder.
+
+The first tier is two plain text files. Both files load into the system prompt of each
+session:
 
 | File | Content | Limit |
 |---|---|---|
-| `memory/memory.md` | Notes of the agent: facts about the environment, projects, and lessons. | 2200 characters |
+| `memory/memory.md` | Facts of the agent: facts about the environment, projects, and lessons. | 2200 characters |
 | `memory/user_profile.md` | Facts about you: name, preferences, and habits. | 1375 characters |
 
-A line that holds only `§` separates two entries. You can read and edit the files with any text
-editor.
+The second tier is the memory notes. A note is one Markdown file for each topic, for
+example `memory/notes/rpc.md` for the topic `rpc`. A note has no size limit, and it does
+not load into the system prompt. A topic has only `a-z`, `0-9`, and `-`, and at most 48
+characters.
 
-The agent changes memory with the `memory` tool. The tool has three actions:
+A note starts with YAML frontmatter. `type` is the target of the first `add`, `memory` or
+`user`. `modified` is the time of the last write by the tool.
 
-- `add` adds an entry. When the file is full, the action fails and lists the current entries,
-  so the model can remove or join entries.
-- `replace` finds an entry by a unique part of its text and replaces it.
-- `remove` finds an entry by a unique part of its text and removes it.
+```
+---
+type: memory
+modified: 2026-11-04T09:12:44Z
+---
+QuickNode free plan: 10M credits/month, 15 req/s
+§
+Helius RPC: 1M credits/day; mainnet URL in .env
+```
 
-The writes are atomic and use a file lock. A memory change shows in the system prompt from the
-next session. See [Why the prompt stays the same](#why-the-prompt-stays-the-same).
+A line that holds only `§` separates two entries, in a memory file and in a note. One
+entry has at most 4000 characters. You can read and edit the files with any text editor.
+
+The agent changes memory with the `memory` tool. The tool has five actions:
+
+- `add` adds an entry. With a `topic`, the entry goes to the note of that topic. With no
+  topic, the entry goes to the memory file of the target. When the entry does not fit in
+  the file, it goes to the inbox note of the target, `inbox-memory` or `inbox-user`. An
+  `add` never fails because of the limit.
+- `replace` finds an entry by a unique part of its text and replaces it. When the new
+  text does not fit in the memory file, the new text goes to the inbox note, and the old
+  entry leaves the file.
+- `remove` finds an entry by a unique part of its text and removes it. When a note has no
+  more entries, the tool deletes the note.
+- `search` finds entries by words in the two memory files and in all notes. It shows at
+  most 8 matches.
+- `read` shows the numbered entries of one note. The `from` parameter sets the first
+  entry to show.
+
+`replace` and `remove` look in the memory file of the target first. When the file has no
+match, they look in all notes. With a `topic`, they look only in that note.
+
+After a spill, and after an `add` with a topic, the result tells the model to search the
+notes before it saves another fact on the same subject. Thus a note does not get the
+same fact two times.
+
+The writes are atomic and use a file lock. A change to a memory file shows in the system
+prompt from the next session. A `search` and a `read` show a change at once. A new note
+shows in the `## MEMORY TOPICS` section from the next session. See
+[Why the prompt stays the same](#why-the-prompt-stays-the-same).
 
 The `session_search` tool searches all past sessions with SQLite full text search. The agent uses
 it to find an old conversation. It skips the goal judge sessions.
@@ -423,7 +465,8 @@ A review is a copy of the conversation in a separate `review` session. It sends 
 schemas as its parent and the session id of its parent as the cache key, so the prompt cache
 hits. It can use only the `memory`, `skill_view`, and `skill_manage` tools. A review sends one
 notice after the answer, with one line for each kind of change, for example
-`🧩 Skills updated: <name>, <name>` and `💾 Memory updated`.
+`🧩 Skills updated: <name>, <name>`, `💾 Memory updated`, and
+`💾 Memory note updated: <topic>`.
 
 Cron runs, child runs, and reviews do not start reviews.
 

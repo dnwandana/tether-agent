@@ -18,7 +18,7 @@ gives the default of each key on this page.
 | `browser` | Control a headless Chrome. | `browser_navigate`, `browser_click`, `browser_fill`, `browser_read`, `browser_run_js`, `browser_take_screenshot`, `browser_cookies` | Chrome or Chromium on the host. |
 | `vision` | Look at an image. | `view_image` | `agent.vision_provider`, or `vision: true` on the primary provider. |
 | `ask` | Ask the user a question. | `clarify` | None. |
-| `memory` | Keep notes, and search past sessions. | `memory`, `session_search` | None. |
+| `memory` | Keep facts and memory notes, and search past sessions. | `memory`, `session_search` | None. |
 | `skills` | Use and write skills. | `skills_list`, `skill_view`, `skill_manage` | None. |
 | `cron` | Create and manage scheduled jobs. | `cronjob` | The gateway runs the jobs. |
 | `delegation` | Start child agents. | `delegate_task` | The gateway, for background batches. |

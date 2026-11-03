@@ -486,8 +486,9 @@ changes a different `state.db`.
 | `state.db` | The SQLite database: sessions, messages, usage, cron jobs, pairing, and approvals. |
 | `gateway.lock` | The lock and the process id of the running gateway. |
 | `logs/tether.log` | The log of `chat` and `gateway`. |
-| `memory/memory.md` | The notes that the agent keeps. |
+| `memory/memory.md` | The facts that the agent keeps. |
 | `memory/user_profile.md` | The facts about you that the agent keeps. |
+| `memory/notes/` | The memory notes, one Markdown file for each topic. They do not load into the system prompt. |
 | `skills/` | The skills. Refer to [Skills](Skills). |
 | `scripts/` | The scripts for cron jobs. Refer to [Cron](Cron). |
 | `cache/` | Price data, long tool outputs, media, screenshots, the browser profile, and the MCP tool lists. |

@@ -167,10 +167,13 @@ Install Chrome or Chromium so that the browser tools are available.
 ### The agent does not use a new memory entry
 
 **Cause:** the system prompt of a session does not change after it is made. This keeps the
-provider prompt cache valid. A memory change shows in the prompt only after the prompt is made
-again.
+provider prompt cache valid. A change to `memory.md` or `user_profile.md` shows in the
+prompt only after the prompt is made again. A memory note never loads into the prompt. The
+`## MEMORY TOPICS` section shows a new note from the next session.
 
-**Fix:** send `/new`, or wait for the next compaction of the session.
+**Fix:** send `/new`, or wait for the next compaction of the session. In the current
+session, ask the agent to search its memory. The `search` action of the `memory` tool
+finds a new entry at once.
 
 ## Provider problems
 
