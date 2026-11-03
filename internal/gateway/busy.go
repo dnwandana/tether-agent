@@ -13,10 +13,15 @@ import (
 	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
+// maxQueuedMessages is the maximum number of messages of the owner that wait in the queue
+// of one key. Each one keeps its text and its images until its turn.
+const maxQueuedMessages = 20
+
 // The busy texts of Tether Agent, in Markdown. A busy ack is one plain line.
 const (
 	SteerAck           = "↪️ Got it. I'll do this after the current step."
 	QueueAck           = "⏳ Queued. I'll answer after the current task."
+	QueueFullReply     = "⛔ **Queue full**\nThe message is not saved. Wait for the current task, or send /stop."
 	StopReply          = "⏹ **Stopped**\nThe session is safe. Send a message to continue."
 	NoTaskReply        = "💤 **No task to stop**"
 	SteerStartingReply = "⏩ **Note saved**\nThe agent did not start yet. It reads the note at the start of the task."

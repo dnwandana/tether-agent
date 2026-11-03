@@ -179,6 +179,33 @@ func wantBusyReply(t *testing.T, rep Reply, text string, buttons []Button) {
 	}
 }
 
+func TestFullQueueRefusesTheMessage(t *testing.T) {
+	g, _, _, _ := busyGateway(t)
+	f := &replyFactory{}
+	for range maxQueuedMessages {
+		g.Submit(context.Background(), media("k"), f.new, nil)
+	}
+	waitFor(t, func() bool { return g.queueLen("k") == maxQueuedMessages })
+	if err := g.Handle(context.Background(), media("k"), f.new); err != nil {
+		t.Fatal(err)
+	}
+	if n := g.queueLen("k"); n != maxQueuedMessages {
+		t.Fatal("a full queue must refuse the message:", n)
+	}
+	reps := f.replies()
+	if last := reps[len(reps)-1]; last.Text != QueueFullReply || len(last.Buttons) != 0 {
+		t.Fatalf("%+v", last)
+	}
+	// The key keeps only the route of the newest message, not its images.
+	g.mu.Lock()
+	last := g.key("k").last
+	g.mu.Unlock()
+	if last.ChatID != media("k").ChatID || len(last.Images) != 0 || last.Text != "" {
+		t.Fatalf("%+v", last)
+	}
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+}
+
 func TestQueuedReplyHasNowButton(t *testing.T) {
 	g, _, _, _ := busyGateway(t)
 	f := &replyFactory{}
