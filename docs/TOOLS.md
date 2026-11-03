@@ -661,9 +661,11 @@ Do NOT save task progress, session results, logs of finished work, or temporary 
 
 TWO TARGETS:
 - 'user': who the user is: name, role, preferences, communication style, dislikes.
-- 'memory': your notes: environment facts, project conventions, tool quirks, lessons.
+- 'memory': your facts: environment facts, project conventions, tool quirks, lessons.
 
-ACTIONS: add (a new entry), replace (change the entry that old_text finds), remove (delete the entry that old_text finds). The memory has a character limit. When an add goes over the limit, the error lists the entries; merge or remove one first.
+ACTIONS: add (a new entry), replace (change the entry that old_text finds), remove (delete the entry that old_text finds), search (find entries by words), read (open a note by its topic).
+
+NOTES: memory and user have a character limit. When an add does not fit, the entry goes to a memory note (inbox-memory or inbox-user), and the add still succeeds. Give a topic to put related facts in one note, for example topic 'rpc' for RPC provider facts. Give no topic for a fact that each session needs, such as the name of the user or a correction: a note does not load into the prompt. The prompt lists the topics of the notes. Use search to find a fact, and read to open a note. Before you add a fact, search the notes for the same subject. When a note has an older version, replace it.
 
 SKIP: trivial facts, facts that are easy to find again, raw data, and temporary task state.
 
@@ -676,7 +678,9 @@ SKIP: trivial facts, facts that are easy to find again, raw data, and temporary 
       "enum": [
         "add",
         "replace",
-        "remove"
+        "remove",
+        "search",
+        "read"
       ],
       "description": "The action to do."
     },
@@ -686,7 +690,7 @@ SKIP: trivial facts, facts that are easy to find again, raw data, and temporary 
         "memory",
         "user"
       ],
-      "description": "The store: 'memory' for your notes, 'user' for the user profile."
+      "description": "The store: 'memory' for your facts, 'user' for the user profile. Required for add, replace, and remove."
     },
     "content": {
       "type": "string",
@@ -695,11 +699,22 @@ SKIP: trivial facts, facts that are easy to find again, raw data, and temporary 
     "old_text": {
       "type": "string",
       "description": "A short unique part of the entry to replace or remove."
+    },
+    "topic": {
+      "type": "string",
+      "description": "The note topic: lowercase words joined by '-', for example 'rpc-providers'. For add, the entry goes to this note. For replace and remove, only this note is searched. For read, the note to open."
+    },
+    "query": {
+      "type": "string",
+      "description": "The words to find. Required for search."
+    },
+    "from": {
+      "type": "integer",
+      "description": "For read: the number of the first entry to show. The default is 1."
     }
   },
   "required": [
-    "action",
-    "target"
+    "action"
   ]
 }
 ```

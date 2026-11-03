@@ -8,13 +8,20 @@ import (
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
 
-// frozenNote ends each memory tool result. The system prompt keeps a frozen
-// copy of the memory, so a change shows only after the next prompt build.
+// frozenNote follows a result that changed memory.md or user_profile.md. The
+// system prompt keeps a frozen copy of the memory, so a change shows only after
+// the next prompt build.
 const frozenNote = "This change shows in the system prompt from the next session or prompt rebuild."
+
+// noteChangeLine follows a result that changed a note.
+const noteChangeLine = "A search and a read show this change at once. A new note shows in the topic list of the system prompt from the next session or prompt rebuild."
 
 // MemoryTool is the memory tool.
 type MemoryTool struct {
 	Store *memory.Store
+	// MaxChars caps a read result (context.tool_output_max_chars). Store.Read
+	// also caps it at memory.MaxReadChars.
+	MaxChars int
 }
 
 type memoryArgs struct {
@@ -22,6 +29,9 @@ type memoryArgs struct {
 	Target  string `json:"target"`
 	Content string `json:"content"`
 	OldText string `json:"old_text"`
+	Topic   string `json:"topic"`
+	Query   string `json:"query"`
+	From    int    `json:"from"`
 }
 
 // Name returns "memory".
@@ -53,25 +63,35 @@ func (MemoryTool) Schema() provider.ToolSchema {
 			"save it as a skill with skill_manage.\n\n" +
 			"TWO TARGETS:\n" +
 			"- 'user': who the user is: name, role, preferences, communication style, dislikes.\n" +
-			"- 'memory': your notes: environment facts, project conventions, tool quirks, lessons.\n\n" +
+			"- 'memory': your facts: environment facts, project conventions, tool quirks, lessons.\n\n" +
 			"ACTIONS: add (a new entry), replace (change the entry that old_text finds), " +
-			"remove (delete the entry that old_text finds). The memory has a character limit. " +
-			"When an add goes over the limit, the error lists the entries; merge or remove one first.\n\n" +
+			"remove (delete the entry that old_text finds), search (find entries by words), " +
+			"read (open a note by its topic).\n\n" +
+			"NOTES: memory and user have a character limit. When an add does not fit, the entry goes to " +
+			"a memory note (inbox-memory or inbox-user), and the add still succeeds. Give a topic to put " +
+			"related facts in one note, for example topic 'rpc' for RPC provider facts. Give no topic for " +
+			"a fact that each session needs, such as the name of the user or a correction: a note does " +
+			"not load into the prompt. The prompt lists the topics of the notes. Use search to find a " +
+			"fact, and read to open a note. Before you add a fact, search the notes for the same subject. " +
+			"When a note has an older version, replace it.\n\n" +
 			"SKIP: trivial facts, facts that are easy to find again, raw data, and temporary task state.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "action": {"type": "string", "enum": ["add", "replace", "remove"], "description": "The action to do."},
-    "target": {"type": "string", "enum": ["memory", "user"], "description": "The store: 'memory' for your notes, 'user' for the user profile."},
+    "action": {"type": "string", "enum": ["add", "replace", "remove", "search", "read"], "description": "The action to do."},
+    "target": {"type": "string", "enum": ["memory", "user"], "description": "The store: 'memory' for your facts, 'user' for the user profile. Required for add, replace, and remove."},
     "content": {"type": "string", "description": "The entry text. Required for add and replace."},
-    "old_text": {"type": "string", "description": "A short unique part of the entry to replace or remove."}
+    "old_text": {"type": "string", "description": "A short unique part of the entry to replace or remove."},
+    "topic": {"type": "string", "description": "The note topic: lowercase words joined by '-', for example 'rpc-providers'. For add, the entry goes to this note. For replace and remove, only this note is searched. For read, the note to open."},
+    "query": {"type": "string", "description": "The words to find. Required for search."},
+    "from": {"type": "integer", "description": "For read: the number of the first entry to show. The default is 1."}
   },
-  "required": ["action", "target"]
+  "required": ["action"]
 }`),
 	}
 }
 
-// Run applies the change of the call to the memory files.
+// Run searches, reads, or changes the memory.
 func (t MemoryTool) Run(_ context.Context, raw json.RawMessage, _ *Env) (string, error) {
 	var a memoryArgs
 	if err := decodeArgs(raw, &a); err != nil {
@@ -80,9 +100,36 @@ func (t MemoryTool) Run(_ context.Context, raw json.RawMessage, _ *Env) (string,
 	if t.Store == nil {
 		return "", toolErr("memory is not available in this session")
 	}
-	sum, err := t.Store.Apply(memory.Op{Action: a.Action, Target: a.Target, Content: a.Content, OldText: a.OldText})
-	if err != nil {
-		return "", toolErr("%v", err)
+	switch a.Action {
+	case "search":
+		out, err := t.Store.Search(a.Query)
+		if err != nil {
+			return "", toolErr("%v", err)
+		}
+		return out, nil
+	case "read":
+		out, err := t.Store.Read(a.Topic, a.From, t.MaxChars)
+		if err != nil {
+			return "", toolErr("%v", err)
+		}
+		return out, nil
+	case "add", "replace", "remove":
+		if a.Target == "" {
+			return "", toolErr("target is required for %s; use memory or user", a.Action)
+		}
+		res, err := t.Store.Apply(memory.Op{Action: a.Action, Target: a.Target, Topic: a.Topic, Content: a.Content, OldText: a.OldText})
+		if err != nil {
+			return "", toolErr("%v", err)
+		}
+		out := res.Text
+		if res.Tier1Changed {
+			out += "\n" + frozenNote
+		}
+		if res.Note != "" {
+			out += "\n" + noteChangeLine
+		}
+		return out, nil
+	default:
+		return "", toolErr("unknown action %q; use add, replace, remove, search, or read", a.Action)
 	}
-	return sum + "\n" + frozenNote, nil
 }

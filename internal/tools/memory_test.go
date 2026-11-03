@@ -1,8 +1,11 @@
 package tools
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/memory"
 )
@@ -48,9 +51,106 @@ func TestMemoryToolSchema(t *testing.T) {
 		t.Fatal(tool.Name(), tool.Toolset())
 	}
 	sch := string(tool.Schema().Parameters)
-	for _, w := range []string{`"enum": ["add", "replace", "remove"]`, `"enum": ["memory", "user"]`} {
+	if !json.Valid([]byte(sch)) {
+		t.Fatal(sch)
+	}
+	for _, w := range []string{
+		`"enum": ["add", "replace", "remove", "search", "read"]`,
+		`"enum": ["memory", "user"]`,
+		`'memory' for your facts`,
+		`"topic": {"type": "string", "description": "The note topic: lowercase words joined by '-', for example 'rpc-providers'. For add, the entry goes to this note. For replace and remove, only this note is searched. For read, the note to open."}`,
+		`"query": {"type": "string", "description": "The words to find. Required for search."}`,
+		`"from": {"type": "integer", "description": "For read: the number of the first entry to show. The default is 1."}`,
+		`"required": ["action"]`,
+	} {
 		if !strings.Contains(sch, w) {
 			t.Fatalf("schema has no %s", w)
 		}
+	}
+	desc := tool.Schema().Description
+	for _, w := range []string{
+		"- 'memory': your facts:",
+		"NOTES: memory and user have a character limit. When an add does not fit, the entry goes to " +
+			"a memory note (inbox-memory or inbox-user), and the add still succeeds.",
+		"The prompt lists the topics of the notes. Use search to find a fact, and read to open a note. " +
+			"Before you add a fact, search the notes for the same subject. When a note has an older version, replace it.",
+	} {
+		if !strings.Contains(desc, w) {
+			t.Fatalf("description has no %q", w)
+		}
+	}
+	for _, w := range []string{"your notes", "merge or remove one first"} {
+		if strings.Contains(desc+sch, w) {
+			t.Fatalf("schema still has %q", w)
+		}
+	}
+}
+
+func TestMemoryToolSearchAndReadNeedNoTarget(t *testing.T) {
+	tool := MemoryTool{Store: openStore(t)}
+	runTool(t, tool, `{"action":"add","target":"memory","topic":"rpc","content":"Helius RPC: 1M credits/day"}`)
+	out := runTool(t, tool, `{"action":"search","query":"helius"}`)
+	if !strings.Contains(out, "1. note rpc (type memory, modified ") || !strings.Contains(out, "[Helius] RPC: 1M credits/day") {
+		t.Fatal(out)
+	}
+	if out := runTool(t, tool, `{"action":"read","topic":"rpc"}`); !strings.Contains(out, "\n1. Helius RPC: 1M credits/day") {
+		t.Fatal(out)
+	}
+	if out := runToolErr(t, tool, `{"action":"search"}`); !strings.Contains(out, "query is required for search; give one or more words") {
+		t.Fatal(out)
+	}
+	for _, action := range []string{"add", "replace", "remove"} {
+		out := runToolErr(t, tool, `{"action":"`+action+`","content":"x","old_text":"x"}`)
+		if want := "target is required for " + action + "; use memory or user"; !strings.Contains(out, want) {
+			t.Fatal(out)
+		}
+	}
+	if out := runToolErr(t, tool, `{"action":"list"}`); !strings.Contains(out, `unknown action "list"; use add, replace, remove, search, or read`) {
+		t.Fatal(out)
+	}
+}
+
+func TestMemoryToolResultLines(t *testing.T) {
+	const noteText = "A search and a read show this change at once. A new note shows in the topic list " +
+		"of the system prompt from the next session or prompt rebuild."
+	tool := MemoryTool{Store: openStore(t)}
+	out := runTool(t, tool, `{"action":"add","target":"memory","content":"VPS is at Hetzner"}`)
+	if !strings.HasSuffix(out, "\n"+frozenNote) || strings.Contains(out, noteText) {
+		t.Fatal(out)
+	}
+	out = runTool(t, tool, `{"action":"add","target":"memory","topic":"rpc","content":"Helius RPC: 1M credits/day"}`)
+	if !strings.HasSuffix(out, "\n"+noteText) || strings.Contains(out, frozenNote) {
+		t.Fatal(out)
+	}
+	out = runTool(t, tool, `{"action":"add","target":"memory","content":"VPS is at Hetzner"}`)
+	if !strings.Contains(out, "The entry already exists; nothing changed.") || strings.Contains(out, frozenNote) || strings.Contains(out, noteText) {
+		t.Fatal(out)
+	}
+
+	// A replace spill changes tier 1 and a note, so both lines follow.
+	small, err := memory.Open(t.TempDir(), 30, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool = MemoryTool{Store: small}
+	runTool(t, tool, `{"action":"add","target":"memory","content":"short fact"}`)
+	out = runTool(t, tool, `{"action":"replace","target":"memory","old_text":"short","content":"`+strings.Repeat("long ", 10)+`"}`)
+	if !strings.HasSuffix(out, "\n"+frozenNote+"\n"+noteText) {
+		t.Fatal(out)
+	}
+}
+
+func TestMemoryToolReadCutAtMaxChars(t *testing.T) {
+	s := openStore(t)
+	for i := 1; i <= 10; i++ {
+		runTool(t, MemoryTool{Store: s}, fmt.Sprintf(`{"action":"add","target":"memory","topic":"rpc","content":"%d %s"}`, i, strings.Repeat("a", 100)))
+	}
+	out := runTool(t, MemoryTool{Store: s, MaxChars: 500}, `{"action":"read","topic":"rpc"}`)
+	if !strings.Contains(out, "… output cut at 500 characters after entry ") || utf8.RuneCountInString(out) > 500 {
+		t.Fatalf("%d runes: %s", utf8.RuneCountInString(out), out)
+	}
+	out = runTool(t, MemoryTool{Store: s}, `{"action":"read","topic":"rpc","from":10}`)
+	if !strings.Contains(out, "\n10. 10 a") || strings.Contains(out, "\n1. 1 a") {
+		t.Fatal(out)
 	}
 }

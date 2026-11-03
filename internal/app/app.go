@@ -648,7 +648,7 @@ func (a *App) registerTools(gatewayRole bool) {
 	a.RegisterTool(tools.PatchTool{})
 	a.RegisterTool(&tools.WebFetchTool{Client: a.WebClient, MaxURLs: cfg.Web.FetchMaxURLs, MaxBytes: int64(cfg.Web.FetchMaxBytes)})
 	a.RegisterTool(&tools.WebSearchTool{Client: a.WebClient})
-	a.RegisterTool(tools.MemoryTool{Store: a.Memory})
+	a.RegisterTool(tools.MemoryTool{Store: a.Memory, MaxChars: cfg.Context.ToolOutputMaxChars})
 	a.RegisterTool(tools.ClarifyTool{Timeout: time.Duration(cfg.Approvals.TimeoutS) * time.Second})
 	a.RegisterTool(tools.SessionSearchTool{Store: a.Store, MaxChars: cfg.Context.ToolOutputMaxChars})
 	// Sessions lets the first call after a restart restore the list from the history.
