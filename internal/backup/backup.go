@@ -58,6 +58,10 @@ type Result struct {
 // testHookAfterPrepare runs after the prepare step and before the archive write. Tests set it.
 var testHookAfterPrepare func()
 
+// testHookBeforeFolders runs after the copies of memory/ and before the copies of the
+// other folders. Tests set it.
+var testHookBeforeFolders func()
+
 // checkCopy runs the integrity check on the DB copy. Tests replace it.
 var checkCopy = checkDB
 
@@ -186,42 +190,36 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 		red.ConfigWarnings = append(red.ConfigWarnings, res.Warnings...)
 	}
 
-	// The shared lock stops the collect and the copies between the two writes of a memory
-	// change. The archive write reads the copies, so it does not hold the lock.
+	// The shared lock stops the collect and the copies of memory/ between the two writes of
+	// a memory change. A memory change waits for the lock, so the lock covers only memory/.
+	// The archive write reads the copies, so it does not hold the lock.
 	releaseMemory, err := lockMemory(ctx, opts.DataDir)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	defer releaseMemory()
-	found, skipped, err := collectItems(opts.DataDir)
+	found, skipped, err := collectMemory(opts.DataDir)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("list the data files: %w", err)
 	}
-	res.Skipped = append(res.Skipped, skipped...)
 	r := security.NewRedactor(values)
-	for i := range found {
-		it := &found[i]
-		if it.Dir {
-			continue
-		}
-		dst := filepath.Join(tmp, "files", filepath.FromSlash(it.Rel))
-		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-			return nil, nil, nil, fmt.Errorf("create a temp folder for %s: %w", it.Rel, err)
-		}
-		changed, err := maskTextFile(it.Src, dst, r)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("copy %s: %w", it.Rel, err)
-		}
-		// A memory item always reads its copy, so the hash and the archive get the bytes
-		// that the lock protected.
-		if changed || strings.HasPrefix(it.Rel, "memory/") {
-			it.Src = dst
-		}
-		if changed {
-			red.Files++
-		}
+	if err := copyItems(found, tmp, r, &red); err != nil {
+		return nil, nil, nil, err
 	}
 	releaseMemory()
+	if testHookBeforeFolders != nil {
+		testHookBeforeFolders()
+	}
+	folders, folderSkipped, err := collectFolders(opts.DataDir)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("list the data files: %w", err)
+	}
+	if err := copyItems(folders, tmp, r, &red); err != nil {
+		return nil, nil, nil, err
+	}
+	found = append(found, folders...)
+	res.Skipped = append(res.Skipped, skipped...)
+	res.Skipped = append(res.Skipped, folderSkipped...)
 	items = append(items, found...)
 
 	files, err := fileEntries(items)
@@ -332,6 +330,35 @@ func lockBackups(dir string) (release func(), err error) {
 
 // memoryLockPoll is the time between two tries of lockMemory.
 const memoryLockPoll = 50 * time.Millisecond
+
+// copyItems copies the files of found into tmp/files with the known secret values
+// masked (maskTextFile). It sets Src of an item to its copy when the mask changed the
+// file, and always for a memory item. It counts the changed files in red.
+func copyItems(found []item, tmp string, r *security.Redactor, red *Redacted) error {
+	for i := range found {
+		it := &found[i]
+		if it.Dir {
+			continue
+		}
+		dst := filepath.Join(tmp, "files", filepath.FromSlash(it.Rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return fmt.Errorf("create a temp folder for %s: %w", it.Rel, err)
+		}
+		changed, err := maskTextFile(it.Src, dst, r)
+		if err != nil {
+			return fmt.Errorf("copy %s: %w", it.Rel, err)
+		}
+		// A memory item always reads its copy, so the hash and the archive get the bytes
+		// that the lock protected.
+		if changed || strings.HasPrefix(it.Rel, "memory/") {
+			it.Src = dst
+		}
+		if changed {
+			red.Files++
+		}
+	}
+	return nil
+}
 
 // lockMemory takes a shared flock on the lock file of the memory store and waits for it. The
 // wait stops when ctx ends, so a signal stops a backup that waits for a long store write. It

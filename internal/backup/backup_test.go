@@ -603,6 +603,41 @@ func TestCreateWaitsForMemoryLock(t *testing.T) {
 	}
 }
 
+func TestCreateReleasesMemoryLockBeforeOtherFolders(t *testing.T) {
+	dir, _ := newDataDir(t)
+	write(t, dir, "memory/memory.md", "old fact\n")
+	write(t, dir, "skills/a/SKILL.md", "---\nname: a\ndescription: d\n---\nbody\n")
+	f, err := os.OpenFile(filepath.Join(dir, "memory", memory.LockFileName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	called := false
+	testHookBeforeFolders = func() {
+		called = true
+		// A memory change can take the lock while the other folders are copied.
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Errorf("the memory lock is held during the copies of the other folders: %v", err)
+			return
+		}
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	}
+	t.Cleanup(func() { testHookBeforeFolders = nil })
+	var buf bytes.Buffer
+	opts := createOpts(dir)
+	opts.OutPath, opts.Stdout = "-", &buf
+	if _, err := Create(ctx, opts); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("Create did not call testHookBeforeFolders")
+	}
+	a := createReadArchive(t, buf.Bytes())
+	if string(a.contents["memory/memory.md"]) != "old fact\n" || !strings.Contains(string(a.contents["skills/a/SKILL.md"]), "body") {
+		t.Fatal(a.contents)
+	}
+}
+
 func TestCreateStopsWhileWaitingForMemoryLock(t *testing.T) {
 	dir, _ := newDataDir(t)
 	write(t, dir, "memory/memory.md", "old fact\n")
