@@ -168,7 +168,8 @@ type keyState struct {
 	turns int
 	// queue holds the messages that wait for the key, in order.
 	queue []*pendingTurn
-	// last is the newest message of the key and its renderer factory, for Enqueue.
+	// last is the route of the newest message of the key (routeOf) and its renderer
+	// factory, for Enqueue.
 	last         Inbound
 	lastRenderer func() Renderer
 	// markerSession is the session id of the marker of the key. It is empty until the turn
@@ -303,7 +304,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 		return func() error { return ErrStopping }
 	}
 	ks := g.key(in.Key)
-	ks.last, ks.lastRenderer = in, newRenderer
+	ks.last, ks.lastRenderer = routeOf(in), newRenderer
 	if !ks.busy {
 		p := &pendingTurn{in: in, newRenderer: newRenderer}
 		ks.busy = true
@@ -326,6 +327,11 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 			g.flushBusyText(ctx, m, newRenderer)
 		})
 		g.mu.Unlock()
+		return func() error { return nil }
+	}
+	if len(ks.queue) >= maxQueuedMessages {
+		g.mu.Unlock()
+		ackReply(newRenderer(), Reply{Text: QueueFullReply})
 		return func() error { return nil }
 	}
 	p := &pendingTurn{in: in, newRenderer: newRenderer, ready: make(chan struct{})}
@@ -549,6 +555,15 @@ func (g *Gateway) Wait(timeout time.Duration) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return true
+}
+
+// routeOf returns in with no text, images, or files. A keyState keeps it as the newest
+// message of the key, and the users of that message use only the route of the message:
+// they set their own text, and no images or files. Thus the key does not keep the image
+// data of an old message.
+func routeOf(in Inbound) Inbound {
+	in.Text, in.Images, in.Files = "", nil, nil
+	return in
 }
 
 // key returns the state of key and creates it when necessary. The caller holds g.mu.

@@ -126,7 +126,7 @@ func (h *heldStarts) release() {
 func (g *Gateway) startGoalTurn(ctx context.Context, in Inbound, newRenderer func() Renderer, c goals.Continuation) {
 	g.mu.Lock()
 	ks := g.key(in.Key)
-	ks.last, ks.lastRenderer = in, newRenderer
+	ks.last, ks.lastRenderer = routeOf(in), newRenderer
 	g.mu.Unlock()
 	if err := g.enqueueGoal(ctx, in.Key, c); err != nil {
 		g.logger().Warn("gateway: cannot start the goal turn", "key", in.Key, "session", c.SessionID, "err", err.Error())
