@@ -521,3 +521,39 @@ func TestDebouncerTake(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 }
+
+// turnCtxRenderer is a recRenderer that keeps the context of its turn.
+type turnCtxRenderer struct {
+	recRenderer
+	got chan context.Context
+}
+
+func (r *turnCtxRenderer) TurnContext(ctx context.Context) { r.got <- ctx }
+
+func TestRendererGetsTheTurnContext(t *testing.T) {
+	g, _ := gatewayWithSlowProvider(t, 2*time.Second)
+	r := &turnCtxRenderer{got: make(chan context.Context, 1)}
+	done := make(chan struct{})
+	go func() {
+		_ = g.Handle(context.Background(), inb("k", "first"), func() Renderer { return r })
+		close(done)
+	}()
+	var tctx context.Context
+	select {
+	case tctx = <-r.got:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the renderer got no turn context")
+	}
+	if tctx.Err() != nil {
+		t.Fatal("the turn context ended before the turn")
+	}
+	waitFor(t, func() bool { _, ok := g.Running("k"); return ok })
+	g.mustRun(t, "k").Cancel() // what /stop does
+	select {
+	case <-tctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a /stop must end the turn context")
+	}
+	<-done
+	g.Wait(5 * time.Second)
+}

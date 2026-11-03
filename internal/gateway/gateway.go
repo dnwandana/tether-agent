@@ -93,6 +93,10 @@ type HandleRenderer interface{ AckReplyHandle(r Reply) AckHandle }
 // example as the first line of the status bubble. A Renderer without it shows no goal line.
 type GoalLineRenderer interface{ GoalLine(line string) }
 
+// TurnContextRenderer receives the context of the turn before the turn starts. The context
+// ends at /stop and at the end of the turn, so the renderer can end a wait of its own.
+type TurnContextRenderer interface{ TurnContext(ctx context.Context) }
+
 // RunState describes the running turn of a key.
 type RunState struct {
 	// Cancel stops the turn (/stop).
@@ -706,6 +710,9 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 	end.r = r
 	tctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	if tr, ok := r.(TurnContextRenderer); ok {
+		tr.TurnContext(tctx)
+	}
 	rs := &RunState{
 		Cancel:  cancel,
 		Steer:   agent.NewSteerQueue(),
