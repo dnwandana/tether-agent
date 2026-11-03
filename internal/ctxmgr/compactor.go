@@ -138,13 +138,15 @@ func (c *Compactor) Maybe(ctx context.Context, s *sessions.Session, prov provide
 	if err != nil {
 		return false, fmt.Errorf("compaction: %w", err)
 	}
-	return c.MaybeStored(ctx, s, prov, window, force, stored)
+	return c.MaybeStored(ctx, s, prov, window, force, stored, 0)
 }
 
 // MaybeStored is Maybe with the stored messages of the session that the caller read. A
 // compaction does not change the stored messages, so the caller can use stored again
-// after the compaction.
-func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool, stored []sessions.StoredMessage) (compacted bool, err error) {
+// after the compaction. fixed is the token estimate of the system prompt and the tool
+// schemas of the next request (EstimateFixed). The check uses it when no provider count
+// is available, for example after a compaction or with a provider that gives no usage.
+func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool, stored []sessions.StoredMessage, fixed int) (compacted bool, err error) {
 	comps, err := LatestCompaction(ctx, c.DB, s.ID)
 	if err != nil {
 		return false, err
@@ -153,7 +155,7 @@ func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov p
 	trigger := int(c.Cfg.CompactThreshold * float64(window))
 	if !force {
 		last, at := lastPrompt(stored, comps)
-		if !OverThreshold(ViewSize(last, at, view), window, c.Cfg.CompactThreshold) {
+		if !OverThreshold(ViewSize(last, at, fixed, view), window, c.Cfg.CompactThreshold) {
 			return false, nil
 		}
 	}

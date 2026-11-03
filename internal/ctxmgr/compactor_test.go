@@ -304,6 +304,22 @@ func TestStaleProviderCountIgnoredAfterCompaction(t *testing.T) {
 	}
 }
 
+func TestMaybeStoredCountsFixedPartsWithNoProviderCount(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 79)
+	stored, err := c.Store.Messages(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The messages alone are about 1500 tokens, below the threshold of 2000.
+	if did, err := c.MaybeStored(ctx, sess, fp, 4000, false, stored, 0); did || err != nil {
+		t.Fatal("the messages alone must not compact", did, err)
+	}
+	// A large system prompt and large tool schemas move the request over the threshold.
+	if did, err := c.MaybeStored(ctx, sess, fp, 4000, false, stored, 1000); !did || err != nil {
+		t.Fatal("the system prompt and the schemas count", did, err)
+	}
+}
+
 func TestBuildViewWithoutCompactionIsStored(t *testing.T) {
 	stored := []sessions.StoredMessage{{ID: 1, Msg: provider.Message{Content: "a"}}, {ID: 2, Msg: provider.Message{Content: "b"}}}
 	v := BuildView(stored, nil)

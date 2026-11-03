@@ -42,16 +42,30 @@ func TestEstimateCountsToolArgsAndBytes(t *testing.T) {
 
 func TestViewSizeUsesProviderCountPlusNew(t *testing.T) {
 	view := []StoredView{{1, msg(400)}, {2, msg(400)}, {3, msg(800)}}
-	if got := ViewSize(5000, 2, view); got != 5000+(800+16)/4 {
+	if got := ViewSize(5000, 2, 1000, view); got != 5000+(800+16)/4 {
 		t.Fatal(got)
 	}
-	if got := ViewSize(0, 0, view); got != EstimateChars(msgs(view)) {
+	if got := ViewSize(0, 0, 0, view); got != EstimateChars(msgs(view)) {
+		t.Fatal(got)
+	}
+	// With no provider count, the system prompt and the tool schemas count too.
+	if got := ViewSize(0, 0, 1000, view); got != 1000+EstimateChars(msgs(view)) {
 		t.Fatal(got)
 	}
 	// A summary message of a compaction has id 0. It is older than the provider count.
 	view = append([]StoredView{{0, msg(4000)}}, view...)
-	if got := ViewSize(5000, 2, view); got != 5000+(800+16)/4 {
+	if got := ViewSize(5000, 2, 1000, view); got != 5000+(800+16)/4 {
 		t.Fatal(got)
+	}
+}
+
+func TestEstimateFixedCountsSystemAndSchemas(t *testing.T) {
+	schemas := []provider.ToolSchema{{Name: "ab", Description: "cdef", Parameters: []byte(`{"x":1}`)}}
+	if got := EstimateFixed(strings.Repeat("s", 400), schemas); got != (400+2+4+7)/4 {
+		t.Fatal(got)
+	}
+	if EstimateFixed("", nil) != 0 {
+		t.Fatal()
 	}
 }
 

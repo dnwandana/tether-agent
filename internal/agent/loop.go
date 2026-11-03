@@ -326,7 +326,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		if err != nil {
 			return res, fmt.Errorf("agent: read the history: %w", err)
 		}
-		if a.compact(ctx, t, prov, sink, stored) && t.System == "" {
+		if a.compact(ctx, t, prov, sink, stored, ctxmgr.EstimateFixed(system, schemas)) && t.System == "" {
 			// The compaction count is part of the prompt key, so the prompt is rebuilt.
 			system, _ = a.turnSystem(ctx, t, channel)
 			if t.review == nil && !noReviews(t.Session.Kind) {
@@ -552,12 +552,12 @@ func (a *Agent) viewOf(ctx context.Context, sessionID string, msgs []sessions.St
 // compact runs the compactor before a model call. It returns true when the
 // session was compacted. A failure does not stop the turn. After the third failure in a
 // row, the sink tells the user.
-func (a *Agent) compact(ctx context.Context, t Turn, prov provider.Provider, sink Sink, stored []sessions.StoredMessage) bool {
+func (a *Agent) compact(ctx context.Context, t Turn, prov provider.Provider, sink Sink, stored []sessions.StoredMessage, fixed int) bool {
 	// A review run reads a copy of the parent view, so it does not compact.
 	if a.Compactor == nil || t.review != nil {
 		return false
 	}
-	did, err := a.Compactor.MaybeStored(ctx, t.Session, prov, a.contextWindow(prov), false, stored)
+	did, err := a.Compactor.MaybeStored(ctx, t.Session, prov, a.contextWindow(prov), false, stored, fixed)
 	switch {
 	case errors.Is(err, ctxmgr.ErrCompactionFailed):
 		sink.Notice("⚠️ " + err.Error())
