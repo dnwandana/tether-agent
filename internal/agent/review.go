@@ -592,8 +592,16 @@ func (c *ReviewCounters) reset(id string) {
 	}
 }
 
-// forget removes the data of the session.
-func (c *ReviewCounters) forget(id string) {
+// Len returns the number of sessions that have review data.
+func (c *ReviewCounters) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.m)
+}
+
+// Forget removes the data of the session. A later turn of the session reads its user
+// turns from the store again.
+func (c *ReviewCounters) Forget(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.m, id)
@@ -713,7 +721,7 @@ func (a *Agent) ReviewBeforeNew(ctx context.Context, old *sessions.Session) {
 	}
 	r, ok := a.fullReview(ctx, old)
 	// The session ends here, so its counters go.
-	a.Reviews.forget(old.ID)
+	a.Reviews.Forget(old.ID)
 	if !ok {
 		return
 	}

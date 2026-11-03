@@ -77,7 +77,17 @@ func TestNewResumeRenameArchiveDelete(t *testing.T) {
 	if s, _ := c.Deps.Store.Get(ctx, first); s.Title != "scrape allsaints" {
 		t.Fatal(s.Title)
 	}
+	// A turn keeps the review data of the session, and /archive frees it.
+	if _, err := c.Deps.Agent.RunTurn(ctx, agent.Turn{Session: c.Session, UserText: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.Deps.Agent.Reviews.Len() != 1 {
+		t.Fatal("the turn kept no review data")
+	}
 	run(t, c, "/archive")
+	if c.Deps.Agent.Reviews.Len() != 0 {
+		t.Fatal("/archive must forget the review data")
+	}
 	out.Reset()
 	run(t, c, "/sessions")
 	if strings.Contains(out.String(), first) {
