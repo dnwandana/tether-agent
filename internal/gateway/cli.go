@@ -774,7 +774,7 @@ type CLISink struct {
 	// midLine is true when the last text that W got does not end with a newline.
 	midLine bool
 	// lastTodo is the preview of the last todo_list call. Plan reads the kind of the
-	// call from it, because Plan gets only the list.
+	// call from it, because the two lists do not tell the kind of the call.
 	lastTodo string
 }
 
@@ -805,7 +805,7 @@ func (s *CLISink) ToolStart(name, preview string) {
 }
 
 // Plan prints the Hermes plan row, so the terminal shows the progress of the task list.
-func (s *CLISink) Plan(items []tools.TodoItem) {
+func (s *CLISink) Plan(_, items []tools.TodoItem) {
 	s.mu.Lock()
 	kind := s.lastTodo
 	s.mu.Unlock()

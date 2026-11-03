@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,17 +60,20 @@ func vis(names ...string) map[string]bool {
 	return out
 }
 
+// planCall is one Plan call: the list before the todo_list call and the list after it.
+type planCall struct{ before, after []tools.TodoItem }
+
 // planRecSink records the Plan calls of a turn.
 type planRecSink struct {
 	nopSink
 	mu    sync.Mutex
-	plans [][]tools.TodoItem
+	plans []planCall
 }
 
-func (p *planRecSink) Plan(items []tools.TodoItem) {
+func (p *planRecSink) Plan(before, after []tools.TodoItem) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.plans = append(p.plans, items)
+	p.plans = append(p.plans, planCall{before, after})
 }
 
 func (p *planRecSink) count() int {
@@ -78,8 +82,9 @@ func (p *planRecSink) count() int {
 	return len(p.plans)
 }
 
-// todoFake is a todo_list tool that writes one item to the store of the session.
-type todoFake struct{ fail bool }
+// todoFake is a todo_list tool that writes one item to the store of the session. With
+// read, it only reads the list.
+type todoFake struct{ fail, read bool }
 
 func (todoFake) Name() string       { return "todo_list" }
 func (todoFake) Toolset() string    { return tools.SetFile }
@@ -91,16 +96,44 @@ func (f todoFake) Run(_ context.Context, _ json.RawMessage, env *tools.Env) (str
 	if f.fail {
 		return "", errors.New("boom")
 	}
+	if f.read {
+		return `{"todos":[]}`, nil
+	}
 	raw := []json.RawMessage{json.RawMessage(`{"id":"1","content":"Find the flaky test","status":"in_progress"}`)}
 	return `{"todos":[]}`, tools.TodoStoreFor(env.Values).Write(raw, false)
 }
 
+// todoRestoreFake restores a list from history inside the call and then writes, like the
+// real tool after a gateway restart.
+type todoRestoreFake struct{ todoFake }
+
+func (todoRestoreFake) Run(_ context.Context, _ json.RawMessage, env *tools.Env) (string, error) {
+	store := tools.TodoStoreFor(env.Values)
+	store.Restore([]tools.TodoItem{{ID: "1", Content: "Find the flaky test", Status: "pending"}}, 3)
+	raw := []json.RawMessage{json.RawMessage(`{"id":"1","content":"Find the flaky test","status":"in_progress"}`)}
+	return `{"todos":[]}`, store.Write(raw, false)
+}
+
 func TestPlanSinkAfterTodoListCall(t *testing.T) {
-	a := agentWith(t, todoFake{}, slowTool{name: "read_file"})
+	pending := []tools.TodoItem{{ID: "1", Content: "Find the flaky test", Status: "pending"}}
+	active := []tools.TodoItem{{ID: "1", Content: "Find the flaky test", Status: "in_progress"}}
+	e := env()
 	s := &planRecSink{}
-	a.runRound(ctx, []provider.ToolCall{tc("1", "read_file", `{}`), tc("2", "todo_list", `{}`)}, env(), vis("read_file", "todo_list"), s, "")
-	if s.count() != 1 || len(s.plans[0]) != 1 || s.plans[0][0].Content != "Find the flaky test" {
-		t.Fatalf("%+v", s.plans)
+	a := agentWith(t, todoFake{}, slowTool{name: "read_file"})
+	a.runRound(ctx, []provider.ToolCall{tc("1", "read_file", `{}`), tc("2", "todo_list", `{}`)}, e, vis("read_file", "todo_list"), s, "")
+	if s.count() != 1 || len(s.plans[0].before) != 0 || !reflect.DeepEqual(s.plans[0].after, active) {
+		t.Fatalf("a write: %+v", s.plans)
+	}
+	// A read gives two equal lists, not the list before the last write.
+	agentWith(t, todoFake{read: true}).runRound(ctx, []provider.ToolCall{tc("3", "todo_list", `{}`)}, e, vis("todo_list"), s, "")
+	if s.count() != 2 || !reflect.DeepEqual(s.plans[1].before, active) || !reflect.DeepEqual(s.plans[1].after, active) {
+		t.Fatalf("a read: %+v", s.plans)
+	}
+	// A restore inside the call gives the restored list as before.
+	r := &planRecSink{}
+	agentWith(t, todoRestoreFake{}).runRound(ctx, []provider.ToolCall{tc("1", "todo_list", `{}`)}, env(), vis("todo_list"), r, "")
+	if r.count() != 1 || !reflect.DeepEqual(r.plans[0].before, pending) || !reflect.DeepEqual(r.plans[0].after, active) {
+		t.Fatalf("a restore: %+v", r.plans)
 	}
 }
 

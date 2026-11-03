@@ -367,7 +367,7 @@ func TestCLISinkPlanRow(t *testing.T) {
 		var b strings.Builder
 		s := &CLISink{W: &b, Line: func(tool, preview string) string { return tool }}
 		s.ToolStart("todo_list", c.preview)
-		s.Plan(c.items)
+		s.Plan(nil, c.items)
 		lines := strings.Split(strings.TrimSpace(b.String()), "\n")
 		got := strings.TrimSuffix(strings.TrimPrefix(lines[len(lines)-1], ansiDim), ansiReset)
 		if got != c.want {

@@ -61,11 +61,11 @@ type Sink interface {
 	Notice(text string)
 }
 
-// PlanSink is an optional Sink that shows the task list of the session. The main loop calls
-// Plan after each todo_list call. A child run never calls it, so the plan of a child does not
-// go into the bubble of its parent.
+// PlanSink is an optional Sink that shows the task list of the session. After each todo_list
+// call, the main loop gives the list just before the call and the list after it. A child run
+// never calls it, so the plan of a child does not go into the bubble of its parent.
 type PlanSink interface {
-	Plan(items []tools.TodoItem)
+	Plan(before, after []tools.TodoItem)
 }
 
 // Agent runs the turns of all sessions. One Agent is shared by all channels.

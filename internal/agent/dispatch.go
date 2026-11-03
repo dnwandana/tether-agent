@@ -38,16 +38,27 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 			return
 		}
 		ls.ToolStart(c.Name, tools.ArgPreview(c.Name, c.Args))
+		// todo_list is not parallel-safe, so no other call of the round writes the list
+		// between the two reads.
+		todo := c.Name == "todo_list" && env != nil && env.Kind != KindSubagent
+		var w0 int64
+		if todo {
+			_, _, w0 = tools.TodoStoreFor(env.Values).Change()
+		}
 		if deny != "" && !visible[c.Name] {
 			results[i] = tools.Result{Text: deny, IsError: true}
 		} else {
 			results[i] = a.dispatch(ctx, c, env, visible)
 		}
 		ls.ToolEnd(c.Name, results[i].IsError)
-		// todo_list is not parallel-safe, so no other call of the round writes the list now.
-		if c.Name == "todo_list" && !results[i].IsError && env != nil && env.Kind != KindSubagent {
-			items, _, _ := tools.TodoStoreFor(env.Values).Items()
-			ls.Plan(items)
+		if todo && !results[i].IsError {
+			before, items, w1 := tools.TodoStoreFor(env.Values).Change()
+			// The store keeps the list before the last write. A call that wrote nothing
+			// changed nothing, so its list before the call is the list now.
+			if w1 == w0 {
+				before = items
+			}
+			ls.Plan(before, items)
 		}
 	}
 	if len(calls) < 2 || !a.allParallelSafe(calls, visible) {
@@ -158,11 +169,11 @@ func (l *lockedSink) ToolEnd(name string, isError bool) {
 	l.s.ToolEnd(name, isError)
 }
 
-// Plan forwards the task list when the inner sink is a PlanSink. Else it does nothing.
-func (l *lockedSink) Plan(items []tools.TodoItem) {
+// Plan forwards the two task lists when the inner sink is a PlanSink. Else it does nothing.
+func (l *lockedSink) Plan(before, after []tools.TodoItem) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if p, ok := l.s.(PlanSink); ok {
-		p.Plan(items)
+		p.Plan(before, after)
 	}
 }

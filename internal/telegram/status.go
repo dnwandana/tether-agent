@@ -64,10 +64,6 @@ const (
 	// maxClosedEditTries is the number of tries for the last edit of a
 	// closed bubble, the first try included.
 	maxClosedEditTries = 3
-	// planMaxItems is the largest number of item lines in the plan block.
-	planMaxItems = 8
-	// planRule ends the plan block, above the tool lines.
-	planRule = "───"
 )
 
 // ToolLine returns the status line for one tool call.
@@ -163,6 +159,14 @@ type closedEdit struct {
 	tries int
 }
 
+// queuedSend is a new message that waits in the send queue. When deletable is
+// true, the sent message ID goes into Status.ids for the cleanup.
+type queuedSend struct {
+	text      string
+	silent    bool
+	deletable bool
+}
+
 // Status is the tool progress message of one run. All lines go
 // into one message that is edited in place, at most once per Interval. A
 // timer sends a pending edit when no new line arrives. The methods are safe
@@ -187,18 +191,13 @@ type Status struct {
 	noEdit     bool                     // set after a permanent edit error: send each line alone
 	splitting  bool                     // set while split closes the full bubble
 	waiting    []closedEdit             // the edits of closed bubbles to try again, oldest first
+	queue      []queuedSend             // the new messages that wait for a send, oldest first
 	lastEdit   time.Time
 	floodUntil time.Time
 	ids        []int // every status message, for the cleanup
 	timer      *time.Timer
 	flushCtx   context.Context
 	closed     bool
-	// goalLine and plan start each bubble of the turn. openBubble keeps them.
-	goalLine string
-	plan     []tools.TodoItem
-	// headOpen lets flush send a bubble with no tool line. A setter sets it, and
-	// openBubble clears it, so a bubble after a Reset waits for a tool line.
-	headOpen bool
 }
 
 // Add adds the line for one tool call from src. The main agent gets the
@@ -207,8 +206,12 @@ type Status struct {
 // mode, each source and tool has one line in the open bubble. A new call
 // replaces that line with its own preview and the count "(×N)". "new" mode
 // adds a line only when the source or the tool changes, and "off" mode does
-// nothing.
+// nothing. The todo_list call of the main agent gets no line, because the plan
+// messages show the list.
 func (s *Status) Add(ctx context.Context, src Source, tool, preview, args string) {
+	if src == (Source{}) && tool == "todo_list" {
+		return
+	}
 	mode := s.mode()
 	if mode == "off" {
 		return
@@ -272,35 +275,22 @@ func (s *Status) Add(ctx context.Context, src Source, tool, preview, args string
 	s.flush(ctx, false)
 }
 
-// SetGoalLine sets the goal line of the turn and shows the bubble at once, also with no
-// tool line. In "off" mode no bubble exists, so the line goes out as one silent message.
+// SetGoalLine sends the goal line of the turn as its own silent message in each mode. The
+// cleanup deletes it, except in "off" mode.
 func (s *Status) SetGoalLine(ctx context.Context, line string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
-	line = cutUTF16(line, statusTextLimit)
-	if s.mode() == "off" {
-		// The cleanup does not delete this message, so its ID is not kept.
-		if _, err := s.send(ctx, line, true); err != nil {
-			s.logger().Info("telegram status send of the goal line failed", "err", err.Error())
-		}
-		return
-	}
 	s.flushCtx = context.WithoutCancel(ctx)
-	s.goalLine = line
-	if s.noEdit {
-		s.sendLine(ctx, line)
-		return
-	}
-	s.headOpen = true
-	s.flush(ctx, false)
+	s.enqueue(ctx, cutUTF16(line, statusTextLimit), true, s.mode() != "off")
 }
 
-// SetPlan sets the plan block of the turn. Each later call replaces it. "off" mode
-// shows no plan.
-func (s *Status) SetPlan(ctx context.Context, items []tools.TodoItem) {
+// SetPlan sends the plan message of one todo_list call of the main agent. before is the
+// list before the call, and after is the list after the call. The message closes the open
+// bubble, so the next tool line goes out below it. "off" mode sends no plan message.
+func (s *Status) SetPlan(ctx context.Context, before, after []tools.TodoItem) {
 	if s.mode() == "off" {
 		return
 	}
@@ -309,87 +299,37 @@ func (s *Status) SetPlan(ctx context.Context, items []tools.TodoItem) {
 	if s.closed {
 		return
 	}
-	s.flushCtx = context.WithoutCancel(ctx)
-	s.plan = slices.Clone(items)
-	if s.noEdit {
-		if len(items) > 0 {
-			s.sendLine(ctx, cutUTF16(strings.Join(planLines(items, planMaxItems), "\n"), statusTextLimit))
-		}
+	text, done := planMessage(before, after)
+	if text == "" {
 		return
 	}
-	s.headOpen = true
-	s.flush(ctx, false)
+	s.flushCtx = context.WithoutCancel(ctx)
+	s.closeBubble(ctx)
+	// The next tool line is not a repeat of the line above the plan message.
+	s.lastLine, s.lastKey = "", groupKey{}
+	// The cleanup keeps the done list.
+	s.enqueue(ctx, text, true, !done)
 }
 
-// textOf returns the text of a bubble with lines: the goal line, the plan block, and
-// then lines, at most statusTextLimit UTF-16 units. s.mu is held.
+// textOf returns the text of a bubble with lines, at most statusTextLimit UTF-16 units.
+// s.mu is held.
 func (s *Status) textOf(lines []string) string {
 	text, _ := s.compose(lines)
 	return cutUTF16(text, statusTextLimit)
 }
 
 // fits reports whether the text of a bubble with lines fits in statusTextLimit with no
-// cut. The plan block can give up item lines for the fit. s.mu is held.
+// cut. s.mu is held.
 func (s *Status) fits(lines []string) bool {
 	_, ok := s.compose(lines)
 	return ok
 }
 
-// compose returns the text of a bubble with lines before the cut. When the text is too
-// long, the plan block gives up its last item lines until the text fits or no item line
-// is left. ok is true when the text fits. s.mu is held.
+// compose returns the text of a bubble with lines before the cut. A bubble shows tool
+// lines only. ok is true when the text fits in statusTextLimit. s.mu is held.
 func (s *Status) compose(lines []string) (text string, ok bool) {
-	keep := min(len(s.plan), planMaxItems)
-	for {
-		var parts []string
-		if s.goalLine != "" {
-			parts = append(parts, s.goalLine)
-		}
-		if len(s.plan) > 0 {
-			parts = append(parts, planLines(s.plan, keep)...)
-			parts = append(parts, planRule)
-		}
-		parts = append(parts, lines...)
-		text = strings.Join(parts, "\n")
-		if UTF16Len(text) <= statusTextLimit {
-			return text, true
-		}
-		if keep <= 0 || len(s.plan) == 0 {
-			return text, false
-		}
-		keep--
-	}
-}
-
-// planLines returns the lines of the plan block of items, with no "───" line, and at
-// most keep item lines.
-func planLines(items []tools.TodoItem, keep int) []string {
-	done, total := tools.TodoSummary(items)
-	shown := items
-	if len(items) > planMaxItems {
-		// The open items come first, so the work that is left shows.
-		shown = make([]tools.TodoItem, 0, len(items))
-		for _, it := range items {
-			if it.Status == "pending" || it.Status == "in_progress" {
-				shown = append(shown, it)
-			}
-		}
-		for _, it := range items {
-			if it.Status != "pending" && it.Status != "in_progress" {
-				shown = append(shown, it)
-			}
-		}
-		shown = shown[:planMaxItems]
-	}
-	shown = shown[:max(0, min(keep, len(shown)))]
-	out := []string{fmt.Sprintf("📋 Plan %d/%d", done, total)}
-	for _, it := range shown {
-		out = append(out, planMarker(it.Status)+" "+oneLine(it.Content))
-	}
-	if more := len(items) - len(shown); more > 0 {
-		out = append(out, fmt.Sprintf("+%d more", more))
-	}
-	return out
+	text = strings.Join(lines, "\n")
+	return text, UTF16Len(text) <= statusTextLimit
 }
 
 // planMarker returns the marker of an item line for status.
@@ -410,6 +350,12 @@ func planMarker(status string) string {
 // returns true when the flush found a permanent edit error. Then the flush
 // sent the line of the call alone, and the caller must stop. s.mu is held.
 func (s *Status) split(ctx context.Context) bool {
+	if s.msgID == 0 {
+		// The flush holds a bubble that waits for its first send, so the
+		// lines of the bubble must go into the send queue.
+		s.closeBubble(ctx)
+		return false
+	}
 	s.splitting = true
 	s.flush(ctx, true)
 	s.splitting = false
@@ -420,26 +366,27 @@ func (s *Status) split(ctx context.Context) bool {
 
 // Reset closes the open bubble, so the next tool line starts a new message
 // below the streamed answer. The closed bubble gets its pending lines first.
+// A bubble that waits for its first send goes into the send queue.
 func (s *Status) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
-	if s.msgID != 0 && !s.noEdit && s.flushCtx != nil {
-		ctx, cancel := context.WithTimeout(s.flushCtx, flushTimeout)
-		s.flush(ctx, true)
-		cancel()
-		s.keepFailedEdit()
+	ctx := context.Background()
+	if s.flushCtx != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(s.flushCtx, flushTimeout)
+		defer cancel()
 	}
-	s.openBubble()
+	s.closeBubble(ctx)
 	s.lastLine, s.lastKey = "", groupKey{}
 }
 
-// Close sends the pending lines. It deletes all status messages when Cleanup
-// and success are both true. Add does nothing after Close. The timer still
-// tries the failed edits of closed bubbles, so the final counts can arrive
-// later.
+// Close closes the open bubble and sends the queue one time. It deletes all
+// status messages when Cleanup and success are both true. Add does nothing
+// after Close. The timer still tries the failed edits of closed bubbles, so
+// the final counts can arrive later.
 func (s *Status) Close(ctx context.Context, success bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -447,12 +394,19 @@ func (s *Status) Close(ctx context.Context, success bool) {
 		return
 	}
 	s.closed = true
-	if !s.noEdit && s.textOf(s.lines) != "" {
-		s.flush(ctx, true)
-		s.keepFailedEdit()
+	cleanup := s.Cleanup && success
+	if cleanup {
+		// Do not send a message that the cleanup deletes next.
+		s.dropDeletable()
 	}
+	s.closeBubble(ctx)
 	s.stopTimer()
-	if s.Cleanup && success {
+	// After Close, sendQueue drops an entry on a network error or a 5xx. An entry
+	// that waits for a flood wait stays, and the timer sends it later.
+	if wait := s.sendQueue(ctx); wait > 0 {
+		s.armTimer(wait)
+	}
+	if cleanup {
 		// A deleted message needs no edit.
 		s.waiting = nil
 		for _, id := range s.ids {
@@ -463,6 +417,76 @@ func (s *Status) Close(ctx context.Context, success bool) {
 	} else if len(s.waiting) > 0 {
 		s.armTimer(s.editWait())
 	}
+}
+
+// dropDeletable removes the queue entries that the cleanup deletes. The other
+// entries keep their order. A bubble that waits for its first send loses its
+// lines, because the cleanup deletes it too. s.mu is held.
+func (s *Status) dropDeletable() {
+	s.queue = slices.DeleteFunc(s.queue, func(e queuedSend) bool { return e.deletable })
+	if s.msgID == 0 {
+		s.lines, s.groups = nil, nil
+	}
+}
+
+// DropCleanupEntries drops the queued messages that the cleanup of a successful turn
+// deletes, so they do not go out before the final answer.
+func (s *Status) DropCleanupEntries(success bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Cleanup && success {
+		s.dropDeletable()
+	}
+}
+
+// Drain sends the queue, oldest first, and then a bubble that waits for its
+// first send. Thus the tool lines before an answer message go out above it. It
+// waits for each flood wait without s.mu, so the timer and the setters do not
+// block. It returns when the queue is empty, when ctx ends, or after
+// flushTimeout. The timer sends the entries that are left.
+func (s *Status) Drain(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	deadline := s.now().Add(flushTimeout)
+	for {
+		s.mu.Lock()
+		wait := s.sendQueue(ctx)
+		if wait == 0 {
+			wait = s.sendHeld(ctx)
+		}
+		if wait > 0 && !s.closed {
+			s.armTimer(wait)
+		}
+		s.mu.Unlock()
+		if wait <= 0 {
+			return
+		}
+		left := deadline.Sub(s.now())
+		if left <= 0 {
+			return
+		}
+		t := time.NewTimer(min(wait, left))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// sendHeld sends a bubble that waits for its first send. It returns the wait
+// before the next try during a flood wait, else 0. s.mu is held.
+func (s *Status) sendHeld(ctx context.Context) time.Duration {
+	if s.msgID != 0 || len(s.lines) == 0 || s.noEdit || s.closed {
+		return 0
+	}
+	s.flush(ctx, true)
+	if s.msgID == 0 {
+		return max(s.floodUntil.Sub(s.now()), 0)
+	}
+	return 0
 }
 
 // keepFailedEdit runs after the forced flush of a bubble that closes. When
@@ -480,8 +504,7 @@ func (s *Status) keepFailedEdit() {
 func (s *Status) openBubble() {
 	s.stopTimer()
 	s.lines, s.msgID, s.shown, s.groups = nil, 0, "", nil
-	s.headOpen = false
-	if len(s.waiting) > 0 {
+	if len(s.waiting) > 0 || len(s.queue) > 0 {
 		s.armTimer(s.editWait())
 	}
 }
@@ -523,10 +546,10 @@ func (s *Status) editClosed(ctx context.Context) bool {
 	return true
 }
 
-// stopIdleTimer stops the timer when no closed bubble waits for an edit.
-// s.mu is held.
+// stopIdleTimer stops the timer when no closed bubble waits for an edit and
+// no new message waits in the send queue. s.mu is held.
 func (s *Status) stopIdleTimer() {
-	if len(s.waiting) == 0 {
+	if len(s.waiting) == 0 && len(s.queue) == 0 {
 		s.stopTimer()
 	}
 }
@@ -541,15 +564,25 @@ func (s *Status) editWait() time.Duration {
 // interval and for a flood wait, and a timer sends it later. s.mu is held.
 func (s *Status) flush(ctx context.Context, force bool) {
 	text := s.textOf(s.lines)
-	if text == "" || text == s.shown || (s.msgID == 0 && len(s.lines) == 0 && !s.headOpen) {
+	// A bubble with no tool line has no text, so it never goes out.
+	if text == "" || text == s.shown {
 		s.stopIdleTimer()
 		return
 	}
 	now := s.now()
 	if s.msgID == 0 {
+		// A new bubble must not go out above a message that waits in the queue.
+		if len(s.queue) > 0 || now.Before(s.floodUntil) {
+			s.armTimer(max(s.floodUntil.Sub(now), 0))
+			return
+		}
 		m, err := s.send(ctx, text, false)
 		if err != nil {
 			s.logger().Info("telegram status send failed", "err", err.Error())
+			if wait, ok := floodWait(err); ok {
+				s.floodUntil = now.Add(max(wait, s.interval()))
+				s.armTimer(s.floodUntil.Sub(now))
+			}
 			return
 		}
 		s.msgID, s.shown, s.lastEdit = m.MessageID, text, now
@@ -615,13 +648,78 @@ func (s *Status) noEditLine() string {
 	return line
 }
 
+// sendLine sends line as its own message. The line goes through the send
+// queue, so it does not go out above a message that waits. s.mu is held.
 func (s *Status) sendLine(ctx context.Context, line string) {
-	m, err := s.send(ctx, line, false)
-	if err != nil {
-		s.logger().Info("telegram status send failed", "err", err.Error())
+	s.enqueue(ctx, line, false, true)
+}
+
+// enqueue puts a new message at the end of the send queue. The message goes
+// out at once when no other message waits and no flood wait runs. s.mu is
+// held.
+func (s *Status) enqueue(ctx context.Context, text string, silent, deletable bool) {
+	s.queue = append(s.queue, queuedSend{text: text, silent: silent, deletable: deletable})
+	if len(s.queue) > 1 {
+		// The timer runs for the head of the queue.
 		return
 	}
-	s.ids = append(s.ids, m.MessageID)
+	if wait := s.sendQueue(ctx); wait > 0 {
+		s.armTimer(wait)
+	}
+}
+
+// sendQueue sends the waiting messages, oldest first. It returns 0 when the
+// queue is empty, else the wait before the next try. s.mu is held.
+func (s *Status) sendQueue(ctx context.Context) time.Duration {
+	for len(s.queue) > 0 {
+		now := s.now()
+		if now.Before(s.floodUntil) {
+			return s.floodUntil.Sub(now)
+		}
+		e := s.queue[0]
+		m, err := s.send(ctx, e.text, e.silent)
+		if err == nil {
+			if e.deletable {
+				s.ids = append(s.ids, m.MessageID)
+			}
+			s.queue = s.queue[1:]
+			continue
+		}
+		if wait, ok := floodWait(err); ok {
+			// The entry stays at the head, also after Close.
+			s.floodUntil = now.Add(max(wait, s.interval()))
+			s.logger().Info("telegram status flood control, back off", "wait_s", wait.Seconds())
+			return s.floodUntil.Sub(now)
+		}
+		var ae *APIError
+		retry := !errors.As(err, &ae) || ae.Code >= 500
+		// After Close, no new event can come, so a closed Status must not
+		// try a failed send for ever.
+		if retry && !s.closed {
+			s.logger().Info("telegram status send failed, retry later", "err", err.Error())
+			return s.interval()
+		}
+		s.logger().Info("telegram status send failed, drop it", "err", err.Error())
+		s.queue = s.queue[1:]
+	}
+	return 0
+}
+
+// closeBubble closes the open bubble and opens a new one. A sent bubble gets
+// its pending lines, but no forced edit during a flood wait. A bubble that
+// waits for its first send goes into the send queue, so its lines stay.
+// s.mu is held.
+func (s *Status) closeBubble(ctx context.Context) {
+	switch {
+	case s.msgID != 0 && !s.noEdit:
+		if !s.now().Before(s.floodUntil) {
+			s.flush(ctx, true)
+		}
+		s.keepFailedEdit()
+	case s.msgID == 0 && len(s.lines) > 0:
+		s.enqueue(ctx, s.textOf(s.lines), false, true)
+	}
+	s.openBubble()
 }
 
 // send sends text as a new message. A silent message makes no sound.
@@ -651,6 +749,12 @@ func (s *Status) onTimer() {
 	}
 	ctx, cancel := context.WithTimeout(s.flushCtx, flushTimeout)
 	defer cancel()
+	// The queue goes first, so the new messages keep the order of the events. The
+	// edits and the open bubble wait for the next timer.
+	if wait := s.sendQueue(ctx); wait > 0 {
+		s.armTimer(wait)
+		return
+	}
 	// After Close, and after a permanent edit error, only the closed
 	// bubbles get edits.
 	if !s.editClosed(ctx) || s.closed || s.noEdit {

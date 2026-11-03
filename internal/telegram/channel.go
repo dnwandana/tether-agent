@@ -875,6 +875,11 @@ type tgRenderer struct {
 	// over. It can be nil.
 	handoff func()
 
+	// drainCtx limits the wait of an answer message for the send queue. r.ctx has no
+	// cancel, so stopDrain ends drainCtx at a /stop and after the Drain in Done.
+	drainCtx  context.Context
+	stopDrain context.CancelFunc
+
 	mu sync.Mutex
 	// stopTyping ends the typing loop of the turn. It is set at the first event of the turn.
 	stopTyping func()
@@ -885,11 +890,12 @@ type tgRenderer struct {
 }
 
 var (
-	_ gateway.Renderer         = (*tgRenderer)(nil)
-	_ gateway.ReplyRenderer    = (*tgRenderer)(nil)
-	_ gateway.HandleRenderer   = (*tgRenderer)(nil)
-	_ gateway.GoalLineRenderer = (*tgRenderer)(nil)
-	_ agent.PlanSink           = (*tgRenderer)(nil)
+	_ gateway.Renderer            = (*tgRenderer)(nil)
+	_ gateway.ReplyRenderer       = (*tgRenderer)(nil)
+	_ gateway.HandleRenderer      = (*tgRenderer)(nil)
+	_ gateway.GoalLineRenderer    = (*tgRenderer)(nil)
+	_ gateway.TurnContextRenderer = (*tgRenderer)(nil)
+	_ agent.PlanSink              = (*tgRenderer)(nil)
 )
 
 func (ch *Channel) newRenderer(ctx context.Context, chatID int64, threadID string, isDM bool) *tgRenderer {
@@ -898,7 +904,16 @@ func (ch *Channel) newRenderer(ctx context.Context, chatID int64, threadID strin
 		Cleanup: ch.Cfg.CleanupProgress, Log: ch.Log}
 	sm := &Streamer{C: ch.C, ChatID: chatID, ThreadID: threadID, IsDM: isDM, Cfg: ch.Cfg.Streaming,
 		OnFirstMessage: st.Reset, Log: ch.Log}
-	return &tgRenderer{ch: ch, ctx: rctx, chatID: chatID, threadID: threadID, status: st, stream: sm}
+	r := &tgRenderer{ch: ch, ctx: rctx, chatID: chatID, threadID: threadID, status: st, stream: sm}
+	r.drainCtx, r.stopDrain = context.WithCancel(rctx)
+	sm.BeforeNewMessage = func(context.Context) { st.Drain(r.drainCtx) }
+	return r
+}
+
+// TurnContext ends the wait of an answer message for the send queue when ctx ends, for
+// example at a /stop.
+func (r *tgRenderer) TurnContext(ctx context.Context) {
+	context.AfterFunc(ctx, r.stopDrain)
 }
 
 // begin starts the typing loop at the first event of the turn. A renderer that only sends
@@ -946,10 +961,10 @@ func (r *tgRenderer) GoalLine(line string) {
 	}
 }
 
-// Plan shows the plan block after a todo_list call of the main agent.
-func (r *tgRenderer) Plan(items []tools.TodoItem) {
+// Plan sends the plan message after a todo_list call of the main agent.
+func (r *tgRenderer) Plan(before, after []tools.TodoItem) {
 	if r.begin() {
-		r.status.SetPlan(r.ctx, items)
+		r.status.SetPlan(r.ctx, before, after)
 	}
 }
 
@@ -1155,6 +1170,14 @@ func (r *tgRenderer) Done(final string, err error) {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		clean = strings.TrimSpace(clean + "\n\nerror: " + err.Error())
 	}
+	// A plan message that waits goes out above the answer. With the cleanup,
+	// the messages that Close deletes do not go out.
+	r.status.DropCleanupEntries(err == nil)
+	if !errors.Is(err, context.Canceled) {
+		r.status.Drain(r.ctx)
+	}
+	// The answer waits for the queue one time only, and not at all after a /stop.
+	r.stopDrain()
 	// An empty text makes the streamer use the streamed text without the media tags.
 	if ferr := r.stream.Finish(r.ctx, clean); ferr != nil {
 		r.ch.logger().Warn("telegram: cannot send the answer", "chat", r.chatID, "err", ferr.Error())

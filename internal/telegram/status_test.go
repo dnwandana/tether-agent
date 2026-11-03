@@ -944,8 +944,8 @@ func TestSplitFloodEditRetries(t *testing.T) {
 	floodEdits(api)
 	s.Add(ctx, Source{}, "t0", strings.Repeat("p", previewMax), "{}")
 	api.setReply(nil)
-	if api.count("sendMessage") != 2 {
-		t.Fatal(api.methods())
+	if api.count("sendMessage") != 1 {
+		t.Fatal("the new bubble must wait for the flood wait:", api.methods())
 	}
 	clk.Advance(2 * time.Second)
 	if !fireTimer(s) || api.count("editMessageText") != 1 {
@@ -957,6 +957,10 @@ func TestSplitFloodEditRetries(t *testing.T) {
 	}
 	if got := lastEditOf(api, firstBubble); got != want {
 		t.Fatal("the closed bubble must get all its lines:", api.methods())
+	}
+	if sends := api.textsOf("sendMessage"); len(sends) != 2 ||
+		sends[1] != ToolLine("all", "t0", strings.Repeat("p", previewMax), "{}") {
+		t.Fatal("the new bubble must go out after the flood wait:", sends)
 	}
 }
 
