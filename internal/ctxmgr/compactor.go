@@ -138,7 +138,14 @@ func (c *Compactor) Maybe(ctx context.Context, s *sessions.Session, prov provide
 	if err != nil {
 		return false, fmt.Errorf("compaction: %w", err)
 	}
-	comps, err := LoadCompactions(ctx, c.DB, s.ID)
+	return c.MaybeStored(ctx, s, prov, window, force, stored)
+}
+
+// MaybeStored is Maybe with the stored messages of the session that the caller read. A
+// compaction does not change the stored messages, so the caller can use stored again
+// after the compaction.
+func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool, stored []sessions.StoredMessage) (compacted bool, err error) {
+	comps, err := LatestCompaction(ctx, c.DB, s.ID)
 	if err != nil {
 		return false, err
 	}
@@ -209,7 +216,7 @@ func (c *Compactor) View(ctx context.Context, sessionID string) ([]StoredView, e
 	if err != nil {
 		return nil, fmt.Errorf("compaction: %w", err)
 	}
-	comps, err := LoadCompactions(ctx, c.DB, sessionID)
+	comps, err := LatestCompaction(ctx, c.DB, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -277,11 +284,24 @@ func (c *Compactor) logger() *slog.Logger {
 
 // LoadCompactions returns the compactions of the session in id order.
 func LoadCompactions(ctx context.Context, d *db.DB, sessionID string) ([]Compaction, error) {
+	return loadCompactions(ctx, d, sessionID, `SELECT id, from_message_id, upto_message_id, summary, created_at
+		FROM compactions WHERE session_id = ? ORDER BY id`)
+}
+
+// LatestCompaction returns the latest compaction of the session, or no compaction. The
+// model view uses only the latest compaction, because each summary also holds the
+// previous summary. Thus the read does not get the old summaries.
+func LatestCompaction(ctx context.Context, d *db.DB, sessionID string) ([]Compaction, error) {
+	return loadCompactions(ctx, d, sessionID, `SELECT id, from_message_id, upto_message_id, summary, created_at
+		FROM compactions WHERE session_id = ? ORDER BY id DESC LIMIT 1`)
+}
+
+// loadCompactions returns the compactions that query gives for the session.
+func loadCompactions(ctx context.Context, d *db.DB, sessionID, query string) ([]Compaction, error) {
 	if d == nil {
 		return nil, nil
 	}
-	rows, err := d.QueryContext(ctx, `SELECT id, from_message_id, upto_message_id, summary, created_at
-		FROM compactions WHERE session_id = ? ORDER BY id`, sessionID)
+	rows, err := d.QueryContext(ctx, query, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("compaction: read the compactions of %s: %w", sessionID, err)
 	}
