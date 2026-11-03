@@ -665,6 +665,13 @@ func TestNewAndDeleteFreeSessionState(t *testing.T) {
 		if a.Agent.Prompts.Len() != 1 {
 			t.Fatal("the prompt is not cached")
 		}
+		// A turn keeps the review data of the session.
+		if _, err := a.Agent.RunTurn(ctx, agent.Turn{Session: old, UserText: "hi", Env: a.NewEnv(old, "cli")}); err != nil {
+			t.Fatal(err)
+		}
+		if a.Agent.Reviews.Len() != 1 {
+			t.Fatal("the turn kept no review data")
+		}
 	}
 	freed := func(how string) {
 		t.Helper()
@@ -679,6 +686,9 @@ func TestNewAndDeleteFreeSessionState(t *testing.T) {
 		}
 		if a.Agent.Prompts.Len() != 0 {
 			t.Fatal(how, "must forget the frozen prompt")
+		}
+		if a.Agent.Reviews.Len() != 0 {
+			t.Fatal(how, "must forget the review data")
 		}
 	}
 

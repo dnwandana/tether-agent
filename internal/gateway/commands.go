@@ -427,6 +427,11 @@ func cmdArchive(ctx context.Context, c *CommandCtx, _ string) error {
 	}
 	s.Archived = true
 	pauseOldGoal(ctx, c, s)
+	// The review data of the session keeps its frozen prompt. A /resume reads the counts
+	// from the store again.
+	if ag := c.Deps.Agent; ag != nil {
+		ag.Reviews.Forget(s.ID)
+	}
 	text := fmt.Sprintf("🗄 **Archived \"%s\"**\nThe session list does not show it now.", sessionTitle(s.Title))
 	if !c.interactive() {
 		text += fmt.Sprintf("\nSend /resume %s to undo.", s.ID)

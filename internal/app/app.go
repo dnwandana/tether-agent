@@ -841,8 +841,8 @@ func (a *App) beforeNew(ctx context.Context, old *sessions.Session) {
 }
 
 // ForgetSession frees the state that the process keeps for a session: the Values map of
-// its tool context, the "This session" answers of the approval gate, and the frozen
-// system prompt. Call it when a session ends: after /new, /reset, /delete, and a cron run.
+// its tool context, the "This session" answers of the approval gate, the frozen
+// system prompt, and the review data. Call it when a session ends: after /new, /reset, /delete, and a cron run.
 func (a *App) ForgetSession(sessionID string) {
 	a.valuesMu.Lock()
 	delete(a.values, sessionID)
@@ -852,6 +852,10 @@ func (a *App) ForgetSession(sessionID string) {
 	}
 	if a.Agent != nil && a.Agent.Prompts != nil {
 		a.Agent.Prompts.Forget(sessionID)
+	}
+	if a.Agent != nil {
+		// The review data keeps the frozen prompt, the schemas, and the notice function.
+		a.Agent.Reviews.Forget(sessionID)
 	}
 }
 
