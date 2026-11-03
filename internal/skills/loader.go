@@ -142,7 +142,7 @@ func expandHome(p string) string {
 // guardExternal scans the folder of an external skill. It returns false and
 // a Warning when the guard policy does not allow the skill.
 func guardExternal(s Skill) (Warning, bool) {
-	r, err := ScanDir(s.Dir)
+	r, err := scanDirCached(s.Dir)
 	if err != nil {
 		return Warning{Path: s.Path, Text: fmt.Sprintf("external skill %q is skipped: %v", s.Name, err)}, false
 	}
