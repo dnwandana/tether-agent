@@ -30,6 +30,9 @@ type searchSource struct {
 	entries  []string
 	matched  int
 	hits     int
+	// best is the entry for the snippet: the first entry with the most distinct query
+	// words.
+	best string
 }
 
 // Search returns the entries of tier 1 and of the notes that match the words
@@ -106,7 +109,7 @@ func (s *Store) Search(query string) (string, error) {
 			}
 			lines = append(lines,
 				fmt.Sprintf("%d. %s", i+1, head),
-				"   "+snippet(bestEntry(h.entries, words), words))
+				"   "+snippet(h.best, words))
 		}
 	case len(names) > 0:
 		lines = append(lines, fmt.Sprintf("No entry matches %q. The notes are: %s.", q, joinCapped(names, 40)))
@@ -194,18 +197,36 @@ func entriesBytes(entries []string) int {
 	return n
 }
 
-// score sets src.matched and src.hits for words.
+// score sets src.matched, src.hits, and src.best for words. It lowercases each entry
+// one time. A query word has no newline, so the count in each entry is the count in the
+// entries joined with newlines.
 func score(src *searchSource, words []string) {
-	body := strings.ToLower(strings.Join(src.entries, "\n"))
 	// A query word matches a whole word of the topic name, so "in" does not match
 	// "inbox-user". A topic name has only lowercase letters, digits, and "-".
 	var topic []string
 	if src.isNote {
 		topic = strings.Split(src.name, "-")
 	}
+	counts := make([]int, len(words))
+	src.best = ""
+	bestCount := -1
+	for _, e := range src.entries {
+		low := strings.ToLower(e)
+		distinct := 0
+		for j, w := range words {
+			if c := strings.Count(low, w); c > 0 {
+				counts[j] += c
+				distinct++
+			}
+		}
+		// The best entry is the first entry that has the most distinct query words.
+		if distinct > bestCount {
+			src.best, bestCount = e, distinct
+		}
+	}
 	src.matched, src.hits = 0, 0
-	for _, w := range words {
-		c := strings.Count(body, w)
+	for j, w := range words {
+		c := counts[j]
 		t := slices.Contains(topic, w)
 		if c > 0 || t {
 			src.matched++
@@ -216,24 +237,6 @@ func score(src *searchSource, words []string) {
 			src.hits += 3
 		}
 	}
-}
-
-// bestEntry returns the first entry that has the most distinct query words.
-func bestEntry(entries, words []string) string {
-	best, bestCount := "", -1
-	for _, e := range entries {
-		low := strings.ToLower(e)
-		c := 0
-		for _, w := range words {
-			if strings.Contains(low, w) {
-				c++
-			}
-		}
-		if c > bestCount {
-			best, bestCount = e, c
-		}
-	}
-	return best
 }
 
 // snippet returns entry, or a cut of snippetRunes runes round the first
