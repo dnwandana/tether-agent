@@ -426,7 +426,7 @@ func (ch *Channel) pair(ctx context.Context, m Message, n Normalized) {
 	if reply == "" {
 		return
 	}
-	if _, err := ch.sendText(ctx, m.Chat.ID, n.ThreadID, reply, sendOpts{}); err != nil {
+	if _, err := ch.sendText(ctx, m.Chat.ID, n.ThreadID, reply, sendOpts{class: paceReply}); err != nil {
 		ch.logger().Warn("telegram: cannot send the pairing code", "user", n.UserID, "err", err.Error())
 	}
 }
@@ -440,6 +440,7 @@ func (ch *Channel) localCommand(ctx context.Context, m Message, n Normalized, te
 		return false
 	}
 	send := func(s string, o sendOpts) {
+		o.class = paceReply
 		if _, err := ch.sendText(ctx, m.Chat.ID, n.ThreadID, s, o); err != nil {
 			ch.logger().Warn("telegram: cannot send the command reply", "command", name, "err", err.Error())
 		}
@@ -697,6 +698,8 @@ func ChatInfo(cfg config.TelegramConfig, bot User) func(s *sessions.Session) str
 type sendOpts struct {
 	keyboard *InlineKeyboardMarkup
 	replyTo  int
+	// class is the pace class of the sends. Zero is the default class, which waits for the group window.
+	class paceClass
 }
 
 // sendText sends text as MarkdownV2 parts with "(i/n)" numbers. A part that Telegram
@@ -705,6 +708,7 @@ type sendOpts struct {
 func (ch *Channel) sendText(ctx context.Context, chatID int64, threadID, text string, o sendOpts) (int, error) {
 	parts := finalParts(text)
 	last := 0
+	c := withClass(ch.C, o.class)
 	for i, part := range parts {
 		p := SendMessageParams{ChatID: chatID, Text: part, ParseMode: "MarkdownV2"}
 		if id, ok := ThreadParam(threadID, false); ok {
@@ -716,11 +720,11 @@ func (ch *Channel) sendText(ctx context.Context, chatID int64, threadID, text st
 		if i == 0 && o.replyTo > 0 {
 			p.ReplyParameters = &ReplyParameters{MessageID: o.replyTo, AllowSendingWithoutReply: true}
 		}
-		m, err := ch.C.SendMessage(ctx, p)
+		m, err := c.SendMessage(ctx, p)
 		if err != nil && isBadRequest(err) {
 			logPlainFallback(ch.logger(), "send", chatID, threadID, i+1, len(parts), err)
 			p.Text, p.ParseMode = StripMarkdownV2(part), ""
-			m, err = ch.C.SendMessage(ctx, p)
+			m, err = c.SendMessage(ctx, p)
 		}
 		if err != nil {
 			return last, err
@@ -995,7 +999,7 @@ func (r *tgRenderer) Ack(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	if _, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, text, sendOpts{}); err != nil {
+	if _, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, text, sendOpts{class: paceReply}); err != nil {
 		r.ch.logger().Warn("telegram: cannot send the reply", "chat", r.chatID, "err", err.Error())
 	}
 }
@@ -1013,7 +1017,7 @@ func (r *tgRenderer) AckReply(rep gateway.Reply) {
 		if id, ok := ThreadParam(r.threadID, false); ok {
 			p.MessageThreadID = id
 		}
-		_, err := r.ch.C.SendRichMessage(r.ctx, p)
+		_, err := replyClient(r.ch.C).SendRichMessage(r.ctx, p)
 		if err == nil {
 			return
 		}
@@ -1022,7 +1026,7 @@ func (r *tgRenderer) AckReply(rep gateway.Reply) {
 	if strings.TrimSpace(rep.Text) == "" {
 		return
 	}
-	if _, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, rep.Text, sendOpts{keyboard: kb}); err != nil {
+	if _, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, rep.Text, sendOpts{keyboard: kb, class: paceReply}); err != nil {
 		r.ch.logger().Warn("telegram: cannot send the reply", "chat", r.chatID, "err", err.Error())
 	}
 }
@@ -1036,7 +1040,7 @@ func (r *tgRenderer) AckReplyHandle(rep gateway.Reply) gateway.AckHandle {
 		return nil
 	}
 	// An ack has one part, so sendText returns the ID of the ack message.
-	id, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, rep.Text, sendOpts{keyboard: cmdKeyboard(r.userID, rep.Buttons)})
+	id, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, rep.Text, sendOpts{keyboard: cmdKeyboard(r.userID, rep.Buttons), class: paceReply})
 	if err != nil {
 		r.ch.logger().Warn("telegram: cannot send the reply", "chat", r.chatID, "err", err.Error())
 		return nil

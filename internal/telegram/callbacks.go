@@ -384,11 +384,12 @@ func (it *Interactions) sendMDV2(ctx context.Context, p *prompt, mdv2, plain str
 	if id, ok := ThreadParam(p.threadID, false); ok {
 		params.MessageThreadID = id
 	}
-	m, err := it.C.SendMessage(ctx, params)
+	c := replyClient(it.C)
+	m, err := c.SendMessage(ctx, params)
 	if err != nil && isBadRequest(err) {
 		logPlainFallback(it.logger(), "prompt_send", p.chatID, p.threadID, 1, 1, err)
 		params.Text, params.ParseMode = cutUTF16(plain, maxMessageLen), ""
-		m, err = it.C.SendMessage(ctx, params)
+		m, err = c.SendMessage(ctx, params)
 	}
 	if err != nil {
 		return err
