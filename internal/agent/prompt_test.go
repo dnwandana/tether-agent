@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -32,11 +33,11 @@ func TestToolNoteTodoOnlyWhenVisible(t *testing.T) {
 func TestSectionOrderAndEmptySectionsOmitted(t *testing.T) {
 	s := BuildSystemPrompt(PromptInput{Base: "BASE", Memory: "m1", SkillsIndex: []SkillLine{{"deploy", "Deploy steps. Use when deploying."}},
 		Now: time.Date(2026, 10, 27, 9, 14, 0, 0, time.FixedZone("+07", 7*3600)), WorkDir: "/w", Channel: "cli"})
-	iBase, iMem, iSk, iCtx := strings.Index(s, "BASE"), strings.Index(s, "## MEMORY"), strings.Index(s, "## SKILLS"), strings.Index(s, "## CONTEXT")
+	iBase, iMem, iSk, iCtx := strings.Index(s, "BASE"), strings.Index(s, "## MEMORY\n"), strings.Index(s, "## SKILLS"), strings.Index(s, "## CONTEXT")
 	if !(iBase == 0 && iBase < iMem && iMem < iSk && iSk < iCtx) {
 		t.Fatal(s)
 	}
-	if strings.Contains(s, "## USER PROFILE") || strings.Contains(s, "## TOOL NOTES") {
+	if strings.Contains(s, "## USER PROFILE") || strings.Contains(s, "## TOOL NOTES") || strings.Contains(s, "## MEMORY TOPICS") {
 		t.Fatal("empty sections omitted")
 	}
 	if !strings.Contains(s, "- deploy: Deploy steps. Use when deploying.") || !strings.Contains(s, "2026-10-27 09:14 +07") {
@@ -49,9 +50,9 @@ func TestSectionOrderAndEmptySectionsOmitted(t *testing.T) {
 
 func TestAllSectionsInOrder(t *testing.T) {
 	s := BuildSystemPrompt(PromptInput{Base: "BASE", Memory: "m1", Profile: "p1", SkillsIndex: []SkillLine{{"a", "b"}},
-		ToolNotes: []string{"note one"}, Now: time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC), TZ: "Asia/Jakarta",
+		ToolNotes: []string{"note one"}, NoteTopics: []string{"rpc"}, Now: time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC), TZ: "Asia/Jakarta",
 		WorkDir: "/w", Channel: "telegram", ChatInfo: "group \"Ops\", topic 7"})
-	order := []string{"BASE", "## MEMORY\nm1", "## USER PROFILE\np1", "## SKILLS", "## TOOL NOTES\n- note one", "## CONTEXT"}
+	order := []string{"BASE", "## MEMORY\nm1", "## USER PROFILE\np1", "## MEMORY TOPICS\nNotes: rpc", "## SKILLS", "## TOOL NOTES\n- note one", "## CONTEXT"}
 	last := -1
 	for _, h := range order {
 		i := strings.Index(s, h)
@@ -68,7 +69,7 @@ func TestAllSectionsInOrder(t *testing.T) {
 }
 
 func TestPromptDeterministic(t *testing.T) {
-	in := PromptInput{Base: "B", SkillsIndex: []SkillLine{{"z", "1"}, {"a", "2"}}, ToolNotes: []string{"n"}, Now: time.Unix(0, 0).UTC()}
+	in := PromptInput{Base: "B", SkillsIndex: []SkillLine{{"z", "1"}, {"a", "2"}}, ToolNotes: []string{"n"}, NoteTopics: []string{"rpc", "inbox-user"}, Now: time.Unix(0, 0).UTC()}
 	first := BuildSystemPrompt(in)
 	for range 3 {
 		if BuildSystemPrompt(in) != first {
@@ -78,7 +79,7 @@ func TestPromptDeterministic(t *testing.T) {
 }
 
 func TestBlankMemoryOmitted(t *testing.T) {
-	if s := BuildSystemPrompt(PromptInput{Base: "B", Memory: "  \n", Now: time.Unix(0, 0)}); strings.Contains(s, "## MEMORY") {
+	if s := BuildSystemPrompt(PromptInput{Base: "B", Memory: "  \n", Now: time.Unix(0, 0)}); strings.Contains(s, "## MEMORY\n") {
 		t.Fatal(s)
 	}
 }
@@ -122,9 +123,46 @@ func TestBasePromptEmbedded(t *testing.T) {
 	if len(b) < 200 {
 		t.Fatal()
 	}
-	for _, want := range []string{"Tether Agent", "MEDIA:", "skill_view", "memory"} {
+	for _, want := range []string{"Tether Agent", "MEDIA:", "skill_view", "memory", "The MEMORY TOPICS section lists your memory notes."} {
 		if !strings.Contains(b, want) {
 			t.Fatal(want)
 		}
+	}
+}
+
+func TestMemoryTopicsSection(t *testing.T) {
+	now := time.Unix(0, 0).UTC()
+	if s := BuildSystemPrompt(PromptInput{Base: "B", Memory: "m1", Now: now}); strings.Contains(s, "## MEMORY TOPICS") {
+		t.Fatal("no topics, so no section:", s)
+	}
+	s := BuildSystemPrompt(PromptInput{Base: "B", NoteTopics: []string{"inbox-user", "inbox-memory", "rpc"}, Now: now})
+	want := "## MEMORY TOPICS\nNotes: inbox-user, inbox-memory, rpc\nFind facts with memory action search. Open a note with memory action read."
+	if !strings.Contains(s, want) {
+		t.Fatal(s)
+	}
+	if strings.Contains(s, "## MEMORY\n") {
+		t.Fatal("an empty Memory has no MEMORY section:", s)
+	}
+}
+
+func TestMemoryTopicsKeepInputOrder(t *testing.T) {
+	s := BuildSystemPrompt(PromptInput{Base: "B", NoteTopics: []string{"zeta", "alpha"}, Now: time.Unix(0, 0)})
+	if !strings.Contains(s, "\nNotes: zeta, alpha\n") {
+		t.Fatal("BuildSystemPrompt must not sort:", s)
+	}
+}
+
+func TestMemoryTopicsCap40(t *testing.T) {
+	var names []string
+	for i := range 45 {
+		names = append(names, fmt.Sprintf("t%02d", i))
+	}
+	s := BuildSystemPrompt(PromptInput{Base: "B", NoteTopics: names, Now: time.Unix(0, 0)})
+	if !strings.Contains(s, "\nNotes: "+strings.Join(names[:40], ", ")+", and 5 more\n") {
+		t.Fatal(s)
+	}
+	s = BuildSystemPrompt(PromptInput{Base: "B", NoteTopics: names[:40], Now: time.Unix(0, 0)})
+	if !strings.Contains(s, "\nNotes: "+strings.Join(names[:40], ", ")+"\n") {
+		t.Fatal("40 names have no more text:", s)
 	}
 }

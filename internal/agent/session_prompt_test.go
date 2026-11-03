@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,4 +234,84 @@ func TestPromptCacheConcurrentGet(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// agentWithNotes returns an Agent with a memory store, a prompt cache, a new session, and
+// the path of the notes folder. With visible, the registry has the memory tool.
+func agentWithNotes(t *testing.T, visible bool) (*Agent, *sessions.Session, string) {
+	t.Helper()
+	a, sess := newAgent(t, scripted())
+	dir := t.TempDir()
+	m, err := memory.Open(dir, 2200, 1375)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Memory = m
+	if visible {
+		a.Tools.Register(tools.MemoryTool{Store: m})
+	}
+	a.Prompts = NewPromptCache(a.SessionPrompt)
+	return a, sess, filepath.Join(dir, "notes")
+}
+
+// writeNoteFile writes the note topic with one entry.
+func writeNoteFile(t *testing.T, notes, topic string) {
+	t.Helper()
+	if err := os.MkdirAll(notes, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	text := "---\ntype: memory\n---\nfact of " + topic + "\n"
+	if err := os.WriteFile(filepath.Join(notes, topic+".md"), []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMemoryTopicsOnlyWhenMemoryVisible(t *testing.T) {
+	a, sess, notes := agentWithNotes(t, false)
+	writeNoteFile(t, notes, "rpc-providers")
+	p, _ := a.Prompts.Get(ctx, sess, keyFor(sess, 0), "cli")
+	if strings.Contains(p, "## MEMORY TOPICS") {
+		t.Fatal("no section when the memory tool is not visible")
+	}
+	a.Tools.Register(tools.MemoryTool{Store: a.Memory})
+	p, _ = a.Prompts.Get(ctx, sess, keyFor(sess, 1), "cli")
+	if !strings.Contains(p, "## MEMORY TOPICS\nNotes: rpc-providers\n") {
+		t.Fatal(p)
+	}
+}
+
+func TestMemoryTopicsFrozenWithinSession(t *testing.T) {
+	a, sess, notes := agentWithNotes(t, true)
+	p1, f1 := a.Prompts.Get(ctx, sess, keyFor(sess, 0), "cli")
+	writeNoteFile(t, notes, "rpc-providers")
+	p2, f2 := a.Prompts.Get(ctx, sess, keyFor(sess, 0), "cli")
+	if p1 != p2 || !f1.Equal(f2) || strings.Contains(p2, "## MEMORY TOPICS") {
+		t.Fatal("frozen within session")
+	}
+}
+
+func TestRebuildAfterCompactionReadsTopicsAgain(t *testing.T) {
+	a, sess, notes := agentWithNotes(t, true)
+	writeNoteFile(t, notes, "rpc-providers")
+	if p, _ := a.Prompts.Get(ctx, sess, keyFor(sess, 0), "cli"); strings.Contains(p, "dns-zones") {
+		t.Fatal(p)
+	}
+	writeNoteFile(t, notes, "dns-zones")
+	p, _ := a.Prompts.Get(ctx, sess, keyFor(sess, 1), "cli") // compactions 0 → 1
+	if !strings.Contains(p, "## MEMORY TOPICS\n") || !strings.Contains(p, "dns-zones") || !strings.Contains(p, "rpc-providers") {
+		t.Fatal("rebuild must read the topics again:", p)
+	}
+}
+
+func TestMemoryTopicsErrorLogsWarning(t *testing.T) {
+	a, sess, notes := agentWithNotes(t, true)
+	if err := os.WriteFile(notes, []byte("x"), 0o600); err != nil { // a file at notes
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	a.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	p, _ := a.Prompts.Get(ctx, sess, keyFor(sess, 0), "cli")
+	if strings.Contains(p, "## MEMORY TOPICS") || !strings.Contains(logs.String(), "level=WARN") {
+		t.Fatal(p, logs.String())
+	}
 }

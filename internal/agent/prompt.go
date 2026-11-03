@@ -2,6 +2,7 @@ package agent
 
 import (
 	_ "embed"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -18,12 +19,17 @@ const skillDescMax = 1024
 // promptTimeFormat is the time format of the CONTEXT section.
 const promptTimeFormat = "2006-01-02 15:04 -07"
 
+// promptTopicsMax is the maximum number of note topics in the MEMORY TOPICS section.
+const promptTopicsMax = 40
+
 // PromptInput holds the parts of a system prompt.
 type PromptInput struct {
 	Base, Memory, Profile string
 	SkillsIndex           []SkillLine
 	ToolNotes             []string
-	Now                   time.Time
+	// NoteTopics holds the topics of the memory notes, in the order of the prompt.
+	NoteTopics []string
+	Now        time.Time
 	// TZ is the name of the time zone, for example "Asia/Jakarta". It can be empty.
 	TZ, WorkDir, Channel string
 	// ChatInfo describes the chat, for example the chat type and the topic on Telegram.
@@ -48,7 +54,7 @@ func SkillLines(index []skills.IndexLine) []SkillLine {
 func BasePrompt() string { return basePrompt }
 
 // BuildSystemPrompt returns the system prompt. The parts are in this order: base, MEMORY,
-// USER PROFILE, SKILLS, TOOL NOTES, and CONTEXT. A part with no content has no header. The
+// USER PROFILE, MEMORY TOPICS, SKILLS, TOOL NOTES, and CONTEXT. A part with no content has no header. The
 // output depends only on in, because the prompt cache of the provider needs the same bytes
 // for the same input.
 func BuildSystemPrompt(in PromptInput) string {
@@ -61,6 +67,10 @@ func BuildSystemPrompt(in PromptInput) string {
 	}
 	if s := strings.TrimSpace(in.Profile); s != "" {
 		parts = append(parts, "## USER PROFILE\n"+s)
+	}
+	if len(in.NoteTopics) > 0 {
+		parts = append(parts, "## MEMORY TOPICS\nNotes: "+joinTopics(in.NoteTopics, promptTopicsMax)+
+			"\nFind facts with memory action search. Open a note with memory action read.")
 	}
 	if len(in.SkillsIndex) > 0 {
 		var b strings.Builder
@@ -84,6 +94,15 @@ func BuildSystemPrompt(in PromptInput) string {
 	}
 	parts = append(parts, contextSection(in))
 	return strings.Join(parts, "\n\n")
+}
+
+// joinTopics joins the first max names with ", ". With more names, the text ends with
+// ", and <n> more". It does not change names.
+func joinTopics(names []string, max int) string {
+	if len(names) <= max {
+		return strings.Join(names, ", ")
+	}
+	return strings.Join(names[:max], ", ") + ", and " + strconv.Itoa(len(names)-max) + " more"
 }
 
 // contextSection returns the CONTEXT section: the date, the time zone, the working

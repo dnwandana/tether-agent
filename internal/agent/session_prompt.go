@@ -129,8 +129,8 @@ func NowPrefix(frozenAt, now time.Time) string {
 	return now.Format(nowPrefixFormat)
 }
 
-// SessionPrompt builds the system prompt of the session. It reads memory and the
-// skills from disk. A session prompt override replaces the base prompt. The second result
+// SessionPrompt builds the system prompt of the session. It reads memory, the note topics,
+// and the skills from disk. A session prompt override replaces the base prompt. The second result
 // is the time at which the prompt is frozen. Use it as the build function of NewPromptCache.
 func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, channel string) (string, time.Time) {
 	now := time.Now()
@@ -145,6 +145,15 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, channel st
 	if a.Tools != nil {
 		visible, _ = a.Tools.Visible(tools.Resolve(a.config().Toolsets[channel], nil, nil), nil)
 		in.ToolNotes = DefaultToolNotes(visible)
+	}
+	// The topic list is useful only when the model can search and read a note.
+	if a.Memory != nil && (a.Tools == nil || visible["memory"]) {
+		topics, err := a.Memory.Topics()
+		if err != nil {
+			a.logger().Warn("agent: cannot list the memory notes; the prompt has no topic list", "err", err.Error())
+		} else {
+			in.NoteTopics = topics
+		}
 	}
 	// The index is useful only when the model can load a skill.
 	if a.Skills != nil && (a.Tools == nil || visible["skill_view"]) {

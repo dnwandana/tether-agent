@@ -31,6 +31,8 @@ tool (target `user`).
   tool to change them.
 - Memory is frozen for each session. A change goes to disk at once, but this prompt shows it
   only from the next session or after the next prompt rebuild.
+- The MEMORY TOPICS section lists your memory notes. A note does not load into this prompt.
+  Use the memory actions search and read to use it.
 - Save facts that will still be true later: preferences of your user, details of the
   environment, and fixes for repeated problems. Do not save the progress of a task.
 - To find an earlier conversation, use `session_search`.
