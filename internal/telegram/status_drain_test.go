@@ -319,3 +319,43 @@ func TestRendererStopEndsTheWaitOfTheAnswer(t *testing.T) {
 	}
 	r.Done("", context.Canceled)
 }
+
+func TestDrainLetsOthersTakeTheLockBetweenSends(t *testing.T) {
+	s, api, _ := statusWithFakeAPI(t, "all")
+	drainQueue(s, queuedSend{text: "one"}, queuedSend{text: "two"}, queuedSend{text: "three"})
+	got := make(chan struct{})
+	sends := 0
+	var other error
+	api.setReply(func(method string, _ map[string]any) *APIError {
+		if method != "sendMessage" {
+			return nil
+		}
+		sends++
+		switch sends {
+		case 1:
+			// A setter that waits for s.mu during the first send. The sleep makes it wait
+			// longer than 1 ms, so the mutex gives it the lock at the next unlock.
+			go func() {
+				s.mu.Lock()
+				close(got)
+				s.mu.Unlock()
+			}()
+			time.Sleep(20 * time.Millisecond)
+		case 3:
+			// The setter got the lock between two sends.
+			select {
+			case <-got:
+			case <-time.After(time.Second):
+				other = fmt.Errorf("the setter waited for the full queue")
+			}
+		}
+		return nil
+	})
+	s.Drain(ctx)
+	if other != nil {
+		t.Fatal(other)
+	}
+	if got, want := api.textsOf("sendMessage"), []string{"one", "two", "three"}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
