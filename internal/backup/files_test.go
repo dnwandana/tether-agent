@@ -161,7 +161,7 @@ func TestMaskTextFile(t *testing.T) {
 	r := security.NewRedactor([]string{"supersecret-123456789"})
 	src := writeTmp(t, "token=supersecret-123456789\n")
 	dst := filepath.Join(t.TempDir(), "out")
-	changed, err := maskTextFile(src, dst, r)
+	changed, err := maskTextFile(src, dst, r, true)
 	if err != nil || !changed || readFile(t, dst) != "token="+security.Mask("supersecret-123456789")+"\n" {
 		t.Fatal(changed, err)
 	}
@@ -174,7 +174,7 @@ func TestMaskTextFileNoMatch(t *testing.T) {
 	r := security.NewRedactor([]string{"supersecret-123456789"})
 	src := writeTmp(t, "plain text\n")
 	dst := filepath.Join(t.TempDir(), "out")
-	changed, err := maskTextFile(src, dst, r)
+	changed, err := maskTextFile(src, dst, r, true)
 	if err != nil || changed || readFile(t, dst) != "plain text\n" {
 		t.Fatal(changed, err)
 	}
@@ -185,9 +185,42 @@ func TestMaskTextFileBinary(t *testing.T) {
 	in := "\x00\x01supersecret-123456789"
 	src := writeTmp(t, in)
 	dst := filepath.Join(t.TempDir(), "out")
-	changed, err := maskTextFile(src, dst, r)
+	changed, err := maskTextFile(src, dst, r, true)
 	if err != nil || changed || readFile(t, dst) != in {
 		t.Fatal("a binary file changed", err)
+	}
+}
+
+func TestMaskTextFileMakesNoCopyOfAnUnchangedFile(t *testing.T) {
+	r := security.NewRedactor([]string{"supersecret-123456789"})
+	for name, in := range map[string]string{
+		"text":   "plain text\n",
+		"binary": "\x00" + strings.Repeat("b", 3*binarySniffLen) + "supersecret-123456789",
+	} {
+		dst := filepath.Join(t.TempDir(), "out")
+		changed, err := maskTextFile(writeTmp(t, in), dst, r, false)
+		if err != nil || changed {
+			t.Fatal(name, changed, err)
+		}
+		if _, err := os.Lstat(dst); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatal(name, "an unchanged file needs no copy:", err)
+		}
+	}
+	// A changed file gets its copy.
+	dst := filepath.Join(t.TempDir(), "out")
+	changed, err := maskTextFile(writeTmp(t, "k=supersecret-123456789"), dst, r, false)
+	if err != nil || !changed || readFile(t, dst) != "k="+security.Mask("supersecret-123456789") {
+		t.Fatal(changed, err)
+	}
+}
+
+func TestMaskTextFileCopiesALargeBinaryFile(t *testing.T) {
+	r := security.NewRedactor(nil)
+	in := "\x00" + strings.Repeat("b", 3*binarySniffLen+5)
+	dst := filepath.Join(t.TempDir(), "out")
+	changed, err := maskTextFile(writeTmp(t, in), dst, r, true)
+	if err != nil || changed || readFile(t, dst) != in {
+		t.Fatal("a binary file must be copied with no change", changed, err)
 	}
 }
 
@@ -199,7 +232,7 @@ func TestMaskTextFileRefusesSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := filepath.Join(t.TempDir(), "out")
-	if _, err := maskTextFile(src, dst, r); err == nil {
+	if _, err := maskTextFile(src, dst, r, true); err == nil {
 		t.Fatal("maskTextFile must refuse a symlink")
 	}
 	if _, err := os.Lstat(dst); !errors.Is(err, fs.ErrNotExist) {
@@ -215,7 +248,7 @@ func TestMaskTextFileRefusesFIFO(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := maskTextFile(src, filepath.Join(t.TempDir(), "out"), r)
+		_, err := maskTextFile(src, filepath.Join(t.TempDir(), "out"), r, true)
 		done <- err
 	}()
 	select {

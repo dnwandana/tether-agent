@@ -332,8 +332,9 @@ func lockBackups(dir string) (release func(), err error) {
 const memoryLockPoll = 50 * time.Millisecond
 
 // copyItems copies the files of found into tmp/files with the known secret values
-// masked (maskTextFile). It sets Src of an item to its copy when the mask changed the
-// file, and always for a memory item. It counts the changed files in red.
+// masked (maskTextFile). A memory item always gets a copy. Another item gets a copy only
+// when the mask changed the file. Src of an item with a copy is the copy. It counts the
+// changed files in red.
 func copyItems(found []item, tmp string, r *security.Redactor, red *Redacted) error {
 	for i := range found {
 		it := &found[i]
@@ -344,13 +345,14 @@ func copyItems(found []item, tmp string, r *security.Redactor, red *Redacted) er
 		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 			return fmt.Errorf("create a temp folder for %s: %w", it.Rel, err)
 		}
-		changed, err := maskTextFile(it.Src, dst, r)
+		// A memory item always reads its copy, so the hash and the archive get the bytes
+		// that the lock protected. Another item gets a copy only when the mask changed it.
+		memoryItem := strings.HasPrefix(it.Rel, "memory/")
+		changed, err := maskTextFile(it.Src, dst, r, memoryItem)
 		if err != nil {
 			return fmt.Errorf("copy %s: %w", it.Rel, err)
 		}
-		// A memory item always reads its copy, so the hash and the archive get the bytes
-		// that the lock protected.
-		if changed || strings.HasPrefix(it.Rel, "memory/") {
+		if changed || memoryItem {
 			it.Src = dst
 		}
 		if changed {
