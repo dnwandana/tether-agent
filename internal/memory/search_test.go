@@ -126,6 +126,17 @@ func TestSearchOrder(t *testing.T) {
 	}
 
 	s = open(t)
+	// A query word matches only a whole word of the topic name.
+	writeSearchFile(t, s, "inbox-user.md", "the quota resets monthly")
+	writeSearchFile(t, s, "vps-host.md", "the quota resets monthly")
+	if out := mustSearch(t, s, "in"); !strings.HasPrefix(out, "No entry matches") {
+		t.Fatal(out)
+	}
+	if out := mustSearch(t, s, "host"); !strings.Contains(out, "1 matches") || !strings.Contains(out, "1. note vps-host (") {
+		t.Fatal(out)
+	}
+
+	s = open(t)
 	// modified next: the new note is first, also against the name order.
 	writeSearchFile(t, s, "e.md", "---\nmodified: 2026-11-04T09:00:00Z\n---\nquota")
 	writeSearchFile(t, s, "f.md", "---\nmodified: 2026-11-05T09:00:00Z\n---\nquota")
