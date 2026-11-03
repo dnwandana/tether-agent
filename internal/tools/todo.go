@@ -54,6 +54,12 @@ type TodoStore struct {
 	items    []TodoItem
 	revision int64
 	loaded   bool
+	// before is the list just before the last successful Write. A caller reads
+	// it after a call, because a restore inside the call can fill an empty store.
+	before []TodoItem
+	// writes counts the successful Write calls. revision cannot do this job,
+	// because a Restore sets revision from history and makes no Write.
+	writes int64
 }
 
 // TodoStoreFor returns the TodoStore of the session that owns values, and
@@ -81,6 +87,15 @@ func (s *TodoStore) Items() (items []TodoItem, revision int64, loaded bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return slices.Clone(s.items), s.revision, s.loaded
+}
+
+// Change returns copies of the list before the last successful Write, the list now,
+// and the number of successful Write calls. A caller compares writes before and
+// after a call to know if the call wrote the list.
+func (s *TodoStore) Change() (before, items []TodoItem, writes int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.before), slices.Clone(s.items), s.writes
 }
 
 // Write replaces the list, or merges raw into it by id when merge is true. On
@@ -112,6 +127,9 @@ func (s *TodoStore) Write(raw []json.RawMessage, merge bool) error {
 	if !slices.Equal(next, s.items) {
 		s.revision++
 	}
+	// A write with no change also counts, so the caller sees that the call wrote.
+	s.before = s.items
+	s.writes++
 	s.items = next
 	s.loaded = true
 	return nil
@@ -157,6 +175,22 @@ func TodoSummary(items []TodoItem) (done, total int) {
 		total++
 	}
 	return done, total
+}
+
+// TodoLevel returns the number of parents above an item. The /todo reply and the
+// Telegram plan text indent a subtask by this level. It stops after limit steps, so a
+// parent cycle cannot loop.
+func TodoLevel(parents map[string]string, parent string, limit int) int {
+	level := 0
+	for parent != "" && level < limit {
+		next, ok := parents[parent]
+		if !ok {
+			break
+		}
+		level++
+		parent = next
+	}
+	return level
 }
 
 // todoInput is one raw item of a write. obj is nil when the raw value is not a

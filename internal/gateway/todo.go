@@ -57,27 +57,12 @@ func todoReply(items []tools.TodoItem, revision int64) string {
 	fmt.Fprintf(&b, "📋 Plan %d/%d · revision %d", done, total, revision)
 	for _, it := range items {
 		b.WriteByte('\n')
-		b.WriteString(strings.Repeat("  ", todoLevel(parents, it.Parent, len(items))))
+		b.WriteString(strings.Repeat("  ", tools.TodoLevel(parents, it.Parent, len(items))))
 		b.WriteString(todoMarker(it.Status))
 		b.WriteByte(' ')
 		b.WriteString(EscapeMarkdown(it.Content))
 	}
 	return b.String()
-}
-
-// todoLevel returns the number of parents above an item. It stops after limit steps,
-// so a parent cycle cannot loop.
-func todoLevel(parents map[string]string, parent string, limit int) int {
-	level := 0
-	for parent != "" && level < limit {
-		next, ok := parents[parent]
-		if !ok {
-			break
-		}
-		level++
-		parent = next
-	}
-	return level
 }
 
 // todoMarker returns the marker of an item status. An unknown status shows as pending.

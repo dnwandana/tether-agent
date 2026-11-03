@@ -240,6 +240,35 @@ func TestTodoSummary(t *testing.T) {
 	}
 }
 
+func TestTodoLevel(t *testing.T) {
+	parents := map[string]string{
+		"a": "",
+		"b": "a",
+		"m": "gone",
+		"x": "y",
+		"y": "x",
+	}
+	cases := []struct {
+		name   string
+		parent string
+		limit  int
+		want   int
+	}{
+		{"no parent", "", 5, 0},
+		{"one level", "a", 5, 1},
+		{"two levels", "b", 5, 2},
+		{"a missing parent", "gone", 5, 0},
+		{"a parent with a missing parent", "m", 5, 1},
+		{"a parent cycle stops at the limit", "x", 4, 4},
+		{"a limit of zero", "b", 0, 0},
+	}
+	for _, c := range cases {
+		if got := TodoLevel(parents, c.parent, c.limit); got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
 func TestTodoStoreForCreatesOnce(t *testing.T) {
 	values := map[string]any{}
 	env := &Env{Values: values}
@@ -300,4 +329,77 @@ func TestTodoReadWaitsForTheWriter(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+func TestTodoChangeAfterWrite(t *testing.T) {
+	s := TodoStoreFor(map[string]any{})
+	if before, items, writes := s.Change(); len(before) != 0 || len(items) != 0 || writes != 0 {
+		t.Fatal("a new store:", before, items, writes)
+	}
+	pending := []TodoItem{{ID: "1", Content: "task 1", Status: "pending"}}
+	done := []TodoItem{{ID: "1", Content: "task 1", Status: "completed"}}
+	if err := s.Write(todoRaw(t, todoItem("1", "pending", "")), false); err != nil {
+		t.Fatal(err)
+	}
+	if before, items, writes := s.Change(); len(before) != 0 || !reflect.DeepEqual(items, pending) || writes != 1 {
+		t.Fatal("the first write:", before, items, writes)
+	}
+	if err := s.Write(todoRaw(t, `{"id":"1","status":"completed"}`), true); err != nil {
+		t.Fatal(err)
+	}
+	before, items, writes := s.Change()
+	if !reflect.DeepEqual(before, pending) || !reflect.DeepEqual(items, done) || writes != 2 {
+		t.Fatal("a merge write:", before, items, writes)
+	}
+	// Change returns copies, so a change of the result does not change the store.
+	before[0].Status, items[0].Status = "cancelled", "cancelled"
+	if before, items, _ := s.Change(); before[0].Status != "pending" || items[0].Status != "completed" {
+		t.Fatal("Change must return copies:", before, items)
+	}
+}
+
+func TestTodoChangeAfterSameWrite(t *testing.T) {
+	item := todoItem("1", "pending", "")
+	s := newTodoStore(t, item)
+	if err := s.Write(todoRaw(t, item), false); err != nil {
+		t.Fatal(err)
+	}
+	want := []TodoItem{{ID: "1", Content: "task 1", Status: "pending"}}
+	before, items, writes := s.Change()
+	if !reflect.DeepEqual(before, want) || !reflect.DeepEqual(items, want) || writes != 2 {
+		t.Fatal("a write with no change still counts:", before, items, writes)
+	}
+	if _, rev, _ := s.Items(); rev != 1 {
+		t.Fatal("the same list must keep the revision:", rev)
+	}
+}
+
+func TestTodoChangeAfterRestore(t *testing.T) {
+	pending := []TodoItem{{ID: "1", Content: "task 1", Status: "pending"}}
+	s := TodoStoreFor(map[string]any{})
+	s.Restore(pending, 7)
+	if before, items, writes := s.Change(); len(before) != 0 || !reflect.DeepEqual(items, pending) || writes != 0 {
+		t.Fatal("a restore must not change before or writes:", before, items, writes)
+	}
+	if err := s.Write(todoRaw(t, todoItem("1", "completed", "")), false); err != nil {
+		t.Fatal(err)
+	}
+	// A restore of a loaded store changes nothing.
+	s.Restore(nil, 99)
+	before, items, writes := s.Change()
+	if !reflect.DeepEqual(before, pending) || len(items) != 1 || items[0].Status != "completed" || writes != 1 {
+		t.Fatal("the write after a restore:", before, items, writes)
+	}
+}
+
+func TestTodoChangeAfterFailedWrite(t *testing.T) {
+	s := newTodoStore(t, todoItem("1", "pending", ""))
+	if err := s.Write(todoRaw(t, `{"id":"2","content":" "}`), false); err == nil {
+		t.Fatal("a blank content must fail the write")
+	}
+	want := []TodoItem{{ID: "1", Content: "task 1", Status: "pending"}}
+	before, items, writes := s.Change()
+	if len(before) != 0 || !reflect.DeepEqual(items, want) || writes != 1 {
+		t.Fatal("a failed write must change nothing:", before, items, writes)
+	}
 }
