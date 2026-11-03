@@ -180,6 +180,9 @@ type Status struct {
 	Now      func() time.Time
 	Cleanup  bool
 	Log      *slog.Logger
+	// FlushTimer starts the timer of a later flush and returns its stop function. Nil
+	// means time.AfterFunc. Tests give a fake timer.
+	FlushTimer func(d time.Duration, f func()) (stop func() bool)
 
 	mu         sync.Mutex
 	lines      []string                 // the lines of the open bubble
@@ -194,8 +197,10 @@ type Status struct {
 	queue      []queuedSend             // the new messages that wait for a send, oldest first
 	lastEdit   time.Time
 	floodUntil time.Time
-	ids        []int // every status message, for the cleanup
-	timer      *time.Timer
+	holdUntil  time.Time   // the end of the last pace hold of a first send
+	editHeld   bool        // the last forced edit got a pace hold and sent nothing
+	ids        []int       // every status message, for the cleanup
+	timer      func() bool // the stop function of the pending timer, nil when no timer waits
 	flushCtx   context.Context
 	closed     bool
 }
@@ -484,7 +489,8 @@ func (s *Status) sendHeld(ctx context.Context) time.Duration {
 	}
 	s.flush(ctx, true)
 	if s.msgID == 0 {
-		return max(s.floodUntil.Sub(s.now()), 0)
+		now := s.now()
+		return max(s.floodUntil.Sub(now), s.holdUntil.Sub(now), 0)
 	}
 	return 0
 }
@@ -495,10 +501,17 @@ func (s *Status) sendHeld(ctx context.Context) time.Duration {
 // message to edit. s.mu is held.
 func (s *Status) keepFailedEdit() {
 	text := s.textOf(s.lines)
+	held := s.editHeld
+	s.editHeld = false
 	if s.msgID == 0 || s.noEdit || text == s.shown {
 		return
 	}
-	s.waiting = append(s.waiting, closedEdit{msgID: s.msgID, text: text, tries: 1})
+	// A held edit sent no request, so it is not a try.
+	tries := 1
+	if held {
+		tries = 0
+	}
+	s.waiting = append(s.waiting, closedEdit{msgID: s.msgID, text: text, tries: tries})
 }
 
 func (s *Status) openBubble() {
@@ -519,9 +532,15 @@ func (s *Status) editClosed(ctx context.Context) bool {
 			return false
 		}
 		e := &s.waiting[0]
-		e.tries++
 		now := s.now()
-		_, err := noWaitClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: e.msgID, Text: e.text})
+		_, err := interimClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: e.msgID, Text: e.text})
+		// A pace hold sent no request, so it is not a try and sets no lastEdit.
+		if hold, ok := isPaceHold(err); ok {
+			s.logger().Debug("telegram status pace hold", "kind", "closed_edit", "wait_s", hold.Seconds())
+			s.armTimer(hold)
+			return false
+		}
+		e.tries++
 		s.lastEdit = now
 		if err != nil && !isNotModified(err) {
 			wait, flood := floodWait(err)
@@ -577,6 +596,12 @@ func (s *Status) flush(ctx context.Context, force bool) {
 			return
 		}
 		m, err := s.send(ctx, text, false)
+		if hold, ok := isPaceHold(err); ok {
+			s.logger().Debug("telegram status pace hold", "kind", "send", "wait_s", hold.Seconds())
+			s.holdUntil = now.Add(hold)
+			s.armTimer(hold)
+			return
+		}
 		if err != nil {
 			s.logger().Info("telegram status send failed", "err", err.Error())
 			if wait, ok := floodWait(err); ok {
@@ -598,7 +623,14 @@ func (s *Status) flush(ctx context.Context, force bool) {
 			return
 		}
 	}
-	_, err := noWaitClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: text})
+	_, err := interimClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: text})
+	if hold, ok := isPaceHold(err); ok {
+		s.logger().Debug("telegram status pace hold", "kind", "edit", "wait_s", hold.Seconds())
+		s.editHeld = force
+		s.armTimer(hold)
+		return
+	}
+	s.editHeld = false
 	s.lastEdit = now
 	switch {
 	case err == nil || isNotModified(err):
@@ -678,6 +710,11 @@ func (s *Status) sendQueue(ctx context.Context) time.Duration {
 		}
 		e := s.queue[0]
 		m, err := s.send(ctx, e.text, e.silent)
+		if hold, ok := isPaceHold(err); ok {
+			// The entry stays at the head, and floodUntil does not change.
+			s.logger().Debug("telegram status pace hold", "kind", "send", "wait_s", hold.Seconds())
+			return hold
+		}
 		if err == nil {
 			if e.deletable {
 				s.ids = append(s.ids, m.MessageID)
@@ -710,6 +747,7 @@ func (s *Status) sendQueue(ctx context.Context) time.Duration {
 // waits for its first send goes into the send queue, so its lines stay.
 // s.mu is held.
 func (s *Status) closeBubble(ctx context.Context) {
+	s.editHeld = false
 	switch {
 	case s.msgID != 0 && !s.noEdit:
 		if !s.now().Before(s.floodUntil) {
@@ -728,7 +766,7 @@ func (s *Status) send(ctx context.Context, text string, silent bool) (Message, e
 	if id, ok := ThreadParam(s.ThreadID, false); ok {
 		p.MessageThreadID = id
 	}
-	return noWaitClient(s.C).SendMessage(ctx, p)
+	return queueClient(s.C).SendMessage(ctx, p)
 }
 
 // armTimer starts the timer for a later flush. s.mu is held.
@@ -736,7 +774,11 @@ func (s *Status) armTimer(d time.Duration) {
 	if s.timer != nil {
 		return
 	}
-	s.timer = time.AfterFunc(d, s.onTimer)
+	if s.FlushTimer != nil {
+		s.timer = s.FlushTimer(d, s.onTimer)
+		return
+	}
+	s.timer = time.AfterFunc(d, s.onTimer).Stop
 }
 
 // onTimer sends the edits that waited for the interval or for a flood wait.
@@ -765,7 +807,7 @@ func (s *Status) onTimer() {
 
 func (s *Status) stopTimer() {
 	if s.timer != nil {
-		s.timer.Stop()
+		s.timer()
 		s.timer = nil
 	}
 }
@@ -812,14 +854,7 @@ func (e *floodError) Error() string {
 // without a block (Hermes edit_message).
 func noWaitClient(c *Client) *Client {
 	cc := *c
-	waited := false
-	cc.sleep = func(ctx context.Context, d time.Duration) error {
-		if waited || d > maxInlineFloodWait {
-			return &floodError{RetryAfter: d}
-		}
-		waited = true
-		return c.wait(ctx, d)
-	}
+	cc.inlineWaited = new(bool)
 	return &cc
 }
 
@@ -848,7 +883,8 @@ func isNotModified(err error) bool {
 func isTransient(err error) bool {
 	var ae *APIError
 	var fe *floodError
-	return !errors.As(err, &ae) && !errors.As(err, &fe)
+	var ph *paceHold
+	return !errors.As(err, &ae) && !errors.As(err, &fe) && !errors.As(err, &ph)
 }
 
 // cutUTF16 cuts s to at most limit UTF-16 code units, at a rune border.

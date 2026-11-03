@@ -72,6 +72,9 @@ type Streamer struct {
 	// AfterFunc runs f after d for a later strip of the cursor. Nil means
 	// time.AfterFunc. Tests replace it.
 	AfterFunc func(d time.Duration, f func())
+	// FlushTimer runs f after d for a later flush of the stream. Nil means
+	// time.AfterFunc. Tests replace it.
+	FlushTimer func(d time.Duration, f func()) (stop func() bool)
 
 	mu       sync.Mutex
 	started  bool
@@ -84,6 +87,13 @@ type Streamer struct {
 	// floodUntil is the time when the current flood wait ends. A strip
 	// before this time cannot work.
 	floodUntil time.Time
+	// floodOff is true when the third flood error in a row stopped the
+	// edits.
+	floodOff bool
+	// holdUntil is the time before which no stream request goes out.
+	holdUntil time.Time
+	// held is true when the last stream request got a pace hold.
+	held bool
 
 	// The current segment.
 	acc        string    // the raw text of the segment
@@ -94,9 +104,13 @@ type Streamer struct {
 	pending    int       // new characters since the last flush
 	lastEdit   time.Time
 	drained    bool // BeforeNewMessage ran for the segment
+	// parts are the numbered preview parts that did not go out yet. They
+	// keep the numbers of the first split.
+	parts []previewPart
 
-	timer  *time.Timer
-	runCtx context.Context
+	// stopFlush stops the armed flush timer. Nil means no timer.
+	stopFlush func() bool
+	runCtx    context.Context
 }
 
 // Delta adds streamed text.
@@ -116,8 +130,14 @@ func (s *Streamer) Delta(ctx context.Context, text string) {
 		return
 	}
 	now := s.now()
+	if hold := s.holdEnd(); now.Before(hold) {
+		s.armTimer(hold.Sub(now))
+		return
+	}
 	threshold := s.Cfg.BufferThreshold
-	if now.Sub(s.lastEdit) >= s.interval || (threshold > 0 && s.pending >= threshold) {
+	// The buffer threshold is a debounce rule and not a platform limit, so
+	// it must not override a flood backoff (Hermes).
+	if now.Sub(s.lastEdit) >= s.interval || (threshold > 0 && s.strikes == 0 && s.pending >= threshold) {
 		s.streamFlush(ctx)
 		return
 	}
@@ -204,24 +224,39 @@ func (s *Streamer) safeLimit() int {
 	return max(500, maxMessageLen-UTF16Len(s.Cfg.Cursor)-100)
 }
 
+// previewPart is one numbered preview part that did not go out yet. n is
+// the number of view bytes that the part shows, without the leading
+// newlines.
+type previewPart struct {
+	text string
+	n    int
+}
+
 // streamFlush shows the current text with the cursor. s.mu is held.
 func (s *Streamer) streamFlush(ctx context.Context) {
 	s.stopTimer()
 	s.pending = 0
-	defer func() { s.lastEdit = s.now() }()
+	s.held = false
+	// A held attempt sent no request, so it does not move lastEdit. A flood
+	// error moves it.
+	defer func() {
+		if !s.held {
+			s.lastEdit = s.now()
+		}
+	}()
+	if len(s.parts) > 0 {
+		s.sendParts(ctx)
+		return
+	}
 	safe := s.safeLimit()
 	for v := s.view(); UTF16Len(v) > safe; v = s.view() {
 		if s.msgID == 0 {
 			// No message to edit: send numbered parts now (Hermes).
-			parts := NumberParts(SplitUTF16(v, safe-numberRoom), false)
-			for _, p := range parts {
-				if _, err := s.sendNew(ctx, p, false); err != nil {
-					s.logger().Info("telegram stream send failed", "err", err.Error())
-					s.editsOff = true
-					return
-				}
+			chunks := SplitUTF16(v, safe-numberRoom)
+			for i, text := range NumberParts(chunks, false) {
+				s.parts = append(s.parts, previewPart{text: text, n: len(strings.TrimLeft(chunks[i], "\n"))})
 			}
-			s.commit(len(v))
+			s.sendParts(ctx)
 			return
 		}
 		// Close the open message with the first part. The rest goes into
@@ -234,6 +269,28 @@ func (s *Streamer) streamFlush(ctx context.Context) {
 		s.msgID, s.lastSent, s.msgCreated = 0, "", time.Time{}
 	}
 	s.sendOrEdit(ctx, s.view()+s.Cfg.Cursor)
+}
+
+// sendParts sends the numbered preview parts in order. Each part is a
+// closed message, so commit marks it after its send. A pace hold or a
+// flood error stops the loop, and the next flush sends the next part.
+// s.mu is held.
+func (s *Streamer) sendParts(ctx context.Context) {
+	for len(s.parts) > 0 {
+		p := s.parts[0]
+		if _, err := s.sendNew(ctx, p.text, false); err != nil {
+			if s.noteHold(err) || s.floodStrike(err) {
+				return
+			}
+			s.logger().Info("telegram stream send failed", "err", err.Error())
+			s.editsOff = true
+			return
+		}
+		s.strikes = 0
+		s.parts = s.parts[1:]
+		s.commit(p.n)
+		s.msgID, s.lastSent, s.msgCreated = 0, "", time.Time{}
+	}
 }
 
 // sendOrEdit shows text in the open message, the draft, or a new message.
@@ -271,34 +328,33 @@ func (s *Streamer) sendOrEdit(ctx context.Context, text string) {
 		return
 	}
 	if _, err := s.sendNew(ctx, text, false); err != nil {
+		if s.noteHold(err) || s.floodStrike(err) {
+			return
+		}
 		s.logger().Info("telegram stream send failed, send the final text only", "err", err.Error())
 		s.editsOff = true
+		return
 	}
+	s.strikes = 0
 }
 
-// editStream edits the open message with plain text. A flood error doubles
-// the interval. The third flood error in a row, or another error, stops the
-// stream edits. s.mu is held.
+// editStream edits the open message with plain text. A pace hold waits for
+// the hold end. A flood error is a strike. Another error stops the stream
+// edits. s.mu is held.
 func (s *Streamer) editStream(ctx context.Context, text string) bool {
-	_, err := noWaitClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: text})
-	s.noteFlood(err)
+	_, err := interimClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: text})
 	if err == nil || isNotModified(err) {
 		s.lastSent = text
 		s.strikes = 0
 		return true
 	}
-	if _, ok := floodWait(err); ok {
-		s.strikes++
-		s.interval = min(2*s.interval, maxStreamInterval)
-		s.logger().Info("telegram stream flood control, back off", "strike", s.strikes, "interval_s", s.interval.Seconds())
-		if s.strikes < maxFloodStrikes {
-			return false
-		}
+	if s.noteHold(err) || s.floodStrike(err) {
+		return false
 	}
 	s.logger().Info("telegram stream edit failed, send the final text only", "err", err.Error())
 	s.editsOff = true
-	// A strip under flood control fails. finalize cleans the preview later.
-	if !s.now().Before(s.floodUntil) {
+	// A strip before the flood end cannot work. finalize cleans the preview later.
+	if !s.now().Before(s.holdEnd()) {
 		s.stripCursor(ctx)
 	}
 	return false
@@ -392,7 +448,7 @@ func (s *Streamer) startStripRetry(pc previewClean, wait time.Duration) {
 			if err == nil {
 				return
 			}
-			d, ok := floodWait(err)
+			d, ok := stripWait(err)
 			switch {
 			case !ok:
 				stripStopped(log, "error", err)
@@ -416,12 +472,68 @@ func stripStopped(log *slog.Logger, reason string, err error) {
 	log.Info("telegram cursor strip stopped", "reason", reason, "err", err.Error())
 }
 
-// noteFlood records the end of the flood wait when err is a flood error.
-// s.mu is held.
+// noteFlood records the end of the flood wait when err is a flood error. It
+// ignores a *paceHold, because floodWait does not match it. s.mu is held.
 func (s *Streamer) noteFlood(err error) {
 	if d, ok := floodWait(err); ok {
 		s.floodUntil = s.now().Add(d)
+		// Telegram rounds retry_after to whole seconds, so the hold gets the
+		// same pad as the pace.
+		if end := s.floodUntil.Add(stripRetryPad); end.After(s.holdUntil) {
+			s.holdUntil = end
+		}
 	}
+}
+
+// holdEnd returns holdUntil after it adds the flood end of the chat from
+// the shared pace. s.mu is held.
+func (s *Streamer) holdEnd() time.Time {
+	if end := s.C.Pace.FloodEnd(s.ChatID); end.After(s.holdUntil) {
+		s.holdUntil = end
+	}
+	return s.holdUntil
+}
+
+// noteHold records a pace hold of a stream request. A hold is not a
+// strike, because no request went out. The flush timer tries again at the
+// hold end. s.mu is held.
+func (s *Streamer) noteHold(err error) bool {
+	d, ok := isPaceHold(err)
+	if !ok {
+		return false
+	}
+	now := s.now()
+	if end := now.Add(d); end.After(s.holdUntil) {
+		s.holdUntil = end
+	}
+	s.held = true
+	s.logger().Debug("telegram stream held by the chat pace", "wait_s", d.Seconds())
+	s.armTimer(s.holdUntil.Sub(now))
+	return true
+}
+
+// floodStrike records a flood error of a stream request as a strike. The
+// interval doubles up to maxStreamInterval, and no request goes out before
+// the flood end. The third strike in a row stops the stream edits. s.mu is
+// held.
+func (s *Streamer) floodStrike(err error) bool {
+	d, ok := floodWait(err)
+	if !ok {
+		return false
+	}
+	s.noteFlood(err)
+	s.strikes++
+	s.interval = min(2*s.interval, maxStreamInterval)
+	s.logger().Info("telegram stream flood control, back off",
+		"strike", s.strikes, "interval_s", s.interval.Seconds(), "retry_after_s", d.Seconds())
+	if s.strikes < maxFloodStrikes {
+		s.armTimer(s.holdUntil.Sub(s.now()))
+		return true
+	}
+	s.logger().Info("telegram stream edit failed, send the final text only", "err", err.Error(), "flood", true)
+	s.editsOff, s.floodOff = true, true
+	s.stopTimer()
+	return true
 }
 
 // savePreview copies the open preview before a send, because a send moves
@@ -446,6 +558,12 @@ func (s *Streamer) cleanPreview(ctx context.Context, pc previewClean) {
 		s.startStripRetry(pc, s.floodUntil.Sub(now)+stripRetryPad)
 		return
 	}
+	// A flood of another call of the chat also starts the timer chain, so
+	// the strip does not wait for the flood end with s.mu held.
+	if now, end := s.now(), s.C.Pace.FloodEnd(s.ChatID); now.Before(end) {
+		s.startStripRetry(pc, end.Sub(now))
+		return
+	}
 	err := stripTry(ctx, s.C, s.ChatID, pc, s.logger())
 	s.noteFlood(err)
 	if err == nil {
@@ -454,11 +572,21 @@ func (s *Streamer) cleanPreview(ctx context.Context, pc previewClean) {
 		}
 		return
 	}
-	if d, ok := floodWait(err); ok {
+	if d, ok := stripWait(err); ok {
 		s.startStripRetry(pc, d+stripRetryPad)
 		return
 	}
 	stripStopped(s.logger(), "error", err)
+}
+
+// stripWait reports whether a strip try can try again later, and the wait.
+// A pace wait that is longer than the context of one try gives a *paceHold
+// and not a flood error.
+func stripWait(err error) (time.Duration, bool) {
+	if d, ok := floodWait(err); ok {
+		return d, true
+	}
+	return isPaceHold(err)
 }
 
 // deleteStale deletes a preview that the full final text replaced. It uses
@@ -489,6 +617,14 @@ func (s *Streamer) continuation(text string) string {
 	return text
 }
 
+// inFlood reports whether the chat is in a flood wait now: the flood end
+// of the stream or of the shared pace is later than now. With a nil pace,
+// only the flood end of the stream counts. s.mu is held.
+func (s *Streamer) inFlood() bool {
+	now := s.now()
+	return now.Before(s.floodUntil) || now.Before(s.C.Pace.FloodEnd(s.ChatID))
+}
+
 // finalize closes the segment with its final MarkdownV2 text. s.mu is held.
 func (s *Streamer) finalize(ctx context.Context) error {
 	text := s.view()
@@ -498,7 +634,11 @@ func (s *Streamer) finalize(ctx context.Context) error {
 		}
 		return nil
 	}
-	if s.editsOff {
+	// After a flood stop, or in a flood wait of the chat, the final text must
+	// wait for the flood end in all cases. An edit of the preview then costs
+	// no extra time and gives one formatted answer.
+	afterFlood := s.floodOff || s.inFlood()
+	if s.editsOff && !s.floodOff {
 		return s.sendRest(ctx, text, s.continuation(text))
 	}
 	if s.msgID == 0 {
@@ -516,7 +656,7 @@ func (s *Streamer) finalize(ctx context.Context) error {
 		// then moved all three fields to part 1. Restore the preview.
 		s.msgID, s.lastSent, s.msgCreated = old, oldSent, oldCreated
 	}
-	return s.editFinal(ctx, text)
+	return s.editFinal(ctx, text, afterFlood)
 }
 
 // freshFinalDue reports whether the open message is old enough that the
@@ -538,21 +678,31 @@ func finalParts(text string) []string {
 
 // editFinal edits the open message with the first final part and sends the
 // other parts. When the edit fails, it sends the text that the user did not
-// see. s.mu is held.
-func (s *Streamer) editFinal(ctx context.Context, text string) error {
+// see. When afterFlood is true, the edit waits for the flood end of the chat
+// and makes one try. s.mu is held.
+func (s *Streamer) editFinal(ctx context.Context, text string, afterFlood bool) error {
 	parts := finalParts(text)
 	plain := text
 	if len(parts) > 1 {
 		plain = StripMarkdownV2(parts[0])
 	}
 	c := noWaitClient(s.C)
+	if afterFlood {
+		// Wait for the flood end, then make one try. A second 429 goes to
+		// sendRest at once.
+		c = finalEditClient(s.C)
+	}
 	p := EditMessageTextParams{ChatID: s.ChatID, MessageID: s.msgID, Text: parts[0], ParseMode: "MarkdownV2"}
 	_, err := c.EditMessageText(ctx, p)
 	s.noteFlood(err)
 	if err != nil && !isNotModified(err) && isBadRequest(err) {
 		logPlainFallback(s.logger(), "edit_final", s.ChatID, s.ThreadID, 1, len(parts), err)
 		p.Text, p.ParseMode = plain, ""
-		_, err = noWaitClient(s.C).EditMessageText(ctx, p)
+		fc := noWaitClient(s.C)
+		if afterFlood {
+			fc = finalEditClient(s.C)
+		}
+		_, err = fc.EditMessageText(ctx, p)
 		s.noteFlood(err)
 	}
 	if err != nil && !isNotModified(err) {
@@ -639,7 +789,8 @@ func (s *Streamer) sendPart(ctx context.Context, part string) error {
 }
 
 // sendNew sends a new message and makes it the open message. A stream send
-// is plain text, and it fails at once on a long flood wait. A final send is
+// is plain text. It holds for the chat pace, and it fails at once on a long
+// flood wait. A final send is
 // MarkdownV2, and it waits for the rate limit (Client.Call), because the user
 // must get the final text.
 func (s *Streamer) sendNew(ctx context.Context, text string, final bool) (Message, error) {
@@ -648,7 +799,7 @@ func (s *Streamer) sendNew(ctx context.Context, text string, final bool) (Messag
 	if final {
 		p.ParseMode = "MarkdownV2"
 	} else {
-		c = noWaitClient(s.C)
+		c = interimClient(s.C)
 	}
 	if id, ok := ThreadParam(s.ThreadID, false); ok {
 		p.MessageThreadID = id
@@ -682,6 +833,7 @@ func (s *Streamer) resetSegment() {
 	s.acc, s.committed, s.lastSent = "", "", ""
 	s.msgID, s.msgCreated, s.pending = 0, time.Time{}, 0
 	s.drained = false
+	s.parts = nil
 	if s.draft {
 		s.draftID = draftSeq.Add(1)
 	}
@@ -689,26 +841,43 @@ func (s *Streamer) resetSegment() {
 
 // armTimer starts the timer for a later flush. s.mu is held.
 func (s *Streamer) armTimer(d time.Duration) {
-	if s.timer != nil {
+	if s.stopFlush != nil {
 		return
 	}
-	s.timer = time.AfterFunc(max(d, 0), func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		s.timer = nil
-		if s.finished || s.editsOff || s.pending == 0 {
-			return
-		}
-		ctx, cancel := context.WithTimeout(s.runCtx, flushTimeout)
-		defer cancel()
-		s.streamFlush(ctx)
-	})
+	timer := s.FlushTimer
+	if timer == nil {
+		timer = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
+	}
+	s.stopFlush = timer(max(d, 0), s.onFlushTimer)
+}
+
+// onFlushTimer flushes the stream when the open message does not show the
+// newest text. It does not read pending, because streamFlush sets pending
+// to 0 before the request.
+func (s *Streamer) onFlushTimer() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopFlush = nil
+	if s.finished || s.editsOff {
+		return
+	}
+	now := s.now()
+	if hold := s.holdEnd(); now.Before(hold) {
+		s.armTimer(hold.Sub(now))
+		return
+	}
+	if s.view()+s.Cfg.Cursor == s.lastSent {
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.runCtx, flushTimeout)
+	defer cancel()
+	s.streamFlush(ctx)
 }
 
 func (s *Streamer) stopTimer() {
-	if s.timer != nil {
-		s.timer.Stop()
-		s.timer = nil
+	if s.stopFlush != nil {
+		s.stopFlush()
+		s.stopFlush = nil
 	}
 }
 
