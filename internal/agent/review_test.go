@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -834,5 +836,50 @@ func TestReviewPromptMarksToolTextAsData(t *testing.T) {
 		if !strings.Contains(p, reviewProvenanceNote) || !strings.HasSuffix(p, reviewToolNote) {
 			t.Fatal(p)
 		}
+	}
+}
+
+func TestNoReviewSessionWhenTheProviderIsDown(t *testing.T) {
+	a, sess, parentReq, _ := agentAfterTurn(t)
+	health := provider.NewHealth(nil)
+	chain := provider.NewChain([]provider.ChainEntry{{Name: "primary", P: failProv{"primary", "m"}}}, health, slog.New(slog.DiscardHandler))
+	if _, err := chain.Stream(ctx, provider.Request{}); err == nil {
+		t.Fatal("the call must fail")
+	}
+	a.Prov = chain
+	_, err := a.RunReview(ctx, ReviewRequest{Session: sess, System: parentReq.System, Memory: true})
+	if !errors.Is(err, ErrReviewProviderDown) {
+		t.Fatal(err)
+	}
+	if kids := childSessions(t, a, sess.ID); len(kids) != 0 {
+		t.Fatal("a review with no provider must not make a session:", len(kids))
+	}
+}
+
+func TestBackgroundReviewsRunAtMostTwoAtATime(t *testing.T) {
+	a := &Agent{}
+	var running, peak atomic.Int32
+	release := make(chan struct{})
+	for range 5 {
+		a.goReview(ctx, func(context.Context) {
+			n := running.Add(1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			<-release
+			running.Add(-1)
+		})
+	}
+	waitUntil(t, func() bool { return running.Load() == maxConcurrentReviews })
+	time.Sleep(50 * time.Millisecond)
+	if p := peak.Load(); p != maxConcurrentReviews {
+		t.Fatal("peak", p)
+	}
+	close(release)
+	if !a.WaitReviews(5 * time.Second) {
+		t.Fatal("the waiting reviews must run after the first ones end")
 	}
 }

@@ -152,6 +152,27 @@ func TestChainAllFailJoinsAndAllWaitingStillTries(t *testing.T) {
 	}
 }
 
+func TestChainDownWhenAllEntriesWait(t *testing.T) {
+	clk := &clock{t: time.Unix(0, 0)}
+	h := NewHealth(clk.now)
+	a, b := &failing{name: "a", code: 503}, &failing{name: "b", code: 502}
+	if chainOf(h, a, b).Down() {
+		t.Fatal("a chain with no failure is not down")
+	}
+	_, _ = chainOf(h, a, &stub{name: "b"}).Stream(ctx, Request{})
+	if chainOf(h, a, b).Down() {
+		t.Fatal("one entry works, so the chain is not down")
+	}
+	_, _ = chainOf(h, a, b).Stream(ctx, Request{})
+	if !chainOf(h, a, b).Down() {
+		t.Fatal("all entries wait, so the chain is down")
+	}
+	clk.add(61 * time.Second)
+	if chainOf(h, a, b).Down() {
+		t.Fatal("after the wait time the chain is not down")
+	}
+}
+
 func TestChainStartAtAndPin(t *testing.T) {
 	h := NewHealth(nil)
 	var gotModel []string

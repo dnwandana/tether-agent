@@ -120,6 +120,9 @@ type Agent struct {
 	reviewMu sync.Mutex
 	// reviewWG counts the running background reviews.
 	reviewWG sync.WaitGroup
+	// reviewSlots holds one token for each running background review (goReview). It is
+	// made under reviewMu.
+	reviewSlots chan struct{}
 
 	// beforeCall is a test hook. It runs before the steer drain of each model call.
 	beforeCall func(round int)
