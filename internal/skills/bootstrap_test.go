@@ -121,6 +121,29 @@ func TestTetherMemoryLimits(t *testing.T) {
 	}
 }
 
+func TestTetherMemoryNotes(t *testing.T) {
+	b, _ := bootstrapFS.ReadFile("bootstrap/tether-memory/SKILL.md")
+	s := string(b)
+	for _, must := range []string{"when a fact does not fit in a memory file", "your own facts",
+		"inbox-memory", "inbox-user", "`topic`", "`search`", "`read`", "MEMORY TOPICS", "4,000"} {
+		if !strings.Contains(s, must) {
+			t.Error("missing", must)
+		}
+	}
+	for _, old := range []string{"an `add` is refused", "when a memory file is full", "your own notes", "merge entries"} {
+		if strings.Contains(s, old) {
+			t.Error("old rule", old)
+		}
+	}
+}
+
+func TestTetherSelfNamesNotesFolder(t *testing.T) {
+	b, _ := bootstrapFS.ReadFile("bootstrap/tether-self/SKILL.md")
+	if !strings.Contains(string(b), "the memory notes in `notes/`") {
+		t.Fatal("tether-self does not name the memory/notes/ folder")
+	}
+}
+
 // TestBootstrapSkillsPassOwnGuardAnyway scans every embedded file. The
 // bootstrap skills are never scanned at run time, but clean examples teach
 // the model to write skills that pass the guard.

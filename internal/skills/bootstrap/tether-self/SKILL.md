@@ -14,7 +14,7 @@ process runs the CLI. Both processes share `~/.tether/state.db`.
 - `~/.tether/.env` holds the secrets. Its mode must be 0600.
 - `~/.tether/skills/` holds the skills. The agent reads them again at each session start.
 - `~/.tether/scripts/` holds the scripts for cron jobs and for API calls.
-- `~/.tether/memory/` holds `memory.md` and `user_profile.md`.
+- `~/.tether/memory/` holds `memory.md`, `user_profile.md`, and the memory notes in `notes/`.
 
 ## Tools by toolset
 
