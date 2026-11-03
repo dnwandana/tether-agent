@@ -268,6 +268,26 @@ func TestSecondCompactionSummarizesPreviousSummary(t *testing.T) {
 	}
 }
 
+func TestLatestCompactionGivesOnlyTheNewest(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	if latest, err := LatestCompaction(ctx, c.DB, sess.ID); err != nil || len(latest) != 0 {
+		t.Fatal(latest, err)
+	}
+	if did, _ := c.Maybe(ctx, sess, fp, 2000, false); !did {
+		t.Fatal("first")
+	}
+	appendPlain(t, c.Store, sess.ID, 80, 40)
+	fp.reply = "S2"
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal("second", err)
+	}
+	all, _ := LoadCompactions(ctx, c.DB, sess.ID)
+	latest, err := LatestCompaction(ctx, c.DB, sess.ID)
+	if err != nil || len(all) != 2 || len(latest) != 1 || latest[0] != all[1] || latest[0].Summary != "S2" {
+		t.Fatalf("%+v %+v %v", latest, all, err)
+	}
+}
+
 func TestStaleProviderCountIgnoredAfterCompaction(t *testing.T) {
 	c, sess, fp := compactorWithSession(t, 79)
 	// The last response reports a prompt over the threshold.

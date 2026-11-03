@@ -320,14 +320,20 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		if !summary {
 			a.steerStored(dbCtx, t.Steer, ts, t.OnSteerRead)
 		}
-		if a.compact(ctx, t, prov, sink) && t.System == "" {
+		// One read of the stored messages serves the compaction check and the request. A
+		// compaction does not change the stored messages.
+		stored, err := a.Store.Messages(dbCtx, ts.sessionID)
+		if err != nil {
+			return res, fmt.Errorf("agent: read the history: %w", err)
+		}
+		if a.compact(ctx, t, prov, sink, stored) && t.System == "" {
 			// The compaction count is part of the prompt key, so the prompt is rebuilt.
 			system, _ = a.turnSystem(ctx, t, channel)
 			if t.review == nil && !noReviews(t.Session.Kind) {
 				a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify)
 			}
 		}
-		msgs, err := a.requestMessages(dbCtx, ts)
+		msgs, err := a.requestMessages(dbCtx, ts, stored)
 		if err != nil {
 			return res, err
 		}
@@ -517,7 +523,12 @@ func (a *Agent) viewStored(ctx context.Context, sessionID string) ([]sessions.St
 	if err != nil {
 		return nil, fmt.Errorf("agent: read the history: %w", err)
 	}
-	comps, err := ctxmgr.LoadCompactions(ctx, a.DB, sessionID)
+	return a.viewOf(ctx, sessionID, msgs)
+}
+
+// viewOf is viewStored with the stored messages of the session that the caller read.
+func (a *Agent) viewOf(ctx context.Context, sessionID string, msgs []sessions.StoredMessage) ([]sessions.StoredMessage, error) {
+	comps, err := ctxmgr.LatestCompaction(ctx, a.DB, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("agent: read the history: %w", err)
 	}
@@ -541,12 +552,12 @@ func (a *Agent) viewStored(ctx context.Context, sessionID string) ([]sessions.St
 // compact runs the compactor before a model call. It returns true when the
 // session was compacted. A failure does not stop the turn. After the third failure in a
 // row, the sink tells the user.
-func (a *Agent) compact(ctx context.Context, t Turn, prov provider.Provider, sink Sink) bool {
+func (a *Agent) compact(ctx context.Context, t Turn, prov provider.Provider, sink Sink, stored []sessions.StoredMessage) bool {
 	// A review run reads a copy of the parent view, so it does not compact.
 	if a.Compactor == nil || t.review != nil {
 		return false
 	}
-	did, err := a.Compactor.Maybe(ctx, t.Session, prov, a.contextWindow(prov), false)
+	did, err := a.Compactor.MaybeStored(ctx, t.Session, prov, a.contextWindow(prov), false, stored)
 	switch {
 	case errors.Is(err, ctxmgr.ErrCompactionFailed):
 		sink.Notice("⚠️ " + err.Error())
@@ -755,8 +766,8 @@ func (a *Agent) steerStored(ctx context.Context, q *SteerQueue, ts *turnState, o
 // gets its images back, because the store keeps only a marker for each image. The
 // observed group messages go into a context-only block at the start of the user message
 // of the turn (withObserved).
-func (a *Agent) requestMessages(ctx context.Context, ts *turnState) ([]provider.Message, error) {
-	stored, err := a.viewStored(ctx, ts.sessionID)
+func (a *Agent) requestMessages(ctx context.Context, ts *turnState, msgs []sessions.StoredMessage) ([]provider.Message, error) {
+	stored, err := a.viewOf(ctx, ts.sessionID, msgs)
 	if err != nil {
 		return nil, err
 	}
