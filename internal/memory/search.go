@@ -146,33 +146,52 @@ func queryWords(query string) []string {
 // the notes that are too large, binary, or not readable, so that one bad
 // note does not stop the search.
 func (s *Store) scanNotes(names []string) (srcs []searchSource, skipped int, stop string) {
+	skipped, stop = s.eachNote(names, func(n note) {
+		srcs = append(srcs, searchSource{
+			name:     n.Topic,
+			isNote:   true,
+			typ:      n.Type,
+			modified: n.Modified,
+			entries:  n.Entries,
+		})
+	})
+	return srcs, skipped, stop
+}
+
+// eachNote reads the notes in names, in order, and calls f for each note, until a
+// limit: maxSearchNotes notes or maxSearchBytes of entries. stop is "2000 notes",
+// "16 MiB", or "" when it read all names. skipped counts the notes that are too large,
+// binary, or not readable. A note that is gone after the list is not a skip.
+func (s *Store) eachNote(names []string, f func(note)) (skipped int, stop string) {
 	total := 0
 	for i, name := range names {
 		if i >= maxSearchNotes {
-			return srcs, skipped, "2000 notes"
+			return skipped, "2000 notes"
 		}
 		if total >= maxSearchBytes {
-			return srcs, skipped, "16 MiB"
+			return skipped, "16 MiB"
 		}
 		n, err := s.readNote(name)
 		if errors.Is(err, fs.ErrNotExist) {
-			// The note is gone after the list. This is not a skip.
 			continue
 		}
 		if err != nil {
 			skipped++
 			continue
 		}
-		total += len(strings.Join(n.Entries, Separator))
-		srcs = append(srcs, searchSource{
-			name:     name,
-			isNote:   true,
-			typ:      n.Type,
-			modified: n.Modified,
-			entries:  n.Entries,
-		})
+		total += entriesBytes(n.Entries)
+		f(n)
 	}
-	return srcs, skipped, ""
+	return skipped, ""
+}
+
+// entriesBytes returns the length of the entries joined with Separator, with no join.
+func entriesBytes(entries []string) int {
+	n := max(len(entries)-1, 0) * len(Separator)
+	for _, e := range entries {
+		n += len(e)
+	}
+	return n
 }
 
 // score sets src.matched and src.hits for words.

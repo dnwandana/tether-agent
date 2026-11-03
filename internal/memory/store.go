@@ -209,15 +209,23 @@ func (s *Store) change(op Op, path string, limit int, entries []string, content,
 		return Result{}, err
 	}
 	if i < 0 {
-		var skipped int
-		if n, i, skipped, err = s.findInNotes(oldText); err != nil {
+		var (
+			skipped int
+			stop    string
+		)
+		if n, i, skipped, stop, err = s.findInNotes(oldText); err != nil {
 			return Result{}, err
 		}
-		if n.Topic == "" && skipped > 0 {
-			// The skipped notes can hold the entry, so the model must know them.
-			//lint:ignore ST1005 the text is a fixed message for the model with full sentences.
-			return Result{}, fmt.Errorf("no entry matches %q in %s or in the notes. "+
-				"%d notes were skipped: larger than 1 MiB, binary, or not readable.", oldText, op.Target, skipped)
+		if n.Topic == "" && (skipped > 0 || stop != "") {
+			// The notes that were not read can hold the entry, so the model must know them.
+			msg := fmt.Sprintf("no entry matches %q in %s or in the notes.", oldText, op.Target)
+			if skipped > 0 {
+				msg += fmt.Sprintf(" %d notes were skipped: larger than 1 MiB, binary, or not readable.", skipped)
+			}
+			if stop != "" {
+				msg += " The read stopped at " + stop + "; some notes were not read. Give a topic."
+			}
+			return Result{}, errors.New(msg)
 		}
 		if n.Topic == "" {
 			return Result{}, fmt.Errorf("no entry matches %q in %s or in the notes", oldText, op.Target)
@@ -308,43 +316,34 @@ func (s *Store) openNote(topic string) (note, error) {
 }
 
 // findInNotes returns the note and the index of the one note entry that
-// contains oldText. It reads the notes in name order. Two entries with the
-// same text count as one match, and the first one is the match. No match
-// gives a note with an empty topic. A note that is too large, binary, or not
-// readable is skipped, and skipped counts these notes, so that one bad note
-// does not stop a change in the other notes.
-func (s *Store) findInNotes(oldText string) (note, int, int, error) {
+// contains oldText. It reads the notes in name order, with the limits of a
+// search (eachNote). Two entries with the same text count as one match, and the
+// first one is the match. No match gives a note with an empty topic. A note
+// that is too large, binary, or not readable is skipped, and skipped counts
+// these notes, so that one bad note does not stop a change in the other notes.
+// stop is the limit that stopped the read, or "".
+func (s *Store) findInNotes(oldText string) (note, int, int, string, error) {
 	names, _, err := s.listNotes()
 	if errors.Is(err, errNotesNotFolder) {
-		return note{}, 0, 0, nil
+		return note{}, 0, 0, "", nil
 	}
 	if err != nil {
-		return note{}, 0, 0, err
+		return note{}, 0, 0, "", err
 	}
 	type match struct {
 		n note
 		i int
 	}
 	var hits []match
-	skipped := 0
-	for _, name := range names {
-		n, err := s.readNote(name)
-		if errors.Is(err, fs.ErrNotExist) {
-			// The note is gone after the list. This is not a skip.
-			continue
-		}
-		if err != nil {
-			skipped++
-			continue
-		}
+	skipped, stop := s.eachNote(names, func(n note) {
 		for i, e := range n.Entries {
 			if strings.Contains(e, oldText) {
 				hits = append(hits, match{n, i})
 			}
 		}
-	}
+	})
 	if len(hits) == 0 {
-		return note{}, 0, skipped, nil
+		return note{}, 0, skipped, stop, nil
 	}
 	first := hits[0].n.Entries[hits[0].i]
 	same := true
@@ -355,7 +354,7 @@ func (s *Store) findInNotes(oldText string) (note, int, int, error) {
 		}
 	}
 	if same {
-		return hits[0].n, hits[0].i, skipped, nil
+		return hits[0].n, hits[0].i, skipped, stop, nil
 	}
 	shown := hits[:min(len(hits), 10)]
 	texts := make([]string, len(shown))
@@ -369,7 +368,7 @@ func (s *Store) findInNotes(oldText string) (note, int, int, error) {
 	if len(hits) > 10 {
 		lines = append(lines, fmt.Sprintf("and %d more", len(hits)-10))
 	}
-	return note{}, 0, skipped, fmt.Errorf("%q matches %d entries in the notes; use a longer, unique part of the entry, or give a topic. The matches are:\n%s",
+	return note{}, 0, skipped, stop, fmt.Errorf("%q matches %d entries in the notes; use a longer, unique part of the entry, or give a topic. The matches are:\n%s",
 		oldText, len(hits), strings.Join(lines, "\n"))
 }
 

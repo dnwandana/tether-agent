@@ -563,3 +563,19 @@ func TestNoteFallbackReportsSkippedNotes(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestNoteFallbackStopsAtTheSearchLimit(t *testing.T) {
+	s := open(t)
+	for i := range maxSearchNotes {
+		noteFile(t, s, fmt.Sprintf("n%04d.md", i), "x")
+	}
+	// The note after the limit is not read.
+	noteFile(t, s, "z.md", "deploy via scp")
+	want := `no entry matches "deploy" in memory or in the notes. The read stopped at 2000 notes; some notes were not read. Give a topic.`
+	if err := applyErr(t, s, Op{Action: "remove", Target: "memory", OldText: "deploy"}); err != want {
+		t.Fatal(err)
+	}
+	if res := apply(t, s, Op{Action: "remove", Target: "memory", Topic: "z", OldText: "deploy"}); !strings.HasPrefix(res.Text, "Entry removed from note z") {
+		t.Fatal(res.Text)
+	}
+}
