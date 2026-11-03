@@ -44,6 +44,15 @@ func collectItems(dataDir string) (items []item, skipped []string, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	got, skip, err := collectFolders(dataDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	return append(items, got...), append(skipped, skip...), nil
+}
+
+// collectFolders is the part of collectItems for walkedFolders.
+func collectFolders(dataDir string) (items []item, skipped []string, err error) {
 	for _, top := range walkedFolders {
 		got, skip, err := collectFolder(dataDir, top)
 		if err != nil {

@@ -453,15 +453,35 @@ func (s *Store) file(target string) (string, int, error) {
 	return "", 0, fmt.Errorf("unknown target %q; use memory or user", target)
 }
 
-// lock takes the file lock that serializes writes across processes.
+// lockWait is the maximum time that a change waits for the file lock. Another process
+// holds the lock only for a change or for the copies of a backup.
+var lockWait = 30 * time.Second
+
+// lockPoll is the time between two tries of the file lock.
+const lockPoll = 50 * time.Millisecond
+
+// lock takes the file lock that serializes writes across processes. A blocked flock
+// cannot stop, so it tries without a wait until lockWait ends.
 func (s *Store) lock() (func(), error) {
 	f, err := os.OpenFile(filepath.Join(s.dir, LockFileName), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the memory lock file: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		f.Close()
-		return nil, fmt.Errorf("cannot lock the memory files: %w", err)
+	deadline := time.Now().Add(lockWait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			f.Close()
+			return nil, fmt.Errorf("cannot lock the memory files: %w", err)
+		}
+		if !time.Now().Before(deadline) {
+			f.Close()
+			return nil, fmt.Errorf("the memory files stayed locked for %s by another process, for example a backup; try again later", lockWait)
+		}
+		time.Sleep(lockPoll)
 	}
 	return func() {
 		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)

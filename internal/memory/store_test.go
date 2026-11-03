@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -578,4 +579,32 @@ func TestNoteFallbackStopsAtTheSearchLimit(t *testing.T) {
 	if res := apply(t, s, Op{Action: "remove", Target: "memory", Topic: "z", OldText: "deploy"}); !strings.HasPrefix(res.Text, "Entry removed from note z") {
 		t.Fatal(res.Text)
 	}
+}
+
+func TestChangeStopsWaitingForTheFileLock(t *testing.T) {
+	s := open(t)
+	f, err := os.OpenFile(filepath.Join(s.dir, LockFileName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+	old := lockWait
+	lockWait = 200 * time.Millisecond
+	t.Cleanup(func() { lockWait = old })
+	start := time.Now()
+	_, err = s.Apply(Op{Action: "add", Target: "memory", Content: "fact"})
+	if err == nil || !strings.Contains(err.Error(), "stayed locked") {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d < 200*time.Millisecond || d > 2*time.Second {
+		t.Fatal(d)
+	}
+	// After the unlock, the change goes through.
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, s, Op{Action: "add", Target: "memory", Content: "fact"})
 }
