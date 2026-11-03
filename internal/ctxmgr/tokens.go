@@ -36,17 +36,28 @@ func EstimateChars(msgs []provider.Message) int {
 	return n / charsPerToken
 }
 
+// EstimateFixed returns the token estimate of the parts of a request that are not
+// messages: the system prompt and the tool schemas.
+func EstimateFixed(system string, schemas []provider.ToolSchema) int {
+	n := len(system)
+	for _, s := range schemas {
+		n += len(s.Name) + len(s.Description) + len(s.Parameters)
+	}
+	return n / charsPerToken
+}
+
 // ViewSize returns the size of the model view in tokens: the prompt tokens that
 // the provider gave for the last response, plus the estimate of each message whose id is
 // greater than lastPromptAtMessage. With no provider count (lastPromptTokens == 0), it
-// estimates the full view.
-func ViewSize(lastPromptTokens int, lastPromptAtMessage int64, view []StoredView) int {
+// estimates the full view and adds fixed, the estimate of the system prompt and the tool
+// schemas (EstimateFixed). The provider count already includes these parts.
+func ViewSize(lastPromptTokens int, lastPromptAtMessage int64, fixed int, view []StoredView) int {
 	if lastPromptTokens <= 0 {
 		all := make([]provider.Message, len(view))
 		for i, v := range view {
 			all[i] = v.Msg
 		}
-		return EstimateChars(all)
+		return max(fixed, 0) + EstimateChars(all)
 	}
 	var newer []provider.Message
 	for _, v := range view {
