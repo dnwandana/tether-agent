@@ -197,10 +197,16 @@ func entriesBytes(entries []string) int {
 // score sets src.matched and src.hits for words.
 func score(src *searchSource, words []string) {
 	body := strings.ToLower(strings.Join(src.entries, "\n"))
+	// A query word matches a whole word of the topic name, so "in" does not match
+	// "inbox-user". A topic name has only lowercase letters, digits, and "-".
+	var topic []string
+	if src.isNote {
+		topic = strings.Split(src.name, "-")
+	}
 	src.matched, src.hits = 0, 0
 	for _, w := range words {
 		c := strings.Count(body, w)
-		t := src.isNote && strings.Contains(src.name, w)
+		t := slices.Contains(topic, w)
 		if c > 0 || t {
 			src.matched++
 		}
