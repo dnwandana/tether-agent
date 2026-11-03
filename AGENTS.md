@@ -96,6 +96,15 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   3. Add the ID to the two ID lists of `TestPresetTable` in `internal/config/presets_test.go`.
   4. Give the row an `EffortStyle` that `mapEffort` in `internal/provider/effort.go` handles.
      `mapEffort` maps an unknown style like `chat`.
+- All Telegram sends and edits of one chat share one budget, `telegram.ChatPace`. A new send
+  or edit goes through a typed method of `telegram.Client` that has the chat id.
+  `Client.Call` gives no chat, so its calls skip the budget. Select the class of the call:
+  1. A direct reply to the user, for example a command reply, an ack, or a prompt, uses
+     `replyClient`. It waits for the 1 s slot and the flood end, but not for the group window.
+  2. A send with no turn, for example a cron delivery, keeps the default class. It also
+     waits for the group window.
+  3. A status or preview message uses `queueClient` or `interimClient`. A full budget gives a
+     `*paceHold` at once. A hold is not a flood and not a try.
 - Tests reset global state: `security.AddProtectedPathPatterns(nil)`, the command table of
   `gateway.Register`, and `gateway.pickTip` and `gateway.nowFunc`.
 - `internal/skills/testdata/guard_golden.json` is the output of the Hermes threat patterns.

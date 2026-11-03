@@ -333,6 +333,16 @@ The answer appears while the model writes it:
 `telegram.streaming.transport` sets the method: `auto`, `edit`, or `draft`. `auto` and `draft`
 use drafts in direct messages and edits in groups.
 
+All sends and edits of the bot in one chat share one budget:
+
+- In a group, the bot sends or edits at most 18 messages in each minute.
+- In a private chat, the bot sends or edits at most one message each second.
+- Command replies, button edits, and the final edit of an answer do not wait for the group
+  budget.
+
+In a busy group, the preview changes every few seconds. When Telegram tells the bot to wait,
+the preview stops until the wait ends. Then the answer ends as one formatted message.
+
 The final answer has these rules:
 
 - The bot sends the final text as Telegram MarkdownV2.
