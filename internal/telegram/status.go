@@ -403,8 +403,12 @@ func (s *Status) Close(ctx context.Context, success bool) {
 	if cleanup {
 		// Do not send a message that the cleanup deletes next.
 		s.dropDeletable()
+		// The cleanup also deletes a sent open bubble, so it gets no last edit.
+		s.editHeld = false
+		s.openBubble()
+	} else {
+		s.closeBubble(ctx)
 	}
-	s.closeBubble(ctx)
 	s.stopTimer()
 	// After Close, sendQueue drops an entry on a network error or a 5xx. An entry
 	// that waits for a flood wait stays, and the timer sends it later.

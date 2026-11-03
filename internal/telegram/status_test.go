@@ -1064,6 +1064,21 @@ func TestCleanupDropsClosedEdits(t *testing.T) {
 	}
 }
 
+func TestCleanupSendsNoEditToTheDeletedBubble(t *testing.T) {
+	s, api, _ := statusWithFakeAPI(t, "all")
+	s.Cleanup = true
+	s.Add(ctx, Source{}, "terminal", "a", "{}")
+	// The second line waits for the edit interval.
+	s.Add(ctx, Source{}, "read_file", "b", "{}")
+	if api.count("sendMessage") != 1 || api.count("editMessageText") != 0 {
+		t.Fatal(api.methods())
+	}
+	s.Close(ctx, true)
+	if api.count("editMessageText") != 0 || api.count("deleteMessage") != 1 || fireTimer(s) {
+		t.Fatal("a deleted bubble needs no edit:", api.methods())
+	}
+}
+
 // fireTimerAfter moves the clock past the interval and runs the timer.
 func fireTimerAfter(s *Status, clk *fakeClock) bool {
 	clk.Advance(2 * time.Second)
