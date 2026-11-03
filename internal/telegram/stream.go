@@ -63,7 +63,12 @@ type Streamer struct {
 	// channel uses it to call Status.Reset, so the next tool line starts a
 	// new status message below the answer.
 	OnFirstMessage func()
-	Log            *slog.Logger
+	// BeforeNewMessage runs before the first message of each answer segment.
+	// The channel uses it to call Status.Drain, so a plan message that waits
+	// goes out above the answer. It runs with the Streamer lock held, so it
+	// must not call the Streamer.
+	BeforeNewMessage func(ctx context.Context)
+	Log              *slog.Logger
 	// AfterFunc runs f after d for a later strip of the cursor. Nil means
 	// time.AfterFunc. Tests replace it.
 	AfterFunc func(d time.Duration, f func())
@@ -88,6 +93,7 @@ type Streamer struct {
 	lastSent   string    // the text that the open message or draft shows
 	pending    int       // new characters since the last flush
 	lastEdit   time.Time
+	drained    bool // BeforeNewMessage ran for the segment
 
 	timer  *time.Timer
 	runCtx context.Context
@@ -647,6 +653,12 @@ func (s *Streamer) sendNew(ctx context.Context, text string, final bool) (Messag
 	if id, ok := ThreadParam(s.ThreadID, false); ok {
 		p.MessageThreadID = id
 	}
+	if !s.drained {
+		s.drained = true
+		if s.BeforeNewMessage != nil {
+			s.BeforeNewMessage(ctx)
+		}
+	}
 	m, err := c.SendMessage(ctx, p)
 	if err != nil {
 		if !final {
@@ -669,6 +681,7 @@ func (s *Streamer) opened(id int, text string) {
 func (s *Streamer) resetSegment() {
 	s.acc, s.committed, s.lastSent = "", "", ""
 	s.msgID, s.msgCreated, s.pending = 0, time.Time{}, 0
+	s.drained = false
 	if s.draft {
 		s.draftID = draftSeq.Add(1)
 	}

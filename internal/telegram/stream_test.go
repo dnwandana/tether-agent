@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"bytes"
+	"context"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -572,6 +574,24 @@ func TestOnFirstMessageNotCalledOnEdit(t *testing.T) {
 	_ = s.Finish(ctx, "")
 	if n != 1 {
 		t.Fatal(n)
+	}
+}
+
+func TestBeforeNewMessageRunsOncePerSegment(t *testing.T) {
+	s, api, clk := streamer(t, false)
+	var sends []int // the sendMessage count at each call of the hook
+	s.BeforeNewMessage = func(context.Context) { sends = append(sends, api.count("sendMessage")) }
+	s.Delta(ctx, "First part")
+	clk.Advance(time.Second)
+	s.Delta(ctx, " of the answer") // an edit of the open message
+	s.Boundary(ctx)                // an edit with the final text
+	s.Delta(ctx, "Second part")
+	_ = s.Finish(ctx, "")
+	if api.count("sendMessage") != 2 || api.edits() != 2 {
+		t.Fatal(api.methods())
+	}
+	if !slices.Equal(sends, []int{0, 1}) {
+		t.Fatal("hook calls at sendMessage counts:", sends)
 	}
 }
 
