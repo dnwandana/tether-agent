@@ -452,3 +452,13 @@ func TestAPIErrorMigratedChat(t *testing.T) {
 		t.Fatalf("%q", err.Error())
 	}
 }
+
+func TestDefaultClientKeepsMoreIdleConnections(t *testing.T) {
+	tr, ok := defaultHC.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport %T", defaultHC.Transport)
+	}
+	if tr.MaxIdleConnsPerHost != maxIdleConnsPerHost || tr.Proxy == nil {
+		t.Fatal(tr.MaxIdleConnsPerHost, tr.Proxy == nil)
+	}
+}
