@@ -303,6 +303,18 @@ func withoutImages(msgs []Message) []Message {
 	return out
 }
 
+// Down reports whether every entry of the chain is in its wait time after a failure.
+// Stream still tries all entries then, but a background call, for example a review, can
+// skip its work and save the cost of a call that fails.
+func (c *Chain) Down() bool {
+	for _, e := range c.entries {
+		if !c.health.waiting(e.Name, e.model()) {
+			return false
+		}
+	}
+	return len(c.entries) > 0
+}
+
 // FallbackStatus returns the state of the first entry, from Health only.
 // FallbackName and FallbackModel name the first entry that is not in its
 // wait time.

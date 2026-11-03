@@ -236,6 +236,14 @@ type ReviewRequest struct {
 	ParentEnv *tools.Env
 }
 
+// ErrReviewProviderDown is the error of RunReview when each provider entry of the session
+// failed in its wait time. The review starts no session and makes no call.
+var ErrReviewProviderDown = errors.New("agent: no review now, because each provider entry failed recently")
+
+// maxConcurrentReviews is the number of background reviews that run at the same time.
+// Each review sends the full parent view to the provider. The other reviews wait.
+const maxConcurrentReviews = 2
+
 // RunReview runs one review: a fork of the parent conversation that can only save memory
 // and skills. The parent session never changes. It returns the notices of the saved
 // changes, and sends one summary of them to r.Notify.
@@ -248,6 +256,10 @@ func (a *Agent) RunReview(ctx context.Context, r ReviewRequest) (saved []string,
 	}
 	if !r.Memory && !r.Skills {
 		return nil, errors.New("agent: the review has nothing to do; set Memory or Skills")
+	}
+	// A review with no working provider entry fails, so it does not make a review session.
+	if c, ok := a.providerFor(r.Session).(*provider.Chain); ok && c.Down() {
+		return nil, ErrReviewProviderDown
 	}
 	sess, err := a.forkSession(ctx, r.Session, KindReview, "review", r.Session.ModelOverride)
 	if err != nil {
@@ -775,7 +787,8 @@ func (a *Agent) startReview(ctx context.Context, r ReviewRequest) {
 
 // goReview runs f in a background goroutine that WaitReviews counts. The context of f
 // keeps the values of ctx, but the end of ctx does not stop f. The end of Agent.Background
-// stops f. After the end of Agent.Background, goReview does not start f.
+// stops f. After the end of Agent.Background, goReview does not start f. At most
+// maxConcurrentReviews f run at the same time, and the others wait in their goroutines.
 func (a *Agent) goReview(ctx context.Context, f func(context.Context)) {
 	base := a.Background
 	if base == nil {
@@ -787,6 +800,10 @@ func (a *Agent) goReview(ctx context.Context, f func(context.Context)) {
 		return
 	}
 	a.reviewWG.Add(1)
+	if a.reviewSlots == nil {
+		a.reviewSlots = make(chan struct{}, maxConcurrentReviews)
+	}
+	slots := a.reviewSlots
 	a.reviewMu.Unlock()
 	rctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	stop := context.AfterFunc(base, cancel)
@@ -794,6 +811,14 @@ func (a *Agent) goReview(ctx context.Context, f func(context.Context)) {
 		defer a.reviewWG.Done()
 		defer stop()
 		defer cancel()
+		// At most maxConcurrentReviews reviews run. The end of Agent.Background also ends
+		// the wait.
+		select {
+		case slots <- struct{}{}:
+		case <-rctx.Done():
+			return
+		}
+		defer func() { <-slots }()
 		f(rctx)
 	}()
 }
