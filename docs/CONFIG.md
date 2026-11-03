@@ -278,8 +278,8 @@ The gateway applies `cron.missed_runs` when it starts. The rules are:
 | `telegram.streaming.buffer_threshold` | `24` | An edit also occurs when this number of new characters is in the buffer. |
 | `telegram.streaming.cursor` | `" ▉"` | The text at the end of each edit while the answer streams. |
 | `telegram.streaming.fresh_final_after_s` | `60` | When the preview message is older than this number of seconds, the final answer goes out as a new message. |
-| `telegram.tool_progress` | `all` | The tool status lines: `off`, `new` (a line when the tool changes), `all` (one line per tool, with a count), or `verbose` (each call, with its arguments). With `off`, a goal turn still sends its goal line as one silent message. The plan block does not show. |
-| `telegram.cleanup_progress` | `false` | When `true`, the bot deletes the status message after a successful run. The goal line and the plan block go with the status message. |
+| `telegram.tool_progress` | `all` | The tool status lines: `off`, `new` (a line when the tool changes), `all` (one line per tool, with a count), or `verbose` (each call, with its arguments). With `off`, a goal turn still sends its goal line as one silent message. No plan message goes out. |
+| `telegram.cleanup_progress` | `false` | When `true`, the bot deletes the status message after a successful run. The goal message and the plan messages go too, but the "Plan done" message stays. In `off` mode, the goal message stays. |
 
 Four environment variables control the local files that an answer can send. Set them in `.env`
 or in the process environment. `docs/SECURITY.md` ("Files that the bot sends") gives the full rule.

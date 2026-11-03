@@ -179,8 +179,8 @@ row pauses the goal.
 
 ## The notices
 
-- A `continue` verdict sends no message. Its reason is the first line of the status message
-  of the next turn. See [Telegram](Telegram#typing-and-tool-status-lines).
+- A `continue` verdict sends no message. Its reason goes out as a silent message at the start
+  of the next turn. See [Telegram](Telegram#goal-and-plan-messages).
 - These events each send a separate message: done, blocked, the budget, the judge failures, a
   gate that fails, a parked goal, and a failed turn.
 - Each message about a pause has **Resume** and **Clear** buttons. **Resume** starts the next
@@ -253,7 +253,12 @@ The agent keeps a task list with the `todo_list` tool, in the `todo` toolset. It
 list for work with 3 or more steps. Each item has a status: pending, in progress, completed,
 or cancelled.
 
-- On Telegram, the plan shows at the top of the status message, with at most 8 items.
+- On Telegram, the plan goes out as silent plan messages. See
+  [Telegram](Telegram#goal-and-plan-messages).
+  - The full list goes out at the start of the plan.
+  - A short message shows each completed, cancelled, or new item.
+  - The full list goes out again with "📋 Plan done" when all items are closed.
+  - After a gateway restart, the goal turns show no plan messages until you send a message.
 - In the CLI, a plan row shows after each `todo_list` call.
 - Send `/todo` to see the full list. It makes no model call:
 

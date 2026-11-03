@@ -257,27 +257,71 @@ The status lines have these rules:
 
 Set `telegram.cleanup_progress: true` to delete the status message after a successful run.
 
-A goal turn has two more parts in the status message. See [Goals](Goals).
+### Goal and plan messages
 
-- The first line is the goal line of the turn: "↻ Goal n/max: reason",
-  "↻ Goal n/max: retry after a failed turn.", or "▶ Goal barrier lifted — resuming."
-- A goal turn always sends its status message, also when it makes no tool call.
-- When the agent uses `todo_list`, the plan block shows at the top of the status message,
-  after the goal line. It shows at most 8 items:
+A goal turn and a task list send their own messages. These messages are silent, so they do not
+ring the phone. They are never in a status message. See [Goals](Goals).
 
-  ```text
-  📋 Plan 1/3
-  [x] Find the flaky test
-  [>] Replace the real clock with a fake clock
-  [ ] Run the cron tests 20 times
-  ───
-  ```
+- At the start of each goal turn, the goal line goes out as its own message: "↻ Goal n/max:
+  reason", "↻ Goal n/max: retry after a failed turn.", or "▶ Goal barrier lifted — resuming."
+- When the agent uses `todo_list`, the plan goes out as plan messages. A plan message closes the
+  open status message. The next tool line starts a new status message below the plan message.
+- The status message shows no `todo_list` line. A line from a subagent, `🔀 [i/n] todo_list`,
+  stays.
 
-  A list with more than 8 items shows the open items first, and then a "+N more" line.
-- With `telegram.tool_progress: off`, the goal line goes out as one silent message. The
-  plan block does not show. Send `/todo` to see the list.
-- With `telegram.cleanup_progress: true`, the goal line and the plan block go with the
-  status message.
+The bot sends three types of plan messages:
+
+1. The start list goes out when a new plan starts. It shows all items in list order. A subtask
+   has two spaces for each parent above it, as in `/todo`:
+
+   ```text
+   📋 Plan 0/3
+   [>] Find the flaky test
+   [ ] Replace the real clock with a fake clock
+   [ ] Run the cron tests 20 times
+   ```
+
+2. The change message goes out for a `todo_list` call that completes, cancels, or adds items.
+   It has one line for each change:
+
+   ```text
+   ✅ 1/3 Find the flaky test
+   🚫 Run the cron tests 20 times
+   ➕ Run the cron tests 50 times
+   ```
+
+   - `✅ n/m` shows a completed item. `n` is the number of completed items. `m` is the number
+     of items that are not cancelled.
+   - `🚫` shows a cancelled item.
+   - `➕` shows a new item.
+
+   Other changes send no message, for example an item that starts, or a text edit.
+3. The done list goes out when a `todo_list` call closes the last open item. It replaces the
+   change message of that call. A cancelled item does not count:
+
+   ```text
+   📋 Plan done 3/3
+   [x] Find the flaky test
+   [x] Replace the real clock with a fake clock
+   [~] Run the cron tests 20 times
+   [x] Run the cron tests 50 times
+   ```
+
+These rules apply to the goal message and the plan messages:
+
+- A plan continues over many turns. A goal turn or a new message does not send the start list
+  again.
+- A turn that ends with open items sends no plan message. Send `/todo` to see the list.
+- An answer message waits for the plan messages before it, for a maximum of 30 seconds. Thus
+  the chat shows the messages in the order of the events. A `/stop` ends the wait.
+- With `telegram.tool_progress: off`, no plan message goes out. The goal line still goes out
+  as one silent message.
+- With `telegram.cleanup_progress: true`, a successful turn deletes the goal message, the
+  start list, and the change messages with the status message. The "📋 Plan done" message
+  stays. In `off` mode, the goal message also stays.
+- A failed turn deletes nothing.
+- After a gateway restart, the goal turns show no plan messages until you send a message.
+  Their goal line is a message that is not silent.
 
 ### Streamed answers
 
