@@ -538,6 +538,21 @@ func TestAddTelegramWiresStickerInbox(t *testing.T) {
 	}
 }
 
+func TestAddTelegramPacesOneSharedClient(t *testing.T) {
+	url, _, _ := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, "telegram:\n  enabled: true\n  bot_token: T\n")
+	ch, err := a.AddTelegram(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.C.Pace == nil {
+		t.Fatal("the gateway client must pace the calls of each chat")
+	}
+	if ch.Inbox.C != ch.C || ch.Out.C != ch.C || ch.UI.C != ch.C {
+		t.Fatal("all consumers of the channel must share one client, so they share one pace")
+	}
+}
+
 func TestDelegationAndOptionalTools(t *testing.T) {
 	a := newApp(t)
 	if _, ok := a.Registry.Get("delegate_task"); !ok || a.Delegator == nil {

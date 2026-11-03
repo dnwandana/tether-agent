@@ -476,7 +476,8 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		return nil, errors.New("telegram: telegram.enabled is true, but no bot token is set. " +
 			"Set telegram.bot_token in config.yaml, or set TELEGRAM_BOT_TOKEN in .env")
 	}
-	c := &telegram.Client{Token: cfg.BotToken, BaseURL: a.telegramBaseURL, Log: a.Log}
+	// One pace for all chats keeps the sends and edits of each chat inside the Telegram limits.
+	c := &telegram.Client{Token: cfg.BotToken, BaseURL: a.telegramBaseURL, Log: a.Log, Pace: telegram.NewChatPace()}
 	me, err := c.GetMe(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("telegram: the bot token check (getMe) failed, so check telegram.bot_token: %w", err)
