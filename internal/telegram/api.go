@@ -36,9 +36,23 @@ const (
 	paceLogWait = 5 * time.Second
 )
 
+// maxIdleConnsPerHost is the number of idle connections to the Bot API host that the
+// shared client keeps. One turn sends stream edits, status edits, and chat actions at
+// the same time, and other chats send too. The default of net/http is 2, so the other
+// connections closed and each new call did a new TCP and TLS handshake.
+const maxIdleConnsPerHost = 8
+
 // defaultHC is the one shared HTTP client. It has no global timeout, because
 // each request sets its own deadline (the long poll needs more than 60 s).
-var defaultHC = &http.Client{}
+var defaultHC = &http.Client{Transport: newTransport()}
+
+// newTransport returns a copy of http.DefaultTransport that keeps maxIdleConnsPerHost
+// idle connections for each host. The copy keeps the proxy from the environment.
+func newTransport() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.MaxIdleConnsPerHost = maxIdleConnsPerHost
+	return t
+}
 
 // Client calls the Telegram Bot API.
 type Client struct {
