@@ -8,8 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -114,33 +114,55 @@ func (s *Store) notesPath() string { return filepath.Join(s.dir, "notes") }
 // notesDir examines the notes folder with os.Lstat. It returns an error
 // that wraps fs.ErrNotExist when the folder is missing, and
 // errNotesNotFolder when it is a symlink or a file.
-func (s *Store) notesDir() error {
+func (s *Store) notesDir() (fs.FileInfo, error) {
 	fi, err := os.Lstat(s.notesPath())
 	if errors.Is(err, fs.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	if err != nil {
-		return fmt.Errorf("cannot read the memory notes folder: %w", err)
+		return nil, fmt.Errorf("cannot read the memory notes folder: %w", err)
 	}
 	if !fi.IsDir() {
-		return errNotesNotFolder
+		return nil, errNotesNotFolder
 	}
-	return nil
+	return fi, nil
+}
+
+// openNotes opens the notes folder as an os.Root, with the errors of notesDir. All
+// reads and writes of notes go through the root, so a symlink that replaces the
+// folder or a file after a check cannot move a read or a write out of the folder.
+// The root must be the folder that notesDir examined: a folder that was replaced
+// between the Lstat and the open gives errNotesNotFolder.
+func (s *Store) openNotes() (*os.Root, error) {
+	fi, err := s.notesDir()
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(s.notesPath())
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("cannot open the memory notes folder: %w", err)
+	}
+	st, err := root.Stat(".")
+	if err != nil || !os.SameFile(fi, st) {
+		root.Close()
+		return nil, errNotesNotFolder
+	}
+	return root, nil
 }
 
 // listNotes returns the topics of the regular files in notes/ that have a
 // note name, in name order. skipped counts the other entries of the folder.
 // A missing folder gives no names and no error.
 func (s *Store) listNotes() (names []string, skipped int, err error) {
-	if err := s.notesDir(); err != nil {
+	des, err := s.noteEntries()
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, 0, nil
 		}
 		return nil, 0, err
-	}
-	des, err := os.ReadDir(s.notesPath())
-	if err != nil {
-		return nil, 0, fmt.Errorf("cannot list the memory notes: %w", err)
 	}
 	for _, de := range des {
 		// The type of a DirEntry does not follow a symlink.
@@ -157,6 +179,27 @@ func (s *Store) listNotes() (names []string, skipped int, err error) {
 	return names, skipped, nil
 }
 
+// noteEntries returns the entries of the notes folder in name order. It reads the
+// folder that openNotes opened, not the path again.
+func (s *Store) noteEntries() ([]fs.DirEntry, error) {
+	root, err := s.openNotes()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	d, err := root.Open(".")
+	if err != nil {
+		return nil, fmt.Errorf("cannot list the memory notes: %w", err)
+	}
+	defer d.Close()
+	des, err := d.ReadDir(-1)
+	if err != nil {
+		return nil, fmt.Errorf("cannot list the memory notes: %w", err)
+	}
+	slices.SortFunc(des, func(a, b fs.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	return des, nil
+}
+
 // isTempName reports whether name is the name of a temp file of writeAtomic.
 func isTempName(name string) bool {
 	ok, _ := filepath.Match(tempPattern, name)
@@ -168,30 +211,23 @@ func isTempName(name string) bool {
 // fs.ErrNotExist. The size check comes before the open, so that the store
 // never reads a large file.
 func (s *Store) readNote(topic string) (note, error) {
-	if err := s.notesDir(); err != nil {
+	if !IsNoteName(topic + ".md") {
+		return note{}, fmt.Errorf("no note %q: %w", topic, fs.ErrNotExist)
+	}
+	root, err := s.openNotes()
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return note{}, fmt.Errorf("no note %s: %w", topic, fs.ErrNotExist)
 		}
 		return note{}, err
 	}
-	if !IsNoteName(topic + ".md") {
-		return note{}, fmt.Errorf("no note %q: %w", topic, fs.ErrNotExist)
-	}
-	path := filepath.Join(s.notesPath(), topic+".md")
-	fi, err := os.Lstat(path)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && !fi.Mode().IsRegular()) {
+	defer root.Close()
+	f, fi, err := openRegular(root, topic+".md", maxNoteBytes)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errNotRegular) {
 		return note{}, fmt.Errorf("no note %s: %w", topic, fs.ErrNotExist)
 	}
-	if err != nil {
-		return note{}, fmt.Errorf("cannot read note %s: %w", topic, err)
-	}
-	if fi.Size() > maxNoteBytes {
+	if errors.Is(err, errFileTooLarge) {
 		return note{}, errNoteTooLarge
-	}
-	// O_NOFOLLOW stops a symlink that replaced the file after the Lstat.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if errors.Is(err, fs.ErrNotExist) {
-		return note{}, fmt.Errorf("no note %s: %w", topic, fs.ErrNotExist)
 	}
 	if err != nil {
 		return note{}, fmt.Errorf("cannot read note %s: %w", topic, err)
@@ -243,7 +279,8 @@ func (s *Store) writeNote(n note) error {
 	if !IsNoteName(n.Topic + ".md") {
 		return fmt.Errorf("the topic %q is not a note name", n.Topic)
 	}
-	if err := s.notesDir(); err != nil {
+	root, err := s.openNotes()
+	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
@@ -251,13 +288,14 @@ func (s *Store) writeNote(n note) error {
 			return fmt.Errorf("cannot create the memory notes folder: %w", err)
 		}
 		// A second process can make the folder, or a file, at the same time.
-		if err := s.notesDir(); err != nil {
+		if root, err = s.openNotes(); err != nil {
 			return err
 		}
 	}
-	path := filepath.Join(s.notesPath(), n.Topic+".md")
+	defer root.Close()
+	name := n.Topic + ".md"
 	if len(n.Entries) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := root.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("cannot delete note %s: %w", n.Topic, err)
 		}
 		return nil
@@ -281,5 +319,5 @@ func (s *Store) writeNote(n note) error {
 	b.WriteString("\n---\n")
 	b.WriteString(strings.Join(n.Entries, Separator))
 	b.WriteByte('\n')
-	return writeAtomic(path, b.String())
+	return writeAtomicIn(root, name, b.String())
 }

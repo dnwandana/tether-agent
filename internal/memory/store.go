@@ -548,9 +548,14 @@ func size(entries []string) int {
 // readEntries returns the entries of the file at path. A missing file has
 // no entries.
 func readEntries(path string) ([]string, error) {
-	b, err := os.ReadFile(path)
+	// memory.md and user_profile.md go into the system prompt, so the store reads
+	// them only as regular files in the memory folder, the same as the notes.
+	b, err := readRegularPath(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
+	}
+	if errors.Is(err, errNotRegular) {
+		return nil, fmt.Errorf("%s is not a regular file (for example a symlink); move it away, and then try again", filepath.Base(path))
 	}
 	if err != nil {
 		return nil, err
