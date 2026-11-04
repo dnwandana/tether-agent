@@ -25,7 +25,10 @@ func (s *Store) Read(topic string, from, maxChars int) (string, error) {
 	if strings.TrimSpace(topic) == "" {
 		return "", errors.New("topic is required for read")
 	}
-	t := normalizeTopic(topic)
+	t, err := topicOf(topic)
+	if err != nil {
+		return "", err
+	}
 	if t == "" {
 		return "", fmt.Errorf("the topic %q has no letters a-z or digits; use a topic from the topic list", strings.TrimSpace(topic))
 	}

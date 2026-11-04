@@ -35,8 +35,8 @@ func TestNormalizeTopic(t *testing.T) {
 		{"日本", ""},
 		{"", ""},
 		{strings.Repeat("a", 48), strings.Repeat("a", 48)},
-		{strings.Repeat("a", 49), strings.Repeat("a", 48)},
-		{strings.Repeat("a", 47) + " b", strings.Repeat("a", 47)},
+		{strings.Repeat("a", 49), strings.Repeat("a", 49)},
+		{strings.Repeat("a", 47) + " b", strings.Repeat("a", 47) + "-b"},
 		{strings.Repeat("ab-", 16), strings.Repeat("ab-", 15) + "ab"},
 	} {
 		if got := normalizeTopic(tc.in); got != tc.want {

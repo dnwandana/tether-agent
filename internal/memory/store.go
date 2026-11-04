@@ -168,10 +168,16 @@ func (s *Store) Apply(op Op) (Result, error) {
 	}
 
 	topic := ""
-	if op.Action != ActionAdd && strings.TrimSpace(op.Topic) != "" {
+	if strings.TrimSpace(op.Topic) != "" {
+		t, err := topicOf(op.Topic)
+		if err != nil {
+			return Result{}, err
+		}
 		// A wide search in place of a narrow one can change the wrong entry.
-		if topic = normalizeTopic(op.Topic); topic == "" {
-			return Result{}, fmt.Errorf("the topic %q has no letters a-z or digits; use a topic from the topic list", op.Topic)
+		if op.Action != ActionAdd {
+			if topic = t; topic == "" {
+				return Result{}, fmt.Errorf("the topic %q has no letters a-z or digits; use a topic from the topic list", op.Topic)
+			}
 		}
 	}
 

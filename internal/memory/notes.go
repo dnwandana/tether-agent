@@ -77,7 +77,8 @@ type note struct {
 }
 
 // normalizeTopic returns the topic of a name from the model. The result has
-// only [a-z0-9-], and has no "-" at the start or at the end.
+// only [a-z0-9-], and has no "-" at the start or at the end. It is not cut,
+// so it can be longer than maxTopicBytes; topicOf refuses such a topic.
 func normalizeTopic(s string) string {
 	var b strings.Builder
 	dash := false
@@ -92,11 +93,20 @@ func normalizeTopic(s string) string {
 			dash = true
 		}
 	}
-	t := strings.Trim(b.String(), "-")
+	return strings.Trim(b.String(), "-")
+}
+
+// topicOf returns normalizeTopic(s). A result longer than maxTopicBytes
+// gives an error for the model, because a cut can give two topics the same
+// note. An empty result tells that s has no letters a-z or digits.
+func topicOf(s string) (string, error) {
+	t := normalizeTopic(s)
 	if len(t) > maxTopicBytes {
-		t = t[:maxTopicBytes]
+		//lint:ignore ST1005 the text is a fixed message for the model with full sentences.
+		return "", fmt.Errorf("the topic %q is too long: its note name has %d characters, and the limit is %d. "+
+			"Use a shorter topic, for example a topic from the topic list.", strings.TrimSpace(s), len(t), maxTopicBytes)
 	}
-	return strings.TrimRight(t, "-")
+	return t, nil
 }
 
 // chainName returns the name of note k of the chain of topic. Note 1 is
@@ -131,11 +141,12 @@ func (n note) continues() string {
 }
 
 // IsNoteName reports whether name is the file name of a note: the name ends
-// in ".md", and its stem is not empty and does not change in normalizeTopic.
-// The store and the backup both use this rule.
+// in ".md", and its stem is not empty, is not longer than maxTopicBytes, and
+// does not change in normalizeTopic. The store and the backup both use this
+// rule.
 func IsNoteName(name string) bool {
 	stem, ok := strings.CutSuffix(name, ".md")
-	return ok && stem != "" && stem == normalizeTopic(stem)
+	return ok && stem != "" && len(stem) <= maxTopicBytes && stem == normalizeTopic(stem)
 }
 
 // joinCapped joins items with ", ". With more than max items, it shows the

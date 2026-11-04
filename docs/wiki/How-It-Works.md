@@ -400,7 +400,8 @@ session:
 
 The second tier is the memory notes. A note is one Markdown file for each topic, for
 example `memory/notes/rpc.md` for the topic `rpc`. A note does not load into the system
-prompt. A topic has only `a-z`, `0-9`, and `-`, and at most 48 characters.
+prompt. A topic has only `a-z`, `0-9`, and `-`, and at most 48 characters. The tool
+refuses a longer topic.
 
 A note has a limit of 1 MiB. When an entry does not fit in a note, the entry goes to the
 next note of the topic: `rpc-2`, then `rpc-3`, and so on. The tool result names the note

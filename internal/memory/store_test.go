@@ -763,3 +763,31 @@ func TestReplaceRefusedPastNoteLimit(t *testing.T) {
 		}
 	}
 }
+
+// A topic longer than 48 characters is refused, so that two long topics
+// never share one note.
+func TestLongTopicRefused(t *testing.T) {
+	s := open(t)
+	long := strings.Repeat("a", 48) + " b"
+	want := `the topic "` + long + `" is too long: its note name has 50 characters, and the limit is 48. ` +
+		"Use a shorter topic, for example a topic from the topic list."
+	for _, op := range []Op{
+		{Action: "add", Target: "memory", Topic: long, Content: "fact"},
+		{Action: "replace", Target: "memory", Topic: long, OldText: "fact", Content: "new"},
+		{Action: "remove", Target: "memory", Topic: long, OldText: "fact"},
+	} {
+		if err := applyErr(t, s, op); err != want {
+			t.Fatalf("%s: %s", op.Action, err)
+		}
+	}
+	if _, err := s.Read(long, 1, 0); err == nil || err.Error() != want {
+		t.Fatalf("read: %v", err)
+	}
+	if _, err := os.Stat(s.notesPath()); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("no note must be written")
+	}
+	// A topic of 48 characters still works.
+	if res := apply(t, s, Op{Action: "add", Target: "memory", Topic: strings.Repeat("a", 48), Content: "fact"}); res.Note != strings.Repeat("a", 48) {
+		t.Fatalf("%+v", res)
+	}
+}
