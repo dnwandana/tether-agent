@@ -60,8 +60,24 @@ func TestProtectedPathsSkipsEmptyRoots(t *testing.T) {
 	if got := ProtectedPaths("", ""); len(got) != 0 {
 		t.Fatalf("got %v, want no paths", got)
 	}
-	if got := ProtectedPaths("", "/home/d"); len(got) != 1 || got[0] != "/home/d/.ssh/" {
+	if got := ProtectedPaths("", "/home/d"); len(got) != 1+len(homeStartupFiles)+len(homeStartupDirs) || got[0] != "/home/d/.ssh/" {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestStartupFilesProtected(t *testing.T) {
+	home := t.TempDir()
+	p := ProtectedPaths(filepath.Join(home, ".tether"), home)
+	for _, rel := range []string{".bashrc", ".zshrc", ".profile", ".netrc", ".gitconfig",
+		".config/systemd/user/evil.service", ".config/autostart/evil.desktop", "Library/LaunchAgents/x.plist"} {
+		if err := CheckWritable(filepath.Join(home, rel), p, false); !errors.Is(err, ErrProtected) {
+			t.Errorf("%s: %v", rel, err)
+		}
+	}
+	for _, rel := range []string{"project/.bashrc.md", ".config/other/x", "notes.txt"} {
+		if err := CheckWritable(filepath.Join(home, rel), p, false); err != nil {
+			t.Errorf("%s: %v", rel, err)
+		}
 	}
 }
 
