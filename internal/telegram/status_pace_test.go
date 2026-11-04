@@ -167,3 +167,38 @@ func TestHeldForcedEditIsNotAClosedTry(t *testing.T) {
 		t.Fatalf("edits %d, tries %v: a held forced edit is not a try", api.count("editMessageText"), tries)
 	}
 }
+
+// TestStaleTimerCallbackKeepsTheNewTimer checks that a timer callback that
+// fired before a stopTimer does no work and keeps the handle of the timer
+// that came after it.
+func TestStaleTimerCallbackKeepsTheNewTimer(t *testing.T) {
+	s, api, _, ft, _ := pacedStatus(t, 42)
+	takeSlot(t, s)
+	queueSend(s, queuedPlanText) // the send holds, and the timer T1 waits
+	if n := ft.pendingCount(); n != 1 {
+		t.Fatal("pending timers", n)
+	}
+	// T1 fires. Its callback waits for s.mu, so it does not run yet.
+	ft.mu.Lock()
+	stale := ft.pending[0].f
+	ft.pending = ft.pending[1:]
+	ft.mu.Unlock()
+	// The lock holder stops T1, which has no effect, and arms T2.
+	s.Reset()
+	if n := ft.pendingCount(); n != 1 {
+		t.Fatal("pending timers after Reset", n)
+	}
+	stale()
+	if n := ft.pendingCount(); n != 1 {
+		t.Fatal("the stale callback armed a timer: pending", n)
+	}
+	if api.count("sendMessage") != 0 {
+		t.Fatal("the stale callback sent:", api.methods())
+	}
+	s.mu.Lock()
+	s.stopTimer()
+	s.mu.Unlock()
+	if n := ft.pendingCount(); n != 0 {
+		t.Fatal("stopTimer did not stop T2: pending", n)
+	}
+}

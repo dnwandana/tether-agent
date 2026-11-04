@@ -201,6 +201,7 @@ type Status struct {
 	editHeld   bool        // the last forced edit got a pace hold and sent nothing
 	ids        []int       // every status message, for the cleanup
 	timer      func() bool // the stop function of the pending timer, nil when no timer waits
+	timerGen   uint64      // the generation of the pending timer, for onTimer
 	flushCtx   context.Context
 	closed     bool
 }
@@ -769,22 +770,34 @@ func (s *Status) send(ctx context.Context, text string, silent bool) (Message, e
 	return queueClient(s.C).SendMessage(ctx, p)
 }
 
-// armTimer starts the timer for a later flush. s.mu is held.
+// armTimer starts the timer for a later flush. The callback gets the
+// generation of this timer. s.mu is held.
 func (s *Status) armTimer(d time.Duration) {
 	if s.timer != nil {
 		return
 	}
+	s.timerGen++
+	gen := s.timerGen
+	f := func() { s.onTimer(gen) }
 	if s.FlushTimer != nil {
-		s.timer = s.FlushTimer(d, s.onTimer)
+		s.timer = s.FlushTimer(d, f)
 		return
 	}
-	s.timer = time.AfterFunc(d, s.onTimer).Stop
+	s.timer = time.AfterFunc(d, f).Stop
 }
 
 // onTimer sends the edits that waited for the interval or for a flood wait.
-func (s *Status) onTimer() {
+// gen is the generation of the timer that fired. A timer can fire while
+// stopTimer stops it, and then its callback waits for s.mu. When gen is not
+// the current generation, that timer was stopped, so the callback does
+// nothing. It does not touch s.timer, which can be the handle of a newer
+// timer.
+func (s *Status) onTimer(gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if gen != s.timerGen {
+		return
+	}
 	s.timer = nil
 	if s.flushCtx == nil {
 		return
@@ -805,10 +818,13 @@ func (s *Status) onTimer() {
 	s.flush(ctx, false)
 }
 
+// stopTimer stops the pending timer. It changes the generation, so a
+// callback of that timer that fired already does nothing. s.mu is held.
 func (s *Status) stopTimer() {
 	if s.timer != nil {
 		s.timer()
 		s.timer = nil
+		s.timerGen++
 	}
 }
 
