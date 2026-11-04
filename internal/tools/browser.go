@@ -166,7 +166,8 @@ func (bt *BrowserTools) Tools() []Tool {
 		funcTool{
 			set:  SetBrowser,
 			name: "browser_cookies",
-			desc: "Read, set, or delete browser cookies. get: return the cookies of the current page, or of a domain. " +
+			desc: "Read, set, or delete browser cookies. get: return the cookies of the current page, or of a domain, " +
+				"without their values: a cookie value is often a login secret, so get gives only the length of the value. " +
 				"set: set the cookie name=value for the current page, or for a domain. " +
 				"clear: delete the cookie name, or all cookies of the current page or of a domain when you give no name.",
 			params: `{
@@ -535,10 +536,13 @@ func (bt *BrowserTools) runJS(ctx context.Context, raw json.RawMessage, env *Env
 	return out.String(), nil
 }
 
-// cookieOut is one cookie in the browser_cookies result.
+// cookieOut is one cookie in the browser_cookies result. It has no value: a cookie
+// value is often a login token, and a tool result goes to the model provider and into
+// the transcript. A prompt injection could otherwise copy the logins of the shared
+// browser profile out. ValueLen tells whether the cookie has a value.
 type cookieOut struct {
 	Name     string `json:"name"`
-	Value    string `json:"value"`
+	ValueLen int    `json:"value_len"`
 	Domain   string `json:"domain"`
 	Path     string `json:"path"`
 	Expires  string `json:"expires,omitempty"`
@@ -624,7 +628,7 @@ func (bt *BrowserTools) cookies(ctx context.Context, raw json.RawMessage, env *E
 
 	out := make([]cookieOut, 0, len(match))
 	for _, c := range match {
-		o := cookieOut{Name: c.Name, Value: c.Value, Domain: c.Domain, Path: c.Path, HTTPOnly: c.HTTPOnly, Secure: c.Secure}
+		o := cookieOut{Name: c.Name, ValueLen: len(c.Value), Domain: c.Domain, Path: c.Path, HTTPOnly: c.HTTPOnly, Secure: c.Secure}
 		if !c.Session && c.Expires > 0 {
 			o.Expires = time.Unix(int64(c.Expires), 0).UTC().Format(time.RFC3339)
 		}

@@ -224,7 +224,7 @@ func TestCookiesSetGetClear(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil || len(got) != 2 {
 		t.Fatal(out, err)
 	}
-	if out := runToolEnv(t, cookies, `{"action":"get","name":"b"}`, env); !strings.Contains(out, `"value":"2"`) || strings.Contains(out, `"name":"a"`) {
+	if out := runToolEnv(t, cookies, `{"action":"get","name":"b"}`, env); !strings.Contains(out, `"value_len":1`) || strings.Contains(out, `"value"`) || strings.Contains(out, `"name":"a"`) {
 		t.Fatal(out)
 	}
 	if out := runToolEnv(t, bt.Tool("browser_run_js"), `{"code":"document.cookie"}`, env); !strings.Contains(out, "a=1") {
@@ -241,7 +241,7 @@ func TestCookiesSetGetClear(t *testing.T) {
 	}
 	// A domain cookie does not need the current page.
 	runToolEnv(t, cookies, `{"action":"set","name":"d","value":"4","domain":"example.org"}`, env)
-	if out := runToolEnv(t, cookies, `{"action":"get","domain":"example.org"}`, env); !strings.Contains(out, `"name":"d"`) || !strings.Contains(out, `"value":"4"`) {
+	if out := runToolEnv(t, cookies, `{"action":"get","domain":"example.org"}`, env); !strings.Contains(out, `"name":"d"`) || strings.Contains(out, `"4"`) {
 		t.Fatal(out)
 	}
 	runToolEnv(t, cookies, `{"action":"clear","domain":"example.org"}`, env)
