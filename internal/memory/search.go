@@ -43,11 +43,22 @@ func (s *Store) Search(query string) (string, error) {
 	// The search takes no lock: writeAtomic renames a file, so the search
 	// reads the old file or the new file.
 	var srcs []searchSource
+	var unread []string
 	for _, t := range []struct{ target, file string }{
 		{TargetMemory, memoryFile},
 		{TargetUser, profileFile},
 	} {
-		src := searchSource{name: t.file, entries: s.Entries(t.target)}
+		entries, err := s.ReadEntries(t.target)
+		if err != nil {
+			// A file that cannot be read is not an empty file, so the
+			// result names it.
+			cause := err
+			if u := errors.Unwrap(err); u != nil {
+				cause = u
+			}
+			unread = append(unread, fmt.Sprintf("%s was not searched: %v.", t.file, cause))
+		}
+		src := searchSource{name: t.file, entries: entries}
 		if fi, err := os.Stat(filepath.Join(s.dir, t.file)); err == nil {
 			src.modified = fi.ModTime()
 		}
@@ -119,6 +130,7 @@ func (s *Store) Search(query string) (string, error) {
 	if skipped > 0 {
 		lines = append(lines, fmt.Sprintf("%d files in memory/notes were skipped: not a note name, larger than 1 MiB, or binary.", skipped))
 	}
+	lines = append(lines, unread...)
 	return strings.Join(lines, "\n"), nil
 }
 

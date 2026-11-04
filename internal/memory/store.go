@@ -112,14 +112,22 @@ func (s *Store) Memory() string { return strings.Join(s.Entries(TargetMemory), S
 func (s *Store) Profile() string { return strings.Join(s.Entries(TargetUser), Separator) }
 
 // Entries returns the entries of the target file, read from disk. An
-// unknown target or a missing file gives no entries.
+// unknown target, a missing file, or a read error gives no entries. Use
+// ReadEntries to see the read error.
 func (s *Store) Entries(target string) []string {
+	entries, _ := s.ReadEntries(target)
+	return entries
+}
+
+// ReadEntries returns the entries of the target file, read from disk. A
+// missing file gives no entries and no error. An unknown target or a file
+// that cannot be read gives an error.
+func (s *Store) ReadEntries(target string) ([]string, error) {
 	path, _, err := s.file(target)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	entries, _ := readEntries(path)
-	return entries
+	return readEntries(path)
 }
 
 // Apply makes the change of op and returns the result. The error text is

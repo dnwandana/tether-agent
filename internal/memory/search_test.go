@@ -251,3 +251,23 @@ func TestSearchSkipsUnreadableNote(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+// A tier-1 file that cannot be read is named in the result, so that the
+// model does not take it as empty.
+func TestSearchReportsUnreadableTierOneFile(t *testing.T) {
+	s := open(t)
+	if err := os.Mkdir(filepath.Join(s.dir, "memory.md"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	noteFile(t, s, "rpc.md", "deploy via scp")
+	out := mustSearch(t, s, "deploy")
+	if !strings.Contains(out, "1. note rpc") || !strings.HasSuffix(out, "\nmemory.md was not searched: is a directory.") {
+		t.Fatal(out)
+	}
+	if _, err := s.ReadEntries(TargetMemory); err == nil {
+		t.Fatal("ReadEntries must return the read error")
+	}
+	if got, err := s.ReadEntries(TargetUser); err != nil || got != nil {
+		t.Fatalf("a missing file: %q %v", got, err)
+	}
+}

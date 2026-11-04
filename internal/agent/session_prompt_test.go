@@ -315,3 +315,20 @@ func TestMemoryTopicsErrorLogsWarning(t *testing.T) {
 		t.Fatal(p, logs.String())
 	}
 }
+
+func TestUnreadableMemoryFileLogsWarning(t *testing.T) {
+	a, sess, notes := agentWithNotes(t, true)
+	if _, err := a.Memory.Apply(memory.Op{Action: "add", Target: "user", Content: "The user likes Go"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(filepath.Dir(notes), "memory.md"), 0o700); err != nil { // a folder at memory.md
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	a.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	p, _ := a.Prompts.Get(ctx, sess, keyFor(sess, 0), "cli")
+	if !strings.Contains(p, "The user likes Go") || !strings.Contains(logs.String(), "level=WARN") ||
+		!strings.Contains(logs.String(), "memory.md") {
+		t.Fatal(p, logs.String())
+	}
+}
