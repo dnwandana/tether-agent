@@ -130,16 +130,37 @@ func (t CronJobTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (st
 		return "", toolErr("cron is not available in this session")
 	}
 	a.JobID = strings.TrimSpace(a.JobID)
+	// A caller sees and changes only the jobs of its own chat (callerScope).
+	sc, err := callerScope(ctx, t.Sessions, t.Store, env)
+	if err != nil {
+		return "", err
+	}
+	if a.Deliver != nil {
+		if err := t.checkDeliver(ctx, *a.Deliver, sc, env); err != nil {
+			return "", err
+		}
+	}
 	switch a.Action {
 	case "create":
 		return t.create(ctx, a, env)
 	case "list":
-		return t.list(ctx)
+		return t.list(ctx, sc)
 	}
 	if a.JobID == "" {
 		switch a.Action {
 		case "update", "pause", "resume", "remove", "run":
 			return "", toolErr("job_id is required for %s; call action='list' to get the job ids", a.Action)
+		}
+	}
+	switch a.Action {
+	case "update", "pause", "resume", "remove", "run":
+		j, err := t.Store.Get(ctx, a.JobID)
+		if err == nil && !sc.Has(j.Origin.SessionKey) {
+			// A job of another chat gives the same error as a job that does not exist.
+			err = fmt.Errorf("%w (%s)", cron.ErrNotFound, a.JobID)
+		}
+		if err != nil {
+			return "", cronErr(err)
 		}
 	}
 	switch a.Action {
@@ -277,10 +298,16 @@ func (t CronJobTool) oneShot(j cron.Job) bool {
 	return err == nil && sched.OneShot()
 }
 
-func (t CronJobTool) list(ctx context.Context) (string, error) {
-	jobs, err := t.Store.List(ctx)
+func (t CronJobTool) list(ctx context.Context, sc sessions.Scope) (string, error) {
+	all, err := t.Store.List(ctx)
 	if err != nil {
 		return "", cronErr(err)
+	}
+	var jobs []cron.Job
+	for _, j := range all {
+		if sc.Has(j.Origin.SessionKey) {
+			jobs = append(jobs, j)
+		}
 	}
 	if len(jobs) == 0 {
 		return "no cron jobs", nil
@@ -370,8 +397,15 @@ func (t CronJobTool) checkScript(script string) error {
 
 // origin returns the chat and the thread of the session of env. The session
 // row wins over the session key, because a group key can end with a user id.
+// A fork has no key, so the key comes from the session that it was forked from.
 func (t CronJobTool) origin(ctx context.Context, env *Env) cron.Origin {
-	o := originFromKey(env.SessionKey)
+	key := env.SessionKey
+	if t.Sessions != nil && env.SessionID != "" {
+		if k, err := t.Sessions.RootKey(ctx, env.SessionID); err == nil {
+			key = k
+		}
+	}
+	o := originFromKey(key)
 	if t.Sessions == nil || env.SessionID == "" {
 		return o
 	}
@@ -383,7 +417,22 @@ func (t CronJobTool) origin(ctx context.Context, env *Env) cron.Origin {
 	if src == "" {
 		src = o.Source
 	}
-	return cron.Origin{Source: src, ChatID: sess.ChatID, ThreadID: sess.ThreadID, SessionKey: env.SessionKey}
+	return cron.Origin{Source: src, ChatID: sess.ChatID, ThreadID: sess.ThreadID, SessionKey: key}
+}
+
+// checkDeliver refuses an explicit delivery target outside the chat of a caller that
+// does not have the full scope. Such a caller can deliver to "origin", to "local", or
+// to telegram:<chat> of its own chat, with any thread.
+func (t CronJobTool) checkDeliver(ctx context.Context, deliver string, sc sessions.Scope, env *Env) error {
+	d := strings.TrimSpace(deliver)
+	if sc.All || d == "" || d == "origin" || d == "local" {
+		return nil
+	}
+	chat, _, _ := strings.Cut(strings.TrimPrefix(d, "telegram:"), ":")
+	if env != nil && strings.HasPrefix(d, "telegram:") && chat != "" && chat == t.origin(ctx, env).ChatID {
+		return nil
+	}
+	return toolErr("deliver %q is outside this chat; use 'origin', 'local', or telegram:<chat_id> of this chat", deliver)
 }
 
 // originFromKey parses a session key: telegram:dm:<chat>[:<thread>] or
