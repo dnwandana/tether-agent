@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,4 +132,107 @@ func (f *failingSummary) Stream(c context.Context, req provider.Request) (<-chan
 		return nil, errors.New("summary down")
 	}
 	return f.fakeProv.Stream(c, req)
+}
+
+// countReads sets the compactionRead hook of a. It returns the count of the reads in viewOf.
+func countReads(a *Agent) *atomic.Int32 {
+	n := &atomic.Int32{}
+	a.compactionRead = func() { n.Add(1) }
+	return n
+}
+
+// threeToolRounds returns a script of 3 tool rounds and a final answer: 4 model calls.
+func threeToolRounds() []step {
+	return []step{
+		toolCalls(tc("c1", "echo", `{"s":"a"}`)),
+		toolCalls(tc("c2", "echo", `{"s":"b"}`)),
+		toolCalls(tc("c3", "echo", `{"s":"c"}`)),
+		text("done"),
+	}
+}
+
+func TestRoundReusesTheCompactionReadOfTheCheck(t *testing.T) {
+	fp := scripted(append([]step{text("SUM")}, threeToolRounds()...)...)
+	a, sess := compactingAgent(t, fp)
+	if did, err := a.Compactor.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal("the old compaction:", did, err)
+	}
+	// A large window, so the turn does not compact again.
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", ContextWindow: 1_000_000, Vision: true}
+	reads := countReads(a)
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}})
+	if err != nil || res.Final != "done" {
+		t.Fatal(res, err)
+	}
+	if len(fp.requests) != 1+4 {
+		t.Fatal("4 model calls after the summary call:", len(fp.requests))
+	}
+	for i, req := range fp.requests[1:] {
+		if req.Messages[3].Content != ctxmgr.SummaryPrefix+"SUM" {
+			t.Fatal("the request keeps the summary:", i)
+		}
+	}
+	if n := reads.Load(); n != 0 {
+		t.Fatal("each request uses the read of the check:", n)
+	}
+}
+
+func TestCompactingRoundReadsTheNewCompaction(t *testing.T) {
+	fp := scripted(append([]step{text("SUM")}, threeToolRounds()...)...)
+	a, sess := compactingAgent(t, fp)
+	reads := countReads(a)
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}})
+	if err != nil || res.Final != "done" {
+		t.Fatal(res, err)
+	}
+	if len(fp.requests) != 1+4 || fp.requests[0].System != ctxmgr.SummaryPrompt {
+		t.Fatal("one summary call and 4 model calls:", len(fp.requests))
+	}
+	for i, req := range fp.requests[1:] {
+		if req.Messages[3].Content != ctxmgr.SummaryPrefix+"SUM" {
+			t.Fatal("the request has the new summary:", i)
+		}
+	}
+	if n := reads.Load(); n != 1 {
+		t.Fatal("only the round that compacts reads again:", n)
+	}
+}
+
+func TestNoCompactorReadsEachRound(t *testing.T) {
+	fp := scripted(threeToolRounds()...)
+	a, sess := newAgent(t, fp, echoTool{})
+	reads := countReads(a)
+	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: &recSink{}})
+	if err != nil || res.Final != "done" || len(fp.requests) != 4 {
+		t.Fatal(res, err, len(fp.requests))
+	}
+	if n := reads.Load(); n != 4 {
+		t.Fatal("one read for each round:", n)
+	}
+}
+
+func TestCanceledCompactionCheckReadsAgain(t *testing.T) {
+	fp := scripted(text("SUM"))
+	a, sess := compactingAgent(t, fp)
+	if did, err := a.Compactor.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal("the old compaction:", did, err)
+	}
+	reads := countReads(a)
+	stored, err := a.Store.Messages(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	did, comps, read := a.compact(cctx, Turn{Session: sess}, fp, &recSink{}, stored, 0)
+	if did || comps != nil || read {
+		t.Fatal("a canceled check gives no compactions:", did, comps, read)
+	}
+	msgs, err := a.requestMessages(ctx, &turnState{sessionID: sess.ID}, stored, nil)
+	if err != nil || msgs[3].Content != ctxmgr.SummaryPrefix+"SUM" {
+		t.Fatal("the request keeps the summary:", err)
+	}
+	if n := reads.Load(); n != 1 {
+		t.Fatal("viewOf reads the compaction again:", n)
+	}
 }
