@@ -438,7 +438,55 @@ func TestShutdownRecordsRunWithoutDelivery(t *testing.T) {
 	<-s.turn.started
 	cancel()
 	<-done
-	if j := mustGet(t, s.Store, id); j.LastStatus != "error" || len(s.sends()) != 0 {
+	j := mustGet(t, s.Store, id)
+	if j.LastStatus != "error" || !strings.Contains(j.LastOutput, "shut down") || len(s.sends()) != 0 {
 		t.Fatal(j, s.sends())
+	}
+	if !j.Enabled || j.RepeatLeft != -1 || !j.NextRun.After(clk.Now()) {
+		t.Fatalf("a stopped recurring run waits for its next run: %+v", j)
+	}
+}
+
+// shutdownRun starts the due job id, then cancels the tick while the job runs.
+func shutdownRun(t *testing.T, s *schedFixture) {
+	t.Helper()
+	s.turn.gate = make(chan struct{})
+	s.turn.started = make(chan string, 2)
+	c, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.TickOnce(c); close(done) }()
+	<-s.turn.started
+	cancel()
+	<-done
+	s.turn.gate, s.turn.started = nil, nil
+}
+
+// A run that a shutdown stops does not use up the job. A one-shot job and a job on its last
+// repeat stay enabled and due, so they run again after the restart.
+func TestShutdownDoesNotUseUpLastRun(t *testing.T) {
+	for name, job := range map[string]Job{
+		"one-shot": {Name: "a", Schedule: "2026-10-27T10:30", Prompt: "x", Enabled: true},
+		"repeat 1": {Name: "a", Schedule: "30m", Prompt: "x", RepeatLeft: 1, Enabled: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, clk := scheduler(t)
+			id := mustCreate(t, s.Store, job)
+			clk.t = clk.t.Add(31 * time.Minute)
+			shutdownRun(t, s)
+			j := mustGet(t, s.Store, id)
+			if j.LastStatus != "error" || !strings.Contains(j.LastOutput, "shut down") || len(s.sends()) != 0 {
+				t.Fatal(j, s.sends())
+			}
+			if !j.Enabled || j.RepeatLeft != 1 || j.NextRun.IsZero() || j.NextRun.After(clk.Now()) {
+				t.Fatalf("a stopped last run stays enabled and due: %+v", j)
+			}
+			// The restart runs the job again. That run uses up the job.
+			clk.t = clk.t.Add(time.Minute)
+			startOnce(t, s.Scheduler)
+			j = mustGet(t, s.Store, id)
+			if runs(t, s, id) != 2 || len(s.sends()) != 1 || j.Enabled || j.RepeatLeft != 0 || j.LastStatus != "ok" {
+				t.Fatal(runs(t, s, id), s.sends(), j)
+			}
+		})
 	}
 }

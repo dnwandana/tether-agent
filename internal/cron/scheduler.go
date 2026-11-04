@@ -208,17 +208,21 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 	// The writes use a context without cancel, so a shutdown still records the run.
 	wctx := context.WithoutCancel(ctx)
 	status := o.Status
+	mark := s.Store.MarkRun
 	if ctx.Err() != nil {
-		// The process stops. Record the run, so a restart does not repeat its side effects.
+		// The process stops before the run ends. The outcome is not complete, so it is not
+		// delivered. The cronjob list shows the stop. The stopped run does not use up the job,
+		// so a one-shot job runs again after the restart.
 		status = "error"
 		o.Text = fmt.Sprintf("⚠ Cron job %s stopped: the gateway shut down before the run ended.", j.Name)
 		s.log().Warn("cron job stopped by shutdown", "job", j.ID, "name", j.Name)
+		mark = s.Store.MarkStopped
 	} else if s.Deliver != nil {
 		if err := s.Deliver.Deliver(ctx, j, o); err != nil {
 			status = "delivery_failed"
 		}
 	}
-	if err := s.Store.MarkRun(wctx, j.ID, status, o.Text, ranAt); err != nil {
+	if err := mark(wctx, j.ID, status, o.Text, ranAt); err != nil {
 		s.log().Error("cron: cannot record the job run", "job", j.ID, "err", err)
 	}
 }

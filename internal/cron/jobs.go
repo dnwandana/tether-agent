@@ -270,6 +270,18 @@ func (s *Store) Due(ctx context.Context, now time.Time) ([]Job, error) {
 // never earlier than now. It decrements RepeatLeft, and it disables the job when RepeatLeft
 // reaches 0 or when the schedule has no further run.
 func (s *Store) MarkRun(ctx context.Context, id string, status, output string, ranAt time.Time) error {
+	return s.markRun(ctx, id, status, output, ranAt, false)
+}
+
+// MarkStopped records a run that started at ranAt and that a shutdown stopped before it
+// ended. The run does not use up the job: RepeatLeft stays the same. A recurring job moves
+// to its next run. A one-shot job, or a job on its last repeat, stays due now, so it runs
+// again after the restart.
+func (s *Store) MarkStopped(ctx context.Context, id string, status, output string, ranAt time.Time) error {
+	return s.markRun(ctx, id, status, output, ranAt, true)
+}
+
+func (s *Store) markRun(ctx context.Context, id string, status, output string, ranAt time.Time, stopped bool) error {
 	now := s.now()
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		j, err := s.get(ctx, tx, id)
@@ -286,6 +298,12 @@ func (s *Store) MarkRun(ctx context.Context, id string, status, output string, r
 			next = sched.Next(now)
 		}
 		j.NextRun = next
+		if stopped {
+			if next.IsZero() || j.RepeatLeft == 1 {
+				j.NextRun = now
+			}
+			return s.write(ctx, tx, j)
+		}
 		if j.RepeatLeft > 0 {
 			j.RepeatLeft--
 		}
