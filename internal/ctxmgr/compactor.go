@@ -129,6 +129,62 @@ type Compactor struct {
 
 	mu       sync.Mutex
 	failures map[string]int
+	thrash   map[string]*thrashState
+}
+
+// maxIneffective is the number of compactions in a row that leave the view over the
+// threshold before the automatic check stops. Hermes agent/context_compressor.py uses the
+// same limit.
+const maxIneffective = 2
+
+// thrashState is the anti-thrash state of one session. The system prompt and the tool
+// schemas are a floor that a compaction cannot make smaller. When that floor and the
+// protected messages are over the threshold, each round compacts again and makes one more
+// summary call.
+type thrashState struct {
+	verify  bool // a compaction ran, and the next check judges it
+	strikes int  // the compactions in a row that left the view over the threshold
+}
+
+// allowAuto records the result over of an automatic check of the session. It reports
+// whether the check can compact. A view under the threshold clears the state.
+func (c *Compactor) allowAuto(sessionID string, over bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !over {
+		delete(c.thrash, sessionID)
+		return true
+	}
+	st := c.thrash[sessionID]
+	if st == nil {
+		return true
+	}
+	if st.verify {
+		st.verify = false
+		st.strikes++
+		if st.strikes == maxIneffective {
+			c.logger().Warn("compaction did not bring the view under the threshold two times in a row; "+
+				"automatic compaction stops until the view is under the threshold again. The system prompt "+
+				"and the tool schemas can be too large for the context window", "session", sessionID)
+		}
+	}
+	return st.strikes < maxIneffective
+}
+
+// compactedNow marks that a compaction of the session ran, so the next check judges it. A
+// forced compaction clears the strikes first.
+func (c *Compactor) compactedNow(sessionID string, force bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.thrash == nil {
+		c.thrash = map[string]*thrashState{}
+	}
+	st := c.thrash[sessionID]
+	if st == nil || force {
+		st = &thrashState{}
+		c.thrash[sessionID] = st
+	}
+	st.verify = true
 }
 
 // Maybe compacts the session when its model view is above Cfg.CompactThreshold of window,
@@ -149,16 +205,25 @@ func (c *Compactor) Maybe(ctx context.Context, s *sessions.Session, prov provide
 // schemas of the next request (EstimateFixed). The check uses it when no provider count
 // is available, for example after a compaction or with a provider that gives no usage.
 func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool, stored []sessions.StoredMessage, fixed int) (compacted bool, err error) {
-	comps, err := LatestCompaction(ctx, c.DB, s.ID)
+	compacted, _, err = c.MaybeStoredView(ctx, s, prov, window, force, stored, fixed)
+	return compacted, err
+}
+
+// MaybeStoredView is MaybeStored, and it also returns the compactions that the check read
+// with LatestCompaction. comps is nil when the read failed. comps is also nil when
+// compacted is true, because the new compaction row makes the read old.
+func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool, stored []sessions.StoredMessage, fixed int) (compacted bool, comps []Compaction, err error) {
+	comps, err = LatestCompaction(ctx, c.DB, s.ID)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	view := BuildStoredView(stored, comps)
 	trigger := int(c.Cfg.CompactThreshold * float64(window))
 	if !force {
 		last, at := lastPrompt(stored, comps)
-		if !OverThreshold(ViewSize(last, at, fixed, view), window, c.Cfg.CompactThreshold) {
-			return false, nil
+		over := OverThreshold(ViewSize(last, at, fixed, view), window, c.Cfg.CompactThreshold)
+		if !c.allowAuto(s.ID, over) || !over {
+			return false, comps, nil
 		}
 	}
 	msgs := make([]provider.Message, len(view))
@@ -167,7 +232,7 @@ func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov p
 	}
 	start, end, ok := SelectRange(msgs, c.Cfg.ProtectFirstN, c.Cfg.ProtectLastN)
 	if !ok {
-		return false, nil
+		return false, comps, nil
 	}
 	// The previous summary goes into the new summary, so the view keeps one summary.
 	prevIdx := summaryIndex(view)
@@ -175,18 +240,18 @@ func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov p
 		start = prevIdx
 	}
 	if prevIdx >= end {
-		return false, nil
+		return false, comps, nil
 	}
 	from, upto := rangeIDs(view[start:end], comps)
 	if from == 0 || upto == 0 {
-		return false, nil
+		return false, comps, nil
 	}
 	summary, err := c.summarize(ctx, prov, msgs[start:end], trigger)
 	if err != nil {
 		if ctx.Err() != nil {
-			return false, nil
+			return false, comps, nil
 		}
-		return false, c.fail(s.ID, err)
+		return false, comps, c.fail(s.ID, err)
 	}
 	// A summary model can copy the old snapshot, and the summary must keep one snapshot.
 	// The snapshot is part of the stored summary, so each later request has the same bytes.
@@ -199,11 +264,12 @@ func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov p
 	if _, err := c.DB.ExecContext(context.WithoutCancel(ctx), `INSERT INTO compactions
 		(session_id, from_message_id, upto_message_id, summary, created_at) VALUES (?, ?, ?, ?, ?)`,
 		s.ID, from, upto, summary, time.Now().UnixMilli()); err != nil {
-		return false, c.fail(s.ID, fmt.Errorf("save the summary: %w", err))
+		return false, comps, c.fail(s.ID, fmt.Errorf("save the summary: %w", err))
 	}
 	c.mu.Lock()
 	delete(c.failures, s.ID)
 	c.mu.Unlock()
+	c.compactedNow(s.ID, force)
 	c.logger().Info("compaction done", "session", s.ID, "from", from, "upto", upto, "messages", end-start)
 	// The hook runs only after the save, so each saved compaction gets one review of the
 	// range that it replaces. The call is in this goroutine, so the hook reads the state of
@@ -211,7 +277,7 @@ func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov p
 	if c.OnCompact != nil {
 		c.OnCompact(context.WithoutCancel(ctx), s, msgs, start, end)
 	}
-	return true, nil
+	return true, nil, nil
 }
 
 // View returns the model view of the session: the stored messages with the latest
