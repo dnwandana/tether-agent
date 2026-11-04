@@ -684,6 +684,28 @@ func TestOneDialAtATime(t *testing.T) {
 	}
 }
 
+func TestCacheOfOtherServerIgnored(t *testing.T) {
+	s := config.DefaultMCPServer()
+	s.Command = []string{"ab-mcp"}
+	f := &fakeServer{tools: []ToolDef{{Name: "right"}}}
+	m, _, _ := testManager(t, map[string]config.MCPServer{"a_b": s}, map[string]*fakeServer{"a_b": f})
+	// The server "a b" wrote the same cache file before a rename.
+	writeCache(t, m, "a b", []ToolDef{{Name: "wrong"}})
+	if _, err := m.readCache("a_b"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the cache of another server must count as no cache:", err)
+	}
+	reg := tools.NewRegistry()
+	if err := m.Init(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	if got := toolNames(reg); got != "mcp_a_b_right" || f.dialCount() != 1 {
+		t.Fatal(got, f.dialCount())
+	}
+	if defs, err := m.readCache("a_b"); err != nil || len(defs) != 1 || defs[0].Name != "right" {
+		t.Fatal(defs, err)
+	}
+}
+
 func TestNameClashSkipped(t *testing.T) {
 	m, _, _ := managerWithCache(t, []ToolDef{{Name: "search"}, {Name: "search"}})
 	reg := tools.NewRegistry()

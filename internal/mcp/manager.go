@@ -202,18 +202,9 @@ func (m *Manager) apply(reg *tools.Registry) (count int, skipped []string) {
 }
 
 // ToolName returns the registry name of an MCP tool: mcp_<server>_<tool>. A character
-// that a provider does not accept in a tool name becomes "_".
+// that a provider does not accept in a tool name becomes "_" (see config.MCPSafeName).
 func ToolName(server, tool string) string {
-	return "mcp_" + sanitize(server) + "_" + sanitize(tool)
-}
-
-func sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			return r
-		}
-		return '_'
-	}, s)
+	return "mcp_" + config.MCPSafeName(server) + "_" + config.MCPSafeName(tool)
 }
 
 // call runs one tool call. A cold server starts first. A call that fails because the
@@ -698,11 +689,12 @@ type cachedTool struct {
 }
 
 func (m *Manager) cachePath(server string) string {
-	return filepath.Join(m.CacheDir, sanitize(server)+".json")
+	return filepath.Join(m.CacheDir, config.MCPSafeName(server)+".json")
 }
 
 // readCache returns the cached tool list of the server. A missing file returns an error
-// that wraps os.ErrNotExist.
+// that wraps os.ErrNotExist. A file of a different server also returns such an error, because
+// two server names can have the same file name.
 func (m *Manager) readCache(server string) ([]ToolDef, error) {
 	b, err := os.ReadFile(m.cachePath(server))
 	if err != nil {
@@ -711,6 +703,9 @@ func (m *Manager) readCache(server string) ([]ToolDef, error) {
 	var f cacheFile
 	if err := json.Unmarshal(b, &f); err != nil {
 		return nil, fmt.Errorf("%s: %w", m.cachePath(server), err)
+	}
+	if f.Server != server {
+		return nil, fmt.Errorf("%s holds the tools of the server %q: %w", m.cachePath(server), f.Server, os.ErrNotExist)
 	}
 	defs := make([]ToolDef, 0, len(f.Tools))
 	for _, t := range f.Tools {

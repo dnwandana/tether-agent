@@ -393,3 +393,28 @@ func TestFallbackListValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestMCPServerNameValidation(t *testing.T) {
+	c := Default()
+	c.Providers["primary"] = Provider{Format: "openai"}
+	for _, name := range []string{"a b", "a_b", "GitHub", "github", "search", "a-b"} {
+		c.MCP.Servers[name] = DefaultMCPServer()
+	}
+	err := c.Validate()
+	for _, want := range []string{
+		`config: the MCP server names "a b" and "a_b" are the same`,
+		`config: the MCP server names "GitHub" and "github" are the same`,
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("want %q, got %v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "search") || strings.Contains(err.Error(), `"a-b"`) {
+		t.Fatal("a name with no clash is in the error:", err)
+	}
+	delete(c.MCP.Servers, "a b")
+	delete(c.MCP.Servers, "GitHub")
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
