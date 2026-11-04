@@ -12,6 +12,10 @@ import (
 // ErrQuerySyntax marks an FTS5 query that SQLite cannot parse.
 var ErrQuerySyntax = errors.New(`FTS5 query syntax: quote phrases with "..."`)
 
+// kindReview is the kind of a background review session (agent.KindReview;
+// sessions cannot import agent).
+const kindReview = "review"
+
 // Hit is one message that matches a search.
 type Hit struct {
 	SessionID, Title string
@@ -24,7 +28,9 @@ type Hit struct {
 // archived ones included. It returns at most limit hits, newest first. The
 // snippet marks the matches with "[" and "]" and holds about 12 tokens. It
 // skips the goal_judge sessions, because each judge prompt repeats a part of a
-// chat reply.
+// chat reply. It also skips the review sessions, because a review holds only
+// the review prompt and memory and skill calls that repeat the chat. A review
+// is newer than its chat, so its hits can push the chat hit out of the limit.
 func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("sessions: search: the query is empty")
@@ -36,7 +42,8 @@ func (s *Store) Search(ctx context.Context, query string, limit int) ([]Hit, err
 		snippet(messages_fts, 0, '[', ']', '…', 12)
 		FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.id = m.session_id
-		WHERE messages_fts MATCH ? AND s.kind != ? ORDER BY m.id DESC LIMIT ?`, query, KindGoalJudge, limit)
+		WHERE messages_fts MATCH ? AND s.kind NOT IN (?, ?) ORDER BY m.id DESC LIMIT ?`,
+		query, KindGoalJudge, kindReview, limit)
 	if err != nil {
 		return nil, searchErr(err)
 	}

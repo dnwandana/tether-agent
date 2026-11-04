@@ -454,7 +454,8 @@ shows in the `## MEMORY TOPICS` section from the next session. See
 [Why the prompt stays the same](#why-the-prompt-stays-the-same).
 
 The `session_search` tool searches all past sessions with SQLite full text search. The agent uses
-it to find an old conversation. It skips the goal judge sessions.
+it to find an old conversation. It skips the goal judge sessions and the review sessions,
+because their messages repeat the chat. It finds the cron and subagent sessions.
 
 ## Background reviews
 

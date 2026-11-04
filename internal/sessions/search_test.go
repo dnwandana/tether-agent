@@ -156,3 +156,30 @@ func TestSearchSkipsGoalJudgeSessions(t *testing.T) {
 		t.Fatalf("%+v %v", hits, err)
 	}
 }
+
+func TestSearchSkipsReviewSessions(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	chat, _ := s.Create(ctx, Session{Key: "telegram:1", Source: "telegram", Title: "deploy"})
+	review, _ := s.Create(ctx, Session{Source: "telegram", Kind: "review", ParentID: chat.ID})
+	cron, _ := s.Create(ctx, Session{Source: "cron", Kind: "cron"})
+	child, _ := s.Create(ctx, Session{Source: "telegram", Kind: "subagent", ParentID: chat.ID})
+	// The review session gets its message last, so it is the newest hit.
+	for _, id := range []string{chat.ID, cron.ID, child.ID, review.ID} {
+		if _, err := s.Append(ctx, id, provider.Message{Role: provider.RoleUser, Content: "the yakdeploy step failed"}, MessageMeta{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hits, err := s.Search(ctx, "yakdeploy", 10)
+	if err != nil || len(hits) != 3 {
+		t.Fatalf("%+v %v", hits, err)
+	}
+	for _, h := range hits {
+		if h.SessionID == review.ID {
+			t.Fatalf("the search returned the review session: %+v", hits)
+		}
+	}
+	if hits[0].SessionID != child.ID || hits[1].SessionID != cron.ID || hits[2].SessionID != chat.ID {
+		t.Fatalf("%+v", hits)
+	}
+}
