@@ -64,6 +64,11 @@ const (
 	// maxClosedEditTries is the number of tries for the last edit of a
 	// closed bubble, the first try included.
 	maxClosedEditTries = 3
+	// closedHoldLimit is the time after Close in which a pace hold keeps the
+	// remaining work. A hold is not a try, so in a chat with a full budget
+	// the holds can continue for ever. A later hold drops the waiting edit
+	// or the queued message.
+	closedHoldLimit = 5 * time.Minute
 )
 
 // ToolLine returns the status line for one tool call.
@@ -204,6 +209,7 @@ type Status struct {
 	timerGen   uint64      // the generation of the pending timer, for onTimer
 	flushCtx   context.Context
 	closed     bool
+	closedAt   time.Time // the time of Close
 }
 
 // Add adds the line for one tool call from src. The main agent gets the
@@ -392,7 +398,8 @@ func (s *Status) Reset() {
 // Close closes the open bubble and sends the queue one time. It deletes all
 // status messages when Cleanup and success are both true. Add does nothing
 // after Close. The timer still tries the failed edits of closed bubbles, so
-// the final counts can arrive later.
+// the final counts can arrive later. A pace hold that comes closedHoldLimit
+// or more after Close drops the edit or the queued message.
 func (s *Status) Close(ctx context.Context, success bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -400,6 +407,7 @@ func (s *Status) Close(ctx context.Context, success bool) {
 		return
 	}
 	s.closed = true
+	s.closedAt = s.now()
 	cleanup := s.Cleanup && success
 	if cleanup {
 		// Do not send a message that the cleanup deletes next.
@@ -537,6 +545,12 @@ func (s *Status) editClosed(ctx context.Context) bool {
 		_, err := interimClient(s.C).EditMessageText(ctx, EditMessageTextParams{ChatID: s.ChatID, MessageID: e.msgID, Text: e.text})
 		// A pace hold sent no request, so it is not a try and sets no lastEdit.
 		if hold, ok := isPaceHold(err); ok {
+			if s.holdTooLate() {
+				s.logger().Info("telegram status edit of a closed bubble held too long after close, drop it",
+					"wait_s", hold.Seconds())
+				s.waiting = s.waiting[1:]
+				continue
+			}
 			s.logger().Debug("telegram status pace hold", "kind", "closed_edit", "wait_s", hold.Seconds())
 			s.armTimer(hold)
 			return false
@@ -564,6 +578,12 @@ func (s *Status) editClosed(ctx context.Context) bool {
 		s.waiting = s.waiting[1:]
 	}
 	return true
+}
+
+// holdTooLate reports whether a pace hold comes closedHoldLimit or more after
+// Close. Then the held edit or message must not wait again. s.mu is held.
+func (s *Status) holdTooLate() bool {
+	return s.closed && !s.now().Before(s.closedAt.Add(closedHoldLimit))
 }
 
 // stopIdleTimer stops the timer when no closed bubble waits for an edit and
@@ -712,6 +732,11 @@ func (s *Status) sendQueue(ctx context.Context) time.Duration {
 		e := s.queue[0]
 		m, err := s.send(ctx, e.text, e.silent)
 		if hold, ok := isPaceHold(err); ok {
+			if s.holdTooLate() {
+				s.logger().Info("telegram status send held too long after close, drop it", "wait_s", hold.Seconds())
+				s.queue = s.queue[1:]
+				continue
+			}
 			// The entry stays at the head, and floodUntil does not change.
 			s.logger().Debug("telegram status pace hold", "kind", "send", "wait_s", hold.Seconds())
 			return hold
