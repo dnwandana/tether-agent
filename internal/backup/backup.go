@@ -331,10 +331,10 @@ func lockBackups(dir string) (release func(), err error) {
 // memoryLockPoll is the time between two tries of lockMemory.
 const memoryLockPoll = 50 * time.Millisecond
 
-// copyItems copies the files of found into tmp/files with the known secret values
-// masked (maskTextFile). A memory item always gets a copy. Another item gets a copy only
-// when the mask changed the file. Src of an item with a copy is the copy. It counts the
-// changed files in red.
+// copyItems copies each file of found into tmp/files and sets Src to the copy.
+// maskTextFile masks the known secret values in a text file and copies a binary file
+// with no change. The hash and the archive read the copy, so they get the same bytes.
+// It counts the masked files in red.
 func copyItems(found []item, tmp string, r *security.Redactor, red *Redacted) error {
 	for i := range found {
 		it := &found[i]
