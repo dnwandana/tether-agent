@@ -10,14 +10,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/dnwandana/tether-agent/internal/db"
 )
 
 // manifestLimit is the largest manifest.json that stage reads.
 const manifestLimit = 1 << 20
+
+// stagePrefix is the name prefix of a stage folder in the data dir.
+const stagePrefix = ".restore-tmp-"
+
+// swapMarkerName is the file that Restore puts in the stage folder before the first rename of
+// the swap. A stage folder with this file can hold new files that are not in the data dir, so
+// removeStaleStages keeps it.
+const swapMarkerName = ".swap-started"
 
 // staged is an archive that stage unpacked and verified in a temp folder of the data dir.
 type staged struct {
@@ -30,7 +40,7 @@ type staged struct {
 // is in the data dir, so the swap can move each item with one rename. On each error stage
 // removes the folder, so the data dir does not change.
 func stage(ctx context.Context, r io.Reader, dataDir string) (*staged, error) {
-	dir, err := os.MkdirTemp(dataDir, ".restore-tmp-")
+	dir, err := os.MkdirTemp(dataDir, stagePrefix)
 	if err != nil {
 		return nil, fmt.Errorf("create the stage folder: %w", err)
 	}
@@ -39,6 +49,44 @@ func stage(ctx context.Context, r io.Reader, dataDir string) (*staged, error) {
 		return nil, errors.Join(err, os.RemoveAll(dir))
 	}
 	return s, nil
+}
+
+// removeStaleStages removes the stage folders in dataDir that a killed restore left before its
+// swap. The caller holds the gateway lock and the exclusive DB lock, so no running restore owns
+// these folders. A folder with the swap marker stays: a failed undo or a restore that was
+// killed during the swap leaves it, and it can hold the only copy of some new files.
+func removeStaleStages(dataDir string) error {
+	ents, err := os.ReadDir(dataDir)
+	if err != nil {
+		return fmt.Errorf("read the folder %s: %w", dataDir, err)
+	}
+	for _, e := range ents {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), stagePrefix) {
+			continue
+		}
+		p := filepath.Join(dataDir, e.Name())
+		if _, err := os.Lstat(filepath.Join(p, swapMarkerName)); err == nil {
+			continue
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("read the old stage folder %s: %w", p, err)
+		}
+		if err := os.RemoveAll(p); err != nil {
+			return fmt.Errorf("remove the old stage folder %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// markSwap puts the swap marker in the stage folder dir.
+func markSwap(dir string) error {
+	f, err := os.OpenFile(filepath.Join(dir, swapMarkerName), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create the swap marker in the stage folder: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("create the swap marker in the stage folder: %w", err)
+	}
+	return nil
 }
 
 // stageInto does the work of stage in the folder dir.

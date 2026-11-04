@@ -76,8 +76,9 @@ func runRestore(args []string, stdout, stderr io.Writer) int {
 		archive, source = f, filepath.Base(file)
 	}
 
-	// A signal cancels the context, so the stage step stops and deletes its folder.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// A signal cancels the context, so the stage step stops and deletes its folder. SIGHUP comes
+	// when the owner closes the terminal, for example at the prompt.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
 	var confirm func(backup.Summary) bool
