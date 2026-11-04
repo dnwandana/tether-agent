@@ -1430,3 +1430,22 @@ func TestMaxTurnsSummaryUsageEmptyTwice(t *testing.T) {
 		t.Fatalf("the empty row has U1 + U2: %+v", u)
 	}
 }
+
+func TestConfigOfZeroAgentHasNoRace(t *testing.T) {
+	a := &Agent{}
+	var wg sync.WaitGroup
+	got := make([]*config.Config, 2)
+	for i := range got {
+		wg.Go(func() { got[i] = a.config() })
+	}
+	wg.Wait()
+	if a.Cfg != nil {
+		t.Fatal("config() wrote a.Cfg")
+	}
+	want := config.Default()
+	for _, c := range got {
+		if c == nil || c.Agent.MaxTurns != want.Agent.MaxTurns || c.Delegation.MaxConcurrentChildren != want.Delegation.MaxConcurrentChildren {
+			t.Fatalf("%+v", c)
+		}
+	}
+}

@@ -1879,3 +1879,43 @@ func TestCleanPreviewDoesNotWaitForChatFlood(t *testing.T) {
 		t.Fatal(ft.waitList())
 	}
 }
+
+// TestStaleFlushTimerCallbackKeepsTheNewTimer checks that a flush timer
+// callback that waited for s.mu while stopTimer stopped its timer does
+// nothing. It must not take the handle of the newer timer, so stopTimer can
+// still stop that timer.
+func TestStaleFlushTimerCallbackKeepsTheNewTimer(t *testing.T) {
+	s, api, clk := streamer(t, false)
+	s.C = api.pacedClient(clk)
+	ft := &fakeTimers{clk: clk}
+	s.FlushTimer = ft.timer
+	// Another sender of the chat takes the slot of this second.
+	if _, err := s.C.SendMessage(ctx, SendMessageParams{ChatID: 42, Text: "status"}); err != nil {
+		t.Fatal(err)
+	}
+	s.Delta(ctx, "Hello") // the preview send holds, and the timer T1 waits
+	if n := ft.pendingCount(); n != 1 {
+		t.Fatal("pending timers", n)
+	}
+	sends := api.count("sendMessage")
+	// T1 fires. Its callback waits for s.mu, so it does not run yet.
+	stale := popTimer(t, ft)
+	// The lock holder stops T1, which has no effect, and arms T2.
+	s.mu.Lock()
+	s.stopTimer()
+	s.armTimer(time.Second)
+	s.mu.Unlock()
+	stale()
+	if n := ft.pendingCount(); n != 1 {
+		t.Fatal("the stale callback changed the timers: pending", n)
+	}
+	if api.count("sendMessage") != sends {
+		t.Fatal("the stale callback sent:", api.methods())
+	}
+	s.mu.Lock()
+	s.stopTimer()
+	s.mu.Unlock()
+	if n := ft.pendingCount(); n != 0 {
+		t.Fatal("stopTimer did not stop T2: pending", n)
+	}
+}

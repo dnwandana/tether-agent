@@ -438,7 +438,134 @@ func TestShutdownRecordsRunWithoutDelivery(t *testing.T) {
 	<-s.turn.started
 	cancel()
 	<-done
-	if j := mustGet(t, s.Store, id); j.LastStatus != "error" || len(s.sends()) != 0 {
+	j := mustGet(t, s.Store, id)
+	if j.LastStatus != "error" || !strings.Contains(j.LastOutput, "shut down") || len(s.sends()) != 0 {
 		t.Fatal(j, s.sends())
+	}
+	if !j.Enabled || j.RepeatLeft != -1 || !j.NextRun.After(clk.Now()) {
+		t.Fatalf("a stopped recurring run waits for its next run: %+v", j)
+	}
+}
+
+// shutdownRun starts the due job id, then cancels the tick while the job runs.
+func shutdownRun(t *testing.T, s *schedFixture) {
+	t.Helper()
+	s.turn.gate = make(chan struct{})
+	s.turn.started = make(chan string, 2)
+	c, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.TickOnce(c); close(done) }()
+	<-s.turn.started
+	cancel()
+	<-done
+	s.turn.gate, s.turn.started = nil, nil
+}
+
+// A run that a shutdown stops does not use up the job. A one-shot job and a job on its last
+// repeat stay enabled and due, so they run again after the restart.
+func TestShutdownDoesNotUseUpLastRun(t *testing.T) {
+	for name, job := range map[string]Job{
+		"one-shot": {Name: "a", Schedule: "2026-10-27T10:30", Prompt: "x", Enabled: true},
+		"repeat 1": {Name: "a", Schedule: "30m", Prompt: "x", RepeatLeft: 1, Enabled: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, clk := scheduler(t)
+			id := mustCreate(t, s.Store, job)
+			clk.t = clk.t.Add(31 * time.Minute)
+			shutdownRun(t, s)
+			j := mustGet(t, s.Store, id)
+			if j.LastStatus != "error" || !strings.Contains(j.LastOutput, "shut down") || len(s.sends()) != 0 {
+				t.Fatal(j, s.sends())
+			}
+			if !j.Enabled || j.RepeatLeft != 1 || j.NextRun.IsZero() || j.NextRun.After(clk.Now()) {
+				t.Fatalf("a stopped last run stays enabled and due: %+v", j)
+			}
+			// The restart runs the job again. That run uses up the job.
+			clk.t = clk.t.Add(time.Minute)
+			startOnce(t, s.Scheduler)
+			j = mustGet(t, s.Store, id)
+			if runs(t, s, id) != 2 || len(s.sends()) != 1 || j.Enabled || j.RepeatLeft != 0 || j.LastStatus != "ok" {
+				t.Fatal(runs(t, s, id), s.sends(), j)
+			}
+		})
+	}
+}
+
+// A run record that cannot be written leaves the next run in the past. The job then waits
+// before it runs again, and the wait doubles. A good write clears the wait.
+func TestMarkRunFailureBacksOff(t *testing.T) {
+	s, clk := scheduler(t)
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	if _, err := s.Store.DB.ExecContext(ctx, `CREATE TRIGGER fail_write BEFORE UPDATE ON cron_jobs
+		BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END`); err != nil {
+		t.Fatal(err)
+	}
+	clk.t = clk.t.Add(31 * time.Minute)
+	for range 3 {
+		s.TickOnce(ctx)
+	}
+	if runs(t, s, id) != 1 || len(s.sends()) != 1 {
+		t.Fatal("a failed run record must not start the job on each tick", runs(t, s, id), s.sends())
+	}
+	clk.t = clk.t.Add(markRetryMin + time.Second)
+	s.TickOnce(ctx)
+	s.TickOnce(ctx)
+	if runs(t, s, id) != 2 {
+		t.Fatal("the job runs again after the first wait", runs(t, s, id))
+	}
+	clk.t = clk.t.Add(markRetryMin + time.Second)
+	s.TickOnce(ctx)
+	if runs(t, s, id) != 2 {
+		t.Fatal("the second wait is longer", runs(t, s, id))
+	}
+	clk.t = clk.t.Add(markRetryMin)
+	s.TickOnce(ctx)
+	if runs(t, s, id) != 3 {
+		t.Fatal("the job runs again after the second wait", runs(t, s, id))
+	}
+	if _, err := s.Store.DB.ExecContext(ctx, `DROP TRIGGER fail_write`); err != nil {
+		t.Fatal(err)
+	}
+	clk.t = clk.t.Add(4*markRetryMin + time.Second)
+	s.TickOnce(ctx)
+	j := mustGet(t, s.Store, id)
+	if runs(t, s, id) != 4 || j.LastStatus != "ok" || !j.NextRun.After(clk.Now()) {
+		t.Fatal(runs(t, s, id), j)
+	}
+	s.mu.Lock()
+	_, waits := s.retry[id]
+	s.mu.Unlock()
+	if waits {
+		t.Fatal("a good run record clears the wait")
+	}
+	for range 20 {
+		s.noteMark(id, errors.New("disk I/O error"))
+	}
+	if w := s.retry[id].wait; w != markRetryMax {
+		t.Fatal("the wait has a maximum", w)
+	}
+}
+
+// A job whose stored schedule cannot be parsed has no next run. The scheduler disables it
+// and tells why, so it does not run on each tick.
+func TestBadStoredScheduleDisablesJob(t *testing.T) {
+	s, clk := scheduler(t)
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	if _, err := s.Store.DB.ExecContext(ctx, `UPDATE cron_jobs SET schedule='sometimes' WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	clk.t = clk.t.Add(31 * time.Minute)
+	for range 3 {
+		s.TickOnce(ctx)
+	}
+	j := mustGet(t, s.Store, id)
+	if runs(t, s, id) != 1 || len(s.sends()) != 1 {
+		t.Fatal(runs(t, s, id), s.sends())
+	}
+	if j.Enabled || !j.NextRun.IsZero() || j.LastStatus != "error" || !strings.Contains(j.LastOutput, `"sometimes"`) {
+		t.Fatalf("%+v", j)
+	}
+	if _, waits := s.retry[id]; waits {
+		t.Fatal("a disabled job needs no wait")
 	}
 }

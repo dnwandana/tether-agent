@@ -227,20 +227,79 @@ func TestOnCompactHookCalledWithFullView(t *testing.T) {
 	}
 }
 
-func TestOnCompactDoesNotBlock(t *testing.T) {
+func TestOnCompactRunsAfterTheSummaryIsSaved(t *testing.T) {
 	c, sess, fp := compactorWithSession(t, 80)
-	release := make(chan struct{})
-	defer close(release)
-	c.OnCompact = func(context.Context, *sessions.Session, []provider.Message, int, int) { <-release }
-	done := make(chan struct{})
-	go func() {
-		c.Maybe(ctx, sess, fp, 2000, false)
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("a slow hook must not block the compaction")
+	saved := -1
+	c.OnCompact = func(context.Context, *sessions.Session, []provider.Message, int, int) {
+		comps, err := LoadCompactions(ctx, c.DB, sess.ID)
+		if err != nil {
+			t.Error(err)
+		}
+		saved = len(comps)
+	}
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	if saved != 1 {
+		t.Fatal("OnCompact must run after the save and before Maybe returns:", saved)
+	}
+}
+
+func TestOnCompactRunsOnceForTheSavedRange(t *testing.T) {
+	// One failure keeps the failure count. maxFailures failures reset it.
+	for _, failures := range []int{1, maxFailures} {
+		t.Run(fmt.Sprint(failures), func(t *testing.T) { onCompactAfterFailures(t, failures) })
+	}
+}
+
+// onCompactAfterFailures fails the summary n times, adds 20 messages, and then compacts.
+// It checks that OnCompact ran one time, for the range of the saved compaction.
+func onCompactAfterFailures(t *testing.T, n int) {
+	c, sess, fp := compactorWithSession(t, 80)
+	type call struct {
+		view       []provider.Message
+		start, end int
+	}
+	var (
+		mu    sync.Mutex
+		calls []call
+	)
+	c.OnCompact = func(_ context.Context, _ *sessions.Session, view []provider.Message, start, end int) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, call{view, start, end})
+	}
+	fp.err = errors.New("summary down")
+	for i := 1; i <= n; i++ {
+		if did, _ := c.Maybe(ctx, sess, fp, 2000, false); did {
+			t.Fatal(i, "a failed summary must not compact")
+		}
+	}
+	// The session grows before the next attempt, so the range moves.
+	appendPlain(t, c.Store, sess.ID, 80, 20)
+	fp.err = nil
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 1 {
+		t.Fatal("one review for each compaction that is saved:", len(calls))
+	}
+	stored, _ := c.Store.Messages(ctx, sess.ID)
+	comps, err := LoadCompactions(ctx, c.DB, sess.ID)
+	if err != nil || len(comps) != 1 {
+		t.Fatalf("%+v %v", comps, err)
+	}
+	content := map[int64]string{}
+	for _, m := range stored {
+		content[m.ID] = m.Msg.Content
+	}
+	g := calls[0]
+	if len(g.view) != 100 || g.view[g.start].Content != content[comps[0].FromMessageID] ||
+		g.view[g.end-1].Content != content[comps[0].UptoMessageID] {
+		t.Fatal("the review must cover the saved range:", len(g.view), g.start, g.end, comps[0].FromMessageID, comps[0].UptoMessageID)
 	}
 }
 

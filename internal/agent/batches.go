@@ -98,6 +98,10 @@ func (b *Batches) Start(ctx context.Context, parentKey, parentSessionID string, 
 		b.mu.Unlock()
 		stopAfter()
 		cancel()
+		// The model does not get the id, so delete the row. Else RecoverLost reports it.
+		if _, err := b.DB.ExecContext(dbCtx, `DELETE FROM delegation_batches WHERE id = ?`, id); err != nil {
+			b.logger().Error("agent: cannot delete the row of a refused batch", "batch", id, "err", err.Error())
+		}
 		return "", errors.New("agent: the process stops, so it starts no background batch")
 	}
 	b.wg.Add(1)

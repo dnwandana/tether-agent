@@ -165,6 +165,20 @@ func TestMarkRunNextRunNeverInPast(t *testing.T) {
 	}
 }
 
+func TestMarkStoppedKeepsRepeat(t *testing.T) {
+	c := fixedNow(2026, 10, 27, 10, 0)
+	s := store(t, c)
+	j, _ := s.Create(ctx, Job{Schedule: "every 1h", Prompt: "x", RepeatLeft: 3, Enabled: true})
+	c.t = j.NextRun
+	if err := s.MarkStopped(ctx, j.ID, "error", "stopped", c.t); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(ctx, j.ID)
+	if !got.Enabled || got.RepeatLeft != 3 || !got.NextRun.After(c.t) || got.LastStatus != "error" {
+		t.Fatalf("%+v", got)
+	}
+}
+
 func TestUpdateEmptySliceClears(t *testing.T) {
 	s := store(t, fixedNow(2026, 10, 27, 10, 0))
 	j, _ := s.Create(ctx, Job{Schedule: "30m", Prompt: "x", Skills: []string{"a"}, Toolsets: []string{"web"}, Enabled: true})

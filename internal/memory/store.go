@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -111,14 +112,22 @@ func (s *Store) Memory() string { return strings.Join(s.Entries(TargetMemory), S
 func (s *Store) Profile() string { return strings.Join(s.Entries(TargetUser), Separator) }
 
 // Entries returns the entries of the target file, read from disk. An
-// unknown target or a missing file gives no entries.
+// unknown target, a missing file, or a read error gives no entries. Use
+// ReadEntries to see the read error.
 func (s *Store) Entries(target string) []string {
+	entries, _ := s.ReadEntries(target)
+	return entries
+}
+
+// ReadEntries returns the entries of the target file, read from disk. A
+// missing file gives no entries and no error. An unknown target or a file
+// that cannot be read gives an error.
+func (s *Store) ReadEntries(target string) ([]string, error) {
 	path, _, err := s.file(target)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	entries, _ := readEntries(path)
-	return entries
+	return readEntries(path)
 }
 
 // Apply makes the change of op and returns the result. The error text is
@@ -159,10 +168,16 @@ func (s *Store) Apply(op Op) (Result, error) {
 	}
 
 	topic := ""
-	if op.Action != ActionAdd && strings.TrimSpace(op.Topic) != "" {
+	if strings.TrimSpace(op.Topic) != "" {
+		t, err := topicOf(op.Topic)
+		if err != nil {
+			return Result{}, err
+		}
 		// A wide search in place of a narrow one can change the wrong entry.
-		if topic = normalizeTopic(op.Topic); topic == "" {
-			return Result{}, fmt.Errorf("the topic %q has no letters a-z or digits; use a topic from the topic list", op.Topic)
+		if op.Action != ActionAdd {
+			if topic = t; topic == "" {
+				return Result{}, fmt.Errorf("the topic %q has no letters a-z or digits; use a topic from the topic list", op.Topic)
+			}
 		}
 	}
 
@@ -220,7 +235,7 @@ func (s *Store) change(op Op, path string, limit int, entries []string, content,
 			// The notes that were not read can hold the entry, so the model must know them.
 			msg := fmt.Sprintf("no entry matches %q in %s or in the notes.", oldText, op.Target)
 			if skipped > 0 {
-				msg += fmt.Sprintf(" %d notes were skipped: larger than 1 MiB, binary, or not readable.", skipped)
+				msg += fmt.Sprintf(" %d notes were skipped: larger than 8 MiB, binary, or not readable.", skipped)
 			}
 			if stop != "" {
 				msg += " The read stopped at " + stop + "; some notes were not read. Give a topic."
@@ -253,8 +268,7 @@ func (s *Store) change(op Op, path string, limit int, entries []string, content,
 
 	// The spill writes the inbox before tier 1. The dedupe of the inbox stops
 	// a second copy when the model tries again after a failed tier-1 write.
-	inbox := inboxTopic(op.Target)
-	count, _, err := s.appendToNote(inbox, op.Target, content)
+	inbox, count, _, err := s.appendToNote(inboxTopic(op.Target), op.Target, content)
 	if err != nil {
 		return Result{}, err
 	}
@@ -284,7 +298,17 @@ func (s *Store) changeNote(op Op, n note, i int, content string) (Result, error)
 			text = fmt.Sprintf("Entry removed from note %s. The note had no more entries, so the note was deleted.", n.Topic)
 		}
 	} else {
+		// A note from an older version can be larger than maxNoteBytes. A
+		// replace that does not make the entry longer can change it, so that
+		// the model can make the note smaller.
+		grows := len(content) > len(n.Entries[i])
 		n.Entries[i] = content
+		if grows && len(s.noteText(n)) > maxNoteBytes {
+			//lint:ignore ST1005 the text is a fixed message for the model with full sentences.
+			return Result{}, fmt.Errorf("the new text makes note %s larger than 1 MiB, so nothing changed. "+
+				"Remove the old entry with action remove, and then add the new text with action add and topic %s. "+
+				"The add puts the entry in the next note of the topic when the note is full.", n.Topic, n.Topic)
+		}
 		text = fmt.Sprintf("Entry replaced in note %s (%d entries).", n.Topic, len(n.Entries))
 	}
 	if err := s.writeNote(n); err != nil {
@@ -293,10 +317,11 @@ func (s *Store) changeNote(op Op, n note, i int, content string) (Result, error)
 	return Result{Text: text, Note: n.Topic}, nil
 }
 
-// openNote reads the note of topic for a replace or a remove. The error of
-// a missing note lists the notes, so that the model can select one.
+// openNote reads the note of topic for a replace or a remove, with the limit
+// maxChangeBytes. The error of a missing note lists the notes, so that the
+// model can select one.
 func (s *Store) openNote(topic string) (note, error) {
-	n, err := s.readNote(topic)
+	n, err := s.readNoteMax(topic, maxChangeBytes)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		names, _, lerr := s.listNotes()
@@ -316,12 +341,13 @@ func (s *Store) openNote(topic string) (note, error) {
 }
 
 // findInNotes returns the note and the index of the one note entry that
-// contains oldText. It reads the notes in name order, with the limits of a
-// search (eachNote). Two entries with the same text count as one match, and the
-// first one is the match. No match gives a note with an empty topic. A note
-// that is too large, binary, or not readable is skipped, and skipped counts
-// these notes, so that one bad note does not stop a change in the other notes.
-// stop is the limit that stopped the read, or "".
+// contains oldText. It reads the notes in name order, with the note and byte
+// limits of a search (eachNote) and the size limit maxChangeBytes. Two entries
+// with the same text count as one match, and the first one is the match. No
+// match gives a note with an empty topic. A note that is too large, binary, or
+// not readable is skipped, and skipped counts these notes, so that one bad note
+// does not stop a change in the other notes. stop is the limit that stopped the
+// read, or "".
 func (s *Store) findInNotes(oldText string) (note, int, int, string, error) {
 	names, _, err := s.listNotes()
 	if errors.Is(err, errNotesNotFolder) {
@@ -335,7 +361,7 @@ func (s *Store) findInNotes(oldText string) (note, int, int, string, error) {
 		i int
 	}
 	var hits []match
-	skipped, stop := s.eachNote(names, func(n note) {
+	skipped, stop := s.eachNote(names, maxChangeBytes, func(n note) {
 		for i, e := range n.Entries {
 			if strings.Contains(e, oldText) {
 				hits = append(hits, match{n, i})
@@ -398,48 +424,100 @@ func (s *Store) add(op Op, path string, limit int, entries []string, content str
 		}
 		topic, spill = inboxTopic(op.Target), true
 	}
-	count, added, err := s.appendToNote(topic, op.Target, content)
+	name, count, added, err := s.appendToNote(topic, op.Target, content)
 	if err != nil {
 		return Result{}, err
 	}
 	if !added {
 		return Result{Text: alreadyExists}, nil
 	}
-	first := fmt.Sprintf("Entry added to note %s (%d entries).", topic, count)
+	first := fmt.Sprintf("Entry added to note %s (%d entries).", name, count)
 	if spill {
 		first = fmt.Sprintf("%s is full (%d/%d characters), so the entry went to note %s (%d entries).",
-			op.Target, size(entries), limit, topic, count)
+			op.Target, size(entries), limit, name, count)
 	}
 	lines := []string{first}
+	if name != topic {
+		lines = append(lines, fmt.Sprintf("Note %s is full (1 MiB), so the entry went to note %s.", topic, name))
+	}
 	if topicLine != "" {
 		lines = append(lines, topicLine)
 	}
 	lines = append(lines, searchHint)
-	return Result{Text: strings.Join(lines, "\n"), Note: topic}, nil
+	return Result{Text: strings.Join(lines, "\n"), Note: name}, nil
 }
 
-// appendToNote appends content to the note of topic. A missing note is new
-// and gets typ as its type. A note that has an equal entry does not change,
-// and added is false. count is the entry count after the call. Call it with
-// the lock held.
-func (s *Store) appendToNote(topic, typ, content string) (count int, added bool, err error) {
-	n, err := s.readNote(topic)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		n = note{Topic: topic, Type: typ}
-	case unreadableNote(topic, err) != nil:
-		return 0, false, unreadableNote(topic, err)
-	case err != nil:
-		return 0, false, err
+// appendToNote appends content to the first note of the chain of topic that
+// has room for it: topic, then its continuation notes (see chainName). A
+// missing note topic has room. When no note has room, it makes the next
+// continuation note. Thus an add never makes a note larger than
+// maxNoteBytes. A new note gets typ as its type. When a note of the chain
+// has an equal entry, no note changes, and added is false. name is the note
+// that has the entry, and count is its entry count after the call. Call it
+// with the lock held.
+func (s *Store) appendToNote(topic, typ, content string) (name string, count int, added bool, err error) {
+	names, _, err := s.listNotes()
+	if err != nil {
+		return "", 0, false, err
 	}
-	if slices.Contains(n.Entries, content) {
-		return len(n.Entries), false, nil
+	// ks holds 1 and the numbers of the continuation notes that exist, in
+	// order.
+	ks := []int{1}
+	for _, nm := range names {
+		i := strings.LastIndexByte(nm, '-')
+		if i < 0 {
+			continue
+		}
+		if k, err := strconv.Atoi(nm[i+1:]); err == nil && k > 1 && chainName(topic, k) == nm {
+			ks = append(ks, k)
+		}
 	}
-	n.Entries = append(n.Entries, content)
-	if err := s.writeNote(n); err != nil {
-		return 0, false, err
+	slices.Sort(ks)
+
+	var dst *note
+	for _, k := range ks {
+		n, err := s.readNoteMax(chainName(topic, k), maxChangeBytes)
+		switch {
+		case k == 1 && errors.Is(err, fs.ErrNotExist):
+			dst = &note{Topic: topic, Type: typ, Entries: []string{content}}
+			continue
+		case k > 1 && err != nil:
+			// The note is gone, or it is not a text note that the store reads.
+			continue
+		case errors.Is(err, errNoteTooLargeToChange):
+			// The note is full, and the store does not read it.
+			continue
+		case unreadableNote(topic, err) != nil:
+			return "", 0, false, unreadableNote(topic, err)
+		case err != nil:
+			return "", 0, false, err
+		}
+		if k > 1 && n.continues() != topic {
+			// A note of the model or of another topic has this name.
+			continue
+		}
+		if slices.Contains(n.Entries, content) {
+			return n.Topic, len(n.Entries), false, nil
+		}
+		if dst == nil {
+			n.Entries = append(n.Entries, content)
+			if len(s.noteText(n)) <= maxNoteBytes {
+				dst = &n
+			}
+		}
 	}
-	return len(n.Entries), true, nil
+	if dst == nil {
+		k := 2
+		for slices.Contains(names, chainName(topic, k)) {
+			k++
+		}
+		dst = &note{Topic: chainName(topic, k), Type: typ, Entries: []string{content},
+			Front: []string{"type: " + typ, continuesKey + " " + topic}}
+	}
+	if err := s.writeNote(*dst); err != nil {
+		return "", 0, false, err
+	}
+	return dst.Topic, len(dst.Entries), true, nil
 }
 
 // file returns the path and the limit of target.

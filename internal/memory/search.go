@@ -46,11 +46,22 @@ func (s *Store) Search(query string) (string, error) {
 	// The search takes no lock: writeAtomic renames a file, so the search
 	// reads the old file or the new file.
 	var srcs []searchSource
+	var unread []string
 	for _, t := range []struct{ target, file string }{
 		{TargetMemory, memoryFile},
 		{TargetUser, profileFile},
 	} {
-		src := searchSource{name: t.file, entries: s.Entries(t.target)}
+		entries, err := s.ReadEntries(t.target)
+		if err != nil {
+			// A file that cannot be read is not an empty file, so the
+			// result names it.
+			cause := err
+			if u := errors.Unwrap(err); u != nil {
+				cause = u
+			}
+			unread = append(unread, fmt.Sprintf("%s was not searched: %v.", t.file, cause))
+		}
+		src := searchSource{name: t.file, entries: entries}
 		if fi, err := os.Lstat(filepath.Join(s.dir, t.file)); err == nil && fi.Mode().IsRegular() {
 			src.modified = fi.ModTime()
 		}
@@ -122,6 +133,7 @@ func (s *Store) Search(query string) (string, error) {
 	if skipped > 0 {
 		lines = append(lines, fmt.Sprintf("%d files in memory/notes were skipped: not a note name, larger than 1 MiB, or binary.", skipped))
 	}
+	lines = append(lines, unread...)
 	return strings.Join(lines, "\n"), nil
 }
 
@@ -149,7 +161,7 @@ func queryWords(query string) []string {
 // the notes that are too large, binary, or not readable, so that one bad
 // note does not stop the search.
 func (s *Store) scanNotes(names []string) (srcs []searchSource, skipped int, stop string) {
-	skipped, stop = s.eachNote(names, func(n note) {
+	skipped, stop = s.eachNote(names, maxNoteBytes, func(n note) {
 		srcs = append(srcs, searchSource{
 			name:     n.Topic,
 			isNote:   true,
@@ -163,9 +175,10 @@ func (s *Store) scanNotes(names []string) (srcs []searchSource, skipped int, sto
 
 // eachNote reads the notes in names, in order, and calls f for each note, until a
 // limit: maxSearchNotes notes or maxSearchBytes of entries. stop is "2000 notes",
-// "16 MiB", or "" when it read all names. skipped counts the notes that are too large,
-// binary, or not readable. A note that is gone after the list is not a skip.
-func (s *Store) eachNote(names []string, f func(note)) (skipped int, stop string) {
+// "16 MiB", or "" when it read all names. limit is the size limit of one note. skipped
+// counts the notes that are larger than limit, binary, or not readable. A note that is
+// gone after the list is not a skip.
+func (s *Store) eachNote(names []string, limit int, f func(note)) (skipped int, stop string) {
 	total := 0
 	for i, name := range names {
 		if i >= maxSearchNotes {
@@ -174,8 +187,9 @@ func (s *Store) eachNote(names []string, f func(note)) (skipped int, stop string
 		if total >= maxSearchBytes {
 			return skipped, "16 MiB"
 		}
-		n, err := s.readNote(name)
+		n, err := s.readNoteMax(name, limit)
 		if errors.Is(err, fs.ErrNotExist) {
+			// The note is gone after the list. This is not a skip.
 			continue
 		}
 		if err != nil {

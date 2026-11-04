@@ -142,8 +142,18 @@ func (p *ChatPace) Next(chatID int64, class paceClass) time.Duration {
 // TryTake records a call of the class when the call is free now and returns
 // zero. Else it records nothing and returns the wait.
 func (p *ChatPace) TryTake(chatID int64, class paceClass) time.Duration {
+	wait, _ := p.TryReserve(chatID, class)
+	return wait
+}
+
+// TryReserve is TryTake with a release function like the one of Reserve.
+// The release function removes the record, for example when the request
+// does not go out. When the call is not free, it records nothing, and the
+// release function does nothing. Only the first call of release has an
+// effect.
+func (p *ChatPace) TryReserve(chatID int64, class paceClass) (wait time.Duration, release func()) {
 	if chatID == 0 {
-		return 0
+		return 0, func() {}
 	}
 	now := p.now()
 	p.mu.Lock()
@@ -151,10 +161,10 @@ func (p *ChatPace) TryTake(chatID int64, class paceClass) time.Duration {
 	p.sweep(now)
 	st := p.state(chatID, now)
 	if at := freeAt(st, chatID, class, now); at.After(now) {
-		return at.Sub(now)
+		return at.Sub(now), func() {}
 	}
 	st.calls = append(st.calls, now)
-	return 0
+	return 0, p.releaseFunc(chatID, now)
 }
 
 // Reserve records a call of the class at the first free time and returns
@@ -173,8 +183,14 @@ func (p *ChatPace) Reserve(chatID int64, class paceClass) (wait time.Duration, r
 	at := freeAt(st, chatID, class, now)
 	// at is never before the last entry, so calls stays in time order.
 	st.calls = append(st.calls, at)
+	return at.Sub(now), p.releaseFunc(chatID, at)
+}
+
+// releaseFunc returns a function that removes the record at from the calls
+// of the chat. Only the first call of the function has an effect.
+func (p *ChatPace) releaseFunc(chatID int64, at time.Time) func() {
 	done := false
-	release = func() {
+	return func() {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if done {
@@ -193,7 +209,6 @@ func (p *ChatPace) Reserve(chatID int64, class paceClass) (wait time.Duration, r
 			}
 		}
 	}
-	return at.Sub(now), release
 }
 
 // NoteFlood records a 429 for the chat. The flood end is now plus

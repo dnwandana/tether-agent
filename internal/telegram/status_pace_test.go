@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -165,5 +166,108 @@ func TestHeldForcedEditIsNotAClosedTry(t *testing.T) {
 	s.mu.Unlock()
 	if api.count("editMessageText") != 0 || !slices.Equal(tries, []int{0}) {
 		t.Fatalf("edits %d, tries %v: a held forced edit is not a try", api.count("editMessageText"), tries)
+	}
+}
+
+// TestStaleTimerCallbackKeepsTheNewTimer checks that a timer callback that
+// fired before a stopTimer does no work and keeps the handle of the timer
+// that came after it.
+func TestStaleTimerCallbackKeepsTheNewTimer(t *testing.T) {
+	s, api, _, ft, _ := pacedStatus(t, 42)
+	takeSlot(t, s)
+	queueSend(s, queuedPlanText) // the send holds, and the timer T1 waits
+	if n := ft.pendingCount(); n != 1 {
+		t.Fatal("pending timers", n)
+	}
+	// T1 fires. Its callback waits for s.mu, so it does not run yet.
+	stale := popTimer(t, ft)
+	// The lock holder stops T1, which has no effect, and arms T2.
+	s.Reset()
+	if n := ft.pendingCount(); n != 1 {
+		t.Fatal("pending timers after Reset", n)
+	}
+	stale()
+	if n := ft.pendingCount(); n != 1 {
+		t.Fatal("the stale callback armed a timer: pending", n)
+	}
+	if api.count("sendMessage") != 0 {
+		t.Fatal("the stale callback sent:", api.methods())
+	}
+	s.mu.Lock()
+	s.stopTimer()
+	s.mu.Unlock()
+	if n := ft.pendingCount(); n != 0 {
+		t.Fatal("stopTimer did not stop T2: pending", n)
+	}
+}
+
+// popTimer removes the oldest pending timer and returns its function. The
+// clock does not move.
+func popTimer(t *testing.T, ft *fakeTimers) func() {
+	t.Helper()
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if len(ft.pending) == 0 {
+		t.Fatal("no pending timer")
+	}
+	f := ft.pending[0].f
+	ft.pending = ft.pending[1:]
+	return f
+}
+
+// TestClosedStatusDropsQueuedSendHeldTooLong checks that after Close, a
+// pace hold keeps a queued message until closedHoldLimit, and that a later
+// hold drops it.
+func TestClosedStatusDropsQueuedSendHeldTooLong(t *testing.T) {
+	s, api, clk, ft, logs := pacedStatus(t, 42)
+	s.C.Pace.NoteFlood(42, time.Minute) // an other call of the chat got a 429
+	queueSend(s, queuedPlanText)
+	s.Close(ctx, false)
+	popTimer(t, ft)() // a hold before the limit
+	if len(queueOf(s)) != 1 || ft.pendingCount() != 1 {
+		t.Fatal("a hold before the limit must keep the entry:", queueOf(s), ft.pendingCount())
+	}
+	clk.Advance(closedHoldLimit)
+	s.C.Pace.NoteFlood(42, time.Minute) // the chat budget stays full
+	popTimer(t, ft)()
+	if len(queueOf(s)) != 0 || ft.pendingCount() != 0 || api.count("sendMessage") != 0 {
+		t.Fatal("a hold after the limit must drop the entry:", queueOf(s), ft.pendingCount(), api.methods())
+	}
+	if !strings.Contains(logs.String(), "level=INFO") || !strings.Contains(logs.String(), "drop it") {
+		t.Fatal("the drop must log at Info:", logs.String())
+	}
+}
+
+// TestClosedStatusDropsEditHeldTooLong checks that after Close, a pace hold
+// keeps the waiting edit of a closed bubble until closedHoldLimit, and that
+// a later hold drops it.
+func TestClosedStatusDropsEditHeldTooLong(t *testing.T) {
+	s, api, clk, ft, logs := pacedStatus(t, 42)
+	s.mu.Lock()
+	s.flushCtx = ctx
+	s.lastEdit = clk.Now()
+	s.waiting = []closedEdit{{msgID: firstBubble, text: `📖 read_file: "z" (×9)`, tries: 1}}
+	s.mu.Unlock()
+	s.C.Pace.NoteFlood(42, time.Minute) // an other call of the chat got a 429
+	s.Close(ctx, false)
+	clk.Advance(2 * time.Second)
+	popTimer(t, ft)() // a hold before the limit
+	s.mu.Lock()
+	left := len(s.waiting)
+	s.mu.Unlock()
+	if left != 1 || ft.pendingCount() != 1 {
+		t.Fatal("a hold before the limit must keep the edit:", left, ft.pendingCount())
+	}
+	clk.Advance(closedHoldLimit)
+	s.C.Pace.NoteFlood(42, time.Minute) // the chat budget stays full
+	popTimer(t, ft)()
+	s.mu.Lock()
+	left = len(s.waiting)
+	s.mu.Unlock()
+	if left != 0 || ft.pendingCount() != 0 || api.count("editMessageText") != 0 {
+		t.Fatal("a hold after the limit must drop the edit:", left, ft.pendingCount(), api.methods())
+	}
+	if !strings.Contains(logs.String(), "level=INFO") || !strings.Contains(logs.String(), "drop it") {
+		t.Fatal("the drop must log at Info:", logs.String())
 	}
 }

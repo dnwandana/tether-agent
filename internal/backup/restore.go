@@ -61,7 +61,8 @@ func (e *GatewayRunningError) Error() string {
 // Restore replaces the allow-list state of opts.DataDir with the archive in opts.Archive. It
 // holds the gateway lock and the exclusive DB lock from before the stage step until the swap
 // returns, so no tether process uses the data dir during the restore. The old files go to a
-// pre-restore folder. An error before the swap leaves the data dir unchanged.
+// pre-restore folder. An error before the swap leaves the data dir unchanged, but Restore first
+// removes the stage folders that a killed restore left before its swap.
 func Restore(ctx context.Context, opts RestoreOptions) (*RestoreResult, error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -93,6 +94,11 @@ func Restore(ctx context.Context, opts RestoreOptions) (*RestoreResult, error) {
 	}
 	defer releaseDB()
 
+	// The two locks stop a second restore, so each stage folder without the swap marker is
+	// from a restore that a signal killed.
+	if err := removeStaleStages(dataDir); err != nil {
+		return nil, err
+	}
 	st, err := stage(ctx, ctxReader{ctx: ctx, r: opts.Archive}, dataDir)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -118,6 +124,10 @@ func Restore(ctx context.Context, opts RestoreOptions) (*RestoreResult, error) {
 	}
 
 	if err := addMemoryLock(st.Dir); err != nil {
+		return nil, err
+	}
+	// From here, a killed restore leaves a stage folder that the next restore keeps.
+	if err := markSwap(st.Dir); err != nil {
 		return nil, err
 	}
 	moved, err := swap(dataDir, st.Dir, preDir)

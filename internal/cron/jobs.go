@@ -21,6 +21,10 @@ import (
 // ErrNotFound is the error for a job id that is not in cron_jobs.
 var ErrNotFound = errors.New("cron: job not found. Use list to see the job ids")
 
+// errBadSchedule is the error of MarkRun for a stored schedule that cannot be parsed. MarkRun
+// then disables the job.
+var errBadSchedule = errors.New("cron: the stored schedule is not valid")
+
 // ModelPin sets the provider and the model for the runs of one job.
 type ModelPin struct {
 	Provider string `json:"provider,omitempty"`
@@ -268,10 +272,25 @@ func (s *Store) Due(ctx context.Context, now time.Time) ([]Job, error) {
 
 // MarkRun records a run that started at ranAt. It computes NextRun from the schedule, but
 // never earlier than now. It decrements RepeatLeft, and it disables the job when RepeatLeft
-// reaches 0 or when the schedule has no further run.
+// reaches 0 or when the schedule has no further run. When the stored schedule cannot be
+// parsed, MarkRun disables the job, writes the cause as the last output, and returns an
+// error that wraps errBadSchedule.
 func (s *Store) MarkRun(ctx context.Context, id string, status, output string, ranAt time.Time) error {
+	return s.markRun(ctx, id, status, output, ranAt, false)
+}
+
+// MarkStopped records a run that started at ranAt and that a shutdown stopped before it
+// ended. The run does not use up the job: RepeatLeft stays the same. A recurring job moves
+// to its next run. A one-shot job, or a job on its last repeat, stays due now, so it runs
+// again after the restart.
+func (s *Store) MarkStopped(ctx context.Context, id string, status, output string, ranAt time.Time) error {
+	return s.markRun(ctx, id, status, output, ranAt, true)
+}
+
+func (s *Store) markRun(ctx context.Context, id string, status, output string, ranAt time.Time, stopped bool) error {
 	now := s.now()
-	return s.inTx(ctx, func(tx *sql.Tx) error {
+	var bad error
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
 		j, err := s.get(ctx, tx, id)
 		if err != nil {
 			return err
@@ -279,13 +298,24 @@ func (s *Store) MarkRun(ctx context.Context, id string, status, output string, r
 		j.LastRun, j.LastStatus, j.LastOutput = ranAt, status, output
 		sched, err := parse(j.Schedule, s.loc())
 		if err != nil {
-			return fmt.Errorf("cron: job %s has a bad stored schedule: %w", id, err)
+			// The job has no next run. Disable it, so it does not run on each tick.
+			bad = fmt.Errorf("%w: job %s, schedule %q: %v", errBadSchedule, id, j.Schedule, err)
+			j.Enabled, j.NextRun, j.LastStatus = false, time.Time{}, "error"
+			j.LastOutput = fmt.Sprintf("⚠ Cron job %s is paused: its stored schedule %q is not valid. "+
+				"Update the schedule, then resume the job.", j.Name, j.Schedule)
+			return s.write(ctx, tx, j)
 		}
 		next := sched.Next(ranAt)
 		if !next.IsZero() && !next.After(now) {
 			next = sched.Next(now)
 		}
 		j.NextRun = next
+		if stopped {
+			if next.IsZero() || j.RepeatLeft == 1 {
+				j.NextRun = now
+			}
+			return s.write(ctx, tx, j)
+		}
 		if j.RepeatLeft > 0 {
 			j.RepeatLeft--
 		}
@@ -295,6 +325,10 @@ func (s *Store) MarkRun(ctx context.Context, id string, status, output string, r
 		}
 		return s.write(ctx, tx, j)
 	})
+	if err != nil {
+		return err
+	}
+	return bad
 }
 
 // validate checks a job before the store saves it. It checks the schedule, the prompt or

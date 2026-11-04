@@ -294,6 +294,10 @@ or in the process environment. `docs/SECURITY.md` ("Files that the bot sends") g
 Each entry of `mcp.servers` is one MCP server. Set `command` for a stdio server, or set `url` for
 an HTTP server. A key that the entry does not set keeps the default in this table.
 
+The program changes each character of a server name that is not a letter, a digit, `_`, or `-` to
+`_`. Two server names must stay different after this change, also when the case is ignored. For
+example, `a b` and `a_b`, or `GitHub` and `github`, are not valid together.
+
 | Key | Default | Effect |
 |---|---|---|
 | `mcp.servers.<name>.command` | `[]` | The program and its arguments for a stdio server, for example `[npx, -y, some-mcp-server]`. |

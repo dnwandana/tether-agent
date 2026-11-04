@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -548,7 +549,7 @@ func TestNoteFallbackSkipsUnreadableNote(t *testing.T) {
 	if res := apply(t, s, Op{Action: "remove", Target: "memory", OldText: "ftp"}); res.Text != "Entry removed from note b (1 entries)." {
 		t.Fatal(res.Text)
 	}
-	want := `no entry matches "nothing" in memory or in the notes. 1 notes were skipped: larger than 1 MiB, binary, or not readable.`
+	want := `no entry matches "nothing" in memory or in the notes. 1 notes were skipped: larger than 8 MiB, binary, or not readable.`
 	if err := applyErr(t, s, Op{Action: "remove", Target: "memory", OldText: "nothing"}); err != want {
 		t.Fatal(err)
 	}
@@ -556,10 +557,10 @@ func TestNoteFallbackSkipsUnreadableNote(t *testing.T) {
 
 func TestNoteFallbackReportsSkippedNotes(t *testing.T) {
 	s := open(t)
-	noteFile(t, s, "big.md", strings.Repeat("a", 2<<20))
+	noteFile(t, s, "big.md", strings.Repeat("a", 8<<20+1))
 	noteFile(t, s, "bin.md", "deploy\x00")
 	noteFile(t, s, "ok.md", "x")
-	want := `no entry matches "deploy" in memory or in the notes. 2 notes were skipped: larger than 1 MiB, binary, or not readable.`
+	want := `no entry matches "deploy" in memory or in the notes. 2 notes were skipped: larger than 8 MiB, binary, or not readable.`
 	if err := applyErr(t, s, Op{Action: "remove", Target: "memory", OldText: "deploy"}); err != want {
 		t.Fatal(err)
 	}
@@ -607,4 +608,231 @@ func TestChangeStopsWaitingForTheFileLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	apply(t, s, Op{Action: "add", Target: "memory", Content: "fact"})
+}
+
+// noteFiles returns the size of each file in notes/ of s by its name.
+func noteFiles(t *testing.T, s *Store) map[string]int64 {
+	t.Helper()
+	des, err := os.ReadDir(s.notesPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]int64{}
+	for _, de := range des {
+		fi, err := de.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[de.Name()] = fi.Size()
+	}
+	return out
+}
+
+// fullNote writes the note topic with one entry, so that the note file has
+// room for free more bytes only.
+func fullNote(t *testing.T, s *Store, topic string, free int) {
+	t.Helper()
+	n := note{Topic: topic, Type: "memory", Entries: []string{"x"}}
+	pad := maxNoteBytes - free - len(s.noteText(n))
+	n.Entries = []string{"x" + strings.Repeat("a", pad)}
+	if err := s.writeNote(n); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(s.notesPath(), topic+".md")); err != nil || fi.Size() != int64(maxNoteBytes-free) {
+		t.Fatalf("size %v, err %v", fi.Size(), err)
+	}
+}
+
+// An add never makes a note larger than 1 MiB. Entries with non-ASCII text
+// reach the limit after less than 100 adds.
+func TestAddNeverGrowsNotePastLimit(t *testing.T) {
+	s, err := Open(t.TempDir(), 10, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := func(i int) string { return fmt.Sprintf("%d ", i) + strings.Repeat("日", 3990) }
+	var last Result
+	for i := range 90 {
+		last = apply(t, s, Op{Action: "add", Target: "memory", Content: content(i)})
+	}
+	for name, size := range noteFiles(t, s) {
+		if size > maxNoteBytes {
+			t.Fatalf("%s has %d bytes", name, size)
+		}
+	}
+	if last.Note != "inbox-memory-2" || !strings.Contains(last.Text, "so the entry went to note inbox-memory-2 (") ||
+		!strings.Contains(last.Text, "Note inbox-memory is full (1 MiB), so the entry went to note inbox-memory-2.") {
+		t.Fatalf("%+v", last)
+	}
+	first, second := noteOf(t, s, "inbox-memory"), noteOf(t, s, "inbox-memory-2")
+	if len(first.Entries)+len(second.Entries) != 90 || !slices.Contains(second.Front, "continues: inbox-memory") {
+		t.Fatalf("%d + %d entries, front %q", len(first.Entries), len(second.Entries), second.Front)
+	}
+	// An equal entry in any note of the chain is a duplicate.
+	for _, i := range []int{0, 89} {
+		if res := apply(t, s, Op{Action: "add", Target: "memory", Content: content(i)}); res.Text != alreadyExists {
+			t.Fatalf("entry %d: %q", i, res.Text)
+		}
+	}
+	if _, err := s.Read("inbox-memory", 1, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An add with a topic goes to the first note of the chain that has room.
+func TestAddWithTopicGoesToNextNote(t *testing.T) {
+	s := open(t)
+	fullNote(t, s, "rpc", 8)
+	fact := "Helius RPC: 1M credits/day; mainnet URL in .env"
+	res := apply(t, s, Op{Action: "add", Target: "memory", Topic: "rpc", Content: fact})
+	want := "Entry added to note rpc-2 (1 entries).\n" +
+		"Note rpc is full (1 MiB), so the entry went to note rpc-2.\n" + searchHint
+	if res.Text != want || res.Note != "rpc-2" {
+		t.Fatalf("%+v", res)
+	}
+	if res := apply(t, s, Op{Action: "add", Target: "memory", Topic: "rpc", Content: fact}); res.Text != alreadyExists {
+		t.Fatal(res.Text)
+	}
+	// A short entry still fits in rpc.
+	if res := apply(t, s, Op{Action: "add", Target: "memory", Topic: "rpc", Content: "b"}); res.Note != "rpc" {
+		t.Fatalf("%+v", res)
+	}
+	if got := noteOf(t, s, "rpc-2"); got.Type != "memory" || !slices.Equal(got.Entries, []string{fact}) {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// A note of the model with a continuation name is not a part of the chain.
+func TestAddSkipsNoteOfOtherChain(t *testing.T) {
+	s := open(t)
+	fullNote(t, s, "rpc", 8)
+	noteFile(t, s, "rpc-2.md", "---\ntype: memory\n---\nmy own note\n")
+	res := apply(t, s, Op{Action: "add", Target: "memory", Topic: "rpc", Content: "my own note"})
+	if res.Note != "rpc-3" {
+		t.Fatalf("%+v", res)
+	}
+	if got := noteOf(t, s, "rpc-2").Entries; !slices.Equal(got, []string{"my own note"}) {
+		t.Fatalf("%q", got)
+	}
+}
+
+// Two long topics with the same start get different continuation notes.
+func TestContinuationNameOfLongTopic(t *testing.T) {
+	a, b := strings.Repeat("a", 46)+"-b", strings.Repeat("a", 46)+"-c"
+	for _, topic := range []string{a, b, strings.Repeat("a", 48), "rpc"} {
+		for _, k := range []int{2, 10, 1000} {
+			name := chainName(topic, k)
+			if !IsNoteName(name+".md") || !strings.HasSuffix(name, fmt.Sprintf("-%d", k)) {
+				t.Fatalf("chainName(%q, %d) = %q", topic, k, name)
+			}
+		}
+	}
+	if chainName("rpc", 1) != "rpc" || chainName("rpc", 2) != "rpc-2" {
+		t.Fatal(chainName("rpc", 2))
+	}
+	s := open(t)
+	fullNote(t, s, a, 8)
+	fullNote(t, s, b, 8)
+	ra := apply(t, s, Op{Action: "add", Target: "memory", Topic: a, Content: "fact of topic a"})
+	rb := apply(t, s, Op{Action: "add", Target: "memory", Topic: b, Content: "fact of topic b"})
+	if ra.Note == rb.Note || ra.Note != chainName(a, 2) || rb.Note != chainName(b, 3) {
+		t.Fatalf("%q %q", ra.Note, rb.Note)
+	}
+}
+
+// oversizeNote writes inbox-memory.md as an older version wrote it: 280
+// entries and more than 1 MiB.
+func oversizeNote(t *testing.T, s *Store) {
+	t.Helper()
+	entries := make([]string, 280)
+	for i := range entries {
+		entries[i] = fmt.Sprintf("%04d ", i) + strings.Repeat("x", 3990)
+	}
+	noteFile(t, s, "inbox-memory.md", "---\ntype: memory\n---\n"+strings.Join(entries, Separator)+"\n")
+	if fi, err := os.Stat(filepath.Join(s.notesPath(), "inbox-memory.md")); err != nil || fi.Size() <= maxNoteBytes {
+		t.Fatalf("size %v, err %v", fi.Size(), err)
+	}
+}
+
+// A note that is larger than 1 MiB gets new entries in the next note, and
+// remove and replace make it smaller.
+func TestRepairOversizeNote(t *testing.T) {
+	s := open(t)
+	oversizeNote(t, s)
+	res := apply(t, s, Op{Action: "add", Target: "memory", Topic: "inbox-memory", Content: "new fact"})
+	if res.Note != "inbox-memory-2" {
+		t.Fatalf("%+v", res)
+	}
+	if res := apply(t, s, Op{Action: "add", Target: "memory", Topic: "inbox-memory", Content: "0007 " + strings.Repeat("x", 3990)}); res.Text != alreadyExists {
+		t.Fatal(res.Text)
+	}
+	steps := []struct {
+		op   Op
+		want string
+	}{
+		{Op{Action: "remove", Target: "memory", Topic: "inbox-memory", OldText: "0007 "}, "Entry removed from note inbox-memory (279 entries)."},
+		{Op{Action: "remove", Target: "memory", OldText: "0008 "}, "Entry removed from note inbox-memory (278 entries)."},
+		{Op{Action: "replace", Target: "memory", Topic: "inbox-memory", OldText: "0009 ", Content: "0009 " + strings.Repeat("y", 3990)}, "Entry replaced in note inbox-memory (278 entries)."},
+		{Op{Action: "replace", Target: "memory", OldText: "0010 ", Content: "short"}, "Entry replaced in note inbox-memory (278 entries)."},
+	}
+	for _, st := range steps {
+		if res := apply(t, s, st.op); res.Text != st.want || res.Note != "inbox-memory" {
+			t.Fatalf("%+v: %+v", st.op, res)
+		}
+	}
+	// A replace that makes the note larger is refused.
+	grow := Op{Action: "replace", Target: "memory", Topic: "inbox-memory", OldText: "0011 ", Content: "0011 " + strings.Repeat("z", 3995)}
+	want := "the new text makes note inbox-memory larger than 1 MiB, so nothing changed. " +
+		"Remove the old entry with action remove, and then add the new text with action add and topic inbox-memory. " +
+		"The add puts the entry in the next note of the topic when the note is full."
+	if err := applyErr(t, s, grow); err != want {
+		t.Fatal(err)
+	}
+}
+
+// A replace does not make a note larger than 1 MiB.
+func TestReplaceRefusedPastNoteLimit(t *testing.T) {
+	s := open(t)
+	fullNote(t, s, "rpc", 8)
+	apply(t, s, Op{Action: "add", Target: "memory", Topic: "rpc", Content: "b"})
+	err := applyErr(t, s, Op{Action: "replace", Target: "memory", Topic: "rpc", OldText: "b", Content: "a longer text"})
+	if !strings.HasPrefix(err, "the new text makes note rpc larger than 1 MiB, so nothing changed.") {
+		t.Fatal(err)
+	}
+	if res := apply(t, s, Op{Action: "replace", Target: "memory", OldText: "b", Content: "c"}); res.Note != "rpc" {
+		t.Fatalf("%+v", res)
+	}
+	for name, size := range noteFiles(t, s) {
+		if size > maxNoteBytes {
+			t.Fatalf("%s has %d bytes", name, size)
+		}
+	}
+}
+
+// A topic longer than 48 characters is refused, so that two long topics
+// never share one note.
+func TestLongTopicRefused(t *testing.T) {
+	s := open(t)
+	long := strings.Repeat("a", 48) + " b"
+	want := `the topic "` + long + `" is too long: its note name has 50 characters, and the limit is 48. ` +
+		"Use a shorter topic, for example a topic from the topic list."
+	for _, op := range []Op{
+		{Action: "add", Target: "memory", Topic: long, Content: "fact"},
+		{Action: "replace", Target: "memory", Topic: long, OldText: "fact", Content: "new"},
+		{Action: "remove", Target: "memory", Topic: long, OldText: "fact"},
+	} {
+		if err := applyErr(t, s, op); err != want {
+			t.Fatalf("%s: %s", op.Action, err)
+		}
+	}
+	if _, err := s.Read(long, 1, 0); err == nil || err.Error() != want {
+		t.Fatalf("read: %v", err)
+	}
+	if _, err := os.Stat(s.notesPath()); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("no note must be written")
+	}
+	// A topic of 48 characters still works.
+	if res := apply(t, s, Op{Action: "add", Target: "memory", Topic: strings.Repeat("a", 48), Content: "fact"}); res.Note != strings.Repeat("a", 48) {
+		t.Fatalf("%+v", res)
+	}
 }

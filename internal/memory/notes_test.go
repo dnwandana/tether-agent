@@ -35,8 +35,8 @@ func TestNormalizeTopic(t *testing.T) {
 		{"日本", ""},
 		{"", ""},
 		{strings.Repeat("a", 48), strings.Repeat("a", 48)},
-		{strings.Repeat("a", 49), strings.Repeat("a", 48)},
-		{strings.Repeat("a", 47) + " b", strings.Repeat("a", 47)},
+		{strings.Repeat("a", 49), strings.Repeat("a", 49)},
+		{strings.Repeat("a", 47) + " b", strings.Repeat("a", 47) + "-b"},
 		{strings.Repeat("ab-", 16), strings.Repeat("ab-", 15) + "ab"},
 	} {
 		if got := normalizeTopic(tc.in); got != tc.want {
@@ -161,6 +161,13 @@ func TestReadNoteLimits(t *testing.T) {
 	noteFile(t, s, "big.md", strings.Repeat("a", 1<<20+1))
 	if _, err := s.readNote("big"); !errors.Is(err, errNoteTooLarge) {
 		t.Fatalf("1 MiB + 1: %v", err)
+	}
+	if _, err := s.readNoteMax("big", maxChangeBytes); err != nil {
+		t.Fatalf("a change reads 1 MiB + 1: %v", err)
+	}
+	noteFile(t, s, "huge.md", strings.Repeat("a", 8<<20+1))
+	if _, err := s.readNoteMax("huge", maxChangeBytes); !errors.Is(err, errNoteTooLargeToChange) {
+		t.Fatalf("8 MiB + 1: %v", err)
 	}
 	noteFile(t, s, "bin.md", "a\x00b")
 	if _, err := s.readNote("bin"); !errors.Is(err, errNoteBinary) {

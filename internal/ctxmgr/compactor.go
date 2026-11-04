@@ -118,8 +118,10 @@ type Compactor struct {
 	DB  *db.DB
 	Cfg config.ContextConfig
 	Log *slog.Logger
-	// OnCompact runs in its own goroutine when a compaction starts. view is the full model
-	// view, and view[start:end] is the part that the summary replaces. It can be nil.
+	// OnCompact runs one time for each compaction, after Maybe saves the summary and before
+	// Maybe returns. view is the full model view before the compaction, and view[start:end]
+	// is the part that the saved summary replaces. A failed attempt does not call it. It
+	// must return at once, so it starts long work in its own goroutine. It can be nil.
 	OnCompact func(ctx context.Context, s *sessions.Session, view []provider.Message, start, end int)
 	// Todo returns the task list snapshot of the session for the end of the summary, or "".
 	// It can be nil.
@@ -179,11 +181,6 @@ func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov p
 	if from == 0 || upto == 0 {
 		return false, nil
 	}
-	// One review for each compaction: a retry after a failure does not start a second one.
-	if c.OnCompact != nil && c.failureCount(s.ID) == 0 {
-		hookCtx := context.WithoutCancel(ctx)
-		go c.OnCompact(hookCtx, s, msgs, start, end)
-	}
 	summary, err := c.summarize(ctx, prov, msgs[start:end], trigger)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -208,6 +205,12 @@ func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov p
 	delete(c.failures, s.ID)
 	c.mu.Unlock()
 	c.logger().Info("compaction done", "session", s.ID, "from", from, "upto", upto, "messages", end-start)
+	// The hook runs only after the save, so each saved compaction gets one review of the
+	// range that it replaces. The call is in this goroutine, so the hook reads the state of
+	// the turn before the turn continues.
+	if c.OnCompact != nil {
+		c.OnCompact(context.WithoutCancel(ctx), s, msgs, start, end)
+	}
 	return true, nil
 }
 
@@ -269,12 +272,6 @@ func (c *Compactor) fail(sessionID string, cause error) error {
 		return nil
 	}
 	return fmt.Errorf("%w %d times in a row; the conversation continues without compaction: %v", ErrCompactionFailed, n, cause)
-}
-
-func (c *Compactor) failureCount(sessionID string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.failures[sessionID]
 }
 
 func (c *Compactor) logger() *slog.Logger {

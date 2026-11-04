@@ -46,6 +46,15 @@ type Channel interface {
 	Send(ctx context.Context, to Target, msg Outbound) error
 }
 
+// InflightChannel is a Channel that prepares an inbound message before it calls Submit, for
+// example with a media download or speech to text. Inflight returns the number of messages
+// that the channel received and did not submit yet. The channel must count a message until
+// Submit returns. Wait waits for these messages.
+type InflightChannel interface {
+	Channel
+	Inflight() int
+}
+
 // Inbound is one message from a channel.
 type Inbound struct {
 	// Key is the session key of the message.
@@ -542,13 +551,16 @@ func (g *Gateway) GoalWaker() *GoalWaker {
 	return g.waker
 }
 
-// Wait waits until no turn runs, no submitted message waits for its turn, and no busy text
-// waits in the steer debouncer, or until timeout. It returns false at the timeout.
+// Wait waits until no channel prepares a message, no turn runs, no submitted message waits
+// for its turn, and no busy text waits in the steer debouncer, or until timeout. It returns
+// false at the timeout.
 func (g *Gateway) Wait(timeout time.Duration) bool {
 	end := time.Now().Add(timeout)
-	// The debouncer comes first: a flush starts its turn before it stops to count, so the
-	// active count that Wait reads next includes that turn.
-	for g.debouncer().Pending() || g.active.Load() > 0 {
+	// The checks follow the hand-offs of a message. A channel counts the message until
+	// Submit returns, and Submit puts the text into the debouncer or counts the turn before
+	// it returns. A flush starts its turn before it stops to count. So each check that reads
+	// zero sees the hand-off of the check before it.
+	for g.preparing() || g.debouncer().Pending() || g.active.Load() > 0 {
 		if time.Now().After(end) {
 			return false
 		}
@@ -564,6 +576,16 @@ func (g *Gateway) Wait(timeout time.Duration) bool {
 func routeOf(in Inbound) Inbound {
 	in.Text, in.Images, in.Files = "", nil, nil
 	return in
+}
+
+// preparing reports whether a channel prepares a message that it did not submit yet.
+func (g *Gateway) preparing() bool {
+	for _, ch := range g.Channels {
+		if p, ok := ch.(InflightChannel); ok && p.Inflight() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // key returns the state of key and creates it when necessary. The caller holds g.mu.

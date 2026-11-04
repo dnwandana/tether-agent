@@ -565,6 +565,29 @@ func TestCreateReadsMemoryCopy(t *testing.T) {
 	}
 }
 
+func TestCreateReadsSkillCopy(t *testing.T) {
+	dir, _ := newDataDir(t)
+	write(t, dir, "skills/a/SKILL.md", "old skill\n")
+	write(t, dir, "scripts/x.sh", "echo old\n")
+	// An edit with the same length after the prepare step: only a hash check sees it.
+	testHookAfterPrepare = func() {
+		write(t, dir, "skills/a/SKILL.md", "new skill\n")
+		write(t, dir, "scripts/x.sh", "echo new\n")
+	}
+	t.Cleanup(func() { testHookAfterPrepare = nil })
+	data := restoreArchiveOf(t, dir)
+	target := filepath.Join(t.TempDir(), ".tether")
+	if _, err := Restore(ctx, restoreOpts(target, data)); err != nil {
+		t.Fatal("the archive does not agree with its manifest:", err)
+	}
+	if got := readFile(t, filepath.Join(target, "skills", "a", "SKILL.md")); got != "old skill\n" {
+		t.Fatalf("SKILL.md = %q, want the text of the prepare step", got)
+	}
+	if got := readFile(t, filepath.Join(target, "scripts", "x.sh")); got != "echo old\n" {
+		t.Fatalf("x.sh = %q, want the text of the prepare step", got)
+	}
+}
+
 func TestCreateWaitsForMemoryLock(t *testing.T) {
 	dir, _ := newDataDir(t)
 	write(t, dir, "memory/memory.md", "old fact\n")
@@ -674,12 +697,13 @@ func TestCreateStopsWhileWaitingForMemoryLock(t *testing.T) {
 	}
 }
 
-func TestCreateRefusesSymlinkAfterPrepare(t *testing.T) {
+func TestCreateSymlinkAfterPrepare(t *testing.T) {
 	dir, _ := newDataDir(t)
 	write(t, dir, "skills/a/SKILL.md", "abc")
 	outside := writeTmp(t, "xyz")
 	skill := filepath.Join(dir, "skills", "a", "SKILL.md")
-	// The skill changes to a symlink after the type check of the collect.
+	// The skill changes to a symlink after the copy of the prepare step. The archive reads
+	// the copy, so the link has no effect.
 	testHookAfterPrepare = func() {
 		if err := os.Remove(skill); err != nil {
 			t.Error(err)
@@ -692,11 +716,14 @@ func TestCreateRefusesSymlinkAfterPrepare(t *testing.T) {
 	var buf bytes.Buffer
 	opts := createOpts(dir)
 	opts.OutPath, opts.Stdout = "-", &buf
-	if _, err := Create(ctx, opts); err == nil {
-		t.Fatal("Create must refuse a symlink")
+	if _, err := Create(ctx, opts); err != nil {
+		t.Fatal(err)
 	}
 	if bytes.Contains(buf.Bytes(), []byte("xyz")) {
 		t.Fatal("the archive holds the symlink target")
+	}
+	if got := string(createReadArchive(t, buf.Bytes()).contents["skills/a/SKILL.md"]); got != "abc" {
+		t.Fatalf("SKILL.md = %q, want the copy of the prepare step", got)
 	}
 }
 

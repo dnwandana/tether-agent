@@ -357,6 +357,54 @@ func TestRestorePreDirExists(t *testing.T) {
 	restoreAssertSame(t, target, before)
 }
 
+func TestRestoreRemovesStaleStage(t *testing.T) {
+	_, data := restoreSource(t)
+	target := restoreTarget(t)
+	// A restore that a signal killed before the swap leaves its stage folder.
+	stale := filepath.Join(target, ".restore-tmp-111")
+	write(t, stale, "state.db", "old stage")
+	write(t, stale, "skills/a/SKILL.md", "old stage")
+	// A restore that a signal killed during the swap, or a failed undo, leaves the marker.
+	kept := filepath.Join(target, ".restore-tmp-222")
+	write(t, kept, swapMarkerName, "")
+	write(t, kept, "skills/b/SKILL.md", "new files of a failed undo")
+	if _, err := Restore(ctx, restoreOpts(target, data)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stale); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("the stale stage folder stays:", err)
+	}
+	if got := readFile(t, filepath.Join(kept, "skills", "b", "SKILL.md")); got != "new files of a failed undo" {
+		t.Fatalf("the restore changed a stage folder with the marker: %q", got)
+	}
+	if got := restoreGlob(t, target, ".restore-tmp-"); len(got) != 1 || got[0] != ".restore-tmp-222" {
+		t.Fatalf("stage folders = %v", got)
+	}
+}
+
+func TestRestoreKeepsStageOfFailedUndo(t *testing.T) {
+	_, data := restoreSource(t)
+	target := restoreTarget(t)
+	// The fourth live rename fails, and the undo of the third rename fails too.
+	restoreFailRename(t, 4, 5)
+	_, err := Restore(ctx, restoreOpts(target, data))
+	if !errors.Is(err, errUndoFailed) {
+		t.Fatalf("err = %v, want errUndoFailed", err)
+	}
+	stages := restoreGlob(t, target, ".restore-tmp-")
+	if len(stages) != 1 || !strings.Contains(err.Error(), filepath.Join(target, stages[0])) {
+		t.Fatalf("stage folders = %v, err = %v", stages, err)
+	}
+	// The next restore must not remove the folder that the error names.
+	rename = os.Rename
+	if _, err := Restore(ctx, restoreOpts(target, data)); err == nil {
+		t.Fatal("Restore must fail when the pre-restore folder exists")
+	}
+	if _, err := os.Stat(filepath.Join(target, stages[0], "state.db")); err != nil {
+		t.Fatal("the next restore removed the stage folder of the failed undo:", err)
+	}
+}
+
 // restoreSwapDirs makes a data dir and a stage dir for the swap tests.
 func restoreSwapDirs(t *testing.T) (dataDir, stageDir, preDir string) {
 	t.Helper()

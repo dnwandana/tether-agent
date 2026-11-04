@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -17,8 +18,13 @@ import (
 const (
 	// maxTopicBytes is the maximum length of a topic. A topic has only ASCII.
 	maxTopicBytes = 48
-	// maxNoteBytes is the maximum size of a note that the store reads.
+	// maxNoteBytes is the maximum size of a note that read, search, and add
+	// read, and the maximum size of a note that add and replace write.
 	maxNoteBytes = 1 << 20
+	// maxChangeBytes is the maximum size of a note that remove and replace
+	// read. An older version wrote notes larger than maxNoteBytes. This limit
+	// lets the model make such a note smaller with the memory tool.
+	maxChangeBytes = 8 << 20
 	// binaryCheckBytes is the length of the start of a note that the
 	// store examines for a NUL byte.
 	binaryCheckBytes = 8 << 10
@@ -32,17 +38,23 @@ var errNotesNotFolder = errors.New("memory/notes is not a folder; move it away, 
 // The errors of readNote for a note that the store does not read. Callers
 // add the topic and their own text.
 var (
-	errNoteTooLarge = errors.New("the note is larger than 1 MiB")
-	errNoteBinary   = errors.New("the note has a NUL byte, so it is not a text file")
+	errNoteTooLarge         = errors.New("the note is larger than 1 MiB")
+	errNoteTooLargeToChange = errors.New("the note is larger than 8 MiB")
+	errNoteBinary           = errors.New("the note has a NUL byte, so it is not a text file")
 )
 
-// unreadableNote returns the text for the model when err is errNoteTooLarge
-// or errNoteBinary, and nil for other errors. Read, the note fallback, and
-// the append share it, so that the model gets one text and one next action.
+// unreadableNote returns the text for the model when err is errNoteTooLarge,
+// errNoteTooLargeToChange, or errNoteBinary, and nil for other errors. Read,
+// the note fallback, and the append share it, so that the model gets one
+// text and one next action.
 func unreadableNote(topic string, err error) error {
 	switch {
 	case errors.Is(err, errNoteTooLarge):
-		return fmt.Errorf("note %s is larger than 1 MiB; open it with read_file, or split it", topic)
+		//lint:ignore ST1005 the text is a fixed message for the model with full sentences.
+		return fmt.Errorf("note %s is larger than 1 MiB, so read and search skip it. Open it with read_file. "+
+			"To make it smaller, remove entries with action remove and topic %s, and add them again with another topic.", topic, topic)
+	case errors.Is(err, errNoteTooLargeToChange):
+		return fmt.Errorf("note %s is larger than 8 MiB, so the memory tool cannot change it; open it with read_file", topic)
 	case errors.Is(err, errNoteBinary):
 		return fmt.Errorf("note %s is a binary file; open it with read_file", topic)
 	}
@@ -65,7 +77,8 @@ type note struct {
 }
 
 // normalizeTopic returns the topic of a name from the model. The result has
-// only [a-z0-9-], and has no "-" at the start or at the end.
+// only [a-z0-9-], and has no "-" at the start or at the end. It is not cut,
+// so it can be longer than maxTopicBytes; topicOf refuses such a topic.
 func normalizeTopic(s string) string {
 	var b strings.Builder
 	dash := false
@@ -80,19 +93,60 @@ func normalizeTopic(s string) string {
 			dash = true
 		}
 	}
-	t := strings.Trim(b.String(), "-")
+	return strings.Trim(b.String(), "-")
+}
+
+// topicOf returns normalizeTopic(s). A result longer than maxTopicBytes
+// gives an error for the model, because a cut can give two topics the same
+// note. An empty result tells that s has no letters a-z or digits.
+func topicOf(s string) (string, error) {
+	t := normalizeTopic(s)
 	if len(t) > maxTopicBytes {
-		t = t[:maxTopicBytes]
+		//lint:ignore ST1005 the text is a fixed message for the model with full sentences.
+		return "", fmt.Errorf("the topic %q is too long: its note name has %d characters, and the limit is %d. "+
+			"Use a shorter topic, for example a topic from the topic list.", strings.TrimSpace(s), len(t), maxTopicBytes)
 	}
-	return strings.TrimRight(t, "-")
+	return t, nil
+}
+
+// chainName returns the name of note k of the chain of topic. Note 1 is
+// topic. Note k > 1 is a continuation note: topic, "-", and k, for example
+// rpc-2. The end of topic is cut, so that the name is not longer than
+// maxTopicBytes. A continuation note has the line "continues: <topic>" in
+// its frontmatter, because two long topics can give the same name.
+func chainName(topic string, k int) string {
+	if k <= 1 {
+		return topic
+	}
+	suffix := "-" + strconv.Itoa(k)
+	if len(topic)+len(suffix) > maxTopicBytes {
+		topic = strings.TrimRight(topic[:maxTopicBytes-len(suffix)], "-")
+	}
+	return topic + suffix
+}
+
+// continuesKey starts the frontmatter line of a continuation note that
+// names the first note of its chain.
+const continuesKey = "continues:"
+
+// continues returns the topic of the first note of the chain of n, or ""
+// when n is not a continuation note.
+func (n note) continues() string {
+	for _, line := range n.Front {
+		if v, ok := strings.CutPrefix(line, continuesKey); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 // IsNoteName reports whether name is the file name of a note: the name ends
-// in ".md", and its stem is not empty and does not change in normalizeTopic.
-// The store and the backup both use this rule.
+// in ".md", and its stem is not empty, is not longer than maxTopicBytes, and
+// does not change in normalizeTopic. The store and the backup both use this
+// rule.
 func IsNoteName(name string) bool {
 	stem, ok := strings.CutSuffix(name, ".md")
-	return ok && stem != "" && stem == normalizeTopic(stem)
+	return ok && stem != "" && len(stem) <= maxTopicBytes && stem == normalizeTopic(stem)
 }
 
 // joinCapped joins items with ", ". With more than max items, it shows the
@@ -206,11 +260,19 @@ func isTempName(name string) bool {
 	return ok
 }
 
-// readNote reads the note of topic. A missing note, a topic that is not a
+// readNote reads the note of topic with the limit maxNoteBytes.
+func (s *Store) readNote(topic string) (note, error) { return s.readNoteMax(topic, maxNoteBytes) }
+
+// readNoteMax reads the note of topic. A missing note, a topic that is not a
 // note name, and a file that is not regular give an error that wraps
-// fs.ErrNotExist. The size check comes before the open, so that the store
-// never reads a large file.
-func (s *Store) readNote(topic string) (note, error) {
+// fs.ErrNotExist. A note larger than limit gives errNoteTooLarge, or
+// errNoteTooLargeToChange when limit is maxChangeBytes. The size check comes
+// before the open, so that the store never reads a large file.
+func (s *Store) readNoteMax(topic string, limit int) (note, error) {
+	tooLarge := errNoteTooLarge
+	if limit > maxNoteBytes {
+		tooLarge = errNoteTooLargeToChange
+	}
 	if !IsNoteName(topic + ".md") {
 		return note{}, fmt.Errorf("no note %q: %w", topic, fs.ErrNotExist)
 	}
@@ -222,24 +284,24 @@ func (s *Store) readNote(topic string) (note, error) {
 		return note{}, err
 	}
 	defer root.Close()
-	f, fi, err := openRegular(root, topic+".md", maxNoteBytes)
+	f, fi, err := openRegular(root, topic+".md", int64(limit))
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, errNotRegular) {
 		return note{}, fmt.Errorf("no note %s: %w", topic, fs.ErrNotExist)
 	}
 	if errors.Is(err, errFileTooLarge) {
-		return note{}, errNoteTooLarge
+		return note{}, tooLarge
 	}
 	if err != nil {
 		return note{}, fmt.Errorf("cannot read note %s: %w", topic, err)
 	}
 	defer f.Close()
 	// The limit stops a file that grew after the Lstat.
-	b, err := io.ReadAll(io.LimitReader(f, maxNoteBytes+1))
+	b, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	if err != nil {
 		return note{}, fmt.Errorf("cannot read note %s: %w", topic, err)
 	}
-	if len(b) > maxNoteBytes {
-		return note{}, errNoteTooLarge
+	if len(b) > limit {
+		return note{}, tooLarge
 	}
 	if bytes.IndexByte(b[:min(len(b), binaryCheckBytes)], 0) >= 0 {
 		return note{}, errNoteBinary
@@ -300,6 +362,11 @@ func (s *Store) writeNote(n note) error {
 		}
 		return nil
 	}
+	return writeAtomicIn(root, name, s.noteText(n))
+}
+
+// noteText returns the file text of n, with modified set to the time of now.
+func (s *Store) noteText(n note) string {
 	now := time.Now
 	if s.now != nil {
 		now = s.now
@@ -319,5 +386,5 @@ func (s *Store) writeNote(n note) error {
 	b.WriteString("\n---\n")
 	b.WriteString(strings.Join(n.Entries, Separator))
 	b.WriteByte('\n')
-	return writeAtomicIn(root, name, b.String())
+	return b.String()
 }

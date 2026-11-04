@@ -172,6 +172,15 @@ In an agent job, a `script` runs first, and its stdout goes into the prompt as d
   wait for the next check.
 - Only one job with a `workdir` runs at a time.
 - The jobs are in the `cron_jobs` table of `state.db`, so they stay after a restart.
+- When the gateway stops during a run, the run ends and its result is not sent. The job list shows
+  the status `error` and the stop. The stopped run does not count as one of the `repeat` runs. A
+  one-shot job, or a job on its last run, stays due and runs again after the restart. Other jobs
+  wait for their next time.
+- When the gateway cannot record a run in `state.db`, the job waits before it runs again. The
+  wait starts at 1 minute and doubles each time, up to 1 hour. The log shows the error and the
+  job id.
+- When the stored schedule of a job is not valid, the gateway pauses the job after its run. The
+  job list shows the cause. Update the schedule, then resume the job.
 
 ### Missed runs
 

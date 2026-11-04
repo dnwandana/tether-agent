@@ -162,6 +162,10 @@ mcp:
 An MCP tool has the name `mcp_<server>_<tool>`. The program changes characters that a provider does
 not accept to `_`.
 
+Two server names must stay different after this change, also when the case is ignored. For example,
+`a b` and `a_b`, or `GitHub` and `github`, are the same name. The program refuses such a
+configuration, because the two servers share the tool names and the cache file.
+
 ### How a server runs
 
 An idle server costs nothing:

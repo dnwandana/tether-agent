@@ -434,10 +434,11 @@ type gatewayStop struct {
 	stopReceive func()
 	// notify tells the busy chats that the gateway stops. A nil field is skipped.
 	notify func()
-	// stopping runs when the drain time ends and some turns still run. A nil field is
-	// skipped.
+	// stopping runs after the drain, also when all turns ended. Then no new turn starts.
+	// A nil field is skipped.
 	stopping func()
-	// waitTurns waits for the running turns. It returns false at the timeout.
+	// waitTurns waits for the running turns and for the messages that the channels still
+	// prepare. It returns false at the timeout.
 	waitTurns func(timeout time.Duration) bool
 	// stopWork cancels the turns, the background work, and the cron scheduler.
 	stopWork func()
@@ -454,8 +455,9 @@ type stopWait struct {
 }
 
 // run stops the gateway in the order of Hermes. First, the channels stop to receive
-// messages, so no new turn starts. Then the running turns get the drain time to end.
-// Then the remaining work is cancelled, and each part gets the rest of the grace time.
+// messages. Then the running turns and the messages that the channels still prepare get
+// the drain time to end. Then the stopping step makes the gateway refuse new work, the
+// remaining work is cancelled, and each part gets the rest of the grace time.
 func (s gatewayStop) run() {
 	if s.begin != nil {
 		s.begin()
@@ -469,9 +471,11 @@ func (s gatewayStop) run() {
 		s.log.Info("gateway: all turns ended", "wait", time.Since(start).Round(time.Millisecond).String())
 	} else {
 		s.log.Warn("gateway: some turns did not end in time, so the gateway cancels them", "wait", s.drain.String())
-		if s.stopping != nil {
-			s.stopping()
-		}
+	}
+	// A message that a channel submits after the drain must not start a turn that
+	// stopWork then cancels at once. So the stopping step runs in both cases.
+	if s.stopping != nil {
+		s.stopping()
 	}
 	s.stopWork()
 	end := time.Now().Add(s.grace)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -285,6 +286,7 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("config: goals.judge_provider names %q, which is not in providers", name))
 		}
 	}
+	errs = append(errs, checkMCPNames(c.MCP.Servers)...)
 	errs = append(errs,
 		oneOf("approvals.mode", c.Approvals.Mode, "manual", "smart", "off"),
 		oneOf("approvals.cron_mode", c.Approvals.CronMode, "deny", "approve"),
@@ -293,6 +295,34 @@ func (c *Config) Validate() error {
 		oneOf("telegram.tool_progress", c.Telegram.ToolProgress, "off", "new", "all", "verbose"),
 	)
 	return errors.Join(errs...)
+}
+
+// MCPSafeName returns s with each character that a provider does not accept in a tool name
+// changed to "_". The MCP tool names and the names of the MCP tool cache files use it.
+func MCPSafeName(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, s)
+}
+
+// checkMCPNames returns an error for each two MCP server names that have the same
+// MCPSafeName when the case is ignored. Such servers share the tool names and the cache file.
+// The check ignores the case, because the default file system of macOS ignores it.
+func checkMCPNames(servers map[string]MCPServer) []error {
+	var errs []error
+	first := map[string]string{}
+	for _, name := range slices.Sorted(maps.Keys(servers)) {
+		key := strings.ToLower(MCPSafeName(name))
+		if other, ok := first[key]; ok {
+			errs = append(errs, fmt.Errorf(`config: the MCP server names %q and %q are the same when each character that is not a letter, a digit, "_", or "-" changes to "_" and the case is ignored. Change one of the names`, other, name))
+			continue
+		}
+		first[key] = name
+	}
+	return errs
 }
 
 // oneOf returns an error that names key when value is not in allowed.

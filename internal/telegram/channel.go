@@ -89,12 +89,23 @@ type Channel struct {
 	// richFailed is set at the first failed rich message. Later failures log at the debug
 	// level.
 	richFailed atomic.Bool
+
+	// inflight counts the inbound messages that the channel received and did not submit to
+	// the gateway yet, for example a voice note in speech to text or an album part that
+	// waits for the other parts.
+	inflight atomic.Int64
 }
 
 var _ gateway.Channel = (*Channel)(nil)
 
+var _ gateway.InflightChannel = (*Channel)(nil)
+
 // Name returns "telegram".
 func (ch *Channel) Name() string { return "telegram" }
+
+// Inflight returns the number of inbound messages that the channel received and did not
+// submit to the gateway yet. The stop drain of the gateway waits for them.
+func (ch *Channel) Inflight() int { return int(ch.inflight.Load()) }
 
 // Run registers the bot commands and polls for updates until ctx ends.
 func (ch *Channel) Run(ctx context.Context, gw *gateway.Gateway) error {
@@ -257,7 +268,13 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		return
 	}
 	if m.MediaGroupID != "" {
-		ch.albums.Add(m, func(msgs []Message) { ch.dispatch(ctx, gw, n, msgs, text) })
+		// An album part counts from now, also while it waits for the other parts. Each
+		// part goes to exactly one flush.
+		ch.inflight.Add(1)
+		ch.albums.Add(m, func(msgs []Message) {
+			defer ch.inflight.Add(-int64(len(msgs)))
+			ch.dispatch(ctx, gw, n, msgs, text)
+		})
 		return
 	}
 	ch.dispatch(ctx, gw, n, []Message{m}, text)
@@ -321,8 +338,11 @@ func (ch *Channel) oldIDPlaces(ctx context.Context, oldID string) []string {
 }
 
 // dispatch builds the inbound message of msgs and gives it to the gateway. text is the
-// gated text of the first message, without the bot mention.
+// gated text of the first message, without the bot mention. The message counts in
+// Inflight until Submit returns. From then on, the gateway counts it.
 func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normalized, msgs []Message, text string) {
+	ch.inflight.Add(1)
+	defer ch.inflight.Add(-1)
 	in := gateway.Inbound{
 		Key:      ch.sessionKey(n),
 		Source:   "telegram",
@@ -369,6 +389,8 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 		}
 		t, images, files, err := ch.Inbox.Build(ctx, clean)
 		if err != nil {
+			// Build fails only when ctx ends, that is at a gateway stop.
+			ch.dropAtStop(ctx, n, chatID, msgs[0].MessageID, err)
 			return
 		}
 		in.Text, in.Images, in.Files, in.IsText = t, images, files, false
@@ -386,10 +408,35 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 	submitted = true
 	gw.Submit(ctx, in, newRenderer, func(err error) {
 		release()
-		if err != nil && ctx.Err() == nil {
+		switch {
+		case errors.Is(err, gateway.ErrStopping):
+			ch.dropAtStop(ctx, n, chatID, msgs[0].MessageID, err)
+		case err != nil && ctx.Err() == nil:
 			ch.logger().Warn("telegram: the message failed", "key", in.Key, "err", err.Error())
 		}
 	})
+}
+
+// droppedAtStopText is the notice for a message that a gateway stop dropped before the
+// agent got it.
+const droppedAtStopText = "⚠️ Tether Agent stopped before it could read this message. Send it again."
+
+// dropNoticeTimeout is the limit of the send of droppedAtStopText.
+const dropNoticeTimeout = 3 * time.Second
+
+// dropAtStop logs that a gateway stop dropped the message msgID, and it tells the user in
+// a reply to that message. The poller saved the offset before the handler, so Telegram
+// does not send the message again. ctx can be the cancelled work context, so the send has
+// a context and a limit of its own.
+func (ch *Channel) dropAtStop(ctx context.Context, n Normalized, chatID int64, msgID int, err error) {
+	ch.logger().Warn("telegram: the gateway stops, so the message is dropped",
+		"chat", n.ChatID, "message", msgID, "err", err.Error())
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dropNoticeTimeout)
+	defer cancel()
+	if _, err := ch.sendText(sctx, chatID, n.ThreadID, droppedAtStopText,
+		sendOpts{replyTo: msgID, class: paceReply}); err != nil {
+		ch.logger().Warn("telegram: cannot send the drop notice", "chat", n.ChatID, "err", err.Error())
+	}
 }
 
 // observe saves an observed group message to the shared session of the chat or topic, with

@@ -84,7 +84,10 @@ type serverState struct {
 	cfg      config.MCPServer
 	disabled bool
 	conn     conn
-	inflight int
+	// inflight counts the calls in flight on each connection. dead holds the connections
+	// that a call found dead. A dead connection closes when its last call ends.
+	inflight map[conn]int
+	dead     map[conn]bool
 	lastUsed time.Time
 	// defs is the latest known tool list. registered holds the names of the tools of defs
 	// that are in the registry.
@@ -199,18 +202,9 @@ func (m *Manager) apply(reg *tools.Registry) (count int, skipped []string) {
 }
 
 // ToolName returns the registry name of an MCP tool: mcp_<server>_<tool>. A character
-// that a provider does not accept in a tool name becomes "_".
+// that a provider does not accept in a tool name becomes "_" (see config.MCPSafeName).
 func ToolName(server, tool string) string {
-	return "mcp_" + sanitize(server) + "_" + sanitize(tool)
-}
-
-func sanitize(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-' {
-			return r
-		}
-		return '_'
-	}, s)
+	return "mcp_" + config.MCPSafeName(server) + "_" + config.MCPSafeName(tool)
 }
 
 // call runs one tool call. A cold server starts first. A call that fails because the
@@ -226,12 +220,12 @@ func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMe
 			return "", err
 		}
 		out, err := c.Call(ctx, tool, args)
-		m.release(st)
-		if err == nil || attempt > 0 || ctx.Err() != nil || !deadConn(server, tool, err) {
+		dead := err != nil && ctx.Err() == nil && deadConn(server, tool, err)
+		m.release(st, c, dead)
+		if !dead || attempt > 0 {
 			return out, err
 		}
 		m.logger().Warn("mcp: the connection is dead; the server is started again", "server", server, "err", err.Error())
-		m.drop(st, c)
 	}
 }
 
@@ -258,7 +252,7 @@ func (m *Manager) acquire(ctx context.Context, st *serverState) (conn, error) {
 			m.refreshList(ctx, st, c)
 			st.mu.Lock()
 			st.conn, st.lastUsed = c, m.now()
-			st.inflight++
+			st.use(c)
 			st.mu.Unlock()
 			m.logger().Info("mcp: server started", "server", st.name, "tries", try)
 			return c, nil
@@ -282,27 +276,45 @@ func (m *Manager) take(st *serverState) (conn, error) {
 	if st.conn == nil {
 		return nil, nil
 	}
-	st.inflight++
+	st.use(st.conn)
 	st.lastUsed = m.now()
 	return st.conn, nil
 }
 
-// release ends one call in flight.
-func (m *Manager) release(st *serverState) {
-	st.mu.Lock()
-	st.inflight--
-	st.lastUsed = m.now()
-	st.mu.Unlock()
+// use counts one call in flight on c. The caller holds st.mu.
+func (st *serverState) use(c conn) {
+	if st.inflight == nil {
+		st.inflight = map[conn]int{}
+	}
+	st.inflight[c]++
 }
 
-// drop closes c and removes it from st when it is still the live connection.
-func (m *Manager) drop(st *serverState, c conn) {
+// release ends one call in flight on c. When dead is true, c is no longer the live
+// connection of st, so the next call dials again. Other calls can still use c, so a dead
+// connection closes only when its last call ends.
+func (m *Manager) release(st *serverState, c conn, dead bool) {
 	st.mu.Lock()
-	if st.conn == c {
-		st.conn = nil
+	st.lastUsed = m.now()
+	if dead {
+		if st.conn == c {
+			st.conn = nil
+		}
+		if st.dead == nil {
+			st.dead = map[conn]bool{}
+		}
+		st.dead[c] = true
+	}
+	st.inflight[c]--
+	last := st.inflight[c] <= 0
+	closeNow := last && st.dead[c]
+	if last {
+		delete(st.inflight, c)
+		delete(st.dead, c)
 	}
 	st.mu.Unlock()
-	m.closeLater(c)
+	if closeNow {
+		m.closeLater(c)
+	}
 }
 
 // refreshList lists the tools on a new connection. When the list changed, it updates the
@@ -342,7 +354,7 @@ func (m *Manager) ReapIdle() {
 			idle = defaultIdleStop
 		}
 		var c conn
-		if st.conn != nil && !st.cfg.AlwaysOn && st.inflight == 0 && now.Sub(st.lastUsed) >= idle {
+		if st.conn != nil && !st.cfg.AlwaysOn && st.inflight[st.conn] == 0 && now.Sub(st.lastUsed) >= idle {
 			c, st.conn = st.conn, nil
 		}
 		st.mu.Unlock()
@@ -677,11 +689,12 @@ type cachedTool struct {
 }
 
 func (m *Manager) cachePath(server string) string {
-	return filepath.Join(m.CacheDir, sanitize(server)+".json")
+	return filepath.Join(m.CacheDir, config.MCPSafeName(server)+".json")
 }
 
 // readCache returns the cached tool list of the server. A missing file returns an error
-// that wraps os.ErrNotExist.
+// that wraps os.ErrNotExist. A file of a different server also returns such an error, because
+// two server names can have the same file name.
 func (m *Manager) readCache(server string) ([]ToolDef, error) {
 	b, err := os.ReadFile(m.cachePath(server))
 	if err != nil {
@@ -690,6 +703,9 @@ func (m *Manager) readCache(server string) ([]ToolDef, error) {
 	var f cacheFile
 	if err := json.Unmarshal(b, &f); err != nil {
 		return nil, fmt.Errorf("%s: %w", m.cachePath(server), err)
+	}
+	if f.Server != server {
+		return nil, fmt.Errorf("%s holds the tools of the server %q: %w", m.cachePath(server), f.Server, os.ErrNotExist)
 	}
 	defs := make([]ToolDef, 0, len(f.Tools))
 	for _, t := range f.Tools {

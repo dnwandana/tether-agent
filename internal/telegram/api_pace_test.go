@@ -278,6 +278,59 @@ func TestPaceNotUsedWithoutPaceOrChat(t *testing.T) {
 	}
 }
 
+// TestPaceUnsentCallGivesPlaceBack checks that a counted call gives its
+// place back when the request did not go out.
+func TestPaceUnsentCallGivesPlaceBack(t *testing.T) {
+	done, cancel := context.WithCancel(ctx)
+	cancel()
+	for _, tc := range []struct {
+		name string
+		call func(c *Client) error
+	}{
+		{"body error", func(c *Client) error {
+			missing := filepath.Join(t.TempDir(), "missing.png")
+			return c.Upload(ctx, "sendPhoto", map[string]string{"chat_id": "-100"}, "photo", missing, nil)
+		}},
+		{"request error", func(c *Client) error {
+			c.BaseURL = "http://[::1"
+			_, err := replyClient(c).SendMessage(ctx, SendMessageParams{ChatID: -100, Text: "x"})
+			return err
+		}},
+		{"context done", func(c *Client) error {
+			_, err := queueClient(c).SendMessage(done, SendMessageParams{ChatID: -100, Text: "x"})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeBot(t)
+			c := api.pacedClient(newFakeClock())
+			if err := tc.call(c); err == nil {
+				t.Fatal("the call must fail")
+			}
+			if n := len(api.all()); n != 0 {
+				t.Fatal("the request went out:", api.methods())
+			}
+			if d := c.Pace.Next(-100, paceWait); d != 0 {
+				t.Fatal("the place did not go back:", d)
+			}
+		})
+	}
+}
+
+// TestPaceSendErrorKeepsPlace checks that a counted call keeps its place
+// when the HTTP client fails, because the request can be at Telegram.
+func TestPaceSendErrorKeepsPlace(t *testing.T) {
+	api := newFakeBot(t)
+	c := api.pacedClient(newFakeClock())
+	api.srv.Close()
+	if _, err := c.SendMessage(ctx, SendMessageParams{ChatID: -100, Text: "x"}); err == nil {
+		t.Fatal("the call must fail")
+	}
+	if d := c.Pace.Next(-100, paceWait); d != time.Second {
+		t.Fatal("the call must keep its place:", d)
+	}
+}
+
 func TestPaceFloodRecordedOnSend(t *testing.T) {
 	api := newFakeBot(t)
 	clk := newFakeClock()
@@ -468,6 +521,54 @@ func TestNoWaitSlotWaitKeepsInlineRetry(t *testing.T) {
 	_, err := noWaitClient(c).EditMessageText(ctx, EditMessageTextParams{ChatID: 42, MessageID: 1, Text: "x"})
 	if err != nil || api.count("editMessageText") != 2 {
 		t.Fatal(err, api.methods())
+	}
+}
+
+// TestNoWaitInlineGateUsesRetryAfter checks that a paced noWaitClient call
+// waits inline for a retry_after of maxInlineFloodWait. The gate does not
+// count the pad of the pace, but the wait includes it.
+func TestNoWaitInlineGateUsesRetryAfter(t *testing.T) {
+	api := newFakeBot(t)
+	clk := newFakeClock()
+	c := api.pacedClient(clk)
+	start := clk.Now()
+	flood429Once(api, "editMessageText", int(maxInlineFloodWait/time.Second))
+	_, err := noWaitClient(c).EditMessageText(ctx, EditMessageTextParams{ChatID: 42, MessageID: 1, Text: "x"})
+	if err != nil || api.count("editMessageText") != 2 {
+		t.Fatal(err, api.methods())
+	}
+	if got := clk.Now().Sub(start); got != maxInlineFloodWait+floodPad {
+		t.Fatal("the inline wait must include the pad:", got)
+	}
+}
+
+// TestNoWaitInlineGateUsesFloodEnd checks that a paced noWaitClient call
+// does not wait inline when an earlier 429 moved the flood end of the chat
+// far out, also when the retry_after of this reply is short.
+func TestNoWaitInlineGateUsesFloodEnd(t *testing.T) {
+	api := newFakeBot(t)
+	clk := newFakeClock()
+	c := api.pacedClient(clk)
+	start := clk.Now()
+	nc := noWaitClient(c)
+	nc.sleep = func(context.Context, time.Duration) error {
+		t.Fatal("the call must not wait inline")
+		return nil
+	}
+	api.setReply(func(m string, _ map[string]any) *APIError {
+		if m == "editMessageText" {
+			// During the request, an other call of the chat gets a 429 with a long wait.
+			c.Pace.NoteFlood(42, 30*time.Second)
+			return &APIError{Code: 429, Description: "Too Many Requests: retry after 2", RetryAfter: 2}
+		}
+		return nil
+	})
+	_, err := nc.EditMessageText(ctx, EditMessageTextParams{ChatID: 42, MessageID: 1, Text: "x"})
+	if _, ok := errors.AsType[*floodError](err); !ok {
+		t.Fatal("want a *floodError, got", err)
+	}
+	if api.count("editMessageText") != 1 || !clk.Now().Equal(start) {
+		t.Fatal(api.methods(), clk.Now().Sub(start))
 	}
 }
 

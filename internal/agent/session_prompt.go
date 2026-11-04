@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/tools"
@@ -139,7 +140,17 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, channel st
 		in.Base = s.PromptOverride
 	}
 	if a.Memory != nil {
-		in.Memory, in.Profile = a.Memory.Memory(), a.Memory.Profile()
+		for _, f := range []struct {
+			target string
+			text   *string
+		}{{memory.TargetMemory, &in.Memory}, {memory.TargetUser, &in.Profile}} {
+			entries, err := a.Memory.ReadEntries(f.target)
+			if err != nil {
+				a.logger().Warn("agent: cannot read a memory file; the prompt has no entries of it", "target", f.target, "err", err.Error())
+				continue
+			}
+			*f.text = strings.Join(entries, memory.Separator)
+		}
 	}
 	var visible map[string]bool
 	if a.Tools != nil {

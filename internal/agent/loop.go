@@ -1070,10 +1070,18 @@ func (a *Agent) turnEnv(t Turn) *tools.Env {
 	return env
 }
 
+// defaultConfig is the config of an Agent with no Cfg. The value is made once and shared.
+// Callers only read it.
+var defaultConfig = sync.OnceValue(func() *config.Config {
+	c := config.Default()
+	return &c
+})
+
+// config returns a.Cfg, or defaultConfig when a.Cfg is nil. It does not write to a, so
+// two goroutines can call it on the same Agent.
 func (a *Agent) config() *config.Config {
 	if a.Cfg == nil {
-		c := config.Default()
-		a.Cfg = &c
+		return defaultConfig()
 	}
 	return a.Cfg
 }

@@ -27,6 +27,20 @@ const (
 	maxGrace = 2 * time.Hour
 )
 
+// After a run record fails to write, the next run of the job stays in the past. The job then
+// waits before it runs again. The wait starts at markRetryMin and doubles up to markRetryMax.
+const (
+	markRetryMin = time.Minute
+	markRetryMax = time.Hour
+)
+
+// markRetry is the wait of one job after a failed run record.
+type markRetry struct {
+	// at is the time when the job can run again.
+	at   time.Time
+	wait time.Duration
+}
+
 // Scheduler runs the due jobs of Store in the gateway process. It ticks every Tick.
 // The zero values use the defaults: MaxParallel 2, Missed "skip", Tick 30 s.
 type Scheduler struct {
@@ -47,6 +61,8 @@ type Scheduler struct {
 	sem      chan struct{}
 	mu       sync.Mutex
 	running  map[string]bool
+	// retry holds the jobs that wait after a failed run record.
+	retry map[string]markRetry
 	// workdirBusy is true while a job with a workdir runs. Such jobs run one at a time.
 	workdirBusy bool
 	// base is the context of Start. RunNow uses it, so a run does not end with the turn
@@ -65,6 +81,7 @@ func (s *Scheduler) init() {
 		}
 		s.sem = make(chan struct{}, n)
 		s.running = map[string]bool{}
+		s.retry = map[string]markRetry{}
 	})
 }
 
@@ -172,11 +189,16 @@ func (s *Scheduler) RunNow(ctx context.Context, id string) error {
 }
 
 // claim reserves a slot for the job j. It returns false when the job runs already, when
-// another workdir job runs, or when all MaxParallel slots are in use.
+// the job waits after a failed run record, when another workdir job runs, or when all
+// MaxParallel slots are in use.
 func (s *Scheduler) claim(j Job) bool {
+	now := s.now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.running[j.ID] || (j.Workdir != "" && s.workdirBusy) {
+		return false
+	}
+	if r, ok := s.retry[j.ID]; ok && now.Before(r.at) {
 		return false
 	}
 	select {
@@ -208,19 +230,45 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 	// The writes use a context without cancel, so a shutdown still records the run.
 	wctx := context.WithoutCancel(ctx)
 	status := o.Status
+	mark := s.Store.MarkRun
 	if ctx.Err() != nil {
-		// The process stops. Record the run, so a restart does not repeat its side effects.
+		// The process stops before the run ends. The outcome is not complete, so it is not
+		// delivered. The cronjob list shows the stop. The stopped run does not use up the job,
+		// so a one-shot job runs again after the restart.
 		status = "error"
 		o.Text = fmt.Sprintf("⚠ Cron job %s stopped: the gateway shut down before the run ended.", j.Name)
 		s.log().Warn("cron job stopped by shutdown", "job", j.ID, "name", j.Name)
+		mark = s.Store.MarkStopped
 	} else if s.Deliver != nil {
 		if err := s.Deliver.Deliver(ctx, j, o); err != nil {
 			status = "delivery_failed"
 		}
 	}
-	if err := s.Store.MarkRun(wctx, j.ID, status, o.Text, ranAt); err != nil {
-		s.log().Error("cron: cannot record the job run", "job", j.ID, "err", err)
+	s.noteMark(j.ID, mark(wctx, j.ID, status, o.Text, ranAt))
+}
+
+// noteMark keeps the result err of the run record of the job id. A failed write leaves the
+// next run in the past, so the job waits before it runs again. Each failure in a row doubles
+// the wait. A good write clears the wait. A job with a bad stored schedule needs no wait,
+// because the store disabled it.
+func (s *Scheduler) noteMark(id string, err error) {
+	if errors.Is(err, errBadSchedule) {
+		s.log().Error("cron: job disabled: its stored schedule is not valid", "job", id, "err", err)
+		err = nil
 	}
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err == nil {
+		delete(s.retry, id)
+		return
+	}
+	r := s.retry[id]
+	r.wait = min(max(2*r.wait, markRetryMin), markRetryMax)
+	r.at = now.Add(r.wait)
+	s.retry[id] = r
+	s.log().Error("cron: cannot record the job run. The job waits before it runs again",
+		"job", id, "wait", r.wait, "err", err)
 }
 
 // run calls Runner.Run. A panic becomes an error outcome, so one job cannot stop the

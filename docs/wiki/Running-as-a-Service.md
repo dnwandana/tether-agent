@@ -127,9 +127,12 @@ When the gateway stops, it tries to finish the running replies first. It does th
 1. It stops reading new messages.
 2. It sends a notice to each chat with a running reply, for example:
    `⚠️ The gateway is restarting. I will try to finish this reply first, for up to 3 min.`
-3. It waits for the running turns to end, for at most `agent.restart_drain_timeout_s`
-   seconds. The default is 180.
+3. It waits for the running turns to end, and for the messages that it still prepares, for
+   example a voice note in speech to text. It waits for at most
+   `agent.restart_drain_timeout_s` seconds. The default is 180.
 4. It saves the messages that still wait in the queue, and it cancels the rest of the work.
+   A message that it could not prepare in time, or that comes after the drain, gets this
+   reply: `⚠️ Tether Agent stopped before it could read this message. Send it again.`
 
 On the next start, the gateway continues each reply that it cut, if the cut is recent
 (`agent.resume_freshness_s`, default 3600 seconds; `0` turns this off). It never runs an old

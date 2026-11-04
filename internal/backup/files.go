@@ -195,9 +195,8 @@ func collectFolder(dataDir, top string) (items []item, skipped []string, err err
 // maskTextFile copies src to dst with the known secret values masked. dst
 // gets mode 0600. A file with a NUL byte in its first 8 KB is binary, so it
 // is copied with no change and with no full read into memory. changed reports
-// whether the mask changed the text. With always false, a file that the mask
-// does not change gets no copy, because the archive reads src.
-func maskTextFile(src, dst string, r *security.Redactor, always bool) (changed bool, err error) {
+// whether the mask changed the text.
+func maskTextFile(src, dst string, r *security.Redactor) (changed bool, err error) {
 	sf, err := openRegular(src)
 	if err != nil {
 		return false, err
@@ -210,9 +209,6 @@ func maskTextFile(src, dst string, r *security.Redactor, always bool) (changed b
 	}
 	head = head[:n]
 	if bytes.IndexByte(head, 0) >= 0 {
-		if !always {
-			return false, nil
-		}
 		return false, writeCopy(dst, io.MultiReader(bytes.NewReader(head), sf), src)
 	}
 	// The mask needs the full text. A note has no size limit, but the memory store also
@@ -224,9 +220,6 @@ func maskTextFile(src, dst string, r *security.Redactor, always bool) (changed b
 	in := string(head) + string(rest)
 	out := r.RedactExact(in)
 	changed = out != in
-	if !changed && !always {
-		return false, nil
-	}
 	return changed, writeCopy(dst, strings.NewReader(out), src)
 }
 

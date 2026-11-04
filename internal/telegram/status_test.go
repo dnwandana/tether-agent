@@ -835,12 +835,12 @@ func floodEdits(api *fakeBot) {
 // more and does not fire during a test.
 func fireTimer(s *Status) bool {
 	s.mu.Lock()
-	stop := s.timer
+	stop, gen := s.timer, s.timerGen
 	s.mu.Unlock()
 	if stop == nil || !stop() {
 		return false
 	}
-	s.onTimer()
+	s.onTimer(gen)
 	return true
 }
 

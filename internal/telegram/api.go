@@ -34,6 +34,11 @@ const (
 	generalTopicID = "1"
 	// paceLogWait is the pace wait above which a blocking call logs at Info.
 	paceLogWait = 5 * time.Second
+	// defaultRetryAfter is the retry_after of a 429 with a body that is not
+	// JSON. Telegram always sends JSON, so such a reply comes from a proxy
+	// and gives no wait. The value is long, so the calls do not cause more
+	// 429 replies.
+	defaultRetryAfter = 15 * time.Second
 )
 
 // maxIdleConnsPerHost is the number of idle connections to the Bot API host that the
@@ -352,14 +357,17 @@ func ThreadParam(threadID string, forChatAction bool) (int, bool) {
 
 // envelope is the common reply shape of the Bot API.
 type envelope struct {
-	OK          bool            `json:"ok"`
-	Result      json.RawMessage `json:"result"`
-	ErrorCode   int             `json:"error_code"`
-	Description string          `json:"description"`
-	Parameters  *struct {
-		RetryAfter      int   `json:"retry_after"`
-		MigrateToChatID int64 `json:"migrate_to_chat_id"`
-	} `json:"parameters"`
+	OK          bool             `json:"ok"`
+	Result      json.RawMessage  `json:"result"`
+	ErrorCode   int              `json:"error_code"`
+	Description string           `json:"description"`
+	Parameters  *replyParameters `json:"parameters"`
+}
+
+// replyParameters are the parameters of an error reply.
+type replyParameters struct {
+	RetryAfter      int   `json:"retry_after"`
+	MigrateToChatID int64 `json:"migrate_to_chat_id"`
 }
 
 // Call sends params as a JSON POST to the method and decodes the result into
@@ -438,18 +446,26 @@ func writeMultipart(mw *multipart.Writer, fields map[string]string, fileField, n
 
 // do runs one request with the rate-limit retry loop. newBody makes a fresh
 // body for each attempt. chatID is the chat of the call, or 0. A counted call
-// takes a place in the budget of the chat before each attempt.
+// takes a place in the budget of the chat before each attempt. An attempt
+// whose request did not go out gives its place back. An attempt that got a
+// reply, or that failed in the HTTP client, keeps its place, because the
+// request can be at Telegram.
 func (c *Client) do(ctx context.Context, method string, chatID int64, counted bool, out any, timeout time.Duration,
 	newBody func() (io.Reader, string, func(), error)) error {
 	paced := c.Pace != nil && chatID != 0
 	for attempt := 0; ; attempt++ {
+		release := func() {}
 		if paced && counted {
-			if err := c.pace(ctx, method, chatID); err != nil {
+			var err error
+			if release, err = c.pace(ctx, method, chatID); err != nil {
 				return fmt.Errorf("telegram %s: %w", method, err)
 			}
 		}
-		env, err := c.once(ctx, method, timeout, newBody)
+		env, sent, err := c.once(ctx, method, timeout, newBody)
 		if err != nil {
+			if !sent {
+				release()
+			}
 			c.logger().Warn("telegram request failed", "method", method, "err", err.Error())
 			return err
 		}
@@ -468,17 +484,26 @@ func (c *Client) do(ctx context.Context, method string, chatID int64, counted bo
 			apiErr.MigrateToChatID = env.Parameters.MigrateToChatID
 		}
 		wait := time.Duration(max(apiErr.RetryAfter, 1)) * time.Second
+		// gate is the wait that the inline rule of a noWaitClient copy
+		// compares with maxInlineFloodWait. It has no pad.
+		gate := wait
 		if apiErr.Code == http.StatusTooManyRequests && paced {
 			// Record the flood end before the retry check, so that a call
 			// with no retry also holds the next calls of the chat.
 			c.Pace.NoteFlood(chatID, time.Duration(apiErr.RetryAfter)*time.Second)
-			wait = max(wait, c.Pace.FloodEnd(chatID).Sub(c.paceNow()))
+			// The flood end can be later than this reply gives, because
+			// an earlier 429 of the chat can set it. The retry waits for
+			// the flood end with the pad. The gate uses the same end with
+			// no pad.
+			end := c.Pace.FloodEnd(chatID).Sub(c.paceNow())
+			wait = max(wait, end)
+			gate = max(gate, end-floodPad)
 		}
 		if apiErr.Code != http.StatusTooManyRequests || attempt >= maxRetries429 || c.noRetry {
 			return fmt.Errorf("telegram %s: %w", method, apiErr)
 		}
 		if c.inlineWaited != nil {
-			if *c.inlineWaited || wait > maxInlineFloodWait {
+			if *c.inlineWaited || gate > maxInlineFloodWait {
 				// The wait of a paced call includes the pad of the pace.
 				// The callers add their own pad, so give them the
 				// retry_after of Telegram.
@@ -495,10 +520,11 @@ func (c *Client) do(ctx context.Context, method string, chatID int64, counted bo
 }
 
 // once sends one request and decodes the reply envelope. A reply that is not
-// JSON gives an error with the HTTP status.
+// JSON gives an error with the HTTP status. sent is false when the request
+// did not go out: the body or the request could not be made, or ctx ended
+// before the send.
 func (c *Client) once(ctx context.Context, method string, timeout time.Duration,
-	newBody func() (io.Reader, string, func(), error)) (envelope, error) {
-	var env envelope
+	newBody func() (io.Reader, string, func(), error)) (env envelope, sent bool, err error) {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
@@ -506,34 +532,39 @@ func (c *Client) once(ctx context.Context, method string, timeout time.Duration,
 	}
 	body, ctype, cleanup, err := newBody()
 	if err != nil {
-		return env, fmt.Errorf("telegram %s: %w", method, err)
+		return env, false, fmt.Errorf("telegram %s: %w", method, err)
 	}
 	defer cleanup()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.methodURL(method), body)
 	if err != nil {
-		return env, fmt.Errorf("telegram %s: make request: %w", method, c.clean(err))
+		return env, false, fmt.Errorf("telegram %s: make request: %w", method, c.clean(err))
 	}
 	req.Header.Set("Content-Type", ctype)
+	if err := ctx.Err(); err != nil {
+		return env, false, fmt.Errorf("telegram %s: %w", method, err)
+	}
 	resp, err := c.hc().Do(req)
 	if err != nil {
-		return env, fmt.Errorf("telegram %s: %w", method, c.clean(err))
+		return env, true, fmt.Errorf("telegram %s: %w", method, c.clean(err))
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
-		return env, fmt.Errorf("telegram %s: read reply: %w", method, c.clean(err))
+		return env, true, fmt.Errorf("telegram %s: read reply: %w", method, c.clean(err))
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		if resp.StatusCode == http.StatusTooManyRequests {
-			// A 429 with a body that is not JSON still gets the retry.
-			return envelope{ErrorCode: http.StatusTooManyRequests, Description: "Too Many Requests"}, nil
+			// A 429 with a body that is not JSON still gets the retry. It
+			// has no retry_after, so it gets defaultRetryAfter.
+			return envelope{ErrorCode: http.StatusTooManyRequests, Description: "Too Many Requests",
+				Parameters: &replyParameters{RetryAfter: int(defaultRetryAfter / time.Second)}}, true, nil
 		}
-		return env, fmt.Errorf("telegram %s: HTTP %d: reply is not JSON", method, resp.StatusCode)
+		return env, true, fmt.Errorf("telegram %s: HTTP %d: reply is not JSON", method, resp.StatusCode)
 	}
 	if !env.OK && env.ErrorCode == 0 {
 		env.ErrorCode = resp.StatusCode
 	}
-	return env, nil
+	return env, true, nil
 }
 
 // GetMe returns the bot user.
@@ -710,15 +741,17 @@ func (c *Client) wait(ctx context.Context, d time.Duration) error {
 
 // pace takes a place in the budget of the chat for one counted call. A
 // holding class never waits: it returns a *paceHold. A blocking class waits
-// for its place with ctx.
-func (c *Client) pace(ctx context.Context, method string, chatID int64) error {
+// for its place with ctx. The release function gives the place back, for
+// a request that does not go out. On an error, pace takes no place.
+func (c *Client) pace(ctx context.Context, method string, chatID int64) (release func(), err error) {
 	class := c.classFor(method)
 	if class == paceQueue || class == paceInterim {
-		if wait := c.Pace.TryTake(chatID, class); wait > 0 {
+		wait, release := c.Pace.TryReserve(chatID, class)
+		if wait > 0 {
 			c.logger().Debug("telegram pace hold", "method", method, "chat", chatID, "wait_s", wait.Seconds())
-			return &paceHold{Wait: wait}
+			return nil, &paceHold{Wait: wait}
 		}
-		return nil
+		return release, nil
 	}
 	for {
 		if class == paceWait {
@@ -727,21 +760,21 @@ func (c *Client) pace(ctx context.Context, method string, chatID int64) error {
 			// slot after the last record.
 			if place := c.Pace.Next(chatID, class); place > paceSlot {
 				if err := c.paceSleep(ctx, method, chatID, place, place-paceSlot); err != nil {
-					return err
+					return nil, err
 				}
 				continue
 			}
 		}
 		wait, release := c.Pace.Reserve(chatID, class)
 		if wait == 0 {
-			return nil
+			return release, nil
 		}
 		if err := c.paceSleep(ctx, method, chatID, wait, wait); err != nil {
 			release()
-			return err
+			return nil, err
 		}
 		if !c.Pace.FloodEnd(chatID).After(c.paceNow()) {
-			return nil
+			return release, nil
 		}
 		// A 429 during the wait moved the flood end. Take a new place after it.
 		release()
