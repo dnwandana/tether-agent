@@ -465,8 +465,9 @@ After some turns, a background review looks at the conversation and saves what i
 - A **skill review** starts after each `skills.review_interval_tool_rounds` tool rounds
   (default 10). It can write a new skill or fix a skill.
 - When both are due, they run as one review.
-- A review also runs before a compaction and on `/new`, when the session has 6 or more user
-  turns.
+- A review also runs after a compaction and on `/new`, when the session has 6 or more user
+  turns. The review of a compaction looks at the messages that the saved summary replaces. A
+  failed summary starts no review.
 
 A review is a copy of the conversation in a separate `review` session. It sends the same tool
 schemas as its parent and the session id of its parent as the cache key, so the prompt cache
