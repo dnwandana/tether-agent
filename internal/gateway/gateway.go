@@ -201,7 +201,7 @@ type pendingTurn struct {
 	// keeps its steer. Gateway.mu guards it.
 	takeOver bool
 	// system is true for a turn from Enqueue, for example a batch result or a resume note.
-	// /now does not count it as a waiting message of the owner.
+	// The queue limit and /now do not count it as a waiting message of the owner.
 	system bool
 	// handed is true when next gave the key to the message. Then the message counts in
 	// Gateway.active, and its waiter must run it, so the key goes on. Gateway.mu guards it.
@@ -338,7 +338,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 		g.mu.Unlock()
 		return func() error { return nil }
 	}
-	if len(ks.queue) >= maxQueuedMessages {
+	if ownerQueued(ks) >= maxQueuedMessages {
 		g.mu.Unlock()
 		ackReply(newRenderer(), Reply{Text: QueueFullReply})
 		return func() error { return nil }
@@ -402,8 +402,8 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 // follow-up. It runs after the current turn and the turns that wait before it. Enqueue
 // does not wait for the turn. The answer goes to the channel of the newest message of the
 // key, or else to the channel and the chat of the active session of the key. While the
-// gateway stops, it returns ErrStopping. The turn is not a message of the owner, so /now
-// does not count it.
+// gateway stops, it returns ErrStopping. The turn is not a message of the owner, so the
+// queue limit and /now do not count it.
 func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
 	return g.enqueue(ctx, key, text, true)
 }

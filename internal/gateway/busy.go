@@ -14,7 +14,10 @@ import (
 )
 
 // maxQueuedMessages is the maximum number of messages of the owner that wait in the queue
-// of one key. Each one keeps its text and its images until its turn.
+// of one key (ownerQueued). Each one keeps its text and its images until its turn. The
+// limit applies only to a new message in acceptMessage. A path that moves or keeps a text
+// that the owner already sent does not check it: flushBusyText, /steer before the start,
+// the text that /now moves, the leftover steer, and the resume path.
 const maxQueuedMessages = 20
 
 // The busy texts of Tether Agent, in Markdown. A busy ack is one plain line.
@@ -488,10 +491,11 @@ func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
 // turn above 0 must still hold the key, else nothing changes. The waiting steer text and
 // the merged busy text become the next turn, before the queue. Queued slash commands and
 // Enqueue turns do not count, and they stay in their place. took is false when the turn
-// was already stopped, or when no message of the owner waits, and then nothing changes. waiting is the number of the turns that
-// wait now. stopping is true when the gateway stops, and then nothing changes. msgID is the
-// message ID of the pressed button, or 0. The open busy ack of that message closes with no
-// edit, because the /now reply goes into that message.
+// was already stopped, or when no message of the owner waits, and then nothing changes.
+// waiting is the number of the turns that wait now. stopping is true when the gateway
+// stops, and then nothing changes. msgID is the message ID of the pressed button, or 0. The
+// open busy ack of that message closes with no edit, because the /now reply goes into that
+// message.
 func (g *Gateway) takeOver(key string, turn, msgID int) (took bool, waiting int, stopping bool) {
 	g.mu.Lock()
 	if g.stopping.Load() {
@@ -528,12 +532,7 @@ func (g *Gateway) takeOver(key string, turn, msgID int) (took bool, waiting int,
 		parts = append(parts, s)
 	}
 	text := strings.Join(parts, "\n")
-	for _, p := range ks.queue {
-		// next drops a queued slash command, so it does not count.
-		if !p.system && !isCommandText(p.in) {
-			waiting++
-		}
-	}
+	waiting = ownerQueued(ks)
 	if text == "" && waiting == 0 {
 		g.mu.Unlock()
 		return false, 0, false
@@ -771,6 +770,19 @@ func isCommandText(in Inbound) bool {
 	}
 	_, _, ok := IsCommand(in.Text)
 	return ok
+}
+
+// ownerQueued returns the number of messages of the owner in the queue of ks. A system
+// entry does not count. A slash command does not count, because next drops it. The caller
+// holds g.mu.
+func ownerQueued(ks *keyState) int {
+	n := 0
+	for _, p := range ks.queue {
+		if !p.system && !isCommandText(p.in) {
+			n++
+		}
+	}
+	return n
 }
 
 func (g *Gateway) clock() time.Time {

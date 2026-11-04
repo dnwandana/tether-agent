@@ -206,6 +206,35 @@ func TestFullQueueRefusesTheMessage(t *testing.T) {
 	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
 }
 
+func TestSystemEntriesDoNotFillTheQueue(t *testing.T) {
+	g, _, _, _ := busyGateway(t)
+	f := &replyFactory{}
+	system := []string{"batch result one", "batch result two", "batch result three"}
+	for _, text := range system {
+		if err := g.Enqueue(context.Background(), "k", text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range maxQueuedMessages - 1 {
+		g.Submit(context.Background(), media("k"), f.new, nil)
+	}
+	waitFor(t, func() bool { return g.queueLen("k") == len(system)+maxQueuedMessages-1 })
+	// 19 messages of the owner wait, so the queue takes one more message.
+	g.Submit(context.Background(), media("k"), f.new, nil)
+	waitFor(t, func() bool { return g.queueLen("k") == len(system)+maxQueuedMessages })
+	if err := g.Handle(context.Background(), media("k"), f.new); err != nil {
+		t.Fatal(err)
+	}
+	if n := g.queueLen("k"); n != len(system)+maxQueuedMessages {
+		t.Fatal("a full queue must refuse the message:", n)
+	}
+	reps := f.replies()
+	if last := reps[len(reps)-1]; last.Text != QueueFullReply || len(last.Buttons) != 0 {
+		t.Fatalf("%+v", last)
+	}
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+}
+
 func TestQueuedReplyHasNowButton(t *testing.T) {
 	g, _, _, _ := busyGateway(t)
 	f := &replyFactory{}
