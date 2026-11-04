@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -287,6 +288,39 @@ func TestStoppingRefusesNewWork(t *testing.T) {
 	}
 	if ErrStopping.Error() != "gateway: the gateway is stopping, so it takes no new work" {
 		t.Fatal(ErrStopping)
+	}
+}
+
+// prepChannel is a channel that prepares each message before it submits it, for example
+// with a media download. n is the number of messages that it prepares now.
+type prepChannel struct {
+	recChannel
+	n atomic.Int64
+}
+
+func (c *prepChannel) Inflight() int { return int(c.n.Load()) }
+
+func TestWaitWaitsForTheMessagesThatAChannelPrepares(t *testing.T) {
+	g, fp := gatewayWithSlowProvider(t, 200*time.Millisecond)
+	ch := &prepChannel{}
+	g.Channels = map[string]Channel{"telegram": ch}
+	ch.n.Add(1)
+	if g.Wait(100 * time.Millisecond) {
+		t.Fatal("Wait must wait for a message that the channel prepares")
+	}
+	// The channel submits the message, and then it stops to count it. Wait then waits for
+	// the turn of the message.
+	f := &recFactory{}
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		g.Submit(context.Background(), inb("k", "hi"), f.new, nil)
+		ch.n.Add(-1)
+	}()
+	if !g.Wait(5 * time.Second) {
+		t.Fatal("the turn did not end")
+	}
+	if n := requests(fp); n != 1 || len(f.finals()) != 1 {
+		t.Fatal(n, f.finals())
 	}
 }
 

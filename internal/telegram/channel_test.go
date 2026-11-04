@@ -1157,3 +1157,61 @@ func TestMigrationLogged(t *testing.T) {
 		t.Fatalf("want %s in\n%s", warn, wbuf.String())
 	}
 }
+
+// voiceDM is a DM voice note from the user with the id uid. The harness file "v1" serves it.
+func voiceDM(h *tgHarness, uid int64) Message {
+	h.api.addFile("v1", "voice/file_1.oga", []byte("OGG"))
+	m := dmText(uid, "")
+	m.MessageID, m.Text, m.Entities = 41, "", nil
+	m.Voice = &Voice{FileID: "v1", FileUniqueID: "uv", FileSize: 3}
+	return m
+}
+
+// blockSTT makes speech to text of h wait until release closes or the context ends. started
+// closes when the first transcription starts.
+func blockSTT(h *tgHarness) (started, release chan struct{}) {
+	started, release = make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	h.ch.Inbox.Transcribe = func(ctx context.Context, _ string) (string, error) {
+		once.Do(func() { close(started) })
+		select {
+		case <-release:
+			return "turn on the lights", nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return started, release
+}
+
+func waitClosed(t *testing.T, c <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-c:
+	case <-time.After(5 * time.Second):
+		t.Fatal(what)
+	}
+}
+
+func TestStopDrainWaitsForAMessageInSpeechToText(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	started, release := blockSTT(h)
+	h.update(voiceDM(h, 5))
+	waitClosed(t, started, "the transcription did not start")
+	// The gateway has no turn yet, but the message is not lost: the drain waits for it.
+	if h.gw.Wait(100 * time.Millisecond) {
+		t.Fatal("the drain must wait for a message in speech to text")
+	}
+	close(release)
+	h.waitIdle()
+	s := h.session("telegram:dm:5")
+	if s == nil {
+		t.Fatal("no session")
+	}
+	if got := h.messages(s)[0].Msg.Content; !strings.Contains(got, "turn on the lights") {
+		t.Fatal(got)
+	}
+	if h.ch.Inflight() != 0 {
+		t.Fatal(h.ch.Inflight())
+	}
+}

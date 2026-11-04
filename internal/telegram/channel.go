@@ -89,12 +89,23 @@ type Channel struct {
 	// richFailed is set at the first failed rich message. Later failures log at the debug
 	// level.
 	richFailed atomic.Bool
+
+	// inflight counts the inbound messages that the channel received and did not submit to
+	// the gateway yet, for example a voice note in speech to text or an album part that
+	// waits for the other parts.
+	inflight atomic.Int64
 }
 
 var _ gateway.Channel = (*Channel)(nil)
 
+var _ gateway.InflightChannel = (*Channel)(nil)
+
 // Name returns "telegram".
 func (ch *Channel) Name() string { return "telegram" }
+
+// Inflight returns the number of inbound messages that the channel received and did not
+// submit to the gateway yet. The stop drain of the gateway waits for them.
+func (ch *Channel) Inflight() int { return int(ch.inflight.Load()) }
 
 // Run registers the bot commands and polls for updates until ctx ends.
 func (ch *Channel) Run(ctx context.Context, gw *gateway.Gateway) error {
@@ -257,7 +268,13 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		return
 	}
 	if m.MediaGroupID != "" {
-		ch.albums.Add(m, func(msgs []Message) { ch.dispatch(ctx, gw, n, msgs, text) })
+		// An album part counts from now, also while it waits for the other parts. Each
+		// part goes to exactly one flush.
+		ch.inflight.Add(1)
+		ch.albums.Add(m, func(msgs []Message) {
+			defer ch.inflight.Add(-int64(len(msgs)))
+			ch.dispatch(ctx, gw, n, msgs, text)
+		})
 		return
 	}
 	ch.dispatch(ctx, gw, n, []Message{m}, text)
@@ -321,8 +338,11 @@ func (ch *Channel) oldIDPlaces(ctx context.Context, oldID string) []string {
 }
 
 // dispatch builds the inbound message of msgs and gives it to the gateway. text is the
-// gated text of the first message, without the bot mention.
+// gated text of the first message, without the bot mention. The message counts in
+// Inflight until Submit returns. From then on, the gateway counts it.
 func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normalized, msgs []Message, text string) {
+	ch.inflight.Add(1)
+	defer ch.inflight.Add(-1)
 	in := gateway.Inbound{
 		Key:      ch.sessionKey(n),
 		Source:   "telegram",

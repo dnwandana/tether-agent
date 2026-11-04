@@ -1563,7 +1563,7 @@ func TestStopGatewayStepOrder(t *testing.T) {
 		want     string
 	}{
 		{false, "begin receive notify drain stopping work"},
-		{true, "begin receive notify drain work"},
+		{true, "begin receive notify drain stopping work"},
 	} {
 		ev := &stopEvents{}
 		s := gatewayStop{
