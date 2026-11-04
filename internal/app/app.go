@@ -633,9 +633,10 @@ func (a *App) registerTools(gatewayRole bool) {
 	a.terminal = &tools.TerminalTool{
 		DefaultTimeout: time.Duration(cfg.Terminal.DefaultTimeoutS) * time.Second,
 		DotEnv:         a.DotEnv,
-		// The skill RequiredEnv names of the session reach the child too.
+		// The skill RequiredEnv names of the session reach the child too, except
+		// the secrets of Tether Agent itself.
 		Passthrough: func(env *tools.Env) []string {
-			return append(slices.Clone(cfg.Terminal.EnvPassthrough), tools.PassthroughFor(env)...)
+			return skillPassthrough(cfg, a.DotEnv, env)
 		},
 		SpillDir:  spill,
 		InGateway: gatewayRole,
@@ -716,7 +717,7 @@ func (a *App) registerTools(gatewayRole bool) {
 			Python:      python,
 			DotEnv:      a.DotEnv,
 			Passthrough: func(env *tools.Env) []string {
-				return append(slices.Clone(cfg.Terminal.EnvPassthrough), tools.PassthroughFor(env)...)
+				return skillPassthrough(cfg, a.DotEnv, env)
 			},
 			InGateway: gatewayRole,
 		})
