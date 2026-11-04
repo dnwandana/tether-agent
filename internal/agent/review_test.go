@@ -216,6 +216,8 @@ func TestMemoryNotices(t *testing.T) {
 	// long is too large for tier 1 with the limits of the test (2200 and 1375), but not
 	// too large for one entry.
 	long := strings.Repeat("y", 2300)
+	// mid fits in tier 1, but it is longer than the old cut of 120 runes.
+	mid := strings.Repeat("é", 500)
 	cases := []struct {
 		name  string
 		setup []string // the memory calls before the call under test
@@ -262,6 +264,14 @@ func TestMemoryNotices(t *testing.T) {
 			`{"action":"search","query":"QuickNode"}`, ""},
 		{"read", []string{`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`},
 			`{"action":"read","topic":"rpc"}`, ""},
+		{"add 500 runes to memory", nil,
+			`{"action":"add","target":"memory","content":"` + mid + `"}`, "💾 Memory updated: `" + mid + "`"},
+		{"add 500 runes to the user profile", nil,
+			`{"action":"add","target":"user","content":"` + mid + `"}`, "💾 User profile updated: `" + mid + "`"},
+		{"add 500 runes to a note", nil,
+			`{"action":"add","target":"memory","topic":"rpc","content":"` + mid + `"}`, "💾 Memory note updated: rpc"},
+		{"add a hidden rune", nil,
+			`{"action":"add","target":"memory","content":"a\u200bb"}`, ""},
 		{"failed add", nil,
 			`{"action":"add","target":"memory"}`, ""},
 	}
@@ -817,12 +827,18 @@ func TestCompactNowForcesAndCounts(t *testing.T) {
 }
 
 func TestNoticeQuote(t *testing.T) {
+	long := strings.Repeat("é", 500)
 	cases := []struct{ action, text, want string }{
 		{"add", "", ""},
 		{"add", "  a\n  b ", ": `a b`"},
 		{"add", "run `rm`", ": `run 'rm'`"},
 		{"remove", "Go", " (removed): `Go`"},
-		{"add", strings.Repeat("é", noticeQuoteRunes+5), ": `" + strings.Repeat("é", noticeQuoteRunes) + "…`"},
+		// A tier-1 write goes into the system prompt, so the notice shows the full text.
+		{"add", long, ": `" + long + "`"},
+		// A hidden rune shows as a mark.
+		{"add", "VPS\u200b = ovh", ": `VPS<U+200B> = ovh`"},
+		{"remove", "a\u202eb", " (removed): `a<U+202E>b`"},
+		{"add", "tag\U000E0041", ": `tag<U+E0041>`"},
 	}
 	for _, c := range cases {
 		if got := noticeQuote(c.action, c.text); got != c.want {
@@ -854,6 +870,31 @@ func TestNoReviewSessionWhenTheProviderIsDown(t *testing.T) {
 	if kids := childSessions(t, a, sess.ID); len(kids) != 0 {
 		t.Fatal("a review with no provider must not make a session:", len(kids))
 	}
+}
+
+// A due review does not start while each provider entry is down, and it stays due. It
+// starts after the next turn when the provider works again.
+func TestDueReviewWaitsWhileTheProviderIsDown(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	for range 9 {
+		userTurn(t, a, sess, "hi")
+	}
+	up := a.Prov
+	chain := provider.NewChain([]provider.ChainEntry{{Name: "primary", P: failProv{"primary", "m"}}},
+		provider.NewHealth(nil), slog.New(slog.DiscardHandler))
+	if _, err := chain.Stream(ctx, provider.Request{}); err == nil {
+		t.Fatal("the call must fail")
+	}
+	a.Prov = chain
+	req := provider.Request{System: "SYS", Tools: []provider.ToolSchema{{Name: "memory"}}}
+	a.MaybeStartReviews(ctx, sess, req, TurnResult{Final: "ok"}, nil)
+	time.Sleep(20 * time.Millisecond)
+	if n := len(reviews()); n != 0 {
+		t.Fatal("no review while the provider is down:", n)
+	}
+	a.Prov = up
+	a.MaybeStartReviews(ctx, sess, req, TurnResult{Final: "ok"}, nil)
+	waitUntil(t, func() bool { return len(reviews()) == 1 })
 }
 
 func TestBackgroundReviewsRunAtMostTwoAtATime(t *testing.T) {

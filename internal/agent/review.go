@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -258,7 +259,7 @@ func (a *Agent) RunReview(ctx context.Context, r ReviewRequest) (saved []string,
 		return nil, errors.New("agent: the review has nothing to do; set Memory or Skills")
 	}
 	// A review with no working provider entry fails, so it does not make a review session.
-	if c, ok := a.providerFor(r.Session).(*provider.Chain); ok && c.Down() {
+	if a.reviewProviderDown(r.Session) {
 		return nil, ErrReviewProviderDown
 	}
 	sess, err := a.forkSession(ctx, r.Session, KindReview, "review", r.Session.ModelOverride)
@@ -367,8 +368,8 @@ func reviewNotice(c provider.ToolCall, res tools.Result) string {
 		if topic := noteTopic(first); topic != "" {
 			return memoryNotePrefix + topic
 		}
-		// The notice shows the text, because memory.md and user_profile.md go into the
-		// system prompt of later sessions. The user can see what the review saved.
+		// The notice shows the full text, because memory.md and user_profile.md go into
+		// the system prompt of later sessions. The user can see what the review saved.
 		detail := args.Content
 		if args.Action == "remove" {
 			detail = args.OldText
@@ -391,20 +392,19 @@ func reviewNotice(c provider.ToolCall, res tools.Result) string {
 	return ""
 }
 
-// noticeQuoteRunes is the maximum length of the text in a memory notice.
-const noticeQuoteRunes = 120
-
 // noticeQuote returns the text of a memory write for its notice, for example
-// ": `VPS = ovh`" or " (removed): `hetzner`". The text is one line in a code span, cut
-// to noticeQuoteRunes. An empty text gives "".
+// ": `VPS = ovh`" or " (removed): `hetzner`". The text is one line in a code span.
+// It is not cut, because memory.md and user_profile.md go into the system prompt of
+// later sessions, and the user must see all of it. security.ShowHidden shows each
+// hidden rune as a mark. An empty text gives "".
 func noticeQuote(action, text string) string {
 	text = strings.Join(strings.Fields(strings.ReplaceAll(text, "`", "'")), " ")
 	if text == "" {
 		return ""
 	}
-	if r := []rune(text); len(r) > noticeQuoteRunes {
-		text = string(r[:noticeQuoteRunes]) + "…"
-	}
+	// The join comes first, so the notice stays on one line. ShowHidden then marks the
+	// control and format runes that stay.
+	text = security.ShowHidden(text)
 	if action == "remove" {
 		return " (removed): `" + text + "`"
 	}
@@ -635,6 +635,8 @@ func (a *Agent) MaybeStartReviews(ctx context.Context, sess *sessions.Session, l
 	if !memOn && !skillOn {
 		return
 	}
+	// Read this before c.mu, because the provider check takes the locks of the chain.
+	down := a.reviewProviderDown(sess)
 	c := &a.Reviews
 	c.mu.Lock()
 	hydrated := c.state(sess.ID).hydrated
@@ -671,7 +673,9 @@ func (a *Agent) MaybeStartReviews(ctx context.Context, sess *sessions.Session, l
 	mem := memOn && st.userTurns >= memEvery
 	skill := skillOn && st.toolRounds >= skillEvery
 	// A due review waits for a turn with a final answer.
-	if res.Final == "" || !mem && !skill {
+	// A due review also waits while each provider entry is down. The counters stay, so the
+	// review starts after a later turn when the provider works again.
+	if res.Final == "" || !mem && !skill || down {
 		c.mu.Unlock()
 		return
 	}
@@ -757,6 +761,12 @@ func (a *Agent) fullReview(ctx context.Context, sess *sessions.Session) (r Revie
 	return r, true
 }
 
+// reviewProviderDown reports whether each provider entry of the session failed recently.
+func (a *Agent) reviewProviderDown(sess *sessions.Session) bool {
+	c, ok := a.providerFor(sess).(*provider.Chain)
+	return ok && c.Down()
+}
+
 // enoughTurns reports whether the session has reviewMinUserTurns or more user turns.
 func (a *Agent) enoughTurns(ctx context.Context, sess *sessions.Session) bool {
 	n, err := a.userTurns(ctx, sess.ID)
@@ -771,6 +781,11 @@ func (a *Agent) enoughTurns(ctx context.Context, sess *sessions.Session) bool {
 // current model view of the session.
 func (a *Agent) startReview(ctx context.Context, r ReviewRequest) {
 	a.goReview(ctx, func(ctx context.Context) {
+		// Check the provider before the history read, so an outage costs no read.
+		if a.reviewProviderDown(r.Session) {
+			a.logger().Info("review not started: each provider entry failed recently", "session", r.Session.ID)
+			return
+		}
 		if r.View == nil {
 			v, err := a.View(ctx, r.Session.ID)
 			if err != nil {
