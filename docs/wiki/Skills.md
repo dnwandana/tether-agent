@@ -25,7 +25,7 @@ The frontmatter has these fields:
 |---|---|---|
 | `name` | Yes | The name of the skill. A skill that the agent writes must have the same name as its folder. |
 | `description` | Yes | The text that the agent sees in its skill list. Write when to use the skill. The list shows a maximum of 1024 characters. |
-| `required_environment_variables` | No | The names of secret variables that the skill needs. When a session loads the skill, these variables go to the `terminal` and `execute_code` tools. |
+| `required_environment_variables` | No | The names of secret variables that the skill needs. When a session loads the skill, these variables go to the `terminal` and `execute_code` tools. The secrets of Tether Agent itself (the bot token and the provider keys) never pass this way; put such a name in `terminal.env_passthrough`. |
 
 A skill folder can also have two subfolders:
 
@@ -225,6 +225,12 @@ The guard also checks the structure of the skill folder. Each problem is a findi
 | A file with a binary extension | critical |
 
 The guard also checks executable bits and symbolic links.
+
+The guard scans every file of the skill, whatever its extension: a script with no extension can
+also run. It always scans `SKILL.md`, the known text types, and each file under `scripts/`, and
+each other file with no NUL byte. A file that starts with an ELF, PE, or Mach-O header is
+critical. The guard does not honor a `.skillignore` or `.clawhubignore` file in the skill
+folder, because the author of the skill wrote it.
 
 ### What the guard does for each source
 

@@ -447,8 +447,9 @@ prompt from the next session. A `search` and a `read` show a change at once. A n
 shows in the `## MEMORY TOPICS` section from the next session. See
 [Why the prompt stays the same](#why-the-prompt-stays-the-same).
 
-The `session_search` tool searches all past sessions with SQLite full text search. The agent uses
-it to find an old conversation. It skips the goal judge sessions.
+The `session_search` tool searches the past sessions with SQLite full text search. The agent uses
+it to find an old conversation. It skips the goal judge sessions. The CLI searches all sessions. A
+Telegram chat searches only its own sessions, their forks, and the runs of its own cron jobs.
 
 ## Background reviews
 

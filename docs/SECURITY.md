@@ -21,6 +21,7 @@ limits. Read the limits before you give the agent access to a machine that holds
 - In the default mode, the bot can send any local file that is not protected and not in a denied
   folder (see "Files that the bot sends"). Use strict mode for a bot that other people use.
 - The browser tools have no check for private addresses. All sessions share one Chrome profile.
+  `browser_cookies` does not return the cookie values.
 
 ## Approval gate for commands
 
@@ -149,6 +150,43 @@ There is one exception. The background review fork gets the same tool schemas as
 the prompt cache hits. The dispatcher permits only the `memory`, `skill_view`, and
 `skill_manage` tools in the fork. A call to another tool gives an error result.
 
+## Memory and background review
+
+`memory.md` and `user_profile.md` go into the system prompt of each later session. A skill
+description goes into the skills index of the prompt. So text that the agent saves there stays
+active after `/new`, after a restart, and after a model change.
+
+- The background review reads the full conversation, also tool results (for example web pages and
+  command output) and group messages that were not sent to the agent. The review prompt tells the
+  model that this text is data, and that it must not save an instruction from it.
+- The `memory` tool scans the text of each `add` and `replace` with the skill guard rules. It
+  refuses a critical finding of the injection, exfiltration, credential exposure, and persistence
+  groups, and a high finding of the injection group, for example an invisible character. A
+  `remove` is never refused.
+- The notice of a review write shows the saved text, for example
+  ``💾 Memory updated: `VPS = ovh` ``, so the user sees what the review saved.
+- The memory store reads `memory.md`, `user_profile.md`, and the notes only as regular files. It
+  does not follow a symbolic link, and it does not open a FIFO or a device. All reads and writes of
+  notes stay in the `notes/` folder that the store examined, also when a link replaces the folder
+  after the check.
+
+## Sessions and cron jobs of other chats
+
+`session_search` and `cronjob` show only the data of the chat of the caller:
+
+- The CLI, and a cron job that was made in the CLI, see all sessions and all jobs.
+- A Telegram chat sees only its own sessions, the forks of those sessions, and the runs of its own
+  cron jobs. A DM also sees the topics of the same DM. A group with one session for each user
+  (`telegram.group_sessions_per_user`) gives each user only their own sessions.
+- A Telegram chat can list, change, pause, run, and remove only the cron jobs that it made. A job
+  of another chat gives the same error as a job that does not exist.
+- From a Telegram chat, `deliver` can be `origin`, `local`, or `telegram:<chat_id>` of the same
+  chat. The CLI can deliver to any chat.
+- A cron run gets the scope of the chat that made its job.
+
+The memory files and the skills are one set for all users. Do not give the `memory` or `skills`
+toolsets to people whom you do not trust.
+
 ## Secrets
 
 ### The .env file
@@ -175,7 +213,11 @@ that contains `PASSWORD` is also a secret. The check ignores case.
 These names pass through to the child:
 
 - the names in `terminal.env_passthrough`
-- the `required_environment_variables` of a skill that the session loaded
+- the `required_environment_variables` of a skill that the session loaded, except the secrets of
+  Tether Agent itself: `TELEGRAM_BOT_TOKEN`, the key variable of each provider preset (for
+  example `OPENAI_API_KEY`), and each variable whose value is the bot token or the API key of a
+  configured provider. The author of a skill is not the owner. To give one of these names to a
+  child, put it in `terminal.env_passthrough`.
 - the `env` block of an MCP server entry, for that server only
 
 ### Redaction
@@ -269,6 +311,14 @@ default.
 - `<data>/scripts/` (only the user can put cron scripts there)
 - `<data>/backups/` (an archive in it can install skills and scripts on restore)
 - `<data>/state.db.lock`
+- the shell start files in the home folder: `~/.bashrc`, `~/.bash_profile`, `~/.bash_login`,
+  `~/.bash_logout`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`, and
+  `~/.zlogout`
+- the tool credential and configuration files in the home folder: `~/.netrc`, `~/.pgpass`,
+  `~/.npmrc`, `~/.pypirc`, and `~/.gitconfig`
+- the folders in the home folder that start programs at login or configure a shell or git:
+  `~/.config/systemd/`, `~/.config/autostart/`, `~/.config/environment.d/`, `~/.config/fish/`,
+  `~/.config/git/`, and `~/Library/LaunchAgents/`
 
 A protected file also covers each name that starts with the file name and a `-`, for example
 `<data>/config.yaml-old`.
@@ -321,6 +371,10 @@ the Hermes behavior for a local browser.
   of a router. A page can also redirect to a private address or load data from it.
 - All sessions use one Chrome profile in `<data>/cache/chrome-profile/`. The sessions share the
   cookies and the logins. The profile stays after a restart.
+- `browser_cookies` with `get` does not return the cookie values. It returns the name, the
+  domain, the path, the expiry, the flags, and the length of the value. A tool result goes to the
+  model provider and into the transcript, and a cookie value is often a login. A page script can
+  still read a cookie that is not `HttpOnly`.
 - Hide the `browser` toolset from a channel when you do not trust its users.
 
 ## Telegram access
@@ -415,6 +469,14 @@ of groups are exfiltration, injection, obfuscation, and persistence.
 - **External folders:** the loader skips a `dangerous` skill and logs a warning. It loads a
   `caution` skill.
 - **Bootstrap skills** are trusted. The guard does not scan them.
+- The guard scans every file of a skill, whatever its extension, because a script with no
+  extension or with an unknown extension can also run. It always scans `SKILL.md`, the known text
+  types, and each file under `scripts/`. It scans each other file that has no NUL byte. It lists
+  the other files as `not scanned (binary)`, and it gives a critical finding for an ELF, PE, or
+  Mach-O file.
+- The guard does not honor `.skillignore` or `.clawhubignore`. An ignore file in the skill folder
+  comes from the author of the skill, so it cannot hide a file from the guard.
+- The guard also scans each logical line that a shell builds from lines that end in `\`.
 
 ### Installed skills
 
@@ -422,8 +484,7 @@ The owner installs a public skill with `tether skills install <source>`. The loa
 an installed skill again, so the guard scans it once, before the move.
 
 - `tether skills install` and `tether skills update` always scan in strict mode, also when
-  `skills.guard` is `false`. Strict mode does not honor `.skillignore` and `.clawhubignore`, and
-  it scans every text file. The report lists the files that are not text as
+  `skills.guard` is `false`. The report lists the files that are not text as
   `not scanned (binary)`.
 - If the skill has more than 1 MB of text, the command refuses it. No flag passes this limit.
 - The trust level comes from the source. A GitHub repo in `TRUSTED_REPOS` (`openai/skills`,

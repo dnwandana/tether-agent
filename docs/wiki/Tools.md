@@ -119,6 +119,8 @@ Install Chrome with the command for your system:
 - Chrome stops after `browser.idle_close_minutes` minutes with no browser call. The default is 10.
 - All sessions use one Chrome profile in `~/.tether/cache/chrome-profile/`. The sessions share the
   cookies and the logins. The profile stays after a restart.
+- `browser_cookies` with `get` returns no cookie values, only the names, the domains, the expiry,
+  and the length of each value.
 - The browser tools do not apply `web.block_private_networks`. A page can open a local address.
 
 ```yaml
