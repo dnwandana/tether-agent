@@ -323,12 +323,15 @@ func skillFiles(dir string) (map[string]string, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		if !isScannable(rel) {
-			return nil
-		}
 		b, err := os.ReadFile(p)
 		if err != nil {
 			return err
+		}
+		// The guard reads every text file, whatever its extension, and each
+		// file that mustScan names. Only a file with a NUL byte outside those
+		// is binary data that the patterns do not read.
+		if !mustScan(rel) && !looksText(b) {
+			return nil
 		}
 		total += len(b)
 		if total > maxScanBytes {
