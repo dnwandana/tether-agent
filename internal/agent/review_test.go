@@ -82,7 +82,7 @@ func TestReviewUsesParentToolsAndSystem(t *testing.T) {
 	if last := req.Messages[n+1]; last.Role != provider.RoleUser || !strings.HasPrefix(last.Content, MemoryReviewPrompt) {
 		t.Fatal(last.Content)
 	}
-	if len(saved) != 1 || saved[0] != "💾 User profile updated" || !reflect.DeepEqual(notified, saved) {
+	if len(saved) != 1 || saved[0] != "💾 User profile updated: `The user prefers Go`" || !reflect.DeepEqual(notified, saved) {
 		t.Fatal(saved, notified)
 	}
 	if !strings.Contains(a.Memory.Profile(), "The user prefers Go") {
@@ -109,7 +109,7 @@ func TestReviewSendsOneSummary(t *testing.T) {
 	if len(saved) != 3 {
 		t.Fatal("one notice for each distinct change:", saved)
 	}
-	want := "🧩 Skills updated: a, b\n💾 Memory updated"
+	want := "🧩 Skills updated: a, b\n💾 Memory updated: `x`"
 	if len(notified) != 1 || notified[0] != want {
 		t.Fatalf("want one notify call with %q, got %q", want, notified)
 	}
@@ -197,7 +197,7 @@ func TestSkillNotices(t *testing.T) {
 			t.Errorf("%s: %q, want %q", args, got, want)
 		}
 	}
-	if got := reviewNotice(tc("c", "memory", `{"action":"add","target":"memory","content":"x"}`), tools.Result{Text: "ok"}); got != "💾 Memory updated" {
+	if got := reviewNotice(tc("c", "memory", `{"action":"add","target":"memory","content":"x"}`), tools.Result{Text: "ok"}); got != "💾 Memory updated: `x`" {
 		t.Fatal(got)
 	}
 	if got := reviewNotice(tc("c", "memory", `{"action":"add","target":"memory"}`), tools.Result{Text: "bad", IsError: true}); got != "" {
@@ -221,13 +221,13 @@ func TestMemoryNotices(t *testing.T) {
 		want  string
 	}{
 		{"add to memory", nil,
-			`{"action":"add","target":"memory","content":"VPS = hetzner"}`, "💾 Memory updated"},
+			`{"action":"add","target":"memory","content":"VPS = hetzner"}`, "💾 Memory updated: `VPS = hetzner`"},
 		{"add to user", nil,
-			`{"action":"add","target":"user","content":"The user prefers Go"}`, "💾 User profile updated"},
+			`{"action":"add","target":"user","content":"The user prefers Go"}`, "💾 User profile updated: `The user prefers Go`"},
 		{"replace in memory", []string{`{"action":"add","target":"memory","content":"VPS = hetzner"}`},
-			`{"action":"replace","target":"memory","old_text":"hetzner","content":"VPS = ovh"}`, "💾 Memory updated"},
+			`{"action":"replace","target":"memory","old_text":"hetzner","content":"VPS = ovh"}`, "💾 Memory updated: `VPS = ovh`"},
 		{"remove from user", []string{`{"action":"add","target":"user","content":"The user prefers Go"}`},
-			`{"action":"remove","target":"user","old_text":"Go"}`, "💾 User profile updated"},
+			`{"action":"remove","target":"user","old_text":"Go"}`, "💾 User profile updated (removed): `Go`"},
 		{"add with a topic", nil,
 			`{"action":"add","target":"memory","topic":"rpc","content":"QuickNode free plan"}`, "💾 Memory note updated: rpc"},
 		{"add spill", nil,
@@ -782,7 +782,7 @@ func TestTriggeredReviewRunsAndNotifies(t *testing.T) {
 	waitUntil(t, func() bool { return len(childSessions(t, a, sess.ID)) == 1 })
 	release()
 	waitUntil(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(notices) == 1 })
-	if notices[0] != "💾 User profile updated" || !strings.Contains(a.Memory.Profile(), "likes Go") {
+	if notices[0] != "💾 User profile updated: `likes Go`" || !strings.Contains(a.Memory.Profile(), "likes Go") {
 		t.Fatal(notices)
 	}
 }
@@ -811,5 +811,28 @@ func TestCompactNowForcesAndCounts(t *testing.T) {
 	a.Compactor = nil
 	if _, err := a.CompactNow(ctx, sess); err == nil {
 		t.Fatal("no compactor")
+	}
+}
+
+func TestNoticeQuote(t *testing.T) {
+	cases := []struct{ action, text, want string }{
+		{"add", "", ""},
+		{"add", "  a\n  b ", ": `a b`"},
+		{"add", "run `rm`", ": `run 'rm'`"},
+		{"remove", "Go", " (removed): `Go`"},
+		{"add", strings.Repeat("é", noticeQuoteRunes+5), ": `" + strings.Repeat("é", noticeQuoteRunes) + "…`"},
+	}
+	for _, c := range cases {
+		if got := noticeQuote(c.action, c.text); got != c.want {
+			t.Errorf("%q %q: %q, want %q", c.action, c.text, got, c.want)
+		}
+	}
+}
+
+func TestReviewPromptMarksToolTextAsData(t *testing.T) {
+	for _, p := range []string{reviewPrompt(true, false, nil), reviewPrompt(false, true, nil), reviewPrompt(true, true, &[2]int{0, 4})} {
+		if !strings.Contains(p, reviewProvenanceNote) || !strings.HasSuffix(p, reviewToolNote) {
+			t.Fatal(p)
+		}
 	}
 }
