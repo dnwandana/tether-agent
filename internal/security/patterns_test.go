@@ -201,6 +201,24 @@ func TestProtectedPathPatterns(t *testing.T) {
 	}
 }
 
+func TestNewHomePathShellWritesAsk(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { AddProtectedPathPatterns(nil) })
+	AddProtectedPathPatterns(ProtectedPaths(filepath.Join(home, ".tether"), home))
+	for _, c := range []string{
+		"echo x >> ~/.bash_aliases",
+		"cp key ~/.aws/credentials",
+		"echo x > $HOME/.vimrc",
+		"tee ~/.config/gh/hosts.yml < x",
+	} {
+		p, ok := MatchDangerous(c)
+		if !ok || !strings.HasPrefix(p.ID, "protected_path_write_") {
+			t.Errorf("%q: got %q, %v; want a protected path rule", c, p.ID, ok)
+		}
+	}
+}
+
 // hermesCase is one command from the Hermes tests, with the results that
 // Hermes gives for it. The results were made by the Hermes code itself:
 // tools/approval.py detect_hardline_command, _check_sudo_stdin_guard (with no

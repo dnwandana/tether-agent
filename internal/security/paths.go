@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 // ErrProtected marks the error of CheckWritable for a protected path.
@@ -41,22 +44,27 @@ func (e *ProtectedError) Error() string {
 // Is makes errors.Is(err, ErrProtected) true.
 func (e *ProtectedError) Is(target error) bool { return target == ErrProtected }
 
-// homeStartupFiles are the files in the home folder that a shell, git, or a
-// package tool reads at start or for each call. A write to one of them runs code
-// at the next login or shell, or changes the credentials of a tool. The shell
-// rules of the approval gate already protect most of them, so the file tools must
-// not write them with no approval.
+// homeStartupFiles are the files in the home folder that a shell, X, vim, git,
+// or a package tool reads at start or for each call. A write to one of them runs
+// code at the next login, shell, or editor, or changes the credentials of a tool.
+// The shell rules of the approval gate already protect most of them, so the file
+// tools must not write them with no approval.
 var homeStartupFiles = []string{
-	".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
+	".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".bash_aliases", ".profile",
 	".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout",
+	".xinitrc", ".xprofile", ".vimrc",
 	".netrc", ".pgpass", ".npmrc", ".pypirc", ".gitconfig",
 }
 
-// homeStartupDirs are the folders in the home folder whose files start programs at
-// login or hold the configuration of a shell or of git.
+// homeStartupDirs are the folders in the home folder that start programs, that
+// configure a shell or git, or that hold credentials. A credential file can also
+// start a program, for example credential_process in ~/.aws/config.
+// ~/.local/bin and .git stay writable, because a refusal there blocks common
+// requests such as the install of a tool or of a git hook.
 var homeStartupDirs = []string{
 	".config/systemd", ".config/autostart", ".config/environment.d", ".config/fish",
 	".config/git", "Library/LaunchAgents",
+	".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh", ".config/gcloud",
 }
 
 // ProtectedPaths returns the protected paths. A path that ends in "/" is a
@@ -123,8 +131,21 @@ func CheckWritable(path string, protected []string, allowSkills bool) error {
 	return nil
 }
 
-// covered reports whether path is the protected path base or is in it.
+// pathFold is the Unicode case fold of the path check. It is stateless and
+// safe for concurrent use.
+var pathFold = cases.Fold()
+
+// foldPath returns p in NFC form with Unicode case folding. APFS ignores
+// case and the normalization form, so the check must ignore them too.
+func foldPath(p string) string {
+	return pathFold.String(norm.NFC.String(p))
+}
+
+// covered reports whether path is the protected path base or is in it. It
+// compares the folded forms, so a change of case or of the Unicode
+// normalization form does not get past the check.
 func covered(path, base string, dir bool) bool {
+	path, base = foldPath(path), foldPath(base)
 	if path == base {
 		return true
 	}

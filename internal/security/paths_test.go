@@ -205,3 +205,76 @@ func TestProtectedPathsBackupsAndDBLock(t *testing.T) {
 		}
 	}
 }
+
+func TestProtectedPathsIgnoreCase(t *testing.T) {
+	home := t.TempDir()
+	data := filepath.Join(home, ".tether")
+	p := ProtectedPaths(data, home)
+	for _, f := range []string{
+		filepath.Join(home, ".ZSHRC"),
+		filepath.Join(home, ".SSH", "authorized_keys"),
+		filepath.Join(data, "SCRIPTS", "x.sh"),
+		filepath.Join(data, "state.db-WAL"),
+		// U+017F (long s) folds to "s", like on APFS.
+		filepath.Join(home, ".\u017fsh", "authorized_keys"),
+	} {
+		if err := CheckWritable(f, p, false); !errors.Is(err, ErrProtected) {
+			t.Errorf("%s must be refused: %v", f, err)
+		}
+	}
+	// The folded prefix ".ssh" is not a folder of ".sshx", so the path stays writable.
+	for _, f := range []string{
+		filepath.Join(home, ".sshx", "key"),
+		filepath.Join(home, ".SSHX", "key"),
+	} {
+		if err := CheckWritable(f, p, false); err != nil {
+			t.Errorf("%s must be writable: %v", f, err)
+		}
+	}
+}
+
+func TestProtectedPathsNFDHome(t *testing.T) {
+	parent := t.TempDir()
+	nfc := filepath.Join(parent, "Jos\u00e9")  // é as one rune (NFC)
+	nfd := filepath.Join(parent, "Jose\u0301") // e and a combining acute accent (NFD)
+	p := ProtectedPaths(filepath.Join(nfc, ".tether"), nfc)
+	for _, f := range []string{
+		filepath.Join(nfd, ".ssh", "authorized_keys"),
+		filepath.Join(nfd, ".tether", ".env"),
+		filepath.Join(nfd, ".tether", "scripts", "x.sh"),
+	} {
+		if err := CheckWritable(f, p, false); !errors.Is(err, ErrProtected) {
+			t.Errorf("%s must be refused: %v", f, err)
+		}
+	}
+	// The other direction: an NFD home in the list and an NFC path.
+	p = ProtectedPaths(filepath.Join(nfd, ".tether"), nfd)
+	if err := CheckWritable(filepath.Join(nfc, ".ssh", "authorized_keys"), p, false); !errors.Is(err, ErrProtected) {
+		t.Errorf("an NFC path into an NFD home must be refused: %v", err)
+	}
+}
+
+func TestNewHomePathsProtected(t *testing.T) {
+	home := t.TempDir()
+	p := ProtectedPaths(filepath.Join(home, ".tether"), home)
+	for _, rel := range []string{
+		".bash_aliases", ".xinitrc", ".xprofile", ".vimrc",
+		".aws/config", ".aws/credentials", ".gnupg/x", ".kube/config", ".docker/config.json",
+		".azure/x", ".config/gh/hosts.yml", ".config/gcloud/x",
+		".AWS/config", ".Config/GH/hosts.yml",
+	} {
+		if err := CheckWritable(filepath.Join(home, rel), p, false); !errors.Is(err, ErrProtected) {
+			t.Errorf("%s must be refused: %v", rel, err)
+		}
+	}
+	// A folded prefix of a protected folder is not the folder.
+	for _, rel := range []string{".local/bin/x", ".AWSome/x", ".config/ghx/x", ".dockerignore"} {
+		if err := CheckWritable(filepath.Join(home, rel), p, false); err != nil {
+			t.Errorf("%s must be writable: %v", rel, err)
+		}
+	}
+	repo := t.TempDir()
+	if err := CheckWritable(filepath.Join(repo, ".git", "hooks", "pre-commit"), p, false); err != nil {
+		t.Errorf("a git hook must be writable: %v", err)
+	}
+}

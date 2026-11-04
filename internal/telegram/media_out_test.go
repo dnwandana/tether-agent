@@ -510,6 +510,26 @@ func TestMediaPolicyProtectedBeatsAllowDir(t *testing.T) {
 	}
 }
 
+func TestMediaPolicyCredentialDirsBeatAllowDir(t *testing.T) {
+	home, data := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	pol := NewMediaPolicy(data, policyEnv(map[string]string{EnvMediaAllowDirs: home}), nil)
+	for _, p := range []string{
+		writeAt(t, filepath.Join(home, ".aws", "credentials"), time.Hour),
+		writeAt(t, filepath.Join(home, ".docker", "config.json"), time.Hour),
+		writeAt(t, filepath.Join(home, ".gnupg", "secring.gpg"), time.Hour),
+		writeAt(t, filepath.Join(home, ".SSH", "id_ed25519"), time.Hour),
+	} {
+		if _, err := pol.Check(p); !errors.Is(err, ErrMediaBlocked) {
+			t.Errorf("%s: %v, want ErrMediaBlocked", p, err)
+		}
+	}
+	// Another file in the allowed home folder is still sent.
+	if _, err := pol.Check(writeAt(t, filepath.Join(home, "notes", "a.md"), time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMediaPolicySymlinkToSecretRefused(t *testing.T) {
 	data := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
