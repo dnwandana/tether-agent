@@ -42,6 +42,9 @@ type fakeServer struct {
 	open      []*fakeConn
 	// callErr is the error of the next Call. It is used one time.
 	callErr error
+	// A call of the tool "slow" sends on entered and then waits for proceed, when both are
+	// not nil. When its connection closes during the wait, the call fails.
+	entered, proceed chan struct{}
 }
 
 // fakeConn is one connection to a fakeServer.
@@ -63,6 +66,19 @@ func (c *fakeConn) Call(_ context.Context, tool string, args json.RawMessage) (s
 	c.mu.Unlock()
 	if closed {
 		return "", errors.New("mcp gh: call " + tool + ": connection closed")
+	}
+	c.srv.mu.Lock()
+	entered, proceed := c.srv.entered, c.srv.proceed
+	c.srv.mu.Unlock()
+	if tool == "slow" && entered != nil && proceed != nil {
+		entered <- struct{}{}
+		<-proceed
+		c.mu.Lock()
+		closed := c.closed
+		c.mu.Unlock()
+		if closed {
+			return "", errors.New("mcp gh: call " + tool + ": connection closed")
+		}
 	}
 	c.srv.mu.Lock()
 	err := c.srv.callErr
@@ -606,6 +622,50 @@ func TestDeadConnectionRedials(t *testing.T) {
 	f.mu.Unlock()
 	if res := callTool(t, reg, "mcp_gh_search", `{}`); !res.IsError || res.Text != "mcp gh: search: rate limited" || f.dialCount() != 2 {
 		t.Fatal(res, f.dialCount())
+	}
+}
+
+func TestDeadConnectionKeepsOtherCall(t *testing.T) {
+	m, f, _ := managerWithCache(t, []ToolDef{{Name: "search"}, {Name: "slow"}})
+	reg := tools.NewRegistry()
+	m.Init(ctx, reg)
+	f.mu.Lock()
+	f.entered, f.proceed = make(chan struct{}), make(chan struct{})
+	f.mu.Unlock()
+	// The cleanup lets the slow call end when the test fails early.
+	proceed := sync.OnceFunc(func() { close(f.proceed) })
+	t.Cleanup(proceed)
+	slow := make(chan tools.Result, 1)
+	go func() { slow <- callTool(t, reg, "mcp_gh_slow", `{}`) }()
+	<-f.entered
+	// A different call on the same connection gets a transient error of the transport.
+	f.mu.Lock()
+	f.callErr = errors.New("mcp gh: call search: read tcp: connection reset by peer")
+	f.mu.Unlock()
+	if res := callTool(t, reg, "mcp_gh_search", `{}`); res.IsError || f.dialCount() != 2 {
+		t.Fatal(res, f.dialCount())
+	}
+	m.closing.Wait()
+	f.mu.Lock()
+	first := f.open[0]
+	f.mu.Unlock()
+	first.mu.Lock()
+	closed := first.closed
+	first.mu.Unlock()
+	if closed {
+		t.Fatal("the dead-connection error of one call closed the connection of a call in flight")
+	}
+	proceed()
+	if res := <-slow; res.IsError || res.Text != "slow {}" {
+		t.Fatal(res)
+	}
+	if f.dialCount() != 2 {
+		t.Fatal("the call in flight was sent again on a new connection:", f.dialCount())
+	}
+	// The last call on the dead connection closes it.
+	m.closing.Wait()
+	if f.openConns() != 1 {
+		t.Fatal("open connections:", f.openConns())
 	}
 }
 
