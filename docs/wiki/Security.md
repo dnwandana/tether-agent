@@ -176,7 +176,8 @@ A name is a secret when one of these is true:
 These names pass through to the child:
 
 - the names in `terminal.env_passthrough`
-- the `required_environment_variables` of a skill that the session loaded
+- the `required_environment_variables` of a skill that the session loaded, except the bot token
+  and the provider keys of Tether Agent
 - the `env` block of an MCP server, for that server only
 
 ### Redaction
@@ -257,7 +258,10 @@ itself. Refer to [Skills](Skills#the-skill-guard).
   the servers that you trust.
 - **The browser has no check for private addresses.** `web.block_private_networks` applies to the
   web tools only. A browser page can open a local address, for example the page of a router.
-- **One browser profile.** All sessions share the cookies and the logins.
+- **One browser profile.** All sessions share the cookies and the logins. `browser_cookies` does
+  not return the cookie values.
+- **Memory and skills are shared.** All users of the bot use one memory and one skill set. A
+  Telegram chat sees only its own sessions and cron jobs in `session_search` and `cronjob`.
 - **Scripts can build commands.** The gate checks the text of an `execute_code` script. It cannot
   see a command that the script builds while it runs.
 - **The fallback chain sends the conversation to other providers.** When an entry fails before
