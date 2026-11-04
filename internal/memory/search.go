@@ -48,7 +48,7 @@ func (s *Store) Search(query string) (string, error) {
 		{TargetUser, profileFile},
 	} {
 		src := searchSource{name: t.file, entries: s.Entries(t.target)}
-		if fi, err := os.Stat(filepath.Join(s.dir, t.file)); err == nil {
+		if fi, err := os.Lstat(filepath.Join(s.dir, t.file)); err == nil && fi.Mode().IsRegular() {
 			src.modified = fi.ModTime()
 		}
 		srcs = append(srcs, src)

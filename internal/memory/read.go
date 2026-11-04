@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -129,13 +127,20 @@ func noNote(topic string, names []string) error {
 // Topics returns the note topics, new first by file mtime, then by name, at
 // most 2000. It opens no note, so a prompt build reads no note text.
 func (s *Store) Topics() ([]string, error) {
-	if err := s.notesDir(); err != nil {
+	root, err := s.openNotes()
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	des, err := os.ReadDir(s.notesPath())
+	defer root.Close()
+	d, err := root.Open(".")
+	if err != nil {
+		return nil, fmt.Errorf("cannot list the memory notes: %w", err)
+	}
+	des, err := d.ReadDir(-1)
+	d.Close()
 	if err != nil {
 		return nil, fmt.Errorf("cannot list the memory notes: %w", err)
 	}
@@ -148,7 +153,7 @@ func (s *Store) Topics() ([]string, error) {
 		if !IsNoteName(de.Name()) {
 			continue
 		}
-		fi, err := os.Lstat(filepath.Join(s.notesPath(), de.Name()))
+		fi, err := root.Lstat(de.Name())
 		if err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
