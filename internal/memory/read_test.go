@@ -163,7 +163,8 @@ func TestReadMaxCharsCap(t *testing.T) {
 func TestReadLargeNote(t *testing.T) {
 	s := open(t)
 	writeReadFile(t, s, "big.md", strings.Repeat("a", 2<<20))
-	if got := mustReadErr(t, s, "big", 1, 0); got != "note big is larger than 1 MiB; open it with read_file, or split it" {
+	if got := mustReadErr(t, s, "big", 1, 0); got != "note big is larger than 1 MiB, so read and search skip it. Open it with read_file. "+
+		"To make it smaller, remove entries with action remove and topic big, and add them again with another topic." {
 		t.Fatalf("%q", got)
 	}
 }

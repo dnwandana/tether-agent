@@ -162,6 +162,13 @@ func TestReadNoteLimits(t *testing.T) {
 	if _, err := s.readNote("big"); !errors.Is(err, errNoteTooLarge) {
 		t.Fatalf("1 MiB + 1: %v", err)
 	}
+	if _, err := s.readNoteMax("big", maxChangeBytes); err != nil {
+		t.Fatalf("a change reads 1 MiB + 1: %v", err)
+	}
+	noteFile(t, s, "huge.md", strings.Repeat("a", 8<<20+1))
+	if _, err := s.readNoteMax("huge", maxChangeBytes); !errors.Is(err, errNoteTooLargeToChange) {
+		t.Fatalf("8 MiB + 1: %v", err)
+	}
 	noteFile(t, s, "bin.md", "a\x00b")
 	if _, err := s.readNote("bin"); !errors.Is(err, errNoteBinary) {
 		t.Fatalf("NUL byte: %v", err)

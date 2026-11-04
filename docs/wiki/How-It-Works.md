@@ -399,9 +399,15 @@ session:
 | `memory/user_profile.md` | Facts about you: name, preferences, and habits. | 1375 characters |
 
 The second tier is the memory notes. A note is one Markdown file for each topic, for
-example `memory/notes/rpc.md` for the topic `rpc`. A note has no size limit, and it does
-not load into the system prompt. A topic has only `a-z`, `0-9`, and `-`, and at most 48
-characters.
+example `memory/notes/rpc.md` for the topic `rpc`. A note does not load into the system
+prompt. A topic has only `a-z`, `0-9`, and `-`, and at most 48 characters.
+
+A note has a limit of 1 MiB. When an entry does not fit in a note, the entry goes to the
+next note of the topic: `rpc-2`, then `rpc-3`, and so on. The tool result names the note
+that got the entry. A next note has the line `continues: rpc` in its frontmatter. `read`
+and `search` skip a note that is larger than 1 MiB. `remove` and `replace` can change a
+note of up to 8 MiB, so that the agent can make a larger note from an older version
+smaller.
 
 A note starts with YAML frontmatter. `type` is the target of the first `add`, `memory` or
 `user`. `modified` is the time of the last write by the tool.
@@ -427,7 +433,7 @@ The agent changes memory with the `memory` tool. The tool has five actions:
   `add` never fails because of the limit.
 - `replace` finds an entry by a unique part of its text and replaces it. When the new
   text does not fit in the memory file, the new text goes to the inbox note, and the old
-  entry leaves the file.
+  entry leaves the file. A `replace` that makes a note larger than 1 MiB fails.
 - `remove` finds an entry by a unique part of its text and removes it. When a note has no
   more entries, the tool deletes the note.
 - `search` finds entries by words in the two memory files and in all notes. It shows at

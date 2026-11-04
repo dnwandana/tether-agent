@@ -190,8 +190,9 @@ func maskTextFile(src, dst string, r *security.Redactor) (changed bool, err erro
 	if err != nil {
 		return false, err
 	}
-	// A note has no size limit, but the memory store also reads and writes
-	// each note in full, so one full read is safe.
+	// The memory store writes a note of at most 1 MiB and reads each note
+	// in full, so one full read is safe. An older or hand-edited note can be
+	// larger, and it is copied in full too.
 	in, err := io.ReadAll(sf)
 	sf.Close()
 	if err != nil {

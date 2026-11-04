@@ -38,6 +38,8 @@ files. Use `skill_manage` for skills.
   user_profile.md, the entry goes to a memory note: `inbox-memory` or `inbox-user`.
 - Give a `topic` to put related facts in one note. For example, use the topic `rpc` for
   the facts about RPC providers.
+- A note has a limit of 1 MiB. When a note is full, an `add` puts the entry in the next
+  note of the topic, for example `inbox-memory-2`. The result names the note.
 - Give no `topic` for a fact that each session needs, for example the name of your user
   or a correction. A note does not load into the system prompt.
 - The `## MEMORY TOPICS` section of the system prompt lists the note topics. Use the
