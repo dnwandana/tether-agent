@@ -182,6 +182,23 @@ func TestPaceReleaseGivesSlotBack(t *testing.T) {
 	}
 }
 
+func TestPaceTryReserveRelease(t *testing.T) {
+	clk := newFakeClock()
+	p := testPace(clk)
+	d, release := p.TryReserve(-100, paceQueue)
+	if d != 0 {
+		t.Fatal("first", d)
+	}
+	if d, _ := p.TryReserve(-100, paceQueue); d != time.Second {
+		t.Fatal("a held call must wait for the slot", d)
+	}
+	release()
+	release() // A second call does nothing.
+	if d := p.Next(-100, paceWait); d != 0 {
+		t.Fatal("after release", d)
+	}
+}
+
 func TestPaceNoChat(t *testing.T) {
 	clk := newFakeClock()
 	p := testPace(clk)

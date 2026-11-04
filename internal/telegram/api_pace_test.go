@@ -278,6 +278,59 @@ func TestPaceNotUsedWithoutPaceOrChat(t *testing.T) {
 	}
 }
 
+// TestPaceUnsentCallGivesPlaceBack checks that a counted call gives its
+// place back when the request did not go out.
+func TestPaceUnsentCallGivesPlaceBack(t *testing.T) {
+	done, cancel := context.WithCancel(ctx)
+	cancel()
+	for _, tc := range []struct {
+		name string
+		call func(c *Client) error
+	}{
+		{"body error", func(c *Client) error {
+			missing := filepath.Join(t.TempDir(), "missing.png")
+			return c.Upload(ctx, "sendPhoto", map[string]string{"chat_id": "-100"}, "photo", missing, nil)
+		}},
+		{"request error", func(c *Client) error {
+			c.BaseURL = "http://[::1"
+			_, err := replyClient(c).SendMessage(ctx, SendMessageParams{ChatID: -100, Text: "x"})
+			return err
+		}},
+		{"context done", func(c *Client) error {
+			_, err := queueClient(c).SendMessage(done, SendMessageParams{ChatID: -100, Text: "x"})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeBot(t)
+			c := api.pacedClient(newFakeClock())
+			if err := tc.call(c); err == nil {
+				t.Fatal("the call must fail")
+			}
+			if n := len(api.all()); n != 0 {
+				t.Fatal("the request went out:", api.methods())
+			}
+			if d := c.Pace.Next(-100, paceWait); d != 0 {
+				t.Fatal("the place did not go back:", d)
+			}
+		})
+	}
+}
+
+// TestPaceSendErrorKeepsPlace checks that a counted call keeps its place
+// when the HTTP client fails, because the request can be at Telegram.
+func TestPaceSendErrorKeepsPlace(t *testing.T) {
+	api := newFakeBot(t)
+	c := api.pacedClient(newFakeClock())
+	api.srv.Close()
+	if _, err := c.SendMessage(ctx, SendMessageParams{ChatID: -100, Text: "x"}); err == nil {
+		t.Fatal("the call must fail")
+	}
+	if d := c.Pace.Next(-100, paceWait); d != time.Second {
+		t.Fatal("the call must keep its place:", d)
+	}
+}
+
 func TestPaceFloodRecordedOnSend(t *testing.T) {
 	api := newFakeBot(t)
 	clk := newFakeClock()
