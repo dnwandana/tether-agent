@@ -212,11 +212,10 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("copy %s: %w", it.Rel, err)
 		}
-		// A memory item always reads its copy, so the hash and the archive get the bytes
-		// that the lock protected.
-		if changed || strings.HasPrefix(it.Rel, "memory/") {
-			it.Src = dst
-		}
+		// Each item reads its copy, so the hash and the archive get the same bytes. A file
+		// can change after the copy, for example a skill edit while the gateway runs. For a
+		// memory item, the copy also holds the bytes that the lock protected.
+		it.Src = dst
 		if changed {
 			red.Files++
 		}
