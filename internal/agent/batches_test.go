@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -348,6 +349,40 @@ func TestBatchesCtxEndStopsBatchesForRecoverLost(t *testing.T) {
 	}
 	if got := q.list(); len(got) != 1 || !strings.Contains(got[0], id+" was lost in a restart") {
 		t.Fatal(got)
+	}
+}
+
+// endsAfterFirstErr is a context whose Err is nil at the first call and
+// context.Canceled after that. It ends between the two checks of Start.
+type endsAfterFirstErr struct {
+	context.Context
+	calls atomic.Int32
+}
+
+func (c *endsAfterFirstErr) Err() error {
+	if c.calls.Add(1) == 1 {
+		return nil
+	}
+	return context.Canceled
+}
+
+func TestStartThatStopsLeavesNoBatchRow(t *testing.T) {
+	d := openTestDB(t)
+	q := &enqueued{}
+	b := &Batches{DB: d, Enqueue: q.fn, Ctx: &endsAfterFirstErr{Context: ctx}}
+	if id, err := b.Start(ctx, "telegram:dm:1", "s1", specs(1), slowRun(0)); err == nil {
+		t.Fatal("Start must refuse a batch when Batches.Ctx ends during Start:", id)
+	}
+	var n int
+	if err := d.QueryRowContext(ctx, `SELECT count(*) FROM delegation_batches`).Scan(&n); err != nil || n != 0 {
+		t.Fatal("a refused batch must leave no row:", n, err)
+	}
+	next := &Batches{DB: d, Enqueue: q.fn}
+	if err := next.RecoverLost(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := q.list(); len(got) != 0 {
+		t.Fatal("a refused batch must not be reported as lost:", got)
 	}
 }
 
