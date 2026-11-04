@@ -227,10 +227,17 @@ The guard also checks the structure of the skill folder. Each problem is a findi
 The guard also checks executable bits and symbolic links.
 
 The guard scans every file of the skill, whatever its extension: a script with no extension can
-also run. It always scans `SKILL.md`, the known text types, and each file under `scripts/`, and
-each other file with no NUL byte. A file that starts with an ELF, PE, or Mach-O header is
-critical. The guard does not honor a `.skillignore` or `.clawhubignore` file in the skill
-folder, because the author of the skill wrote it.
+also run. It always scans `SKILL.md`, the known text types, each file under `scripts/`, each file
+that starts with `#!`, and each other file with no NUL byte. A file that starts with an ELF, PE,
+or Mach-O header is critical. The guard does not honor a `.skillignore` or `.clawhubignore` file
+in the skill folder, because the author of the skill wrote it.
+
+The guard also scans a file with a NUL byte when bash can run it, that is, when the first line in
+the first 80 bytes has no NUL byte. It skips such a file when the file is under `.git/`, or when
+its type is an image, font, document, archive, audio, video, or model type. The guard deletes each
+NUL byte before the scan, as bash does. A file that the guard reads only by this rule gets no
+check for invisible characters, because random bytes give false findings. `SKILL.md`, the text
+types, and the files under `scripts/` keep the check, also with a NUL byte.
 
 ### What the guard does for each source
 

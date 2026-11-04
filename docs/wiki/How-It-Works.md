@@ -549,6 +549,10 @@ smaller.
 - **Storage:** the stored messages never change. A row in the `compactions` table replaces a
   range of messages with the summary in the view that goes to the model.
 - **Failures:** after 3 failures in a row, you see a warning.
+- **No loop:** compaction cannot make the system prompt and the tool schemas smaller. When two
+  compactions in a row leave the request over the threshold, automatic compaction stops, and
+  the log gets a warning. It starts again when the request is under the threshold. `/compact`
+  still runs.
 
 ### Long tool output
 

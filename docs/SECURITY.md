@@ -159,12 +159,15 @@ active after `/new`, after a restart, and after a model change.
 - The background review reads the full conversation, also tool results (for example web pages and
   command output) and group messages that were not sent to the agent. The review prompt tells the
   model that this text is data, and that it must not save an instruction from it.
-- The `memory` tool scans the text of each `add` and `replace` with the skill guard rules. It
-  refuses a critical finding of the injection, exfiltration, credential exposure, and persistence
-  groups, and a high finding of the injection group, for example an invisible character. A
-  `remove` is never refused.
-- The notice of a review write shows the saved text, for example
-  ``💾 Memory updated: `VPS = ovh` ``, so the user sees what the review saved.
+- The `memory` tool scans the text of each `add` and `replace` with the memory threat table.
+  The table has 25 rules of Hermes `tools/threat_patterns.py`, 4 credential rules of the skill
+  guard, and a check for invisible characters and Unicode tag characters. Any finding refuses
+  the write. A `remove` is never refused. A text over the limit of 4000 characters for one entry
+  gets the length error, with no scan.
+- The notice of a review write to `memory.md` or `user_profile.md` shows the full saved text,
+  for example ``💾 Memory updated: `VPS = ovh` ``. A hidden character shows as a mark, for
+  example `<U+200B>`. So the user sees each character that goes into the system prompt. The
+  notice of a write to a note shows only the topic, for example `💾 Memory note updated: rpc`.
 - The memory store reads `memory.md`, `user_profile.md`, and the notes only as regular files. It
   does not follow a symbolic link, and it does not open a FIFO or a device. All reads and writes of
   notes stay in the `notes/` folder that the store examined, also when a link replaces the folder
@@ -312,16 +315,25 @@ default.
 - `<data>/backups/` (an archive in it can install skills and scripts on restore)
 - `<data>/state.db.lock`
 - the shell start files in the home folder: `~/.bashrc`, `~/.bash_profile`, `~/.bash_login`,
-  `~/.bash_logout`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`, and
-  `~/.zlogout`
+  `~/.bash_logout`, `~/.bash_aliases`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`,
+  `~/.zlogin`, and `~/.zlogout`
+- the start files of X and vim in the home folder: `~/.xinitrc`, `~/.xprofile`, and `~/.vimrc`
 - the tool credential and configuration files in the home folder: `~/.netrc`, `~/.pgpass`,
   `~/.npmrc`, `~/.pypirc`, and `~/.gitconfig`
 - the folders in the home folder that start programs at login or configure a shell or git:
   `~/.config/systemd/`, `~/.config/autostart/`, `~/.config/environment.d/`, `~/.config/fish/`,
   `~/.config/git/`, and `~/Library/LaunchAgents/`
+- the credential folders in the home folder: `~/.aws/`, `~/.gnupg/`, `~/.kube/`, `~/.docker/`,
+  `~/.azure/`, `~/.config/gh/`, and `~/.config/gcloud/`. A file in them can also start a
+  program, for example `credential_process` in `~/.aws/config`.
+
+`~/.local/bin/` and the `.git/` folder of a repository stay writable.
 
 A protected file also covers each name that starts with the file name and a `-`, for example
 `<data>/config.yaml-old`.
+
+The check ignores case. For example, `~/.SSH/authorized_keys` and `<data>/SCRIPTS/x.sh` are
+refused on every OS.
 
 ### File tools
 
@@ -331,6 +343,9 @@ The file tools resolve the path before the check:
   is refused.
 - A dangling link counts as its target. A write through the link cannot create the protected
   file.
+- They compare the paths after Unicode NFC normalization and case folding. The macOS file
+  system ignores case and the normalization form, so another form of a protected path names
+  the same file.
 - `skill_manage` refuses a write through a symbolic link in `skills/`.
 
 ### Shell commands
@@ -439,7 +454,9 @@ The model can send a local file with a `MEDIA:<path>` tag or a bare absolute pat
 Cron delivery uses the same rule. The rule is a port of Hermes `validate_media_delivery_path`.
 The checks use the real path, after the symbolic links.
 
-1. A protected path (see "Protected paths") is always refused.
+1. A protected path (see "Protected paths") is always refused. `TETHER_MEDIA_ALLOW_DIRS`
+   cannot open it. This rule covers the credential folders `~/.ssh/`, `~/.aws/`, `~/.gnupg/`,
+   `~/.kube/`, `~/.docker/`, `~/.azure/`, `~/.config/gh/`, and `~/.config/gcloud/`.
 2. A file in `<data>/cache/media/`, `<data>/cache/screenshots/`, or a folder of
    `TETHER_MEDIA_ALLOW_DIRS` is sent.
 3. A file in a denied folder is refused: `/etc`, `/proc`, `/sys`, `/dev`, `/root`, `/boot`,
@@ -471,12 +488,23 @@ of groups are exfiltration, injection, obfuscation, and persistence.
 - **Bootstrap skills** are trusted. The guard does not scan them.
 - The guard scans every file of a skill, whatever its extension, because a script with no
   extension or with an unknown extension can also run. It always scans `SKILL.md`, the known text
-  types, and each file under `scripts/`. It scans each other file that has no NUL byte. It lists
-  the other files as `not scanned (binary)`, and it gives a critical finding for an ELF, PE, or
-  Mach-O file.
+  types, each file under `scripts/`, and each file that starts with `#!`. It scans each other file
+  that has no NUL byte. It lists the other files as `not scanned (binary)`, and it gives a
+  critical finding for an ELF, PE, or Mach-O file.
+- The guard also scans a file with a NUL byte when bash can run it: the first line in the first 80
+  bytes has no NUL byte. It does not scan such a file when the file is under `.git/`, or when it is
+  an image, font, document, archive, audio, video, or model file. Bash deletes a NUL byte after its
+  check, so the guard deletes each NUL byte before the scan. A file that the guard reads only by
+  this bash rule gets no check for invisible characters. `SKILL.md`, the text types, and the
+  files under `scripts/` keep the check, also with a NUL byte. Each scanned file counts to the
+  1 MB scan limit.
 - The guard does not honor `.skillignore` or `.clawhubignore`. An ignore file in the skill folder
   comes from the author of the skill, so it cannot hide a file from the guard.
-- The guard also scans each logical line that a shell builds from lines that end in `\`.
+- The guard also scans each logical line that a shell builds from lines that end in `\`, `|`, or
+  `&&`. After `|` or `&&`, it skips blank lines and comment lines, and it removes a trailing
+  comment, as bash does. It does not join a line after `||`, because the next command does not get
+  the output. It does not join a line that starts with `|`, because that is a table row. In a
+  Markdown file, it joins after `|` or `&&` only inside a fenced code block.
 
 ### Installed skills
 

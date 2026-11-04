@@ -140,9 +140,14 @@ approval gate treats a shell write to them as dangerous.
 - `~/.tether/skills/` (only `skill_manage` can write there)
 - `~/.tether/scripts/` (only you put cron scripts there)
 - `~/.tether/backups/`
+- the shell start files, the tool credential files, and the credential folders in the home
+  folder, for example `~/.bashrc`, `~/.bash_aliases`, `~/.gitconfig`, `~/.aws/`, and `~/.gnupg/`
+
+The [security model](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#protected-paths)
+gives the full list.
 
 The file tools resolve `..` and symbolic links before the check. A link that points to a protected
-path is refused.
+path is refused. The check ignores case. For example, `~/.SSH/authorized_keys` is refused.
 
 The shell check reads the text of the command only. It does not resolve a relative path or a
 symbolic link.
@@ -244,6 +249,8 @@ code. Refer to [Telegram](Telegram#pairing) for the steps.
 When other people can talk to the bot, set `TETHER_MEDIA_DELIVERY_STRICT=1` in `.env`. In the
 default mode, the bot can send any local file that is not protected and not in a denied folder.
 A prompt injection can make the model name any file.
+A protected path is never sent, also from a folder of `TETHER_MEDIA_ALLOW_DIRS`. This rule
+covers the credential folders, for example `~/.aws/` and `~/.gnupg/`.
 
 ## The skill guard
 
