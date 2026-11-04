@@ -3,6 +3,7 @@ package cron
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -439,7 +440,7 @@ func TestShutdownRecordsRunWithoutDelivery(t *testing.T) {
 	cancel()
 	<-done
 	j := mustGet(t, s.Store, id)
-	if j.LastStatus != "error" || !strings.Contains(j.LastOutput, "shut down") || len(s.sends()) != 0 {
+	if j.LastStatus != "stopped" || !strings.Contains(j.LastOutput, "shut down") || len(s.sends()) != 0 {
 		t.Fatal(j, s.sends())
 	}
 	if !j.Enabled || j.RepeatLeft != -1 || !j.NextRun.After(clk.Now()) {
@@ -462,7 +463,8 @@ func shutdownRun(t *testing.T, s *schedFixture) {
 }
 
 // A run that a shutdown stops does not use up the job. A one-shot job and a job on its last
-// repeat stay enabled and due, so they run again after the restart.
+// repeat stay enabled and due, so they run again after the restart. A second stop in a row
+// counts as the run: the job is used up, and its output tells why.
 func TestShutdownDoesNotUseUpLastRun(t *testing.T) {
 	for name, job := range map[string]Job{
 		"one-shot": {Name: "a", Schedule: "2026-10-27T10:30", Prompt: "x", Enabled: true},
@@ -474,7 +476,7 @@ func TestShutdownDoesNotUseUpLastRun(t *testing.T) {
 			clk.t = clk.t.Add(31 * time.Minute)
 			shutdownRun(t, s)
 			j := mustGet(t, s.Store, id)
-			if j.LastStatus != "error" || !strings.Contains(j.LastOutput, "shut down") || len(s.sends()) != 0 {
+			if j.LastStatus != StatusStopped || !strings.Contains(j.LastOutput, "shut down") || len(s.sends()) != 0 {
 				t.Fatal(j, s.sends())
 			}
 			if !j.Enabled || j.RepeatLeft != 1 || j.NextRun.IsZero() || j.NextRun.After(clk.Now()) {
@@ -488,6 +490,41 @@ func TestShutdownDoesNotUseUpLastRun(t *testing.T) {
 				t.Fatal(runs(t, s, id), s.sends(), j)
 			}
 		})
+		t.Run(name+" stopped again", func(t *testing.T) {
+			s, clk := scheduler(t)
+			id := mustCreate(t, s.Store, job)
+			clk.t = clk.t.Add(31 * time.Minute)
+			shutdownRun(t, s)
+			clk.t = clk.t.Add(time.Minute)
+			shutdownRun(t, s)
+			j := mustGet(t, s.Store, id)
+			if runs(t, s, id) != 2 || len(s.sends()) != 0 || j.LastStatus != StatusStopped {
+				t.Fatal(runs(t, s, id), s.sends(), j)
+			}
+			if j.Enabled || j.RepeatLeft != 0 || !j.NextRun.IsZero() || !strings.Contains(j.LastOutput, "shut down") ||
+				!strings.Contains(j.LastOutput, "The job does not run again: two shutdowns in a row stopped it.") {
+				t.Fatalf("a second stop in a row uses up the job: %+v", j)
+			}
+		})
+	}
+}
+
+// A one-shot job that stops one time and then completes through RunNow is delivered and used
+// up. Its output has no used-up line.
+func TestStoppedOneShotCompletesThroughRunNow(t *testing.T) {
+	s, clk := scheduler(t)
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "2026-10-27T10:30", Prompt: "x", Enabled: true})
+	clk.t = clk.t.Add(31 * time.Minute)
+	shutdownRun(t, s)
+	clk.t = clk.t.Add(time.Minute)
+	if err := s.RunNow(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	s.wg.Wait()
+	j := mustGet(t, s.Store, id)
+	if runs(t, s, id) != 2 || len(s.sends()) != 1 || j.Enabled || j.RepeatLeft != 0 || j.LastStatus != "ok" ||
+		strings.Contains(j.LastOutput, "two shutdowns") {
+		t.Fatal(runs(t, s, id), s.sends(), j)
 	}
 }
 
@@ -568,4 +605,37 @@ func TestBadStoredScheduleDisablesJob(t *testing.T) {
 	if _, waits := s.retry[id]; waits {
 		t.Fatal("a disabled job needs no wait")
 	}
+}
+
+// A job that the owner deleted during its run gives ErrNotFound at the run record. That is
+// not a failed write, so the job gets no wait.
+func TestDeletedJobGetsNoWait(t *testing.T) {
+	s, _ := scheduler(t)
+	s.init()
+	s.noteMark("gone", fmt.Errorf("%w: gone", ErrNotFound))
+	s.mu.Lock()
+	_, waits := s.retry["gone"]
+	s.mu.Unlock()
+	if waits {
+		t.Fatal("a deleted job must not keep a wait")
+	}
+}
+
+// RunNow tells the caller that a job waits after a failed run record, because the tick
+// does not start the job before the wait ends.
+func TestRunNowRefusesAJobThatWaits(t *testing.T) {
+	s, clk := scheduler(t)
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	s.init()
+	s.mu.Lock()
+	s.retry[id] = markRetry{wait: markRetryMin, at: clk.Now().Add(markRetryMin)}
+	s.mu.Unlock()
+	if err := s.RunNow(ctx, id); err == nil || !strings.Contains(err.Error(), "waits") {
+		t.Fatal(err)
+	}
+	clk.t = clk.t.Add(markRetryMin + time.Second)
+	if err := s.RunNow(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	s.wg.Wait()
 }

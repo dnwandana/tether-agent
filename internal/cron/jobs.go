@@ -25,6 +25,13 @@ var ErrNotFound = errors.New("cron: job not found. Use list to see the job ids")
 // then disables the job.
 var errBadSchedule = errors.New("cron: the stored schedule is not valid")
 
+// StatusStopped is the LastStatus of a run that a shutdown stopped before the run ended.
+const StatusStopped = "stopped"
+
+// stoppedTwiceLine is the output line of a job that a second stop in a row used up. The
+// gateway is in its shutdown and sends no alert, so the cronjob list shows the line.
+const stoppedTwiceLine = "The job does not run again: two shutdowns in a row stopped it."
+
 // ModelPin sets the provider and the model for the runs of one job.
 type ModelPin struct {
 	Provider string `json:"provider,omitempty"`
@@ -196,6 +203,10 @@ func (s *Store) Update(ctx context.Context, id string, patch JobPatch) (Job, err
 		if patch.NextRun != nil {
 			j.NextRun = *patch.NextRun
 		}
+		// An owner who edits the job gets the full one rerun after a stop again.
+		if j.LastStatus == StatusStopped {
+			j.LastStatus = ""
+		}
 		return s.write(ctx, tx, j)
 	})
 	if err != nil {
@@ -239,6 +250,10 @@ func (s *Store) prepareResume(j *Job, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	// A resume gives the full one rerun after a stop again.
+	if j.LastStatus == StatusStopped {
+		j.LastStatus = ""
+	}
 	if j.RepeatLeft == 0 {
 		j.RepeatLeft = defaultRepeat(sched)
 	}
@@ -280,11 +295,13 @@ func (s *Store) MarkRun(ctx context.Context, id string, status, output string, r
 }
 
 // MarkStopped records a run that started at ranAt and that a shutdown stopped before it
-// ended. The run does not use up the job: RepeatLeft stays the same. A recurring job moves
-// to its next run. A one-shot job, or a job on its last repeat, stays due now, so it runs
-// again after the restart.
-func (s *Store) MarkStopped(ctx context.Context, id string, status, output string, ranAt time.Time) error {
-	return s.markRun(ctx, id, status, output, ranAt, true)
+// ended. It always writes StatusStopped as the status. A recurring job with more repeats
+// left moves to its next run, and RepeatLeft stays the same. A one-shot job, or a job on
+// its last repeat, stays due now, so it runs again after the restart. A stopped run that
+// follows a stopped run counts as a run: the job is used up, and the output gets a line
+// that tells why.
+func (s *Store) MarkStopped(ctx context.Context, id string, output string, ranAt time.Time) error {
+	return s.markRun(ctx, id, StatusStopped, output, ranAt, true)
 }
 
 func (s *Store) markRun(ctx context.Context, id string, status, output string, ranAt time.Time, stopped bool) error {
@@ -295,6 +312,7 @@ func (s *Store) markRun(ctx context.Context, id string, status, output string, r
 		if err != nil {
 			return err
 		}
+		prev := j.LastStatus
 		j.LastRun, j.LastStatus, j.LastOutput = ranAt, status, output
 		sched, err := parse(j.Schedule, s.loc())
 		if err != nil {
@@ -311,10 +329,17 @@ func (s *Store) markRun(ctx context.Context, id string, status, output string, r
 		}
 		j.NextRun = next
 		if stopped {
-			if next.IsZero() || j.RepeatLeft == 1 {
-				j.NextRun = now
+			if !next.IsZero() && j.RepeatLeft != 1 {
+				// A recurring job with repeats left moves to its next run. The stop does not count.
+				return s.write(ctx, tx, j)
 			}
-			return s.write(ctx, tx, j)
+			if prev != StatusStopped {
+				// The first stop keeps the job due now, so it runs again after the restart.
+				j.NextRun = now
+				return s.write(ctx, tx, j)
+			}
+			// A second stop in a row counts as the run, so a job that restarts the gateway
+			// cannot run with no end.
 		}
 		if j.RepeatLeft > 0 {
 			j.RepeatLeft--
@@ -322,6 +347,9 @@ func (s *Store) markRun(ctx context.Context, id string, status, output string, r
 		if j.RepeatLeft == 0 || next.IsZero() {
 			j.Enabled = false
 			j.NextRun = time.Time{}
+			if stopped {
+				j.LastOutput = output + "\n" + stoppedTwiceLine
+			}
 		}
 		return s.write(ctx, tx, j)
 	})

@@ -163,12 +163,22 @@ func (s *Scheduler) RunNow(ctx context.Context, id string) error {
 	if !j.Enabled {
 		return fmt.Errorf("cron: job %s is paused. Resume it first", id)
 	}
+	now := s.now()
 	s.mu.Lock()
 	busy := s.running[id]
 	base := s.base
+	var wait time.Duration
+	if r, ok := s.retry[id]; ok && now.Before(r.at) {
+		wait = r.at.Sub(now)
+	}
 	s.mu.Unlock()
 	if busy {
 		return fmt.Errorf("cron: job %s is already running", id)
+	}
+	// claim does not start a job that waits after a failed run record, so tell the caller.
+	if wait > 0 {
+		return fmt.Errorf("cron: job %s waits %s after a failed run record. It runs again after the wait",
+			id, wait.Round(time.Second))
 	}
 	if base == nil {
 		base = context.WithoutCancel(ctx)
@@ -176,7 +186,6 @@ func (s *Scheduler) RunNow(ctx context.Context, id string) error {
 	if base.Err() != nil {
 		return errors.New("cron: the scheduler is stopped")
 	}
-	now := s.now()
 	if _, err := s.Store.Update(ctx, id, JobPatch{NextRun: &now}); err != nil {
 		return err
 	}
@@ -229,22 +238,23 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 	o := s.run(ctx, j)
 	// The writes use a context without cancel, so a shutdown still records the run.
 	wctx := context.WithoutCancel(ctx)
-	status := o.Status
-	mark := s.Store.MarkRun
 	if ctx.Err() != nil {
 		// The process stops before the run ends. The outcome is not complete, so it is not
-		// delivered. The cronjob list shows the stop. The stopped run does not use up the job,
-		// so a one-shot job runs again after the restart.
-		status = "error"
+		// delivered. MarkStopped records the status stopped, and the cronjob list shows it.
+		// The first stop does not use up the job, so a one-shot job runs again after the
+		// restart. A stopped run that follows a stopped run counts as a run.
 		o.Text = fmt.Sprintf("⚠ Cron job %s stopped: the gateway shut down before the run ended.", j.Name)
 		s.log().Warn("cron job stopped by shutdown", "job", j.ID, "name", j.Name)
-		mark = s.Store.MarkStopped
-	} else if s.Deliver != nil {
+		s.noteMark(j.ID, s.Store.MarkStopped(wctx, j.ID, o.Text, ranAt))
+		return
+	}
+	status := o.Status
+	if s.Deliver != nil {
 		if err := s.Deliver.Deliver(ctx, j, o); err != nil {
 			status = "delivery_failed"
 		}
 	}
-	s.noteMark(j.ID, mark(wctx, j.ID, status, o.Text, ranAt))
+	s.noteMark(j.ID, s.Store.MarkRun(wctx, j.ID, status, o.Text, ranAt))
 }
 
 // noteMark keeps the result err of the run record of the job id. A failed write leaves the
@@ -254,6 +264,11 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 func (s *Scheduler) noteMark(id string, err error) {
 	if errors.Is(err, errBadSchedule) {
 		s.log().Error("cron: job disabled: its stored schedule is not valid", "job", id, "err", err)
+		err = nil
+	}
+	// The owner deleted the job during its run. Nothing runs again, so the job needs no wait.
+	if errors.Is(err, ErrNotFound) {
+		s.log().Info("cron: the job was deleted during its run; the run is not recorded", "job", id)
 		err = nil
 	}
 	now := s.now()

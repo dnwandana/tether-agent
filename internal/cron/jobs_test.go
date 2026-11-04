@@ -170,12 +170,98 @@ func TestMarkStoppedKeepsRepeat(t *testing.T) {
 	s := store(t, c)
 	j, _ := s.Create(ctx, Job{Schedule: "every 1h", Prompt: "x", RepeatLeft: 3, Enabled: true})
 	c.t = j.NextRun
-	if err := s.MarkStopped(ctx, j.ID, "error", "stopped", c.t); err != nil {
+	if err := s.MarkStopped(ctx, j.ID, "stopped", c.t); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.Get(ctx, j.ID)
-	if !got.Enabled || got.RepeatLeft != 3 || !got.NextRun.After(c.t) || got.LastStatus != "error" {
+	if !got.Enabled || got.RepeatLeft != 3 || !got.NextRun.After(c.t) || got.LastStatus != StatusStopped ||
+		got.LastOutput != "stopped" {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// A one-shot job that two shutdowns in a row stop is used up, and its output tells why.
+func TestMarkStoppedTwiceUsesUpOneShot(t *testing.T) {
+	c := fixedNow(2026, 10, 27, 10, 0)
+	s := store(t, c)
+	j, _ := s.Create(ctx, Job{Schedule: "2026-10-28T09:00", Prompt: "x", Enabled: true})
+	c.t = j.NextRun
+	if err := s.MarkStopped(ctx, j.ID, "stopped 1", c.t); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(ctx, j.ID)
+	if !got.Enabled || got.RepeatLeft != 1 || !got.NextRun.Equal(c.t) || got.LastStatus != StatusStopped {
+		t.Fatalf("the first stop keeps the job due: %+v", got)
+	}
+	c.t = c.t.Add(time.Minute)
+	if err := s.MarkStopped(ctx, j.ID, "stopped 2", c.t); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = s.Get(ctx, j.ID)
+	if got.Enabled || got.RepeatLeft != 0 || !got.NextRun.IsZero() || got.LastStatus != StatusStopped ||
+		got.LastOutput != "stopped 2\nThe job does not run again: two shutdowns in a row stopped it." {
+		t.Fatalf("the second stop uses up the job: %+v", got)
+	}
+}
+
+// A recurring job with repeats left moves to its next run at each stop. The stops do not
+// count, also two in a row.
+func TestMarkStoppedTwiceKeepsRecurringRepeat(t *testing.T) {
+	c := fixedNow(2026, 10, 27, 10, 0)
+	s := store(t, c)
+	j, _ := s.Create(ctx, Job{Schedule: "every 1h", Prompt: "x", RepeatLeft: 3, Enabled: true})
+	for range 2 {
+		cur, _ := s.Get(ctx, j.ID)
+		c.t = cur.NextRun
+		if err := s.MarkStopped(ctx, j.ID, "stopped", c.t); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, _ := s.Get(ctx, j.ID)
+	if !got.Enabled || got.RepeatLeft != 3 || !got.NextRun.After(c.t) || got.LastStatus != StatusStopped ||
+		got.LastOutput != "stopped" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// An edit or a resume clears the stopped status, so the next stop keeps the job due again.
+func TestEditClearsStoppedStatus(t *testing.T) {
+	for name, edit := range map[string]func(s *Store, id string) error{
+		"update": func(s *Store, id string) error {
+			p := "y"
+			_, err := s.Update(ctx, id, JobPatch{Prompt: &p})
+			return err
+		},
+		"resume": func(s *Store, id string) error {
+			if err := s.SetEnabled(ctx, id, false); err != nil {
+				return err
+			}
+			return s.SetEnabled(ctx, id, true)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := fixedNow(2026, 10, 27, 10, 0)
+			s := store(t, c)
+			j, _ := s.Create(ctx, Job{Schedule: "2026-10-28T09:00", Prompt: "x", Enabled: true})
+			c.t = j.NextRun
+			if err := s.MarkStopped(ctx, j.ID, "stopped", c.t); err != nil {
+				t.Fatal(err)
+			}
+			if err := edit(s, j.ID); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := s.Get(ctx, j.ID); got.LastStatus != "" {
+				t.Fatalf("the edit clears the stopped status: %+v", got)
+			}
+			c.t = c.t.Add(time.Minute)
+			if err := s.MarkStopped(ctx, j.ID, "stopped", c.t); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := s.Get(ctx, j.ID)
+			if !got.Enabled || got.RepeatLeft != 1 || !got.NextRun.Equal(c.t) || got.LastStatus != StatusStopped {
+				t.Fatalf("a stop after an edit keeps the job due: %+v", got)
+			}
+		})
 	}
 }
 
