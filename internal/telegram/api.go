@@ -34,6 +34,11 @@ const (
 	generalTopicID = "1"
 	// paceLogWait is the pace wait above which a blocking call logs at Info.
 	paceLogWait = 5 * time.Second
+	// defaultRetryAfter is the retry_after of a 429 with a body that is not
+	// JSON. Telegram always sends JSON, so such a reply comes from a proxy
+	// and gives no wait. The value is long, so the calls do not cause more
+	// 429 replies.
+	defaultRetryAfter = 15 * time.Second
 )
 
 // defaultHC is the one shared HTTP client. It has no global timeout, because
@@ -338,14 +343,17 @@ func ThreadParam(threadID string, forChatAction bool) (int, bool) {
 
 // envelope is the common reply shape of the Bot API.
 type envelope struct {
-	OK          bool            `json:"ok"`
-	Result      json.RawMessage `json:"result"`
-	ErrorCode   int             `json:"error_code"`
-	Description string          `json:"description"`
-	Parameters  *struct {
-		RetryAfter      int   `json:"retry_after"`
-		MigrateToChatID int64 `json:"migrate_to_chat_id"`
-	} `json:"parameters"`
+	OK          bool             `json:"ok"`
+	Result      json.RawMessage  `json:"result"`
+	ErrorCode   int              `json:"error_code"`
+	Description string           `json:"description"`
+	Parameters  *replyParameters `json:"parameters"`
+}
+
+// replyParameters are the parameters of an error reply.
+type replyParameters struct {
+	RetryAfter      int   `json:"retry_after"`
+	MigrateToChatID int64 `json:"migrate_to_chat_id"`
 }
 
 // Call sends params as a JSON POST to the method and decodes the result into
@@ -532,8 +540,10 @@ func (c *Client) once(ctx context.Context, method string, timeout time.Duration,
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		if resp.StatusCode == http.StatusTooManyRequests {
-			// A 429 with a body that is not JSON still gets the retry.
-			return envelope{ErrorCode: http.StatusTooManyRequests, Description: "Too Many Requests"}, true, nil
+			// A 429 with a body that is not JSON still gets the retry. It
+			// has no retry_after, so it gets defaultRetryAfter.
+			return envelope{ErrorCode: http.StatusTooManyRequests, Description: "Too Many Requests",
+				Parameters: &replyParameters{RetryAfter: int(defaultRetryAfter / time.Second)}}, true, nil
 		}
 		return env, true, fmt.Errorf("telegram %s: HTTP %d: reply is not JSON", method, resp.StatusCode)
 	}

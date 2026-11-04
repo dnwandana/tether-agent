@@ -165,6 +165,48 @@ func TestRetryAfter429(t *testing.T) {
 	}
 }
 
+// TestNonJSON429UsesDefaultRetryAfter checks that a 429 with a body that is
+// not JSON goes through the flood path with defaultRetryAfter.
+func TestNonJSON429UsesDefaultRetryAfter(t *testing.T) {
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if n.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, "<html>429 Too Many Requests</html>")
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":8,"chat":{"id":42}}}`)
+	}))
+	defer srv.Close()
+	clk := newFakeClock()
+	c := &Client{Token: "T", BaseURL: srv.URL, HC: srv.Client(), Pace: NewChatPace()}
+	c.Pace.Now = clk.Now
+	c.sleep = func(_ context.Context, d time.Duration) error {
+		clk.Advance(d)
+		return nil
+	}
+	start := clk.Now()
+	if _, err := c.SendMessage(ctx, SendMessageParams{ChatID: 42, Text: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := clk.Now().Sub(start); got != defaultRetryAfter+floodPad {
+		t.Fatal("retry wait", got)
+	}
+	if got := c.Pace.FloodEnd(42).Sub(start); got != defaultRetryAfter+floodPad {
+		t.Fatal("flood end", got)
+	}
+	// A status call does not wait so long inline.
+	n.Store(0)
+	clk.Advance(time.Minute)
+	_, err := noWaitClient(c).EditMessageText(ctx, EditMessageTextParams{ChatID: 42, MessageID: 8, Text: "y"})
+	if d, ok := floodWait(err); !ok || d != defaultRetryAfter {
+		t.Fatal(err)
+	}
+	if n.Load() != 1 {
+		t.Fatal("calls", n.Load())
+	}
+}
+
 func TestRetryAfterGivesUpAfterThree(t *testing.T) {
 	var n atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
