@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -284,5 +287,18 @@ func TestRestoreMissingFile(t *testing.T) {
 	if code := run([]string{"restore", "--yes", "--data-dir", t.TempDir(), missing}, &out, &errb); code != 1 ||
 		!strings.HasPrefix(errb.String(), "restore: ") {
 		t.Fatal(code, errb.String())
+	}
+}
+
+// Under nohup, SIGHUP is ignored. The restore must not install a handler for it, because
+// signal.Notify turns off the ignore, and a logout then stops the restore.
+func TestRestoreSignalsKeepIgnoredSIGHUP(t *testing.T) {
+	if !slices.Contains(restoreSignals(), os.Signal(syscall.SIGHUP)) {
+		t.Fatal("SIGHUP must stop a restore at a terminal")
+	}
+	signal.Ignore(syscall.SIGHUP)
+	t.Cleanup(func() { signal.Reset(syscall.SIGHUP) })
+	if slices.Contains(restoreSignals(), os.Signal(syscall.SIGHUP)) {
+		t.Fatal("an ignored SIGHUP must stay ignored")
 	}
 }

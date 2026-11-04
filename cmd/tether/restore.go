@@ -76,9 +76,8 @@ func runRestore(args []string, stdout, stderr io.Writer) int {
 		archive, source = f, filepath.Base(file)
 	}
 
-	// A signal cancels the context, so the stage step stops and deletes its folder. SIGHUP comes
-	// when the owner closes the terminal, for example at the prompt.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	// A signal cancels the context, so the stage step stops and deletes its folder.
+	ctx, stop := signal.NotifyContext(context.Background(), restoreSignals()...)
 	defer stop()
 
 	var confirm func(backup.Summary) bool
@@ -186,4 +185,15 @@ func printRestoreSummary(w io.Writer, s backup.Summary) {
 	c.printFolders(w)
 	fmt.Fprintf(w, "The restore replaces the data in %s.\n", s.DataDir)
 	fmt.Fprintf(w, "If the data dir has old data, the old data moves to %s/.\n", s.PreRestoreDir)
+}
+
+// restoreSignals returns the signals that stop a restore. SIGHUP comes when the owner closes
+// the terminal, for example at the prompt. Under nohup, SIGHUP is ignored, and it stays out
+// of the list: signal.Notify turns off the ignore, so a logout would stop the restore.
+func restoreSignals() []os.Signal {
+	sigs := []os.Signal{os.Interrupt, syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		sigs = append(sigs, syscall.SIGHUP)
+	}
+	return sigs
 }
