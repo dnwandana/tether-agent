@@ -110,7 +110,9 @@ type Streamer struct {
 
 	// stopFlush stops the armed flush timer. Nil means no timer.
 	stopFlush func() bool
-	runCtx    context.Context
+	// flushGen is the generation of the armed flush timer, for onFlushTimer.
+	flushGen uint64
+	runCtx   context.Context
 }
 
 // Delta adds streamed text.
@@ -848,15 +850,24 @@ func (s *Streamer) armTimer(d time.Duration) {
 	if timer == nil {
 		timer = func(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
 	}
-	s.stopFlush = timer(max(d, 0), s.onFlushTimer)
+	s.flushGen++
+	gen := s.flushGen
+	s.stopFlush = timer(max(d, 0), func() { s.onFlushTimer(gen) })
 }
 
 // onFlushTimer flushes the stream when the open message does not show the
 // newest text. It does not read pending, because streamFlush sets pending
-// to 0 before the request.
-func (s *Streamer) onFlushTimer() {
+// to 0 before the request. gen is the generation of the timer that fired. A
+// timer can fire while stopTimer stops it, and then its callback waits for
+// s.mu. When gen is not the current generation, that timer was stopped, so
+// the callback does nothing. It does not touch stopFlush, which can be the
+// handle of a newer timer.
+func (s *Streamer) onFlushTimer(gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if gen != s.flushGen {
+		return
+	}
 	s.stopFlush = nil
 	if s.finished || s.editsOff {
 		return
@@ -878,6 +889,8 @@ func (s *Streamer) stopTimer() {
 	if s.stopFlush != nil {
 		s.stopFlush()
 		s.stopFlush = nil
+		// A callback of the stopped timer that waits for s.mu must do nothing.
+		s.flushGen++
 	}
 }
 
