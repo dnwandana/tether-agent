@@ -87,7 +87,7 @@ Click the first element that matches a selector on the current page. A selector 
 
 ### browser_cookies
 
-Read, set, or delete browser cookies. get: return the cookies of the current page, or of a domain. set: set the cookie name=value for the current page, or for a domain. clear: delete the cookie name, or all cookies of the current page or of a domain when you give no name.
+Read, set, or delete browser cookies. get: return the cookies of the current page, or of a domain, without their values: a cookie value is often a login secret, so get gives only the length of the value. set: set the cookie name=value for the current page, or for a domain. clear: delete the cookie name, or all cookies of the current page or of a domain when you give no name.
 
 **Needs:** Chrome or Chromium (browser.chrome_path, CHROME_PATH, or PATH). Without it, the tool returns an error.
 
