@@ -1215,3 +1215,57 @@ func TestStopDrainWaitsForAMessageInSpeechToText(t *testing.T) {
 		t.Fatal(h.ch.Inflight())
 	}
 }
+
+// droppedNotice is the text of the drop notice without the MarkdownV2 markup.
+var droppedNotice = StripMarkdownV2(ToMarkdownV2(droppedAtStopText))
+
+// wantDropNotice checks that the user got the drop notice as a reply to the message msgID,
+// and that the log tells the chat.
+func wantDropNotice(t *testing.T, h *tgHarness, logb *bytes.Buffer, msgID int) {
+	t.Helper()
+	if !strings.Contains(h.sentTexts(), droppedNotice) {
+		t.Fatal(h.sentTexts())
+	}
+	c := h.api.lastCall("sendMessage")
+	rp, _ := c.Body["reply_parameters"].(map[string]any)
+	if rp == nil || rp["message_id"] != float64(msgID) {
+		t.Fatal(c.Body)
+	}
+	if got := logb.String(); !strings.Contains(got, `"msg":"telegram: the gateway stops, so the message is dropped"`) ||
+		!strings.Contains(got, `"chat":"5"`) {
+		t.Fatal(got)
+	}
+	if h.prov.count() != 0 || h.session("telegram:dm:5") != nil {
+		t.Fatal("a dropped message must make no turn and no session")
+	}
+}
+
+func TestMessageCancelledInSpeechToTextGetsANotice(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	logb := debugLog(h)
+	started, _ := blockSTT(h)
+	wctx, stopWork := context.WithCancel(ctx)
+	defer stopWork()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ch.handleUpdate(wctx, h.gw, Update{UpdateID: 1, Message: ptr(voiceDM(h, 5))})
+	}()
+	waitClosed(t, started, "the transcription did not start")
+	// The drain time ends: the gateway stops and cancels the work.
+	h.gw.BeginStopping(ctx)
+	stopWork()
+	waitClosed(t, done, "the update did not end")
+	wantDropNotice(t, h, logb, 41)
+}
+
+func TestMessageAfterTheStopGetsANotice(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	logb := debugLog(h)
+	h.gw.BeginStopping(ctx)
+	m := dmText(5, "hello")
+	m.MessageID = 42
+	h.update(m)
+	h.waitIdle()
+	wantDropNotice(t, h, logb, 42)
+}

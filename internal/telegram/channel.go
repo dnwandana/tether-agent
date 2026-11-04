@@ -389,6 +389,8 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 		}
 		t, images, files, err := ch.Inbox.Build(ctx, clean)
 		if err != nil {
+			// Build fails only when ctx ends, that is at a gateway stop.
+			ch.dropAtStop(ctx, n, chatID, msgs[0].MessageID, err)
 			return
 		}
 		in.Text, in.Images, in.Files, in.IsText = t, images, files, false
@@ -406,10 +408,35 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 	submitted = true
 	gw.Submit(ctx, in, newRenderer, func(err error) {
 		release()
-		if err != nil && ctx.Err() == nil {
+		switch {
+		case errors.Is(err, gateway.ErrStopping):
+			ch.dropAtStop(ctx, n, chatID, msgs[0].MessageID, err)
+		case err != nil && ctx.Err() == nil:
 			ch.logger().Warn("telegram: the message failed", "key", in.Key, "err", err.Error())
 		}
 	})
+}
+
+// droppedAtStopText is the notice for a message that a gateway stop dropped before the
+// agent got it.
+const droppedAtStopText = "⚠️ Tether Agent stopped before it could read this message. Send it again."
+
+// dropNoticeTimeout is the limit of the send of droppedAtStopText.
+const dropNoticeTimeout = 3 * time.Second
+
+// dropAtStop logs that a gateway stop dropped the message msgID, and it tells the user in
+// a reply to that message. The poller saved the offset before the handler, so Telegram
+// does not send the message again. ctx can be the cancelled work context, so the send has
+// a context and a limit of its own.
+func (ch *Channel) dropAtStop(ctx context.Context, n Normalized, chatID int64, msgID int, err error) {
+	ch.logger().Warn("telegram: the gateway stops, so the message is dropped",
+		"chat", n.ChatID, "message", msgID, "err", err.Error())
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dropNoticeTimeout)
+	defer cancel()
+	if _, err := ch.sendText(sctx, chatID, n.ThreadID, droppedAtStopText,
+		sendOpts{replyTo: msgID, class: paceReply}); err != nil {
+		ch.logger().Warn("telegram: cannot send the drop notice", "chat", n.ChatID, "err", err.Error())
+	}
 }
 
 // observe saves an observed group message to the shared session of the chat or topic, with
