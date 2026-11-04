@@ -323,20 +323,23 @@ func skillFiles(dir string) (map[string]string, error) {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		b, err := os.ReadFile(p)
+		// Read only what fits in the scan budget, as ScanDir does, so a large
+		// binary file does not go into memory in full.
+		b, complete, err := readHead(p, maxScanBytes-total)
 		if err != nil {
 			return err
 		}
 		// The guard reads every text file, whatever its extension, and each
-		// file that mustScan names. Only a file with a NUL byte outside those
-		// is binary data that the patterns do not read.
-		if !mustScan(rel) && !looksText(b) {
+		// file that mustScan names: also a file with a NUL byte that bash can
+		// run. Only the other files with a NUL byte are binary data that the
+		// patterns do not read.
+		if !mustScan(rel, b) && !looksText(b) {
 			return nil
 		}
-		total += len(b)
-		if total > maxScanBytes {
+		if !complete {
 			return errTooLargeToScan
 		}
+		total += len(b)
 		files[rel] = string(b)
 		return nil
 	})

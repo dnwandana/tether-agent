@@ -88,6 +88,19 @@ var binaryExt = map[string]bool{
 	".msi": true, ".dmg": true, ".app": true, ".deb": true, ".rpm": true,
 }
 
+// mediaExt holds the file types that the guard skips when they hold a NUL
+// byte: images, fonts, documents, archives, audio, video, and other
+// compressed or model files that can start with no NUL byte.
+var mediaExt = map[string]bool{
+	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".bmp": true, ".ico": true,
+	".tif": true, ".tiff": true, ".avif": true, ".heic": true,
+	".ttf": true, ".otf": true, ".woff": true, ".woff2": true, ".eot": true,
+	".pdf": true, ".docx": true, ".xlsx": true, ".pptx": true, ".odt": true,
+	".zip": true, ".gz": true, ".tgz": true, ".tar": true, ".bz2": true, ".xz": true, ".7z": true,
+	".mp3": true, ".wav": true, ".ogg": true, ".flac": true, ".m4a": true, ".mp4": true, ".webm": true, ".mov": true,
+	".zst": true, ".br": true, ".lz4": true, ".lzma": true, ".onnx": true,
+}
+
 // scriptExt holds the file types that can have the executable bit.
 var scriptExt = map[string]bool{".sh": true, ".bash": true, ".py": true, ".rb": true, ".pl": true}
 
@@ -126,25 +139,57 @@ func unicodeCharName(r rune) string {
 	return fmt.Sprintf("U+%04X", r)
 }
 
+// InvisibleRune returns the first rune of s that is in the list of invisible
+// characters of the skill guard, with its name from that list. ok is false when
+// s has no such rune. The memory guard uses it, so both guards share one list.
+func InvisibleRune(s string) (r rune, name string, ok bool) {
+	for _, r := range s {
+		for _, c := range invisibleChars {
+			if c.r == r {
+				return c.r, c.name, true
+			}
+		}
+	}
+	return 0, "", false
+}
+
 // isScannable reports whether the file at the relative path is a text type
 // that the guard always reads, whatever its bytes are.
 func isScannable(rel string) bool {
 	return path.Base(rel) == skillFile || scannableExt[strings.ToLower(path.Ext(rel))]
 }
 
-// mustScan reports whether the guard reads the file at the relative path even
-// when its content is not text. SKILL.md, the scannableExt types, and each
-// file under scripts/ are always read: the agent or a shell can run them,
-// whatever their name or their bytes are.
-func mustScan(rel string) bool {
-	return isScannable(rel) || strings.HasPrefix(rel, "scripts/")
+// bashSampleBytes is the number of bytes that bash checks before it runs a
+// file as a script.
+const bashSampleBytes = 80
+
+// mustScan reports whether the guard reads the file at the relative path when
+// its content has a NUL byte. head is the start of the content. SKILL.md, the
+// scannableExt types, each file under scripts/, and each file that starts
+// with "#!" are always read. Another file is read when bash can run it: its
+// type is not in mediaExt, it is not under .git/, and its first line in the
+// first 80 bytes has no NUL byte. Bash 3.2 and later refuse a file only when
+// this test fails, and bash deletes a NUL byte after the test.
+func mustScan(rel string, head []byte) bool {
+	if isScannable(rel) || strings.HasPrefix(rel, "scripts/") || bytes.HasPrefix(head, []byte("#!")) {
+		return true
+	}
+	if mediaExt[strings.ToLower(path.Ext(rel))] || strings.HasPrefix(rel, ".git/") || strings.Contains(rel, "/.git/") {
+		return false
+	}
+	first := head[:min(len(head), bashSampleBytes)]
+	if i := bytes.IndexByte(first, '\n'); i >= 0 {
+		first = first[:i]
+	}
+	return bytes.IndexByte(first, 0) < 0
 }
 
 // Scan applies the threat patterns and the invisible-rune check to each file.
 // The key of files is the relative path and the value is the content. The
 // guard scans every file, whatever its extension, because a script with no
 // extension or with an unknown extension can run too. Each pattern gives at
-// most one finding per line.
+// most one finding per line. It deletes each NUL byte before the scan, as
+// bash and dash do.
 func Scan(files map[string]string) ScanResult {
 	return scanFiles(files, nil)
 }
@@ -162,13 +207,23 @@ func scanFiles(files map[string]string, keep func(rel string) bool) ScanResult {
 		if keep != nil && !keep(rel) {
 			continue
 		}
-		findings = append(findings, scanText(rel, files[name])...)
+		content := files[name]
+		hadNUL := strings.IndexByte(content, 0) >= 0
+		if hadNUL {
+			content = strings.ReplaceAll(content, "\x00", "")
+		}
+		// Only a file that the bash rule reads skips the invisible check. SKILL.md, the
+		// scannableExt types, and the scripts/ files keep it, so one NUL byte cannot hide
+		// a zero-width rune in text that the model reads.
+		binary := hadNUL && !isScannable(rel) && !strings.HasPrefix(rel, "scripts/")
+		findings = append(findings, scanText(rel, content, binary)...)
 	}
 	return ScanResult{Verdict: verdictOf(findings), Findings: findings}
 }
 
-// scanText scans the content of one file.
-func scanText(rel, content string) []Finding {
+// scanText scans the content of one file. content has no NUL bytes. hadNUL
+// is true for a file with a NUL byte that only the bash rule of mustScan reads.
+func scanText(rel, content string, hadNUL bool) []Finding {
 	lines := strings.Split(content, "\n")
 	var out []Finding
 	for _, p := range ThreatPatterns {
@@ -182,6 +237,11 @@ func scanText(rel, content string) []Finding {
 		}
 	}
 	out = append(out, scanContinued(rel, lines, out)...)
+	// A file that had a NUL byte gets no invisible_unicode check, because
+	// random bytes give false findings.
+	if hadNUL {
+		return out
+	}
 	for i, line := range lines {
 		for _, c := range invisibleChars {
 			if strings.ContainsRune(line, c.r) {
@@ -199,26 +259,35 @@ func scanText(rel, content string) []Finding {
 }
 
 // scanContinued applies the threat patterns to each logical line that a
-// shell builds from two or more lines that end in a backslash. A pattern that
-// already matched one of the parts gives no second finding. The finding has
-// the line number of the first part.
+// shell builds from two or more lines: a line that ends in a backslash, or a
+// line that ends in "|" or "&&" (see pipeNext). A pattern that already matched
+// one of the parts gives no second finding. The finding has the line number of
+// the first part.
 func scanContinued(rel string, lines []string, found []Finding) []Finding {
 	have := map[string]bool{}
 	for _, f := range found {
 		have[fmt.Sprintf("%s:%d", f.PatternID, f.Line)] = true
 	}
+	code := codeLines(rel, lines)
 	var out []Finding
 	for i := 0; i < len(lines); {
 		j := i
 		var b strings.Builder
-		for j < len(lines) {
+		for {
 			part := strings.TrimSuffix(lines[j], "\r")
-			if !strings.HasSuffix(part, "\\") || j == len(lines)-1 {
-				b.WriteString(part)
-				break
+			if strings.HasSuffix(part, "\\") && j < len(lines)-1 {
+				b.WriteString(strings.TrimSuffix(part, "\\"))
+				j++
+				continue
 			}
-			b.WriteString(strings.TrimSuffix(part, "\\"))
-			j++
+			if head, next, ok := pipeNext(lines, code, j); ok {
+				b.WriteString(head)
+				b.WriteByte(' ')
+				j = next
+				continue
+			}
+			b.WriteString(part)
+			break
 		}
 		if j > i {
 			joined := b.String()
@@ -244,6 +313,63 @@ func scanContinued(rel string, lines []string, found []Finding) []Finding {
 		i = j + 1
 	}
 	return out
+}
+
+// codeLines reports for each line whether a "|" or "&&" join can start or end
+// on it. In a Markdown file, only the lines inside a fenced code block can,
+// because SKILL.md gives commands in such blocks and a table row also ends in
+// "|". In other files, every line can.
+func codeLines(rel string, lines []string) []bool {
+	code := make([]bool, len(lines))
+	md := strings.ToLower(path.Ext(rel)) == ".md"
+	in := false
+	for i, l := range lines {
+		t := strings.TrimLeft(l, " \t")
+		if md && (strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~")) {
+			in = !in
+			continue
+		}
+		code[i] = !md || in
+	}
+	return code
+}
+
+// pipeNext returns line j without its trailing comment and spaces, and the
+// index of the next command line, when line j ends in "|" or "&&". It skips
+// blank lines and comment lines, as bash does. It does not join after "||",
+// because the next command does not get the output, or a line that starts
+// with "|", because that is a table row.
+func pipeNext(lines []string, code []bool, j int) (head string, next int, ok bool) {
+	part := strings.TrimSuffix(lines[j], "\r")
+	if !code[j] || strings.HasPrefix(strings.TrimLeft(part, " \t"), "|") {
+		return "", 0, false
+	}
+	head = strings.TrimRight(stripComment(part), " \t")
+	if strings.HasSuffix(head, "||") || !(strings.HasSuffix(head, "|") || strings.HasSuffix(head, "&&")) {
+		return "", 0, false
+	}
+	for k := j + 1; k < len(lines); k++ {
+		s := strings.TrimSpace(lines[k])
+		if s == "" || strings.HasPrefix(s, "#") {
+			continue
+		}
+		if !code[k] || strings.HasPrefix(s, "|") {
+			return "", 0, false
+		}
+		return head, k, true
+	}
+	return "", 0, false
+}
+
+// stripComment removes a shell comment from line. A "#" starts a comment only
+// at the start of the line or after a space or a tab, so a URL fragment stays.
+func stripComment(line string) string {
+	for i := 0; i < len(line); i++ {
+		if line[i] == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+			return line[:i]
+		}
+	}
+	return line
 }
 
 // cutMatch trims the line and cuts it to 120 runes, the same as Hermes.
@@ -351,18 +477,20 @@ func sevRank(s Severity) int {
 	return 4
 }
 
-// errTooLargeToScan tells that a skill has more text than one scan reads.
-var errTooLargeToScan = fmt.Errorf("skill has more than %d KB of text files; the guard does not scan it", maxTotalSizeKB)
+// errTooLargeToScan tells that a skill has more bytes to scan than one scan reads.
+var errTooLargeToScan = fmt.Errorf("skill has more than %d KB of files to scan; the guard does not scan it", maxTotalSizeKB)
 
 // ScanDir scans all files of the skill folder dir. It adds the Hermes
 // structural checks: file count, file size, binary files, executable bits,
 // and symlinks. It honors no ignore file: an ignore file in the folder comes
 // from the author of the skill, so it must not hide a file from the guard.
 // It pattern-scans SKILL.md, every scannableExt file, every file under
-// scripts/, and every other file with no NUL byte. It lists the other files
-// in Unscanned, stops at a file that it cannot read, and adds a binary_file
-// finding for each file that starts with an executable magic number. More
-// than 1 MB of text gives errTooLargeToScan, so no text is left unscanned.
+// scripts/, every file that starts with "#!", every other file with no NUL
+// byte, and each file with a NUL byte that bash can run (mustScan). It lists
+// the other files in Unscanned, stops at a file that it cannot read, and adds
+// a binary_file finding for each file that starts with an executable magic
+// number. More than 1 MB to scan gives errTooLargeToScan, so no file that the
+// guard must read is left unscanned.
 func ScanDir(dir string) (ScanResult, error) {
 	root, err := filepath.EvalSymlinks(dir)
 	if err != nil {
@@ -440,7 +568,7 @@ func ScanDir(dir string) (ScanResult, error) {
 				Match:       "binary: " + format,
 				Description: fmt.Sprintf("binary/executable file (%s) should not be in a skill", format)})
 		}
-		if !mustScan(rel) && !looksText(data) {
+		if !mustScan(rel, data) && !looksText(data) {
 			unscanned = append(unscanned, rel)
 			return nil
 		}
@@ -474,15 +602,16 @@ func ScanDir(dir string) (ScanResult, error) {
 
 // readHead reads at most budget bytes of text from the file at p. It reads
 // one byte more than budget, so a file that does not fit stops the read
-// early and gives complete false. It reads at least 4 bytes, so that
-// executableMagic always gets the head of a file.
+// early and gives complete false. It reads at least bashSampleBytes bytes, so
+// that executableMagic and mustScan always get the head of a file, also when
+// the budget is almost used up.
 func readHead(p string, budget int) (data []byte, complete bool, err error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return nil, false, err
 	}
 	defer f.Close()
-	limit := max(budget, 4) + 1
+	limit := max(budget, bashSampleBytes) + 1
 	data, err = io.ReadAll(io.LimitReader(f, int64(limit)))
 	if err != nil {
 		return nil, false, err

@@ -33,7 +33,7 @@ type ThreatPattern struct {
 // Match reports whether the pattern hits one line. Like Hermes, the guard
 // applies each pattern to one line at a time.
 func (p ThreatPattern) Match(line string) bool {
-	line = foldPythonCase(line)
+	line = FoldPythonCase(line)
 	if !p.Re.MatchString(line) {
 		return false
 	}
@@ -44,9 +44,9 @@ func (p ThreatPattern) Match(line string) bool {
 // letter but Go (?i) does not, or that Go \b treats as a non-word rune.
 var pyFolds = strings.NewReplacer("İ", "i", "ı", "i", "ſ", "s", "K", "k")
 
-// foldPythonCase maps the runes in pyFolds to their ASCII letters. Then Go
+// FoldPythonCase maps the runes in pyFolds to their ASCII letters. Then Go
 // gives the same case-insensitive matches as Python.
-func foldPythonCase(line string) string {
+func FoldPythonCase(line string) string {
 	for i := 0; i < len(line); i++ {
 		if line[i] >= utf8.RuneSelf {
 			return pyFolds.Replace(line)
@@ -224,7 +224,7 @@ func buildPatterns() []ThreatPattern {
 			Severity:    r.sev,
 			Category:    r.cat,
 			Description: r.desc,
-			Re:          compilePy(src),
+			Re:          CompilePy(src),
 			Extra:       extra,
 		})
 	}
@@ -240,11 +240,11 @@ const (
 	pyWord  = `\p{L}\p{N}_`
 )
 
-// compilePy compiles a Python re pattern (used with re.IGNORECASE) as RE2.
+// CompilePy compiles a Python re pattern (used with re.IGNORECASE) as RE2.
 // It changes \s, \d, and \w to the Python Unicode sets. Go \b stays ASCII:
 // every \b in the Hermes patterns touches an ASCII letter, so the Go \b
 // finds a boundary at least where Python finds one.
-func compilePy(src string) *regexp.Regexp {
+func CompilePy(src string) *regexp.Regexp {
 	src = strings.ReplaceAll(src, `[\s\S]`, `(?s:.)`)
 	var b strings.Builder
 	b.WriteString("(?i)")
@@ -296,13 +296,13 @@ func compilePy(src string) *regexp.Regexp {
 
 var (
 	// environGet matches `.get("name` after os.environ and captures the name part.
-	environGet = compilePy(`^\s*\.get\s*\(\s*["\']([^"\']*)`)
-	secretWord = compilePy(`KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL`)
-	pipInstall = compilePy(`pip\s+install(\s+)`)
-	npmInstall = compilePy(`npm\s+install(\s+)`)
-	pipReqFile = compilePy(`^-r\s`)
-	atDigit    = compilePy(`@\d`)
-	osEnviron  = compilePy(`os\.environ\b`)
+	environGet = CompilePy(`^\s*\.get\s*\(\s*["\']([^"\']*)`)
+	secretWord = CompilePy(`KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL`)
+	pipInstall = CompilePy(`pip\s+install(\s+)`)
+	npmInstall = CompilePy(`npm\s+install(\s+)`)
+	pipReqFile = CompilePy(`^-r\s`)
+	atDigit    = CompilePy(`@\d`)
+	osEnviron  = CompilePy(`os\.environ\b`)
 )
 
 // osEnvironNotSafeGet replaces

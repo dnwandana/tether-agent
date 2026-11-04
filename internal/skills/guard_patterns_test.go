@@ -230,3 +230,25 @@ func TestPythonCaseFolds(t *testing.T) {
 		t.Error("long s with word boundary")
 	}
 }
+
+// TestExportedPythonHelpers checks the exported helpers that the memory guard uses.
+func TestExportedPythonHelpers(t *testing.T) {
+	re := CompilePy(`ignore\s+(?:\w+\s+){0,8}instructions`)
+	for _, s := range []string{
+		"IGNORE\vthe instructions", // Python \s has \v, RE2 \s does not
+		"ignore déjà instructions", // Python \w has the accented letters
+	} {
+		if !re.MatchString(s) {
+			t.Errorf("%q must match", s)
+		}
+	}
+	if re.MatchString("ignoreinstructions") {
+		t.Error("the pattern needs a space after ignore")
+	}
+	if got := FoldPythonCase("İgnore ſystem \u212a"); got != "ignore system k" {
+		t.Errorf("FoldPythonCase: %q", got)
+	}
+	if got := FoldPythonCase("plain ASCII"); got != "plain ASCII" {
+		t.Errorf("FoldPythonCase must not change ASCII text: %q", got)
+	}
+}
