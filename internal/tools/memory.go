@@ -3,12 +3,9 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"strings"
 
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/provider"
-	"github.com/dnwandana/tether-agent/internal/skills"
 )
 
 // frozenNote follows a result that changed memory.md or user_profile.md. The
@@ -140,41 +137,4 @@ func (t MemoryTool) Run(_ context.Context, raw json.RawMessage, _ *Env) (string,
 	default:
 		return "", toolErr("unknown action %q; use add, replace, remove, search, or read", a.Action)
 	}
-}
-
-// memoryThreatCategories are the skill guard categories that memory refuses. An
-// entry of memory.md or user_profile.md goes into the system prompt of each later
-// session, so an injected instruction there stays active (Hermes
-// _scan_memory_content). A note can move into tier 1 with a replace, so notes get
-// the same check.
-var memoryThreatCategories = map[string]bool{
-	"injection": true, "exfiltration": true, "credential_exposure": true, "persistence": true,
-}
-
-// memoryThreat scans the text of a memory write with the skill guard patterns. It
-// returns the refusal text, or "" when the text is allowed. It refuses a critical
-// finding of memoryThreatCategories, and a high finding of the injection category,
-// which includes the invisible characters.
-func memoryThreat(content string) string {
-	r := skills.Scan(map[string]string{"memory": content})
-	var ids []string
-	seen := map[string]bool{}
-	for _, f := range r.Findings {
-		if !memoryThreatCategories[f.Category] {
-			continue
-		}
-		if f.Severity != skills.SevCritical && (f.Category != "injection" || f.Severity != skills.SevHigh) {
-			continue
-		}
-		if !seen[f.PatternID] {
-			seen[f.PatternID] = true
-			ids = append(ids, fmt.Sprintf("%s (%s)", f.PatternID, f.Description))
-		}
-	}
-	if len(ids) == 0 {
-		return ""
-	}
-	return "the memory guard refused the entry: " + strings.Join(ids, "; ") + ". Memory goes into the " +
-		"system prompt of later sessions, so it must not hold instructions to the agent or commands that " +
-		"send data out. Save the fact in your own words, without the flagged text."
 }
