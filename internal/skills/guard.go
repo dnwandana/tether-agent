@@ -53,24 +53,10 @@ type Finding struct {
 type ScanResult struct {
 	Verdict  Verdict
 	Findings []Finding
-	// Unscanned holds the sorted relative paths of the files that strict
-	// mode did not pattern-scan, because their content is not text. It is
-	// always nil in ScanCurrent.
+	// Unscanned holds the sorted relative paths of the files that ScanDir
+	// did not pattern-scan, because their content is not text.
 	Unscanned []string
 }
-
-// ScanMode selects which files ScanDirMode reads.
-type ScanMode int
-
-const (
-	// ScanCurrent is the Hermes mode. It honors .skillignore and
-	// .clawhubignore, and it reads only the scannableExt types.
-	ScanCurrent ScanMode = iota
-	// ScanStrict is the mode for skill install and update. It honors no
-	// ignore file, it reads every file that is text by content, and it
-	// checks the first bytes of each file for an executable format.
-	ScanStrict
-)
 
 // Structural limits from Hermes. maxScanBytes also limits how much text one
 // ScanDir call reads.
@@ -140,17 +126,27 @@ func unicodeCharName(r rune) string {
 	return fmt.Sprintf("U+%04X", r)
 }
 
-// isScannable reports whether the guard reads the file at the relative path.
+// isScannable reports whether the file at the relative path is a text type
+// that the guard always reads, whatever its bytes are.
 func isScannable(rel string) bool {
 	return path.Base(rel) == skillFile || scannableExt[strings.ToLower(path.Ext(rel))]
 }
 
+// mustScan reports whether the guard reads the file at the relative path even
+// when its content is not text. SKILL.md, the scannableExt types, and each
+// file under scripts/ are always read: the agent or a shell can run them,
+// whatever their name or their bytes are.
+func mustScan(rel string) bool {
+	return isScannable(rel) || strings.HasPrefix(rel, "scripts/")
+}
+
 // Scan applies the threat patterns and the invisible-rune check to each file.
-// The key of files is the relative path and the value is the content. Files
-// that are not text types are skipped, the same as Hermes. Each pattern gives
-// at most one finding per line.
+// The key of files is the relative path and the value is the content. The
+// guard scans every file, whatever its extension, because a script with no
+// extension or with an unknown extension can run too. Each pattern gives at
+// most one finding per line.
 func Scan(files map[string]string) ScanResult {
-	return scanFiles(files, isScannable)
+	return scanFiles(files, nil)
 }
 
 // scanFiles scans the files in name order. A nil keep scans every file.
@@ -185,6 +181,7 @@ func scanText(rel, content string) []Finding {
 			}
 		}
 	}
+	out = append(out, scanContinued(rel, lines, out)...)
 	for i, line := range lines {
 		for _, c := range invisibleChars {
 			if strings.ContainsRune(line, c.r) {
@@ -197,6 +194,54 @@ func scanText(rel, content string) []Finding {
 				break
 			}
 		}
+	}
+	return out
+}
+
+// scanContinued applies the threat patterns to each logical line that a
+// shell builds from two or more lines that end in a backslash. A pattern that
+// already matched one of the parts gives no second finding. The finding has
+// the line number of the first part.
+func scanContinued(rel string, lines []string, found []Finding) []Finding {
+	have := map[string]bool{}
+	for _, f := range found {
+		have[fmt.Sprintf("%s:%d", f.PatternID, f.Line)] = true
+	}
+	var out []Finding
+	for i := 0; i < len(lines); {
+		j := i
+		var b strings.Builder
+		for j < len(lines) {
+			part := strings.TrimSuffix(lines[j], "\r")
+			if !strings.HasSuffix(part, "\\") || j == len(lines)-1 {
+				b.WriteString(part)
+				break
+			}
+			b.WriteString(strings.TrimSuffix(part, "\\"))
+			j++
+		}
+		if j > i {
+			joined := b.String()
+			for _, p := range ThreatPatterns {
+				if !p.Match(joined) {
+					continue
+				}
+				seen := false
+				for k := i; k <= j; k++ {
+					if have[fmt.Sprintf("%s:%d", p.ID, k+1)] {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					out = append(out, Finding{
+						PatternID: p.ID, Category: p.Category, Description: p.Description,
+						File: rel, Line: i + 1, Severity: p.Severity, Match: cutMatch(joined),
+					})
+				}
+			}
+		}
+		i = j + 1
 	}
 	return out
 }
@@ -266,7 +311,7 @@ var shellVarRe = regexp.MustCompile(`\$\{?[A-Za-z_]`)
 
 // FormatFindings writes the verdict and the findings, critical first. When an
 // exfiltration finding involves an environment variable, the text ends with
-// the hint to put the API call in a script. When strict mode did not scan a
+// the hint to put the API call in a script. When the scan did not read a
 // file, a "not scanned (binary)" line follows the findings.
 func FormatFindings(r ScanResult) string {
 	var b strings.Builder
@@ -311,28 +356,17 @@ var errTooLargeToScan = fmt.Errorf("skill has more than %d KB of text files; the
 
 // ScanDir scans all files of the skill folder dir. It adds the Hermes
 // structural checks: file count, file size, binary files, executable bits,
-// and symlinks. It honors .skillignore and .clawhubignore. It returns an
-// error when the text files are larger than 1 MB, so no text is left
-// unscanned.
+// and symlinks. It honors no ignore file: an ignore file in the folder comes
+// from the author of the skill, so it must not hide a file from the guard.
+// It pattern-scans SKILL.md, every scannableExt file, every file under
+// scripts/, and every other file with no NUL byte. It lists the other files
+// in Unscanned, stops at a file that it cannot read, and adds a binary_file
+// finding for each file that starts with an executable magic number. More
+// than 1 MB of text gives errTooLargeToScan, so no text is left unscanned.
 func ScanDir(dir string) (ScanResult, error) {
-	return ScanDirMode(dir, ScanCurrent)
-}
-
-// ScanDirMode scans the skill folder dir in the given mode. ScanCurrent is
-// the ScanDir scan. ScanStrict honors no ignore file, pattern-scans SKILL.md,
-// every scannableExt file, and every other file with no NUL byte, lists the
-// other files in Unscanned, stops at a file that it cannot read, and adds
-// a binary_file finding for each file that starts with an executable magic
-// number. In both modes, more than 1 MB of text gives errTooLargeToScan.
-func ScanDirMode(dir string, mode ScanMode) (ScanResult, error) {
 	root, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		return ScanResult{}, fmt.Errorf("scan skill %s: %w", dir, err)
-	}
-	strict := mode == ScanStrict
-	ignore := func(string) bool { return false }
-	if !strict {
-		ignore = loadSkillIgnore(root)
 	}
 	var structural []Finding
 	var unscanned []string
@@ -352,9 +386,6 @@ func ScanDirMode(dir string, mode ScanMode) (ScanResult, error) {
 			return err
 		}
 		rel := filepath.ToSlash(relOS)
-		if ignore(rel) {
-			return nil
-		}
 		count++
 		readPath := p
 		if d.Type()&fs.ModeSymlink != 0 {
@@ -399,41 +430,24 @@ func ScanDirMode(dir string, mode ScanMode) (ScanResult, error) {
 					Match: "executable bit set", Description: "file has executable permission but is not a recognized script type"})
 			}
 		}
-		if strict {
-			data, complete, err := readHead(readPath, maxScanBytes-scanned)
-			if err != nil {
-				// A file that strict mode cannot read must not pass as safe.
-				return fmt.Errorf("read %s: %w", rel, err)
-			}
-			if format, ok := executableMagic(data); ok {
-				add(Finding{PatternID: "binary_file", Severity: SevCritical, Category: "structural", File: rel,
-					Match:       "binary: " + format,
-					Description: fmt.Sprintf("binary/executable file (%s) should not be in a skill", format)})
-			}
-			// SKILL.md and the script and text types are always scanned, because
-			// the agent and the shell read them whatever their bytes are.
-			if !isScannable(rel) && !looksText(data) {
-				unscanned = append(unscanned, rel)
-				return nil
-			}
-			if !complete {
-				return errTooLargeToScan
-			}
-			scanned += len(data)
-			files[rel] = string(data)
-			return nil
-		}
-		if !isScannable(rel) {
-			return nil
-		}
-		data, err := os.ReadFile(readPath)
+		data, complete, err := readHead(readPath, maxScanBytes-scanned)
 		if err != nil {
+			// A file that the guard cannot read must not pass as safe.
+			return fmt.Errorf("read %s: %w", rel, err)
+		}
+		if format, ok := executableMagic(data); ok {
+			add(Finding{PatternID: "binary_file", Severity: SevCritical, Category: "structural", File: rel,
+				Match:       "binary: " + format,
+				Description: fmt.Sprintf("binary/executable file (%s) should not be in a skill", format)})
+		}
+		if !mustScan(rel) && !looksText(data) {
+			unscanned = append(unscanned, rel)
 			return nil
 		}
-		scanned += len(data)
-		if scanned > maxScanBytes {
+		if !complete {
 			return errTooLargeToScan
 		}
+		scanned += len(data)
 		files[rel] = string(data)
 		return nil
 	})
@@ -452,13 +466,8 @@ func ScanDirMode(dir string, mode ScanMode) (ScanResult, error) {
 			Match:       fmt.Sprintf("%dKB total", total/1024),
 			Description: fmt.Sprintf("skill is %dKB total (limit: %dKB)", total/1024, maxTotalSizeKB)})
 	}
-	var r ScanResult
-	if strict {
-		r = scanFiles(files, nil)
-		sort.Strings(unscanned)
-	} else {
-		r = Scan(files)
-	}
+	r := scanFiles(files, nil)
+	sort.Strings(unscanned)
 	all := append(structural, r.Findings...)
 	return ScanResult{Verdict: verdictOf(all), Findings: all, Unscanned: unscanned}, nil
 }
@@ -516,132 +525,4 @@ func within(root, target string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
-}
-
-// Ignore files that a skill can ship to keep development files out of the
-// scan. Hermes reads both names.
-var skillIgnoreFiles = []string{".skillignore", ".clawhubignore"}
-
-// loadSkillIgnore ports the Hermes .skillignore matcher. Blank lines and "#"
-// comments are skipped. A trailing "/" marks a folder. A leading "/" anchors
-// a pattern to the skill root. "*" and "?" are fnmatch globs. The ignore
-// files are always ignored, and SKILL.md is never ignored.
-func loadSkillIgnore(dir string) func(rel string) bool {
-	var patterns []string
-	for _, name := range skillIgnoreFiles {
-		data, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			continue
-		}
-		for _, raw := range strings.Split(string(data), "\n") {
-			line := strings.TrimSpace(raw)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			patterns = append(patterns, line)
-		}
-	}
-	return func(rel string) bool {
-		rel = filepath.ToSlash(rel)
-		segs := strings.Split(rel, "/")
-		base := segs[len(segs)-1]
-		if base == skillFile {
-			return false
-		}
-		for _, n := range skillIgnoreFiles {
-			if base == n {
-				return true
-			}
-		}
-		for _, pat := range patterns {
-			anchored := strings.HasPrefix(pat, "/")
-			p := strings.TrimLeft(pat, "/")
-			isDir := strings.HasSuffix(p, "/")
-			p = strings.TrimRight(p, "/")
-			if p == "" {
-				continue
-			}
-			if isDir {
-				if rel == p || strings.HasPrefix(rel, p+"/") {
-					return true
-				}
-				if !anchored && strings.Contains("/"+rel+"/", "/"+p+"/") {
-					return true
-				}
-				continue
-			}
-			if fnmatch(p, rel) {
-				return true
-			}
-			if anchored {
-				continue
-			}
-			if fnmatch(p, base) {
-				return true
-			}
-			if !strings.Contains(p, "/") {
-				for _, s := range segs {
-					if fnmatch(p, s) {
-						return true
-					}
-				}
-			}
-			if strings.HasPrefix(rel, p+"/") {
-				return true
-			}
-		}
-		return false
-	}
-}
-
-// fnmatch ports Python fnmatch.fnmatch on POSIX. Unlike path.Match, "*"
-// also matches "/".
-func fnmatch(pattern, name string) bool {
-	pr := []rune(pattern)
-	var b strings.Builder
-	b.WriteString(`(?s)\A`)
-	for i := 0; i < len(pr); i++ {
-		c := pr[i]
-		switch c {
-		case '*':
-			b.WriteString(".*")
-		case '?':
-			b.WriteString(".")
-		case '[':
-			j := i + 1
-			if j < len(pr) && pr[j] == '!' {
-				j++
-			}
-			if j < len(pr) && pr[j] == ']' {
-				j++
-			}
-			for j < len(pr) && pr[j] != ']' {
-				j++
-			}
-			if j >= len(pr) {
-				b.WriteString(`\[`)
-				continue
-			}
-			set := string(pr[i+1 : j])
-			neg := strings.HasPrefix(set, "!")
-			set = strings.TrimPrefix(set, "!")
-			set = strings.ReplaceAll(set, `\`, `\\`)
-			if neg {
-				b.WriteString("[^")
-			} else {
-				b.WriteString("[")
-			}
-			b.WriteString(set)
-			b.WriteString("]")
-			i = j
-		default:
-			b.WriteString(regexp.QuoteMeta(string(c)))
-		}
-	}
-	b.WriteString(`\z`)
-	re, err := regexp.Compile(b.String())
-	if err != nil {
-		return false
-	}
-	return re.MatchString(name)
 }

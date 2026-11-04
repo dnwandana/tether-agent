@@ -311,7 +311,7 @@ func (in *Installer) stage(ctx context.Context, src Source, skillName string) (_
 		return nil, fmt.Errorf("the folder of %q contains another skill at %s. Install one skill at a time.",
 			s.skill.Name, Sanitize(rel))
 	}
-	if s.scan, err = ScanDirMode(st.Skill(), ScanStrict); err != nil {
+	if s.scan, err = ScanDir(st.Skill()); err != nil {
 		return nil, err
 	}
 	if s.hash, s.files, err = ContentHash(st.Skill()); err != nil {
