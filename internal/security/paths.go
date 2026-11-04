@@ -41,6 +41,24 @@ func (e *ProtectedError) Error() string {
 // Is makes errors.Is(err, ErrProtected) true.
 func (e *ProtectedError) Is(target error) bool { return target == ErrProtected }
 
+// homeStartupFiles are the files in the home folder that a shell, git, or a
+// package tool reads at start or for each call. A write to one of them runs code
+// at the next login or shell, or changes the credentials of a tool. The shell
+// rules of the approval gate already protect most of them, so the file tools must
+// not write them with no approval.
+var homeStartupFiles = []string{
+	".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
+	".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout",
+	".netrc", ".pgpass", ".npmrc", ".pypirc", ".gitconfig",
+}
+
+// homeStartupDirs are the folders in the home folder whose files start programs at
+// login or hold the configuration of a shell or of git.
+var homeStartupDirs = []string{
+	".config/systemd", ".config/autostart", ".config/environment.d", ".config/fish",
+	".config/git", "Library/LaunchAgents",
+}
+
 // ProtectedPaths returns the protected paths. A path that ends in "/" is a
 // folder. A file path also covers the names that start with it and a "-",
 // for example state.db-wal and state.db-shm. An empty dataDir or home gives
@@ -49,6 +67,12 @@ func ProtectedPaths(dataDir, home string) []string {
 	var out []string
 	if home != "" {
 		out = append(out, filepath.Join(home, ".ssh")+"/")
+		for _, f := range homeStartupFiles {
+			out = append(out, filepath.Join(home, f))
+		}
+		for _, d := range homeStartupDirs {
+			out = append(out, filepath.Join(home, filepath.FromSlash(d))+"/")
+		}
 	}
 	if dataDir != "" {
 		out = append(out,
