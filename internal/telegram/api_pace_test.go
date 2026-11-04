@@ -471,6 +471,54 @@ func TestNoWaitSlotWaitKeepsInlineRetry(t *testing.T) {
 	}
 }
 
+// TestNoWaitInlineGateUsesRetryAfter checks that a paced noWaitClient call
+// waits inline for a retry_after of maxInlineFloodWait. The gate does not
+// count the pad of the pace, but the wait includes it.
+func TestNoWaitInlineGateUsesRetryAfter(t *testing.T) {
+	api := newFakeBot(t)
+	clk := newFakeClock()
+	c := api.pacedClient(clk)
+	start := clk.Now()
+	flood429Once(api, "editMessageText", int(maxInlineFloodWait/time.Second))
+	_, err := noWaitClient(c).EditMessageText(ctx, EditMessageTextParams{ChatID: 42, MessageID: 1, Text: "x"})
+	if err != nil || api.count("editMessageText") != 2 {
+		t.Fatal(err, api.methods())
+	}
+	if got := clk.Now().Sub(start); got != maxInlineFloodWait+floodPad {
+		t.Fatal("the inline wait must include the pad:", got)
+	}
+}
+
+// TestNoWaitInlineGateUsesFloodEnd checks that a paced noWaitClient call
+// does not wait inline when an earlier 429 moved the flood end of the chat
+// far out, also when the retry_after of this reply is short.
+func TestNoWaitInlineGateUsesFloodEnd(t *testing.T) {
+	api := newFakeBot(t)
+	clk := newFakeClock()
+	c := api.pacedClient(clk)
+	start := clk.Now()
+	nc := noWaitClient(c)
+	nc.sleep = func(context.Context, time.Duration) error {
+		t.Fatal("the call must not wait inline")
+		return nil
+	}
+	api.setReply(func(m string, _ map[string]any) *APIError {
+		if m == "editMessageText" {
+			// During the request, an other call of the chat gets a 429 with a long wait.
+			c.Pace.NoteFlood(42, 30*time.Second)
+			return &APIError{Code: 429, Description: "Too Many Requests: retry after 2", RetryAfter: 2}
+		}
+		return nil
+	})
+	_, err := nc.EditMessageText(ctx, EditMessageTextParams{ChatID: 42, MessageID: 1, Text: "x"})
+	if _, ok := errors.AsType[*floodError](err); !ok {
+		t.Fatal("want a *floodError, got", err)
+	}
+	if api.count("editMessageText") != 1 || !clk.Now().Equal(start) {
+		t.Fatal(api.methods(), clk.Now().Sub(start))
+	}
+}
+
 // TestNoWaitPaceWaitIsNotAFlood checks that a long pace wait of a
 // noWaitClient call is a wait and not a *floodError, because no 429 came.
 func TestNoWaitPaceWaitIsNotAFlood(t *testing.T) {

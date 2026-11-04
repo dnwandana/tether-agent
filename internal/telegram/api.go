@@ -454,17 +454,26 @@ func (c *Client) do(ctx context.Context, method string, chatID int64, counted bo
 			apiErr.MigrateToChatID = env.Parameters.MigrateToChatID
 		}
 		wait := time.Duration(max(apiErr.RetryAfter, 1)) * time.Second
+		// gate is the wait that the inline rule of a noWaitClient copy
+		// compares with maxInlineFloodWait. It has no pad.
+		gate := wait
 		if apiErr.Code == http.StatusTooManyRequests && paced {
 			// Record the flood end before the retry check, so that a call
 			// with no retry also holds the next calls of the chat.
 			c.Pace.NoteFlood(chatID, time.Duration(apiErr.RetryAfter)*time.Second)
-			wait = max(wait, c.Pace.FloodEnd(chatID).Sub(c.paceNow()))
+			// The flood end can be later than this reply gives, because
+			// an earlier 429 of the chat can set it. The retry waits for
+			// the flood end with the pad. The gate uses the same end with
+			// no pad.
+			end := c.Pace.FloodEnd(chatID).Sub(c.paceNow())
+			wait = max(wait, end)
+			gate = max(gate, end-floodPad)
 		}
 		if apiErr.Code != http.StatusTooManyRequests || attempt >= maxRetries429 || c.noRetry {
 			return fmt.Errorf("telegram %s: %w", method, apiErr)
 		}
 		if c.inlineWaited != nil {
-			if *c.inlineWaited || wait > maxInlineFloodWait {
+			if *c.inlineWaited || gate > maxInlineFloodWait {
 				// The wait of a paced call includes the pad of the pace.
 				// The callers add their own pad, so give them the
 				// retry_after of Telegram.
