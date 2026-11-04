@@ -39,7 +39,7 @@ func TestSearchFindsOldPhraseAndScrolls(t *testing.T) {
 	ctx := context.Background()
 	s := New(openTestDB(t))
 	sess := seedSession(t, s, 200)
-	hits, err := s.Search(ctx, `"hetzner cx22"`, 5)
+	hits, err := s.Search(ctx, `"hetzner cx22"`, 5, Scope{All: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestSearchNewestFirstAndLimit(t *testing.T) {
 	ctx := context.Background()
 	s := New(openTestDB(t))
 	seedSession(t, s, 20)
-	hits, err := s.Search(ctx, "weather", 5)
+	hits, err := s.Search(ctx, "weather", 5, Scope{All: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestObservedMessagesSearchable(t *testing.T) {
 	if _, err := s.Append(ctx, sess.ID, provider.Message{Role: provider.RoleUser, Content: "[ana|7]\nthe zanzibar plan"}, MessageMeta{Observed: true}); err != nil {
 		t.Fatal(err)
 	}
-	hits, err := s.Search(ctx, "zanzibar", 5)
+	hits, err := s.Search(ctx, "zanzibar", 5, Scope{All: true})
 	if err != nil || len(hits) != 1 {
 		t.Fatal(hits, err)
 	}
@@ -125,7 +125,7 @@ func TestArchivedSessionsSearchable(t *testing.T) {
 	s := New(openTestDB(t))
 	sess, _ := s.Create(ctx, Session{Key: "cli:user", Archived: true})
 	s.Append(ctx, sess.ID, provider.Message{Role: provider.RoleUser, Content: "quokka facts"}, MessageMeta{})
-	if hits, err := s.Search(ctx, "quokka", 5); err != nil || len(hits) != 1 {
+	if hits, err := s.Search(ctx, "quokka", 5, Scope{All: true}); err != nil || len(hits) != 1 {
 		t.Fatal(hits, err)
 	}
 }
@@ -134,7 +134,7 @@ func TestBadFTSQueryIsHelpfulError(t *testing.T) {
 	s := New(openTestDB(t))
 	seedSession(t, s, 3)
 	for _, q := range []string{`"unbalanced`, `a AND`, `foo:bar`, `(x`, `c++`} {
-		_, err := s.Search(context.Background(), q, 5)
+		_, err := s.Search(context.Background(), q, 5, Scope{All: true})
 		if err == nil || !strings.Contains(err.Error(), "FTS5 query syntax") || !errors.Is(err, ErrQuerySyntax) {
 			t.Errorf("%s: %v", q, err)
 		}
@@ -151,7 +151,7 @@ func TestSearchSkipsGoalJudgeSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	hits, err := s.Search(ctx, "zebracron", 10)
+	hits, err := s.Search(ctx, "zebracron", 10, Scope{All: true})
 	if err != nil || len(hits) != 1 || hits[0].SessionID != chat.ID {
 		t.Fatalf("%+v %v", hits, err)
 	}

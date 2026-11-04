@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 )
@@ -24,6 +25,9 @@ const (
 // raw messages and snippets, with no LLM call.
 type SessionSearchTool struct {
 	Store *sessions.Store
+	// Cron gives the origin of a cron run, so the run reads only the sessions of the
+	// chat that created its job. It can be nil.
+	Cron *cron.Store
 	// MaxChars caps the text of the read shape (context.tool_output_max_chars).
 	// A value <= 0 means no cap.
 	MaxChars int
@@ -76,7 +80,9 @@ func (SessionSearchTool) Schema() provider.ToolSchema {
 
 // Run chooses the shape from the fields that are present: session_id with
 // around_message_id scrolls, session_id alone reads, query searches.
-func (t SessionSearchTool) Run(ctx context.Context, raw json.RawMessage, _ *Env) (string, error) {
+// The caller reads only the sessions of its scope (callerScope). A session of another
+// scope gives the same error as a session that does not exist.
+func (t SessionSearchTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
 	var a sessionSearchArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return "", err
@@ -84,25 +90,38 @@ func (t SessionSearchTool) Run(ctx context.Context, raw json.RawMessage, _ *Env)
 	if t.Store == nil {
 		return "", toolErr("session search is not available in this session")
 	}
+	sc, err := callerScope(ctx, t.Store, t.Cron, env)
+	if err != nil {
+		return "", err
+	}
 	a.SessionID = strings.TrimSpace(a.SessionID)
+	if a.SessionID != "" {
+		ok, err := t.Store.InScope(ctx, a.SessionID, sc)
+		if errors.Is(err, sessions.ErrNotFound) || err == nil && !ok {
+			return "", toolErr("no session %s", a.SessionID)
+		}
+		if err != nil {
+			return "", err
+		}
+	}
 	switch {
 	case a.SessionID != "" && a.AroundMessageID != 0:
 		return t.scroll(ctx, a)
 	case a.SessionID != "":
 		return t.read(ctx, a.SessionID)
 	case strings.TrimSpace(a.Query) != "":
-		return t.discover(ctx, a)
+		return t.discover(ctx, a, sc)
 	}
 	return "", toolErr("pass query to search, session_id to read a session, or session_id and around_message_id to scroll")
 }
 
-func (t SessionSearchTool) discover(ctx context.Context, a sessionSearchArgs) (string, error) {
+func (t SessionSearchTool) discover(ctx context.Context, a sessionSearchArgs, sc sessions.Scope) (string, error) {
 	limit := a.Limit
 	if limit <= 0 {
 		limit = searchDefaultLimit
 	}
 	limit = min(limit, searchMaxLimit)
-	hits, err := t.Store.Search(ctx, a.Query, limit)
+	hits, err := t.Store.Search(ctx, a.Query, limit, sc)
 	if errors.Is(err, sessions.ErrQuerySyntax) {
 		return "", toolErr("%s", sessions.ErrQuerySyntax.Error())
 	}
