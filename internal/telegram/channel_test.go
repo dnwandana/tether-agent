@@ -1249,7 +1249,7 @@ func TestMessageCancelledInSpeechToTextGetsANotice(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		h.ch.handleUpdate(wctx, h.gw, Update{UpdateID: 1, Message: ptr(voiceDM(h, 5))})
+		h.ch.handleUpdate(wctx, h.gw, Update{UpdateID: 1, Message: new(voiceDM(h, 5))})
 	}()
 	waitClosed(t, started, "the transcription did not start")
 	// The drain time ends: the gateway stops and cancels the work.

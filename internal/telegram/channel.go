@@ -91,8 +91,9 @@ type Channel struct {
 	richFailed atomic.Bool
 
 	// inflight counts the inbound messages that the channel received and did not submit to
-	// the gateway yet, for example a voice note in speech to text or an album part that
-	// waits for the other parts.
+	// the gateway yet: an update that waits in the queue of its chat or that its handler
+	// prepares, for example a voice note in speech to text, and an album part that waits for
+	// the other parts.
 	inflight atomic.Int64
 }
 
@@ -139,7 +140,7 @@ func (ch *Channel) SetTurnContext(ctx context.Context) { ch.turnCtx = ctx }
 
 // poller returns the poller of Run.
 func (ch *Channel) poller() *Poller {
-	return &Poller{C: ch.C, DB: ch.DB, Log: ch.Log, HandleCtx: ch.turnCtx}
+	return &Poller{C: ch.C, DB: ch.DB, Log: ch.Log, HandleCtx: ch.turnCtx, Inflight: &ch.inflight}
 }
 
 // Send sends a message to a chat, for cron delivery and other sends with no turn. The text

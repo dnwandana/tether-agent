@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -442,4 +443,30 @@ func TestBotMenuHasRestart(t *testing.T) {
 		}
 	}
 	t.Fatal("no restart command in the menu")
+}
+
+// The inflight count covers each update from the push until its handler returns. An update
+// that waits behind another update of the same chat counts too, so the stop drain waits for it.
+func TestChatQueuesCountWaitingUpdates(t *testing.T) {
+	var n atomic.Int64
+	var wg sync.WaitGroup
+	release := make(chan struct{})
+	started := make(chan struct{}, 2)
+	c := &chatQueues{
+		handle:   func(context.Context, Update) { started <- struct{}{}; <-release },
+		log:      slog.New(slog.DiscardHandler),
+		wg:       &wg,
+		inflight: &n,
+	}
+	c.push(context.Background(), 1, Update{UpdateID: 1})
+	c.push(context.Background(), 1, Update{UpdateID: 2})
+	<-started
+	if got := n.Load(); got != 2 {
+		t.Fatalf("inflight %d while one update runs and one waits, want 2", got)
+	}
+	close(release)
+	wg.Wait()
+	if got := n.Load(); got != 0 {
+		t.Fatalf("inflight %d after the handlers returned, want 0", got)
+	}
 }

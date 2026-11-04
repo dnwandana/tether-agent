@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
@@ -34,6 +35,9 @@ type Poller struct {
 	// HandleCtx is the context of the handle calls. Nil uses the context of Run. A
 	// separate context lets the turns go on after Run stops to poll.
 	HandleCtx context.Context
+	// Inflight counts each message update from its push to the queue of its chat until
+	// its handle call returns. It can be nil.
+	Inflight *atomic.Int64
 
 	// sleep waits between failed calls. Tests replace it.
 	sleep func(ctx context.Context, d time.Duration) error
@@ -55,7 +59,7 @@ func (p *Poller) Run(ctx context.Context, handle func(ctx context.Context, u Upd
 	}
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	chats := &chatQueues{handle: handle, log: p.logger(), wg: &wg}
+	chats := &chatQueues{handle: handle, log: p.logger(), wg: &wg, inflight: p.Inflight}
 	timeout := p.TimeoutS
 	if timeout <= 0 {
 		timeout = defaultPollTimeoutS
@@ -119,6 +123,8 @@ type chatQueues struct {
 	log    *slog.Logger
 	// wg counts the workers.
 	wg *sync.WaitGroup
+	// inflight counts the queued and running updates. It can be nil.
+	inflight *atomic.Int64
 
 	mu sync.Mutex
 	// queues holds the waiting updates of each chat. A chat is in the map
@@ -129,6 +135,9 @@ type chatQueues struct {
 // push adds u to the queue of chat and starts the worker of chat when no
 // worker runs.
 func (c *chatQueues) push(ctx context.Context, chat int64, u Update) {
+	if c.inflight != nil {
+		c.inflight.Add(1)
+	}
 	c.mu.Lock()
 	if c.queues == nil {
 		c.queues = map[int64][]Update{}
@@ -159,6 +168,9 @@ func (c *chatQueues) work(ctx context.Context, chat int64) {
 		c.queues[chat] = q[1:]
 		c.mu.Unlock()
 		c.run(ctx, u)
+		if c.inflight != nil {
+			c.inflight.Add(-1)
+		}
 	}
 }
 
