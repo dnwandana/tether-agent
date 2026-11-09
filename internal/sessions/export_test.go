@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -131,5 +132,26 @@ func TestExportLeavesOutReasoning(t *testing.T) {
 	if strings.Contains(out, "reasoning") || strings.Contains(out, "encrypted_content") ||
 		strings.Contains(out, "ENCRYPTED-BLOB") || strings.Contains(out, "secret plan") {
 		t.Fatal("the export holds reasoning:", out)
+	}
+}
+
+func TestListAllSkipsAuxSessions(t *testing.T) {
+	s := New(openTestDB(t))
+	ctx := context.Background()
+	chat, _ := s.Create(ctx, Session{Key: "telegram:1", Source: "telegram", Title: "deploy"})
+	judge, _ := s.Create(ctx, Session{Source: "telegram", Kind: KindGoalJudge, ParentID: chat.ID})
+	time.Sleep(2 * time.Millisecond)
+	aux, _ := s.Create(ctx, Session{Source: "telegram", Kind: KindAux, ParentID: chat.ID, Title: "side calls"})
+	got, err := s.ListAll(ctx, 50)
+	if err != nil || len(got) != 2 {
+		t.Fatal(got, err)
+	}
+	ids := []string{got[0].ID, got[1].ID}
+	if slices.Contains(ids, aux.ID) || !slices.Contains(ids, chat.ID) || !slices.Contains(ids, judge.ID) {
+		t.Fatalf("%+v", got)
+	}
+	// The aux session is the newest, so it must not take the place of a real session.
+	if one, _ := s.ListAll(ctx, 1); len(one) != 1 || one[0].ID == aux.ID {
+		t.Fatal(one)
 	}
 }

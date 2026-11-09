@@ -327,3 +327,9 @@ func TestChildBlocksACPDelegate(t *testing.T) {
 		t.Fatal("a delegate_task child must not see acp_delegate")
 	}
 }
+
+func TestKindAliases(t *testing.T) {
+	if KindSubagent != sessions.KindSubagent || KindReview != sessions.KindReview {
+		t.Fatal(KindSubagent, KindReview)
+	}
+}

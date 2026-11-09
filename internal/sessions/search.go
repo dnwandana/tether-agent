@@ -12,10 +12,6 @@ import (
 // ErrQuerySyntax marks an FTS5 query that SQLite cannot parse.
 var ErrQuerySyntax = errors.New(`FTS5 query syntax: quote phrases with "..."`)
 
-// kindReview is the kind of a background review session (agent.KindReview;
-// sessions cannot import agent).
-const kindReview = "review"
-
 // Hit is one message that matches a search.
 type Hit struct {
 	SessionID, Title string
@@ -31,7 +27,8 @@ type Hit struct {
 // chat reply. It also skips the review sessions, because a review holds only
 // the review prompt and memory and skill calls that repeat the chat. A review
 // is newer than its chat, so its hits can push the chat hit out of the limit.
-// It returns only the hits in the sessions of sc.
+// It also skips the aux sessions, because an aux row holds only the task name
+// of a side call. It returns only the hits in the sessions of sc.
 func (s *Store) Search(ctx context.Context, query string, limit int, sc Scope) ([]Hit, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("sessions: search: the query is empty")
@@ -40,13 +37,13 @@ func (s *Store) Search(ctx context.Context, query string, limit int, sc Scope) (
 		limit = 10
 	}
 	scope, scopeArgs := scopeFilter("m.session_id", sc)
-	args := append([]any{query, KindGoalJudge, kindReview}, scopeArgs...)
+	args := append([]any{query, KindGoalJudge, KindReview, KindAux}, scopeArgs...)
 	args = append(args, limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT m.session_id, s.title, m.timestamp, m.id,
 		snippet(messages_fts, 0, '[', ']', '…', 12)
 		FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.id = m.session_id
-		WHERE messages_fts MATCH ? AND s.kind NOT IN (?, ?)`+scope+` ORDER BY m.id DESC LIMIT ?`, args...)
+		WHERE messages_fts MATCH ? AND s.kind NOT IN (?, ?, ?)`+scope+` ORDER BY m.id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, searchErr(err)
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
 // LastAnswer is the newest stored model answer.
@@ -33,16 +34,23 @@ func (l LastAnswer) PinnedEntry() string {
 }
 
 // ReadLastAnswer returns the newest assistant row with a model. ok is false when no row
-// exists.
+// exists. It skips the rows of the hidden child sessions (sessions.HiddenChildKinds), so a
+// side call or a judge call on another entry does not look like the newest answer.
 func ReadLastAnswer(ctx context.Context, d *db.DB) (l LastAnswer, ok bool, err error) {
-	// The LEFT JOIN keeps a row whose session row does not exist.
-	const q = `SELECT messages.provider, messages.model, messages.timestamp,
+	kinds := sessions.HiddenChildKinds
+	args := make([]any, len(kinds))
+	for i, k := range kinds {
+		args[i] = k
+	}
+	// The LEFT JOIN and the COALESCE keep a row whose session row does not exist.
+	q := `SELECT messages.provider, messages.model, messages.timestamp,
 		COALESCE(sessions.model_override, '')
 		FROM messages LEFT JOIN sessions ON sessions.id = messages.session_id
 		WHERE messages.role = 'assistant' AND messages.model != ''
+		AND COALESCE(sessions.kind, '') NOT IN (` + strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",") + `)
 		ORDER BY messages.timestamp DESC, messages.id DESC LIMIT 1`
 	var ms int64
-	err = d.QueryRowContext(ctx, q).Scan(&l.Provider, &l.Model, &ms, &l.Pin)
+	err = d.QueryRowContext(ctx, q, args...).Scan(&l.Provider, &l.Model, &ms, &l.Pin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return LastAnswer{}, false, nil
 	}

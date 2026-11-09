@@ -8,14 +8,30 @@ import (
 	"time"
 )
 
-// KindGoalJudge is the kind of the hidden session that records the judge calls and the draft
-// calls of one goal.
-const KindGoalJudge = "goal_judge"
+// The kinds of the sessions that the program makes as children of another session.
+const (
+	// KindSubagent is the kind of the session of one delegate_task child.
+	KindSubagent = "subagent"
+	// KindReview is the kind of the session of one background review.
+	KindReview = "review"
+	// KindGoalJudge is the kind of the hidden session that records the judge calls and the
+	// draft calls of one goal.
+	KindGoalJudge = "goal_judge"
+	// KindAux is the kind of the hidden session that records the model calls that run
+	// outside a turn.
+	KindAux = "aux"
+)
+
+// HiddenChildKinds are the kinds of the sessions that the program makes as children of
+// another session. They have no session key. The program gives each one a parent when it
+// creates the session. deleteSessions clears the parent of a child when it deletes the parent, so a hidden
+// session can lose its parent later.
+var HiddenChildKinds = []string{KindSubagent, KindReview, KindGoalJudge, KindAux}
 
 // AutomaticKinds are the session kinds that the program makes without a user: one session
-// for each cron run, each delegate_task child, each background review, and each goal judge.
-// PruneAutomatic deletes only these kinds. It never deletes a chat session.
-var AutomaticKinds = []string{"cron", "subagent", "review", KindGoalJudge}
+// for each cron run, each delegate_task child, each background review, each goal judge, and
+// each aux session. PruneAutomatic deletes only these kinds. It never deletes a chat session.
+var AutomaticKinds = []string{"cron", KindSubagent, KindReview, KindGoalJudge, KindAux}
 
 // pruneBatch is the maximum number of sessions that one transaction of PruneAutomatic
 // deletes. Small transactions keep the write lock of state.db short.

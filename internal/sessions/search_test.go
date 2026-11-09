@@ -183,3 +183,21 @@ func TestSearchSkipsReviewSessions(t *testing.T) {
 		t.Fatalf("%+v", hits)
 	}
 }
+
+func TestSearchSkipsAuxSessions(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	chat, _ := s.Create(ctx, Session{Key: "telegram:1", Source: "telegram", Title: "notes"})
+	aux, _ := s.Create(ctx, Session{Source: "telegram", Kind: KindAux, ParentID: chat.ID, Title: "side calls"})
+	if _, err := s.Append(ctx, chat.ID, provider.Message{Role: provider.RoleUser, Content: "start the compaction now"}, MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	// The aux row is the newest hit when the filter is missing.
+	if _, err := s.Append(ctx, aux.ID, provider.Message{Role: provider.RoleAssistant, Content: "compaction"}, MessageMeta{Model: "glm-5.3"}); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := s.Search(ctx, "compaction", 10, Scope{All: true})
+	if err != nil || len(hits) != 1 || hits[0].SessionID != chat.ID {
+		t.Fatalf("%+v %v", hits, err)
+	}
+}

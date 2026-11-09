@@ -277,6 +277,36 @@ func TestPruneDeletesOldGoalJudgeSessions(t *testing.T) {
 	}
 }
 
+func TestSessionKinds(t *testing.T) {
+	if KindSubagent != "subagent" || KindReview != "review" || KindAux != "aux" || KindGoalJudge != "goal_judge" {
+		t.Fatal(KindSubagent, KindReview, KindAux, KindGoalJudge)
+	}
+	if want := []string{"subagent", "review", "goal_judge", "aux"}; !slices.Equal(HiddenChildKinds, want) {
+		t.Fatalf("HiddenChildKinds = %v, want %v", HiddenChildKinds, want)
+	}
+	if want := []string{"cron", "subagent", "review", "goal_judge", "aux"}; !slices.Equal(AutomaticKinds, want) {
+		t.Fatalf("AutomaticKinds = %v, want %v", AutomaticKinds, want)
+	}
+}
+
+func TestPruneDeletesOldAuxSessions(t *testing.T) {
+	d := openTestDB(t)
+	s := New(d)
+	day := 24 * time.Hour
+	old := agedSession(t, d, s, KindAux, "telegram", 91*day)
+	fresh := agedSession(t, d, s, KindAux, "telegram", 10*day)
+	got, err := s.PruneAutomatic(context.Background(), retNow.Add(-90*day))
+	if err != nil || len(got) != 1 || got[0] != old.ID {
+		t.Fatalf("pruned %v, want [%s]: %v", got, old.ID, err)
+	}
+	if n := related(t, d, old.ID); n != 0 {
+		t.Fatalf("the aux session left %d related rows", n)
+	}
+	if _, err := s.Get(context.Background(), fresh.ID); err != nil {
+		t.Fatalf("a fresh aux session must stay: %v", err)
+	}
+}
+
 func TestDeleteRemovesGoalRow(t *testing.T) {
 	d := openTestDB(t)
 	s := New(d)

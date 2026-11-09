@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
 func insertSession(t *testing.T, d *db.DB, id, pin string) {
@@ -94,5 +95,30 @@ func TestReadLastAnswerEmpty(t *testing.T) {
 	l, ok, err := ReadLastAnswer(context.Background(), d)
 	if err != nil || ok {
 		t.Fatalf("l=%+v ok=%v err=%v", l, ok, err)
+	}
+}
+
+func TestReadLastAnswerSkipsHiddenSessions(t *testing.T) {
+	d := openUsageDB(t)
+	insertSession(t, d, "s1", "")
+	now := time.Now()
+	insertUsage(t, d, usageRow{session: "s1", model: "glm-5.3", prov: "primary", at: now.Add(-time.Hour)})
+	// A newer row in each hidden child session does not count.
+	for i, kind := range sessions.HiddenChildKinds {
+		id := "hidden-" + kind
+		if _, err := d.Exec(`INSERT INTO sessions (id, kind, parent_id) VALUES (?, ?, 's1')`, id, kind); err != nil {
+			t.Fatal(err)
+		}
+		insertUsage(t, d, usageRow{session: id, model: "kimi-k2.6", prov: "vision", at: now.Add(-time.Duration(i+1) * time.Minute)})
+	}
+	l, ok, err := ReadLastAnswer(context.Background(), d)
+	if err != nil || !ok || l.Provider != "primary" || l.Model != "glm-5.3" {
+		t.Fatalf("%+v ok=%v err=%v", l, ok, err)
+	}
+	// A row with no session row still counts.
+	insertUsage(t, d, usageRow{session: "orphan", model: "deepseek", prov: "fallback", at: now.Add(-30 * time.Minute)})
+	l, ok, err = ReadLastAnswer(context.Background(), d)
+	if err != nil || !ok || l.Provider != "fallback" || l.Model != "deepseek" || l.Pin != "" {
+		t.Fatalf("%+v ok=%v err=%v", l, ok, err)
 	}
 }

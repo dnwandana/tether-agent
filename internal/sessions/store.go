@@ -20,7 +20,7 @@ import (
 // ErrNotFound is the error when a session id has no row.
 var ErrNotFound = errors.New("no session")
 
-// Session is one row of the sessions table. Kind is chat, cron, subagent, or review.
+// Session is one row of the sessions table. Kind is chat, cron, subagent, review, goal_judge, or aux.
 // Effort is the reasoning effort that /effort set. "" uses the config.
 type Session struct {
 	ID, Key, Source, ChatID, ThreadID, UserID, Title, ModelOverride, PromptOverride, ParentID, Kind string

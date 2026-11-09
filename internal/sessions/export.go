@@ -75,11 +75,12 @@ func (s *Store) ExportJSONL(ctx context.Context, id string, w io.Writer) (int, e
 }
 
 // ListAll returns the newest sessions of all keys, archived sessions included, with the
-// most recently active session first. It returns at most limit sessions.
+// most recently active session first. It returns at most limit sessions. It skips the
+// aux sessions, because each side call makes its aux session the most recently active one.
 func (s *Store) ListAll(ctx context.Context, limit int) ([]SessionSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+prefixCols("s.")+`,
 		(SELECT count(*) FROM messages m WHERE m.session_id = s.id)
-		FROM sessions s ORDER BY s.last_active DESC, s.id DESC LIMIT ?`, limit)
+		FROM sessions s WHERE s.kind != ? ORDER BY s.last_active DESC, s.id DESC LIMIT ?`, KindAux, limit)
 	if err != nil {
 		return nil, fmt.Errorf("sessions: list: %w", err)
 	}

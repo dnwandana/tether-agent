@@ -34,10 +34,10 @@ const (
 	ChildCancelled = "cancelled"
 )
 
-// The kinds of a forked session.
+// The kinds of a forked session. internal/sessions owns the names.
 const (
-	KindSubagent = "subagent"
-	KindReview   = "review"
+	KindSubagent = sessions.KindSubagent
+	KindReview   = sessions.KindReview
 )
 
 // titleMax is the maximum number of characters of the title of a forked session.
