@@ -30,6 +30,7 @@ type Config struct {
 	Cron          CronConfig          `yaml:"cron"`
 	Telegram      TelegramConfig      `yaml:"telegram"`
 	MCP           MCPConfig           `yaml:"mcp"`
+	ACP           ACPConfig           `yaml:"acp"`
 	Media         MediaConfig         `yaml:"media"`
 	Pricing       PricingConfig       `yaml:"pricing"`
 	Log           LogConfig           `yaml:"log"`
@@ -392,6 +393,13 @@ func Default() Config {
 		},
 		MCP: MCPConfig{
 			Servers: map[string]MCPServer{},
+		},
+		ACP: ACPConfig{
+			IdleTimeoutS:     300,
+			MaxSessions:      2,
+			TurnTimeoutS:     1800,
+			WorkdirAllowlist: []string{},
+			Agents:           map[string]ACPAgent{},
 		},
 		Media: MediaConfig{
 			TTS: MediaBackend{

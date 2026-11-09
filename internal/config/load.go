@@ -23,7 +23,9 @@ var varRef = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
 //
 // Load starts from Default, expands each ${VAR} in the string values of the
 // file through env, and decodes the file over the defaults. A missing file
-// is valid. Then Load resolves the preset of each provider entry with
+// is valid. After the decode, Load fills the acp block: each bare agent
+// entry, the catalog command and modes, and "~/" in acp.workdir_allowlist.
+// Then Load resolves the preset of each provider entry with
 // ResolvePreset. An entry other than primary that cannot serve a call loads
 // with its Unusable message set. If env is nil, Load uses os.LookupEnv.
 func Load(path string, env func(string) (string, bool)) (*Config, error) {
@@ -36,8 +38,8 @@ func Load(path string, env func(string) (string, bool)) (*Config, error) {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("config: cannot read %s: %w", path, err)
 	}
+	var root yaml.Node
 	if len(bytes.TrimSpace(data)) > 0 {
-		var root yaml.Node
 		if err := yaml.Unmarshal(data, &root); err != nil {
 			return nil, fmt.Errorf("config: %s is not valid YAML: %w. Correct the file and try again", path, err)
 		}
@@ -45,9 +47,14 @@ func Load(path string, env func(string) (string, bool)) (*Config, error) {
 			return nil, err
 		}
 		if err := root.Decode(&c); err != nil {
+			if uk, ok := errors.AsType[*unknownKeyError](err); ok {
+				return nil, fmt.Errorf("config: %s: %w. Correct the file and try again", path, uk)
+			}
 			return nil, fmt.Errorf("config: %s has a value of the wrong type: %w. Correct the file and try again", path, err)
 		}
 	}
+	// An empty file leaves root as the zero node, which has no bare agent entries.
+	fillACP(&c.ACP, &root)
 
 	// An empty telegram.bot_token falls back to $TELEGRAM_BOT_TOKEN. An
 	// unset variable is not an error here, because Telegram is optional.
@@ -287,6 +294,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	errs = append(errs, checkMCPNames(c.MCP.Servers)...)
+	errs = append(errs, c.ACP.validate()...)
 	errs = append(errs,
 		oneOf("approvals.mode", c.Approvals.Mode, "manual", "smart", "off"),
 		oneOf("approvals.cron_mode", c.Approvals.CronMode, "deny", "approve"),

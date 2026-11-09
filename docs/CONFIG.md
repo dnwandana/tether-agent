@@ -312,6 +312,40 @@ example, `a b` and `a_b`, or `GitHub` and `github`, are not valid together.
 | `mcp.servers.<name>.idle_stop_minutes` | `10` | The program stops the server after this number of minutes with no call. |
 | `mcp.servers.<name>.enabled` | `true` | When `false`, the program ignores the server. |
 
+## acp
+
+The `acp` block sets the `acp_delegate` tool. The tool gives a coding task to an external
+coding agent, for example Claude Code, over the Agent Client Protocol (ACP). Each entry of
+`acp.agents` is one agent. An entry turns on its agent. A key that the entry does not set keeps
+the default in this table. An unknown key in an entry is an error.
+
+`claude-code` and `codex` are built-in agents. For these two ids, an empty `command` and an
+empty `modes` get the built-in values. Another id must set `command` and `modes`.
+
+| Key | Default | Effect |
+|---|---|---|
+| `acp.enabled` | `false` | When `true`, the program registers the `acp_delegate` tool. At least one agent must be enabled. |
+| `acp.idle_timeout_s` | `300` | The program stops an adapter process after this number of seconds with no task. The minimum is 60. The next call resumes the session of the coding agent. |
+| `acp.max_sessions` | `2` | The maximum number of live adapter processes in one Tether Agent process. The gateway and each `tether chat` process have their own limit. The minimum is 1. |
+| `acp.turn_timeout_s` | `1800` | The maximum time of one `acp_delegate` call, in seconds. The `timeout_s` argument of the tool can only make it shorter. The minimum is 60. |
+| `acp.workdir_allowlist` | `[]` | The folders where a coding agent can work. Each entry must be an absolute path. A leading `~/` expands to the home folder. With `[]`, the tool refuses each call. |
+| `acp.agents.<name>.enabled` | `true` | When `false`, the program ignores the agent. |
+| `acp.agents.<name>.command` | `[]` | The adapter program and its arguments, for example `[npx, -y, @agentclientprotocol/claude-agent-acp]`. `[]` uses `[claude-agent-acp]` for `claude-code` and `[codex-acp]` for `codex`. When the program is an absolute path, its folder goes first in the `PATH` of the adapter. |
+| `acp.agents.<name>.env` | `{}` | More environment variables for the adapter. A value replaces the inherited value. A secret name is an error: a name that ends in `_KEY`, `_TOKEN`, or `_SECRET`, or that contains `PASSWORD`. |
+| `acp.agents.<name>.permission_preset` | `auto` | The permission preset: `all`, `risky`, `auto`, or `folder`, from strict to loose. The model can choose this preset or a stricter one. |
+| `acp.agents.<name>.model` | `""` | The model of the coding agent. `""` uses the default of the adapter. |
+| `acp.agents.<name>.version_pin` | `""` | The expected version of the adapter. `tether doctor` warns when the version is different. It does not stop a start. |
+| `acp.agents.<name>.modes` | `{}` | The mode id of the agent for each preset. `{}` uses the built-in modes of `claude-code` and `codex`. |
+
+The built-in modes:
+
+| Preset | `claude-code` mode | `codex` mode |
+|---|---|---|
+| all | `default` | `read-only` |
+| risky | `acceptEdits` | `workspace-write` |
+| auto | `auto` | `agent` |
+| folder | `bypassPermissions` | `agent-full-access` |
+
 ## media
 
 Each media tool has a backend. `command` runs a command template on the host. `endpoint` sends

@@ -12,8 +12,8 @@ import (
 
 // walkKeys calls fn for each dotted yaml key under v. A map with struct values gives a
 // "<name>" segment, and the walk goes into a sample entry: DefaultMCPServer for an MCP
-// server, else the zero value. A map with other values is one key, and def is nil for it
-// when the map is a placeholder map such as toolsets.<name>.
+// server, DefaultACPAgent for an ACP agent, else the zero value. A map with other values is
+// one key, and def is nil for it when the map is a placeholder map such as toolsets.<name>.
 func walkKeys(v reflect.Value, prefix string, fn func(key string, def *string)) {
 	t := v.Type()
 	for i := range t.NumField() {
@@ -34,6 +34,9 @@ func walkKeys(v reflect.Value, prefix string, fn func(key string, def *string)) 
 			sample := reflect.New(f.Type.Elem()).Elem()
 			if f.Type.Elem() == reflect.TypeOf(MCPServer{}) {
 				sample = reflect.ValueOf(DefaultMCPServer())
+			}
+			if f.Type.Elem() == reflect.TypeFor[ACPAgent]() {
+				sample = reflect.ValueOf(DefaultACPAgent())
 			}
 			walkKeys(sample, key+".<name>", fn)
 		case f.Type.Kind() == reflect.Map && f.Type.Elem().Kind() == reflect.Slice:
