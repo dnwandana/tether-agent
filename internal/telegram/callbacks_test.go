@@ -556,3 +556,167 @@ func TestApprovalMessagesHaveNoLinkPreview(t *testing.T) {
 		}
 	}
 }
+
+// acpApproval is a permission request of a coding agent.
+func acpApproval(noSession bool) security.ApprovalRequest {
+	return security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "go test ./...",
+		Description: "claude-code wants to run a command", Summary: "Run the tests",
+		NoAlways: true, NoSession: noSession}
+}
+
+// keyboardRows returns the number of button rows of the last sendMessage call.
+func keyboardRows(api *fakeBot) int {
+	rm, _ := api.lastCall("sendMessage").Body["reply_markup"].(map[string]any)
+	rows, _ := rm["inline_keyboard"].([]any)
+	return len(rows)
+}
+
+func TestApprovalKeyboardNoAlwaysAndNoSession(t *testing.T) {
+	for _, c := range []struct {
+		noSession bool
+		texts     []string
+		args      []string
+		rows      int
+	}{
+		{false, []string{"✅ Allow once", "✅ Allow in this session", "❌ Deny"}, []string{"once", "session", "deny"}, 2},
+		{true, []string{"✅ Allow once", "❌ Deny"}, []string{"once", "deny"}, 1},
+	} {
+		it, api := interactions(t)
+		tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		_, _ = it.For(5, "").PromptApproval(tctx, acpApproval(c.noSession))
+		cancel()
+		texts, data := keyboardOf(api, 0)
+		if !reflect.DeepEqual(texts, c.texts) {
+			t.Fatalf("noSession %v: buttons %q", c.noSession, texts)
+		}
+		for i, d := range data {
+			if !strings.HasSuffix(d, ":"+c.args[i]) {
+				t.Fatalf("noSession %v: data %q", c.noSession, data)
+			}
+		}
+		if n := keyboardRows(api); n != c.rows {
+			t.Fatalf("noSession %v: %d rows, want %d", c.noSession, n, c.rows)
+		}
+	}
+}
+
+// An old "always" button, or a "session" tap on a NoSession request, gets the scope that
+// the request permits. The pop-up and the result header show that scope.
+func TestApprovalTapScopeChange(t *testing.T) {
+	for _, c := range []struct {
+		noSession bool
+		arg       string
+		want      security.Scope
+		popup     string
+	}{
+		{false, "always", security.ScopeSession, "✅ Approval allowed · this session"},
+		{false, "session", security.ScopeSession, "✅ Approval allowed · this session"},
+		{true, "session", security.ScopeOnce, "✅ Approval allowed · once"},
+		{true, "always", security.ScopeOnce, "✅ Approval allowed · once"},
+		{true, "deny", security.ScopeDeny, "❌ Approval denied"},
+	} {
+		it, api := interactions(t)
+		go func() {
+			waitSends(t, api, 1)
+			_, data := keyboardOf(api, 0)
+			id := strings.Split(data[0], ":")[1]
+			it.HandleCallback(ctx, press(5, callbackData(approvalPrefix, id, c.arg)))
+		}()
+		got, err := it.For(5, "").PromptApproval(ctx, acpApproval(c.noSession))
+		if err != nil || got != c.want {
+			t.Fatalf("%v %s: got %v %v, want %v", c.noSession, c.arg, got, err, c.want)
+		}
+		if p := api.lastCall("answerCallbackQuery").Body["text"]; p != c.popup {
+			t.Fatalf("%v %s: pop-up %q", c.noSession, c.arg, p)
+		}
+		if e, _ := api.lastCall("editMessageText").Body["text"].(string); !strings.HasPrefix(e, headerFor(c.want, 0).mdv2()) {
+			t.Fatalf("%v %s: edit %q", c.noSession, c.arg, e)
+		}
+	}
+}
+
+func TestFitScope(t *testing.T) {
+	for _, c := range []struct {
+		in                  security.Scope
+		noAlways, noSession bool
+		want                security.Scope
+	}{
+		{security.ScopeAlways, false, false, security.ScopeAlways},
+		{security.ScopeAlways, true, false, security.ScopeSession},
+		{security.ScopeSession, true, false, security.ScopeSession},
+		{security.ScopeSession, true, true, security.ScopeOnce},
+		{security.ScopeAlways, true, true, security.ScopeOnce},
+		{security.ScopeSession, false, true, security.ScopeOnce},
+		{security.ScopeDeny, true, true, security.ScopeDeny},
+		{security.ScopeOnce, true, true, security.ScopeOnce},
+	} {
+		if got := fitScope(c.in, c.noAlways, c.noSession); got != c.want {
+			t.Errorf("fitScope(%v, %v, %v) = %v, want %v", c.in, c.noAlways, c.noSession, got, c.want)
+		}
+	}
+}
+
+func TestApproveAlwaysOnNoAlwaysRequest(t *testing.T) {
+	it, api := interactions(t)
+	ch := &Channel{UI: it}
+	out := make(chan security.Scope, 2)
+	ask := func(req security.ApprovalRequest) {
+		go func() {
+			sc, _ := it.For(5, "").PromptApproval(ctx, req)
+			out <- sc
+		}()
+	}
+	ask(acpApproval(false))
+	waitSends(t, api, 1)
+	if got := ch.resolveText(5, "approve", "always"); got != "✅ **Approval allowed** · this session\nThe agent continues." {
+		t.Fatalf("reply %q", got)
+	}
+	if sc := <-out; sc != security.ScopeSession {
+		t.Fatal(sc)
+	}
+	ask(acpApproval(true))
+	waitSends(t, api, 2)
+	if got := ch.resolveText(5, "approve", "session"); got != "✅ **Approval allowed** · once\nThe agent continues." {
+		t.Fatalf("reply %q", got)
+	}
+	if sc := <-out; sc != security.ScopeOnce {
+		t.Fatal(sc)
+	}
+	// /approve all always: the coding agent request gets session, a normal request keeps always.
+	ask(acpApproval(false))
+	waitSends(t, api, 3)
+	ask(security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d"})
+	waitSends(t, api, 4)
+	if n := it.ResolveApprovals(5, security.ScopeAlways, true); n != 2 {
+		t.Fatal(n)
+	}
+	got := map[security.Scope]int{}
+	got[<-out]++
+	got[<-out]++
+	if got[security.ScopeSession] != 1 || got[security.ScopeAlways] != 1 {
+		t.Fatal(got)
+	}
+}
+
+// add runs the setup before the prompt is in pending, under the same lock. Else a concurrent
+// /approve can read the prompt without its noAlways and noSession flags.
+func TestAddSetsFlagsBeforePublish(t *testing.T) {
+	it, _ := interactions(t)
+	var published bool
+	p := it.add(approvalPrefix, 42, "", func(p *prompt) {
+		_, published = it.pending[p.id]
+		p.noAlways, p.noSession = true, true
+	})
+	if published {
+		t.Fatal("the prompt was in pending before its setup")
+	}
+	it.mu.Lock()
+	got := it.pending[p.id]
+	it.mu.Unlock()
+	if got != p || !got.noAlways || !got.noSession {
+		t.Fatalf("pending prompt %+v", got)
+	}
+	if n, applied := it.resolveApprovals(42, security.ScopeAlways, true); n != 1 || applied != security.ScopeOnce {
+		t.Fatalf("n %d, applied %v", n, applied)
+	}
+}

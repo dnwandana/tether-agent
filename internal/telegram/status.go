@@ -33,6 +33,7 @@ var ToolEmoji = map[string]string{
 	"skill_view":              "📚",
 	"skill_manage":            "📝",
 	"delegate_task":           "🔀",
+	"acp_delegate":            "🤖", // Tether Agent only
 	"cronjob":                 "⏰",
 	"execute_code":            "🐍",
 	"view_image":              "👁️", // vision_analyze

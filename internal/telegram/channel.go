@@ -539,11 +539,11 @@ func (ch *Channel) resolveText(chatID int64, name, args string) string {
 	if name == "deny" {
 		scope = security.ScopeDeny
 	}
-	n := 0
+	n, applied := 0, scope
 	if ch.UI != nil {
-		n = ch.UI.ResolveApprovals(chatID, scope, all)
+		n, applied = ch.UI.resolveApprovals(chatID, scope, all)
 	}
-	return resolveReply(name, scope, n)
+	return resolveReply(name, applied, n)
 }
 
 // sessionKey returns the session key of a message. In a chat with observed

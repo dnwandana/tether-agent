@@ -68,8 +68,10 @@ type prompt struct {
 	multi           bool
 	picked          []bool
 	// free is true for a question with no choices: the next text in the chat answers it.
-	free  bool
-	reply chan promptReply
+	free bool
+	// noAlways and noSession are the answers that the approval request does not permit.
+	noAlways, noSession bool
+	reply               chan promptReply
 }
 
 type promptReply struct {
@@ -110,13 +112,11 @@ func (c *ChatUI) Ask(ctx context.Context, q tools.Question) (tools.Answer, error
 // returns ScopeTimeout and the context error.
 func (it *Interactions) promptApproval(ctx context.Context, chatID int64, threadID string, req security.ApprovalRequest) (security.Scope, error) {
 	mdv2, plain := buildApprovalPrompt(req, it.ApprovalTimeout)
-	p := it.add(approvalPrefix, chatID, threadID)
-	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
-		{{Text: "✅ Allow once", CallbackData: callbackData(approvalPrefix, p.id, "once")},
-			{Text: "✅ Allow in this session", CallbackData: callbackData(approvalPrefix, p.id, "session")}},
-		{{Text: "✅ Always allow", CallbackData: callbackData(approvalPrefix, p.id, "always")},
-			{Text: "❌ Deny", CallbackData: callbackData(approvalPrefix, p.id, "deny")}},
-	}}
+	// Set the flags before the prompt is in pending, so that a concurrent /approve applies them.
+	p := it.add(approvalPrefix, chatID, threadID, func(p *prompt) {
+		p.noAlways, p.noSession = req.NoAlways, req.NoSession
+	})
+	kb := approvalKeyboard(p.id, req.NoAlways, req.NoSession)
 	if err := it.sendMDV2(ctx, p, mdv2, plain, kb); err != nil {
 		it.remove(p.id)
 		return security.ScopeDeny, fmt.Errorf("telegram approval: %w", err)
@@ -222,8 +222,12 @@ func (it *Interactions) HandleCallback(ctx context.Context, cq CallbackQuery) bo
 			answerCB(invalidCallback)
 			return true
 		}
-		// A pop-up shows plain text, so it gets the plain header.
-		answerCB(headerFor(scope, it.ApprovalTimeout).plain())
+		it.mu.Lock()
+		applied := fitScope(scope, p.noAlways, p.noSession)
+		it.mu.Unlock()
+		// A pop-up shows plain text, so it gets the plain header. deliverLocked applies the
+		// same scope rule, so deliver gets the tapped scope.
+		answerCB(headerFor(applied, it.ApprovalTimeout).plain())
 		if !it.deliver(id, promptReply{scope: scope}) {
 			it.logger().Info("telegram: the approval was answered already", "prompt", id)
 		}
@@ -279,6 +283,14 @@ func (it *Interactions) askCallback(ctx context.Context, p *prompt, arg string, 
 // /deny text fallbacks. It answers the oldest one, or all of them with all. It returns the
 // number of answered approvals.
 func (it *Interactions) ResolveApprovals(chatID int64, scope security.Scope, all bool) int {
+	n, _ := it.resolveApprovals(chatID, scope, all)
+	return n
+}
+
+// resolveApprovals does the work of ResolveApprovals. It also returns the scope that the
+// last answered approval got after fitScope. With no pending approval, applied is scope.
+func (it *Interactions) resolveApprovals(chatID int64, scope security.Scope, all bool) (n int, applied security.Scope) {
+	applied = scope
 	it.mu.Lock()
 	defer it.mu.Unlock()
 	var list []*prompt
@@ -292,9 +304,24 @@ func (it *Interactions) ResolveApprovals(chatID int64, scope security.Scope, all
 		list = list[:1]
 	}
 	for _, p := range list {
+		applied = fitScope(scope, p.noAlways, p.noSession)
 		it.deliverLocked(p.id, promptReply{scope: scope})
 	}
-	return len(list)
+	return len(list), applied
+}
+
+// fitScope returns the scope that an approval request permits for the answer s. With
+// noSession, "this session" and "always" give "once". noSession also hides "always",
+// because "always" is wider than "this session". Else with noAlways, "always" gives
+// "this session".
+func fitScope(s security.Scope, noAlways, noSession bool) security.Scope {
+	switch {
+	case noSession && (s == security.ScopeSession || s == security.ScopeAlways):
+		return security.ScopeOnce
+	case noAlways && s == security.ScopeAlways:
+		return security.ScopeSession
+	}
+	return s
 }
 
 // TakeText gives text to the oldest open question with no choices in the chat and the
@@ -318,8 +345,9 @@ func (it *Interactions) TakeText(chatID int64, threadID, text string) bool {
 	return it.deliverLocked(oldest.id, promptReply{answer: tools.Answer{Text: strings.TrimSpace(text)}})
 }
 
-// add makes a new pending prompt with a random id of 8 bytes.
-func (it *Interactions) add(kind string, chatID int64, threadID string) *prompt {
+// add makes a new pending prompt with a random id of 8 bytes. Each setup function changes the
+// prompt under it.mu before the prompt goes into pending, so no reader sees a partial prompt.
+func (it *Interactions) add(kind string, chatID int64, threadID string, setup ...func(*prompt)) *prompt {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		// crypto/rand does not fail on the supported systems. A time value keeps the id unique.
@@ -333,6 +361,9 @@ func (it *Interactions) add(kind string, chatID int64, threadID string) *prompt 
 	it.seq++
 	p := &prompt{id: hex.EncodeToString(b[:]), kind: kind, chatID: chatID, threadID: threadID, seq: it.seq,
 		reply: make(chan promptReply, 1)}
+	for _, f := range setup {
+		f(p)
+	}
 	it.pending[p.id] = p
 	return p
 }
@@ -355,13 +386,18 @@ func (it *Interactions) deliver(id string, r promptReply) bool {
 }
 
 // deliverLocked gives r to the waiter of the prompt id and removes the prompt. The caller
-// holds it.mu. The reply channel has room for one answer, so the send never blocks.
+// holds it.mu. The reply channel has room for one answer, so the send never blocks. For
+// an approval, it changes the scope with fitScope to a scope that the request permits.
+// This is the one place of that change, so a tap, an old button, and /approve agree.
 func (it *Interactions) deliverLocked(id string, r promptReply) bool {
 	p, ok := it.pending[id]
 	if !ok {
 		return false
 	}
 	delete(it.pending, id)
+	if p.kind == approvalPrefix {
+		r.scope = fitScope(r.scope, p.noAlways, p.noSession)
+	}
 	p.reply <- r
 	return true
 }

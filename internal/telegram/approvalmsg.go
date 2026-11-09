@@ -34,6 +34,26 @@ func headerFor(s security.Scope, timeout time.Duration) approvalHeader {
 	return approvalHeader{"❌", denied, ""}
 }
 
+// approvalKeyboard returns the buttons of the approval prompt id. noAlways removes the
+// "always" button. noSession keeps only "once" and "deny".
+func approvalKeyboard(id string, noAlways, noSession bool) *InlineKeyboardMarkup {
+	btn := func(text, arg string) InlineKeyboardButton {
+		return InlineKeyboardButton{Text: text, CallbackData: callbackData(approvalPrefix, id, arg)}
+	}
+	once, session := btn("✅ Allow once", "once"), btn("✅ Allow in this session", "session")
+	always, deny := btn("✅ Always allow", "always"), btn("❌ Deny", "deny")
+	var rows [][]InlineKeyboardButton
+	switch {
+	case noSession:
+		rows = [][]InlineKeyboardButton{{once, deny}}
+	case noAlways:
+		rows = [][]InlineKeyboardButton{{once, session}, {deny}}
+	default:
+		rows = [][]InlineKeyboardButton{{once, session}, {always, deny}}
+	}
+	return &InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
 // format returns the header with title between the marks open and close. esc
 // escapes the title and the detail.
 func (h approvalHeader) format(mark string, esc func(string) string) string {

@@ -83,6 +83,12 @@ func TestToolEmojiTodoList(t *testing.T) {
 	}
 }
 
+func TestToolEmojiACPDelegate(t *testing.T) {
+	if got := ToolLine("all", "acp_delegate", "fix the tests", "{}"); got != `🤖 acp_delegate: "fix the tests"` {
+		t.Fatal(got)
+	}
+}
+
 func TestGoalLineIsItsOwnMessage(t *testing.T) {
 	s, api, _ := statusWithFakeAPI(t, "all")
 	s.SetGoalLine(ctx, goalLine)
