@@ -1335,7 +1335,9 @@ func runUsage(args []string, stdout, stderr io.Writer) int {
 	}
 	since, ok := obs.UsageSince(scope, time.Now())
 	if !ok {
-		return usageError(stderr, "usage", "unknown range "+scope+"; use today, 7d, or 30d")
+		r := obs.UsageRanges
+		list := strings.Join(r[:len(r)-1], ", ") + ", or " + r[len(r)-1]
+		return usageError(stderr, "usage", "unknown range "+scope+"; use "+list)
 	}
 	dir := dataDir(*dataFlag)
 	dbPath := filepath.Join(dir, "state.db")
@@ -1354,7 +1356,7 @@ func runUsage(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "usage: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Usage %s:\n%s\nCompactions: %d\n", scope, obs.FormatUsage(rows), compactions)
+	fmt.Fprintf(stdout, "Usage %s (all chats):\n%s\nCompactions: %d\n", obs.UsageRangeHead(scope), obs.FormatUsage(rows), compactions)
 	return 0
 }
 

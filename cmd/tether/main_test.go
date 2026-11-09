@@ -528,19 +528,29 @@ func TestUsageSubcommand(t *testing.T) {
 	st.Append(ctx, sess.ID, provider.Message{Role: provider.RoleAssistant, Content: "b"},
 		sessions.MessageMeta{Model: "z-ai/glm-4.7", Provider: "openrouter", CostUSD: 0.07})
 	d.Close()
-	for _, args := range [][]string{{"usage", "--data-dir", dir}, {"usage", "30d", "--data-dir", dir}} {
+	for _, c := range []struct {
+		args []string
+		head string
+	}{
+		{[]string{"usage", "--data-dir", dir}, "Usage today (all chats):\n"},
+		{[]string{"usage", "30d", "--data-dir", dir}, "Usage 30 days (all chats):\n"},
+		{[]string{"usage", "all", "--data-dir", dir}, "Usage all time (all chats):\n"},
+	} {
 		out.Reset()
 		errb.Reset()
-		if code := run(args, &out, &errb); code != 0 {
-			t.Fatalf("%v: exit %d: %s", args, code, errb.String())
+		if code := run(c.args, &out, &errb); code != 0 {
+			t.Fatalf("%v: exit %d: %s", c.args, code, errb.String())
 		}
-		for _, want := range []string{"3.41M", "$0.07", "tok/s"} {
+		if !strings.HasPrefix(out.String(), c.head) {
+			t.Fatalf("%v: want the header %q:\n%s", c.args, c.head, out.String())
+		}
+		for _, want := range []string{"3.41M", "$0.07", "tok/s", "cached", "cache 0 · hit 0%"} {
 			if !strings.Contains(out.String(), want) {
-				t.Fatal(args, want, out.String())
+				t.Fatal(c.args, want, out.String())
 			}
 		}
 		if strings.Contains(out.String(), "flat") || errb.Len() != 0 {
-			t.Fatalf("%v: stdout:\n%s\nstderr:\n%s", args, out.String(), errb.String())
+			t.Fatalf("%v: stdout:\n%s\nstderr:\n%s", c.args, out.String(), errb.String())
 		}
 	}
 	if code := run([]string{"usage", "1y", "--data-dir", dir}, &out, &errb); code != 2 {
@@ -1064,7 +1074,7 @@ func TestSubcommandBadUsage(t *testing.T) {
 		{[]string{"pairing", "revoke"}, "revoke needs a user id"},
 		{[]string{"pairing", "revoke", "a", "b", "c"}, "unexpected argument: c"},
 		{[]string{"pairing", "frob"}, "unknown command: frob"},
-		{[]string{"usage", "90d"}, "unknown range 90d; use today, 7d, or 30d"},
+		{[]string{"usage", "90d"}, "unknown range 90d; use today, 7d, 30d, or all"},
 		{[]string{"usage", "7d", "x"}, "unexpected argument: x"},
 		{[]string{"sessions", "--verbose"}, "unknown flag --verbose"},
 	} {

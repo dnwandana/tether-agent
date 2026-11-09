@@ -244,9 +244,11 @@ Examples:
 		Name:    "usage",
 		Group:   "Manage data",
 		Summary: "Show the calls, the tokens, and the cost of each model.",
-		Usage:   "tether usage [today|7d|30d] [flags]",
-		Body: `Show the calls, the tokens, the speed, and the cost of each model. The default
-range is today. The cost comes from the stored price of each call.
+		Usage:   "tether usage [today|7d|30d|all] [flags]",
+		Body: `Show the calls, the tokens, the cached tokens, the cache hit rate, the speed,
+and the cost of each model, for all chats. The default range is today. The
+range all shows all the stored usage. The cost comes from the stored price of
+each call.
 
 Flags:
   --data-dir DIR       The data folder. The default is TETHER_HOME, then
@@ -255,6 +257,7 @@ Flags:
 Examples:
   tether usage
   tether usage 7d
+  tether usage all
 `,
 	},
 	{
