@@ -54,6 +54,12 @@ type ApprovalRequest struct {
 	// from the description argument of the model and is not trusted. The gate
 	// does not read it. The UI shows it next to the command.
 	Summary string
+	// NoAlways hides the "always" answer. A UI that gets "always" for such a request
+	// applies "this session". A permission request of a coding agent sets it.
+	NoAlways bool
+	// NoSession hides the "this session" answer too. A UI applies "once" for a
+	// "this session" or an "always" answer. A request whose rule does not say what runs sets it.
+	NoSession bool
 }
 
 // Prompter asks the user about one dangerous command. It is the UI of a
@@ -236,6 +242,63 @@ func (g *Gate) prompt(ctx context.Context, req ApprovalRequest, p Prompter) (Sco
 	case <-pctx.Done():
 		return ScopeTimeout, pctx.Err()
 	}
+}
+
+// AskACP asks the user about one permission request of a coding agent. It
+// does not use the danger patterns, approvals.mode, smart mode, the Judge, or
+// approvals.cron_mode. It asks each time, except when the session memory of
+// the gate has a "this session" answer for req.PatternID. It never reads or
+// writes approvals_always. The returns are:
+//   - once or session: (ScopeOnce or ScopeSession, nil).
+//   - deny: (ScopeDeny, nil).
+//   - no answer in the gate timeout: (ScopeTimeout, nil).
+//   - the end of ctx: (ScopeTimeout, ctx.Err()).
+//   - an error of p: (ScopeDeny, err).
+//   - a nil p: (ScopeDeny, nil).
+//
+// An "always" answer becomes ScopeSession. With req.NoSession, a "this
+// session" or "always" answer becomes ScopeOnce, and the gate saves nothing.
+func (g *Gate) AskACP(ctx context.Context, req ApprovalRequest, p Prompter) (Scope, error) {
+	if p == nil {
+		return ScopeDeny, nil
+	}
+	req.NoAlways = true
+	session := sessionOf(req)
+	if !req.NoSession && g.sessionApproved(session, req.PatternID) {
+		return ScopeSession, nil
+	}
+	scope, err := g.prompt(ctx, req, p)
+	switch {
+	case ctx.Err() != nil:
+		return ScopeTimeout, ctx.Err()
+	case scope == ScopeTimeout || errors.Is(err, context.DeadlineExceeded):
+		return ScopeTimeout, nil
+	case err != nil:
+		return ScopeDeny, err
+	}
+	switch scope {
+	case ScopeOnce:
+		return ScopeOnce, nil
+	case ScopeSession, ScopeAlways:
+		if req.NoSession {
+			return ScopeOnce, nil
+		}
+		g.approveSession(session, req.PatternID)
+		return ScopeSession, nil
+	default:
+		return ScopeDeny, nil
+	}
+}
+
+// sessionApproved reports whether the session memory has a "this session"
+// answer for the rule. Unlike approved, it does not read approvals_always.
+func (g *Gate) sessionApproved(session, patternID string) bool {
+	if session == "" {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.sessions[session][patternID]
 }
 
 // ResetSession removes the "This session" answers of sessionID.
