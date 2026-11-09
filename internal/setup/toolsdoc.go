@@ -12,8 +12,9 @@ import (
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
-// toolsDocConfig turns on every built-in tool: a vision provider for view_image and a
-// backend for each media tool. The provider gets no call.
+// toolsDocConfig turns on every built-in tool: a vision provider for view_image, a
+// backend for each media tool, and one coding agent for acp_delegate. The provider gets
+// no call, and no coding agent starts.
 const toolsDocConfig = `providers:
   primary:
     format: openai
@@ -25,6 +26,12 @@ media:
   image:
     backend: endpoint
     provider: primary
+acp:
+  enabled: true
+  workdir_allowlist: [/srv/projects]
+  agents:
+    claude-code:
+      enabled: true
 pricing:
   sources: []
 `

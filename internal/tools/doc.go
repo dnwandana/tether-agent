@@ -42,6 +42,8 @@ func toolNeeds(name string) string {
 		return "media.image. It has no default backend, so the tool is not registered until you set one."
 	case name == "delegate_task":
 		return "the gateway role for background: true. The chat role runs the tasks in the foreground."
+	case name == "acp_delegate":
+		return "acp.enabled, an agent, and acp.workdir_allowlist."
 	}
 	return ""
 }

@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/acp"
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/browser"
 	"github.com/dnwandana/tether-agent/internal/config"
@@ -67,6 +68,8 @@ type Options struct {
 	Gateway bool
 	// TelegramBaseURL replaces the Bot API root. Empty uses the real Bot API. Tests set it.
 	TelegramBaseURL string
+	// Version is the version of the binary. The coding agents get it in clientInfo. Empty uses "dev".
+	Version string
 }
 
 // App holds the shared parts of one process.
@@ -112,6 +115,15 @@ type App struct {
 	mcpStop context.CancelFunc
 	// mcpReaper is closed when the idle reaper of MCP returns.
 	mcpReaper chan struct{}
+	// ACP runs the coding agents of acp_delegate. It is nil when acp.enabled is false or
+	// no agent is enabled.
+	ACP *acp.Manager
+	// closeACP closes the coding agent sessions of a Tether session for good. It is nil
+	// with no ACP manager. Tests replace it.
+	closeACP func(sessionID string)
+	acpStop  context.CancelFunc
+	// acpReaper is closed when the idle reaper of ACP returns.
+	acpReaper chan struct{}
 	// Sched is the cron scheduler. It is nil outside the gateway role.
 	Sched *cron.Scheduler
 	// Telegram is the Telegram channel. AddTelegram sets it in the gateway role.
@@ -279,6 +291,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.Agent.Compactor.OnCompact = a.Agent.ReviewOnCompaction
 	// The chat type and the topic of a Telegram session go into its system prompt.
 	a.Agent.ChatInfo = telegram.ChatInfo(a.Cfg.Telegram, telegram.User{})
+	a.startACP(ctx, opts.Version)
 	a.registerDelegation(opts.Gateway)
 	// The open items of the todo list go to the end of a compaction summary.
 	a.Agent.Compactor.Todo = a.todoSnapshot
@@ -423,6 +436,10 @@ func (a *App) registerDelegation(gatewayRole bool) {
 		tool.Background = a.Delegator
 	}
 	a.RegisterTool(tool)
+	// The tool exists only with a manager. A nil *acp.Manager in the interface is not nil.
+	if a.ACP != nil {
+		a.RegisterTool(tools.NewACPDelegateTool(a.Cfg.ACP, a.ACP, approvalWait(a.Cfg.Approvals.TimeoutS)))
+	}
 }
 
 // newScheduler builds the cron scheduler of the gateway role. AddTelegram sets
@@ -458,10 +475,11 @@ func (a *App) cronTurn(ctx context.Context, t cron.CronTurn) (string, error) {
 	// Each run has a new session, so free its per-session state after the turn.
 	defer a.ForgetSession(t.Session.ID)
 	res, err := a.Agent.RunTurn(ctx, agent.Turn{
-		Session:     t.Session,
-		UserText:    t.Text,
-		Toolsets:    tools.Resolve(a.Cfg.Toolsets["cron"], t.Toolsets, nil),
-		RemoveTools: t.RemoveTools,
+		Session:  t.Session,
+		UserText: t.Text,
+		Toolsets: tools.Resolve(a.Cfg.Toolsets["cron"], t.Toolsets, nil),
+		// The default toolsets.cron is [all], so remove acp_delegate. The tool also refuses a cron run.
+		RemoveTools: append(slices.Clone(t.RemoveTools), "acp_delegate"),
 		Env:         env,
 	})
 	return res.Final, err
@@ -594,6 +612,52 @@ func (a *App) startMCP(ctx context.Context, cfgPath string) {
 		for {
 			select {
 			case <-mctx.Done():
+				return
+			case <-t.C:
+				m.ReapIdle()
+			}
+		}
+	}()
+}
+
+// acpReapEvery is the time between two checks for idle coding agent processes. Tests change it.
+var acpReapEvery = time.Minute
+
+// startACP builds the manager of the coding agents and starts its idle reaper. It starts
+// no adapter process: the first acp_delegate call starts one.
+func (a *App) startACP(ctx context.Context, version string) {
+	if !a.Cfg.ACP.Enabled {
+		return
+	}
+	if len(a.Cfg.ACP.EnabledAgents()) == 0 {
+		a.Log.Warn("acp: acp.enabled is true, but no agent is enabled, so acp_delegate is not registered")
+		return
+	}
+	if version == "" {
+		version = "dev"
+	}
+	a.ACP = acp.NewManager(acp.ManagerOptions{
+		Config:        a.Cfg.ACP,
+		DataDir:       a.DataDir,
+		DotEnv:        a.DotEnv,
+		Store:         acp.NewStore(a.DB),
+		ClientVersion: version,
+		Log:           a.Log,
+	})
+	a.closeACP = a.ACP.Close
+	// The reaper has its own ticker. A stop of an adapter takes up to 2 s, and that must
+	// not delay the MCP reap.
+	actx, stop := context.WithCancel(context.WithoutCancel(ctx))
+	a.acpStop = stop
+	m, done := a.ACP, make(chan struct{})
+	a.acpReaper = done
+	go func() {
+		defer close(done)
+		t := time.NewTicker(acpReapEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-actx.Done():
 				return
 			case <-t.C:
 				m.ReapIdle()
@@ -764,8 +828,8 @@ func (a *App) NewEnv(sess *sessions.Session, channel string) *tools.Env {
 			gate.Prompter = a.CLIAsk
 			env.Ask = a.CLIAsk
 		}
-		// gateway.Deps.Turn sends the "🔀 [i/n] tool" lines of the delegate_task children
-		// through the CLI sink.
+		// gateway.Deps.Turn sends the "🔀 [i/n] tool" lines of the delegate_task children and
+		// the "🔀 [agent] kind" lines of the acp_delegate tool calls through the CLI sink.
 	case channel == "telegram" && sess != nil && a.Telegram != nil:
 		ch := a.Telegram
 		if chat, err := strconv.ParseInt(sess.ChatID, 10, 64); err == nil && ch.UI != nil {
@@ -816,7 +880,7 @@ func (a *App) Deps() *gateway.Deps {
 		// then free the state of that session.
 		BeforeNew: a.beforeNew,
 		// /delete frees the state of the session that it removes.
-		AfterDelete: a.ForgetSession,
+		AfterDelete: a.afterDelete,
 		// /stop, /new, and /reset cancel the background delegation children of the key.
 		CancelKey: a.cancelKey,
 		ToolLine:  func(tool, preview string) string { return telegram.ToolLine("all", tool, preview, "") },
@@ -838,6 +902,20 @@ func (a *App) Deps() *gateway.Deps {
 func (a *App) beforeNew(ctx context.Context, old *sessions.Session) {
 	a.Agent.ReviewBeforeNew(ctx, old)
 	a.ForgetSession(old.ID)
+	// Close returns at once, so the reply to /new does not wait.
+	if a.closeACP != nil {
+		a.closeACP(old.ID)
+	}
+}
+
+// afterDelete frees the state of a deleted session and closes its coding agent sessions.
+// ForgetSession does not close them, because it also runs after each cron run and for each
+// pruned session.
+func (a *App) afterDelete(sessionID string) {
+	a.ForgetSession(sessionID)
+	if a.closeACP != nil {
+		a.closeACP(sessionID)
+	}
 }
 
 // ForgetSession frees the state that the process keeps for a session: the Values map of
@@ -904,6 +982,15 @@ func (a *App) Restarts() <-chan StopRequest { return a.restarts }
 // it, a /restart starts no new stop.
 func (a *App) MarkStopping() bool { return a.stopping.CompareAndSwap(false, true) }
 
+// codingTasks returns the agent ids of the running acp_delegate calls. It returns nil with
+// no ACP manager.
+func (a *App) codingTasks() []string {
+	if a.ACP == nil {
+		return nil
+	}
+	return a.ACP.Busy()
+}
+
 // requestRestart is the RestartRequest of /restart. It saves the chat of key for the next
 // gateway and counts the busy keys. The returned start func sends the stop request.
 func (a *App) requestRestart(ctx context.Context, key string, to gateway.Target) (gateway.RestartState, func()) {
@@ -918,7 +1005,7 @@ func (a *App) requestRestart(ctx context.Context, key string, to gateway.Target)
 		a.Log.Warn("gateway: cannot save the chat of /restart, so it gets no message after the restart",
 			"key", key, "err", err.Error())
 	}
-	st := gateway.RestartState{Busy: len(a.Gateway().BusyKeys())}
+	st := gateway.RestartState{Busy: len(a.Gateway().BusyKeys()), CodingTasks: a.codingTasks()}
 	return st, func() {
 		// A second /restart at the same time sends nothing.
 		if !a.MarkStopping() {
@@ -1060,7 +1147,7 @@ func (a *App) cleanSpill() {
 	}
 }
 
-// Close stops Chrome and the MCP servers, and closes the database and the log file.
+// Close stops Chrome, the MCP servers, and the coding agents, and closes the database and the log file.
 func (a *App) Close() error {
 	var errs []error
 	if a.mcpStop != nil {
@@ -1071,6 +1158,21 @@ func (a *App) Close() error {
 	if a.mcpReaper != nil {
 		<-a.mcpReaper
 		a.mcpReaper = nil
+	}
+	// The ACP reaper must return before the adapters stop. StopAll keeps the
+	// acp_sessions rows, so the next call resumes the context.
+	if a.acpStop != nil {
+		a.acpStop()
+		a.acpStop = nil
+	}
+	if a.acpReaper != nil {
+		<-a.acpReaper
+		a.acpReaper = nil
+	}
+	// a.ACP stays set: the gateway can read it at the same time, through codingTasks. A
+	// second StopAll does nothing, and Busy is empty after StopAll.
+	if a.ACP != nil {
+		a.ACP.StopAll()
 	}
 	if a.MCP != nil {
 		a.MCP.Close()

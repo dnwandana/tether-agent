@@ -328,6 +328,86 @@ func TestGateApproverNilGateFailsClosed(t *testing.T) {
 	}
 }
 
+var _ PermissionAsker = GateApprover{}
+
+// acpRequest is a permission request as the ACP bridge builds it.
+func acpRequest() security.ApprovalRequest {
+	return security.ApprovalRequest{
+		SessionID:   "from-the-caller",
+		Summary:     "Edit internal/acp/client.go",
+		Description: "claude-code wants to edit a file",
+		Command:     "internal/acp/client.go\n- return nil\n+ return c.close(ctx)",
+		PatternID:   "acp:claude-code:acp-sess-1:edit",
+		NoAlways:    true,
+	}
+}
+
+func TestGateApproverAskPermissionBuildsRequest(t *testing.T) {
+	p := &recPrompter{scope: security.ScopeOnce}
+	// Mode "off" must not skip the question: AskACP ignores approvals.mode.
+	var a Approver = GateApprover{Gate: &security.Gate{Mode: "off"}, Prompter: p}
+	pa, ok := a.(PermissionAsker)
+	if !ok {
+		t.Fatal("GateApprover must implement PermissionAsker")
+	}
+	env := &Env{SessionID: "s1", SessionKey: "telegram:dm:5", Kind: "chat", RootKind: "",
+		Values: map[string]any{"child_name": "2/3"}}
+	scope, err := pa.AskPermission(ctx, env, acpRequest())
+	if err != nil || scope != security.ScopeOnce {
+		t.Fatal(scope, err)
+	}
+	if len(p.reqs) != 1 {
+		t.Fatalf("asked %d times, want 1", len(p.reqs))
+	}
+	r, want := p.reqs[0], acpRequest()
+	if r.SessionID != "s1" || r.SessionKey != "telegram:dm:5" || r.Kind != "chat" || r.RootKind != "" {
+		t.Fatalf("the env fields are wrong: %+v", r)
+	}
+	if r.Summary != want.Summary || r.Description != want.Description || r.Command != want.Command ||
+		r.PatternID != want.PatternID || !r.NoAlways || r.NoSession {
+		t.Fatalf("the request fields must pass unchanged: %+v", r)
+	}
+	if r.ChildName != "" {
+		t.Fatalf("a coding agent is not a delegate_task child, ChildName = %q", r.ChildName)
+	}
+}
+
+func TestGateApproverAskPermissionSessionMemory(t *testing.T) {
+	p := &recPrompter{scope: security.ScopeSession}
+	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
+	env := &Env{SessionID: "s1"}
+	for range 2 {
+		scope, err := g.AskPermission(ctx, env, acpRequest())
+		if err != nil || scope != security.ScopeSession {
+			t.Fatal(scope, err)
+		}
+	}
+	if len(p.reqs) != 1 {
+		t.Fatalf("the session answer must hold, asked %d times", len(p.reqs))
+	}
+	// Another Tether session has no grant.
+	if _, err := g.AskPermission(ctx, &Env{SessionID: "s2"}, acpRequest()); err != nil || len(p.reqs) != 2 {
+		t.Fatal(err, len(p.reqs))
+	}
+}
+
+func TestGateApproverAskPermissionNilGate(t *testing.T) {
+	scope, err := (GateApprover{}).AskPermission(ctx, &Env{SessionID: "s1"}, acpRequest())
+	if scope != security.ScopeDeny || err == nil || !strings.Contains(err.Error(), "approval gate missing") {
+		t.Fatal(scope, err)
+	}
+}
+
+func TestGateApproverAskPermissionNoPrompter(t *testing.T) {
+	g := GateApprover{Gate: &security.Gate{Mode: "manual"}}
+	for _, env := range []*Env{{SessionID: "s1"}, nil} {
+		scope, err := g.AskPermission(ctx, env, acpRequest())
+		if scope != security.ScopeDeny || err != nil {
+			t.Fatal(scope, err)
+		}
+	}
+}
+
 func TestExecThroughRealGateCronDeny(t *testing.T) {
 	env := &Env{SessionID: "s1", Kind: "cron", Gate: GateApprover{Gate: &security.Gate{Mode: "manual", CronMode: "deny"}}}
 	out := runToolEnvErr(t, &TerminalTool{DefaultTimeout: time.Minute}, `{"command":"rm -rf /tmp/tether-none"}`, env)

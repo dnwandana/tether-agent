@@ -23,9 +23,11 @@ const turnToolsKey = "turn_tools"
 // the next number, and the first number is 1.
 var delegateBatches atomic.Uint64
 
-// ProgressFunc receives one tool start of a delegate_task child as data. The batch number
-// and the child name, for example "2/3", identify the source. The preview is empty when
-// the call has no main argument. ChildProgressLine makes the text line from these values.
+// ProgressFunc receives one tool start of a delegate_task child, or one tool call of an
+// acp_delegate coding agent, as data. The batch number and the child name, for example
+// "2/3", identify the source. acp_delegate gives batch 0 and the agent id as the child, and
+// the tool is the ACP tool kind. The preview is empty when the call has no main argument.
+// ChildProgressLine makes the text line from these values.
 type ProgressFunc func(batch uint64, child, tool, preview string)
 
 // The defaults of the delegation limits, for a config value that is not positive.
@@ -218,7 +220,7 @@ func (t DelegateTool) Schema() provider.ToolSchema {
 		"- If the user writes in a language other than English, or asks for a specific language or style, say so in 'context'.\n" +
 		"- Subagent summaries are SELF-REPORTS, not verified facts. For operations with external side effects, " +
 		"require a verifiable handle (URL, ID, absolute path) and verify it yourself before you tell the user it succeeded.\n" +
-		"- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob.\n" +
+		"- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob, acp_delegate.\n" +
 		"- Results are always returned as an array, one entry per task."
 	params := map[string]any{
 		"type": "object",

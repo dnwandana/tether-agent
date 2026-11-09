@@ -337,3 +337,11 @@ func TestDelegateBackgroundErrors(t *testing.T) {
 		t.Fatal("background batches have the same limit:", out)
 	}
 }
+
+func TestDelegateTextNamesACPDelegate(t *testing.T) {
+	want := "- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, " +
+		"execute_code, cronjob, acp_delegate.\n"
+	if d := (DelegateTool{}).Schema().Description; !strings.Contains(d, want) {
+		t.Fatal(d)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -318,5 +319,11 @@ func TestChildTakesParentEffort(t *testing.T) {
 	}
 	if fp.requests[0].Effort != "low" {
 		t.Fatal(fp.requests[0].Effort)
+	}
+}
+
+func TestChildBlocksACPDelegate(t *testing.T) {
+	if !slices.Contains(ChildBlockedTools, "acp_delegate") {
+		t.Fatal("a delegate_task child must not see acp_delegate")
 	}
 }

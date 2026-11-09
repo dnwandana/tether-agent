@@ -19,7 +19,7 @@ the description and the JSON schema of the parameters that the model sees.
 | `browser` | `browser_click`, `browser_cookies`, `browser_fill`, `browser_navigate`, `browser_read`, `browser_run_js`, `browser_take_screenshot` |
 | `code_execution` | `execute_code` |
 | `cron` | `cronjob` |
-| `delegation` | `delegate_task` |
+| `delegation` | `acp_delegate`, `delegate_task` |
 | `file` | `patch`, `read_file`, `write_file` |
 | `media` | `generate_image`, `text_to_speech`, `transcribe_audio` |
 | `memory` | `memory`, `session_search` |
@@ -382,6 +382,57 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
 
 ## delegation
 
+### acp_delegate
+
+Give a coding task to an external coding agent, for example Claude Code, over the Agent Client Protocol. The coding agent works in workdir with its own tools. It sees only the task text and the files, so put all the facts that it needs in task. Each permission request of the coding agent comes to the user as an approval message. The tool waits for the end of the turn and returns the final text of the coding agent. A later call in the same session continues the same coding agent session. Do not use this tool for a small change that you can make yourself.
+
+**Needs:** acp.enabled, an agent, and acp.workdir_allowlist.
+
+```json
+{
+  "properties": {
+    "agent": {
+      "description": "The id of the coding agent.",
+      "enum": [
+        "claude-code"
+      ],
+      "type": "string"
+    },
+    "model": {
+      "description": "The model of the coding agent. Default: the model in the config of the agent.",
+      "type": "string"
+    },
+    "permission_preset": {
+      "description": "The config preset of the agent or a stricter one. The order from strict to loose is all, risky, auto, folder. Default: the config preset.",
+      "enum": [
+        "all",
+        "risky",
+        "auto",
+        "folder"
+      ],
+      "type": "string"
+    },
+    "task": {
+      "description": "The full brief for the coding agent: the goal, the files, the constraints, and how to check the result.",
+      "type": "string"
+    },
+    "timeout_s": {
+      "description": "The time limit of this turn in seconds. At most 1800 (acp.turn_timeout_s).",
+      "type": "integer"
+    },
+    "workdir": {
+      "description": "The absolute path of the repository folder. It must be inside acp.workdir_allowlist. Required, except in tether chat, where the default is the current folder.",
+      "type": "string"
+    }
+  },
+  "required": [
+    "agent",
+    "task"
+  ],
+  "type": "object"
+}
+```
+
 ### delegate_task
 
 Spawn one or more subagents to work on tasks in isolated contexts. Each subagent gets its own conversation and toolsets. Only the final summary is returned; intermediate tool results never enter your context window.
@@ -408,7 +459,7 @@ IMPORTANT:
 - Subagents have NO memory of your conversation. Pass all relevant info (file paths, error messages, constraints) in the 'context' field.
 - If the user writes in a language other than English, or asks for a specific language or style, say so in 'context'.
 - Subagent summaries are SELF-REPORTS, not verified facts. For operations with external side effects, require a verifiable handle (URL, ID, absolute path) and verify it yourself before you tell the user it succeeded.
-- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob.
+- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob, acp_delegate.
 - Results are always returned as an array, one entry per task.
 
 **Needs:** the gateway role for background: true. The chat role runs the tasks in the foreground.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 // ErrToolError marks an error whose message is meant for the model. Dispatch
@@ -93,6 +94,12 @@ type Asker interface {
 // description of the model, or empty.
 type Approver interface {
 	CheckCommand(ctx context.Context, env *Env, command, summary string) error
+}
+
+// PermissionAsker asks the user about one permission request of a coding agent. The
+// acp_delegate tool reads it from env.Gate with a type assertion.
+type PermissionAsker interface {
+	AskPermission(ctx context.Context, env *Env, req security.ApprovalRequest) (security.Scope, error)
 }
 
 // Result is the result of one tool call for the model.

@@ -290,6 +290,19 @@ func (g GateApprover) CheckCommand(ctx context.Context, env *Env, command, summa
 	return g.Gate.Check(ctx, req, g.Prompter)
 }
 
+// AskPermission asks the user about one permission request of a coding agent through
+// Gate.AskACP. It sets the session fields of req from env. It does not set ChildName,
+// because a coding agent is not a delegate_task child.
+func (g GateApprover) AskPermission(ctx context.Context, env *Env, req security.ApprovalRequest) (security.Scope, error) {
+	if g.Gate == nil {
+		return security.ScopeDeny, errors.New("approval gate missing: the coding agent cannot get an approval without the approval gate")
+	}
+	if env != nil {
+		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
+	}
+	return g.Gate.AskACP(ctx, req, g.Prompter)
+}
+
 // ResetSession removes the "This session" answers of sessionID from the gate. A run with
 // its own session calls it when the run ends, so the gate does not keep the answers.
 func (g GateApprover) ResetSession(sessionID string) {

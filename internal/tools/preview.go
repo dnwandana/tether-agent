@@ -43,6 +43,7 @@ var PreviewKeys = map[string]string{
 	"clarify":          "question",
 	"session_search":   "query",
 	"delegate_task":    "goal",
+	"acp_delegate":     "task",
 }
 
 // previewFallbackKeys are the keys that ArgPreview tries, in this order, for a tool that is

@@ -57,7 +57,7 @@ func TestGeneratedDocIsCurrent(t *testing.T) {
 	defer done()
 	// The registry has every built-in tool, also without python3 and Chrome on this host.
 	for _, name := range []string{"execute_code", "view_image", "browser_navigate", "delegate_task",
-		"text_to_speech", "transcribe_audio", "generate_image", "cronjob"} {
+		"text_to_speech", "transcribe_audio", "generate_image", "cronjob", "acp_delegate"} {
 		if _, ok := r.Get(name); !ok {
 			t.Fatalf("the doc registry has no %s", name)
 		}

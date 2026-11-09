@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1074,5 +1075,172 @@ func TestDepsSkillsReadsTheCatalog(t *testing.T) {
 	list, _, err := d.Skills()
 	if err != nil || !slices.ContainsFunc(list, func(s skills.Skill) bool { return s.Name == "test-skill-cmd" }) {
 		t.Fatal(list, err)
+	}
+}
+
+// acpBlock turns on ACP with one claude-code agent. The command does not exist: New
+// must start no adapter process, so New must not fail.
+const acpBlock = "acp:\n  enabled: true\n  workdir_allowlist: [/srv/projects]\n" +
+	"  agents:\n    claude-code:\n      command: [/nonexistent/claude-agent-acp]\n"
+
+// acpApp returns an App of the chat role with acpBlock.
+func acpApp(t *testing.T, url string) *App {
+	t.Helper()
+	dir := t.TempDir()
+	writeConfig(t, dir, url, acpBlock)
+	a, err := New(ctx, Options{DataDir: dir, Version: "1.2.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	return a
+}
+
+func TestACPDisabledRegistersNoTool(t *testing.T) {
+	a := newApp(t)
+	if a.ACP != nil {
+		t.Fatal("acp.enabled is false by default, so no manager")
+	}
+	if _, ok := a.Registry.Get("acp_delegate"); ok {
+		t.Fatal("acp_delegate must not be registered")
+	}
+}
+
+// acp.enabled: true with no enabled agent: the tool is not registered and the app starts.
+func TestACPEnabledWithoutAgentStarts(t *testing.T) {
+	for _, extra := range []string{
+		"acp:\n  enabled: true\n  workdir_allowlist: [/srv/projects]\n",
+		"acp:\n  enabled: true\n  agents:\n    claude-code:\n      enabled: false\n",
+	} {
+		dir := t.TempDir()
+		writeConfig(t, dir, fakeProviderURL(t), extra)
+		a, err := New(ctx, Options{DataDir: dir})
+		if err != nil {
+			t.Fatal(extra, err)
+		}
+		if a.ACP != nil {
+			t.Fatal(extra, "no enabled agent, so no manager")
+		}
+		if _, ok := a.Registry.Get("acp_delegate"); ok {
+			t.Fatal(extra, "acp_delegate must not be registered")
+		}
+		if err := a.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestACPEnabledRegistersTool(t *testing.T) {
+	a := acpApp(t, fakeProviderURL(t))
+	if a.ACP == nil {
+		t.Fatal("acp.enabled with an enabled agent must build the manager")
+	}
+	tl, ok := a.Registry.Get("acp_delegate")
+	if !ok {
+		t.Fatal("acp_delegate is not registered")
+	}
+	if tl.Toolset() != "delegation" || tl.ParallelSafe() {
+		t.Fatalf("toolset %q, parallel-safe %v", tl.Toolset(), tl.ParallelSafe())
+	}
+}
+
+// beforeNew (/new, /reset) and the AfterDelete func (/delete) close the ACP sessions.
+// ForgetSession also runs after each cron run and for pruned ids, so it must not close them.
+func TestACPClosedOnNewAndDeleteOnly(t *testing.T) {
+	a := acpApp(t, fakeProviderURL(t))
+	if a.closeACP == nil {
+		t.Fatal("New must set closeACP to the Close of the manager")
+	}
+	var closed []string
+	a.closeACP = func(id string) { closed = append(closed, id) }
+	a.beforeNew(ctx, &sessions.Session{ID: "old", Kind: "chat"})
+	a.Deps().AfterDelete("gone")
+	a.ForgetSession("cron-run")
+	if !slices.Equal(closed, []string{"old", "gone"}) {
+		t.Fatal(closed)
+	}
+}
+
+func TestACPCloseIsNilSafe(t *testing.T) {
+	a := newApp(t)
+	a.beforeNew(ctx, &sessions.Session{ID: "old", Kind: "chat"})
+	a.Deps().AfterDelete("gone")
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A cron run must not see acp_delegate. A chat turn with the same app sees it.
+func TestCronTurnHidesACPDelegate(t *testing.T) {
+	sse, err := os.ReadFile("../provider/testdata/openai_text_stream.sse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(sse)
+	}))
+	t.Cleanup(srv.Close)
+	keepCommandTable(t)
+	dir := t.TempDir()
+	writeConfig(t, dir, srv.URL, acpBlock)
+	a, err := New(ctx, Options{DataDir: dir, Gateway: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	last := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return bodies[len(bodies)-1]
+	}
+	// The delegate_task text names acp_delegate, so look for the tool name field.
+	const toolName = `"name":"acp_delegate"`
+
+	chat, err := a.Store.Create(ctx, sessions.Session{Source: "cli", Kind: "chat", Key: "cli:t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Agent.RunTurn(ctx, agent.Turn{Session: chat, UserText: "hi",
+		Toolsets: tools.Resolve(a.Cfg.Toolsets["cli"], nil, nil), Env: a.NewEnv(chat, "cli")}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(last(), toolName) {
+		t.Fatal("a chat turn must see acp_delegate")
+	}
+
+	job, err := a.Store.Create(ctx, sessions.Session{Source: "cron", Kind: "cron", Key: "cron:j1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.cronTurn(ctx, cron.CronTurn{Session: job, Text: "report"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(last(), toolName) {
+		t.Fatal("a cron run must not see acp_delegate")
+	}
+}
+
+func TestRestartStateCodingTasks(t *testing.T) {
+	// No manager: no coding task.
+	a := gatewayApp(t, "", "")
+	st, _ := a.requestRestart(ctx, "telegram:1", gateway.Target{})
+	if st.CodingTasks != nil {
+		t.Fatal(st.CodingTasks)
+	}
+	// A manager with no running Prompt: no coding task.
+	b := gatewayApp(t, "", acpBlock)
+	if b.ACP == nil {
+		t.Fatal("acpBlock must build the manager")
+	}
+	st, _ = b.requestRestart(ctx, "telegram:1", gateway.Target{})
+	if len(st.CodingTasks) != 0 {
+		t.Fatal(st.CodingTasks)
 	}
 }
