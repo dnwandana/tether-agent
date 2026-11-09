@@ -106,7 +106,7 @@ func init() {
 		{Name: "fork", Help: "Copy the current session and switch to the copy: /fork [title]", Run: cmdFork},
 		{Name: "compact", Help: "Replace the older messages of this session with a summary now", Run: cmdCompact},
 		ReloadMCPCommand(nil),
-		{Name: "usage", Help: "Show the token use and the cost of each model: /usage [today|7d|30d|session]", Run: cmdUsage, WhileBusy: true},
+		{Name: "usage", Help: "Show the token use, the cache use, and the cost of each model: /usage [today|7d|30d|all|session]", Run: cmdUsage, WhileBusy: true},
 		{Name: "help", Help: "Show all commands: /help [skills]", Run: cmdHelp, WhileBusy: true},
 	} {
 		Register(c)
@@ -1050,21 +1050,35 @@ func plural(n int, word string) string {
 // usageRange is one range of /usage: the argument and the button label.
 type usageRange struct{ arg, label string }
 
-// usageRanges are the ranges of /usage in button order. The header names a range with the
-// label in lower case.
-var usageRanges = []usageRange{{"today", "Today"}, {"7d", "7 days"}, {"30d", "30 days"}, {"session", "Session"}}
+// usageRanges are the ranges of /usage in button order. The header text of a range comes from
+// obs.UsageRangeHead, not from the label, so that /usage and tether usage use the same words.
+var usageRanges = []usageRange{{"today", "Today"}, {"7d", "7 days"}, {"30d", "30 days"}, {"all", "All"}, {"session", "Session"}}
 
-// usageButtons returns the range buttons of /usage with a check mark on the current range.
+// usageButtons returns the range buttons of /usage in two rows with a check mark on the
+// current range. The first three ranges go in the first row, so that each label has space.
 func usageButtons(current string) [][]Button {
-	row := make([]Button, 0, len(usageRanges))
-	for _, u := range usageRanges {
+	rows := [][]Button{nil, nil}
+	for i, u := range usageRanges {
 		label := u.label
 		if u.arg == current {
 			label = "✓ " + label
 		}
-		row = append(row, Button{Text: label, Data: "/usage " + u.arg})
+		row := 0
+		if i >= 3 {
+			row = 1
+		}
+		rows[row] = append(rows[row], Button{Text: label, Data: "/usage " + u.arg})
 	}
-	return [][]Button{row}
+	return rows
+}
+
+// usageArgs returns the arguments of usageRanges in button order.
+func usageArgs() []string {
+	names := make([]string, len(usageRanges))
+	for i, u := range usageRanges {
+		names[i] = u.arg
+	}
+	return names
 }
 
 func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
@@ -1085,23 +1099,15 @@ func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 			return err
 		}
 		session = s
-		head = fmt.Sprintf("📊 **Usage: \"%s\"**", sessionTitle(s.Title))
+		head = fmt.Sprintf("📊 **Usage: this session, \"%s\"**", sessionTitle(s.Title))
 	} else {
 		var ok bool
 		if since, ok = obs.UsageSince(scope, time.Now()); !ok {
-			names := make([]string, len(usageRanges))
-			for i, u := range usageRanges {
-				names[i] = u.arg
-			}
 			c.send(Reply{Text: fmt.Sprintf("⚠️ **Unknown range: %s**\nThe ranges are: %s.",
-				EscapeMarkdown(scope), strings.Join(names, ", "))})
+				EscapeMarkdown(scope), strings.Join(usageArgs(), ", "))})
 			return nil
 		}
-		for _, u := range usageRanges {
-			if u.arg == scope {
-				head = "📊 **Usage: " + strings.ToLower(u.label) + "**"
-			}
-		}
+		head = "📊 **Usage: " + obs.UsageRangeHead(scope) + " · all chats**"
 	}
 	sessionID := ""
 	if session != nil {
@@ -1145,6 +1151,10 @@ func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 			r.Rich += "\n\n" + tail
 			r.Text += "\n" + tail
 		}
+	}
+	if !c.interactive() {
+		// The CLI shows no buttons, so the last line names the ranges.
+		r.Text += "\nRanges: /usage " + strings.Join(usageArgs(), "|")
 	}
 	c.send(r)
 	return nil

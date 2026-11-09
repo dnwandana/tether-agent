@@ -263,7 +263,7 @@ func TestUsageCommand(t *testing.T) {
 		sessions.MessageMeta{Model: "z-ai/glm-4.7", Provider: "openrouter", CostUSD: 0.07})
 
 	run(t, c, "/usage")
-	for _, want := range []string{"📊 **Usage: today**\n", "glm-4.7", "188k", "z-ai/glm-4.7", "$0.07", "tok/s"} {
+	for _, want := range []string{"📊 **Usage: today · all chats**\n", "glm-4.7", "188k", "z-ai/glm-4.7", "$0.07", "tok/s"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatal(want, "\n", out)
 		}
@@ -276,9 +276,12 @@ func TestUsageCommand(t *testing.T) {
 	if strings.Contains(out.String(), "z-ai") || !strings.Contains(out.String(), "glm-4.7") || !strings.Contains(out.String(), "Compactions: 0") {
 		t.Fatal(out)
 	}
+	if !strings.HasSuffix(out.String(), "\nCompactions: 0\nRanges: /usage today|7d|30d|all|session\n") {
+		t.Fatal(out)
+	}
 	out.Reset()
 	run(t, c, "/usage 1y")
-	if out.String() != "⚠️ **Unknown range: 1y**\nThe ranges are: today, 7d, 30d, session.\n" {
+	if out.String() != "⚠️ **Unknown range: 1y**\nThe ranges are: today, 7d, 30d, all, session.\n" {
 		t.Fatal(out)
 	}
 }
@@ -308,12 +311,13 @@ func seedUsage(t *testing.T, c *CommandCtx) []obs.UsageRow {
 	return rows
 }
 
-// wantUsageButtons returns the range buttons of /usage with a check mark on the button at i.
+// wantUsageButtons returns the two rows of range buttons of /usage with a check mark on the
+// button at i. The index counts across both rows.
 func wantUsageButtons(i int) [][]Button {
-	row := []Button{{Text: "Today", Data: "/usage today"}, {Text: "7 days", Data: "/usage 7d"},
-		{Text: "30 days", Data: "/usage 30d"}, {Text: "Session", Data: "/usage session"}}
-	row[i].Text = "✓ " + row[i].Text
-	return [][]Button{row}
+	all := []Button{{Text: "Today", Data: "/usage today"}, {Text: "7 days", Data: "/usage 7d"},
+		{Text: "30 days", Data: "/usage 30d"}, {Text: "All", Data: "/usage all"}, {Text: "Session", Data: "/usage session"}}
+	all[i].Text = "✓ " + all[i].Text
+	return [][]Button{all[:3], all[3:]}
 }
 
 func TestUsageCommandRichReply(t *testing.T) {
@@ -321,10 +325,10 @@ func TestUsageCommandRichReply(t *testing.T) {
 	rows := seedUsage(t, c)
 	run(t, c, "/usage")
 	r := lastSent(t, sent)
-	if want := "📊 **Usage: today**\n\n" + obs.FormatUsageMarkdown(rows); r.Rich != want {
+	if want := "📊 **Usage: today · all chats**\n\n" + obs.FormatUsageMarkdown(rows); r.Rich != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", r.Rich, want)
 	}
-	if want := "📊 **Usage: today**\n```\n" + obs.FormatUsageNarrow(rows) + "\n```"; r.Text != want {
+	if want := "📊 **Usage: today · all chats**\n```\n" + obs.FormatUsageNarrow(rows) + "\n```"; r.Text != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", r.Text, want)
 	}
 	if !reflect.DeepEqual(r.Buttons, wantUsageButtons(0)) || r.Edit {
@@ -332,12 +336,17 @@ func TestUsageCommandRichReply(t *testing.T) {
 	}
 	run(t, c, "/usage 7d")
 	r = lastSent(t, sent)
-	if !strings.HasPrefix(r.Rich, "📊 **Usage: 7 days**\n\n| Model |") || !strings.HasPrefix(r.Text, "📊 **Usage: 7 days**\n```\n") ||
+	if !strings.HasPrefix(r.Rich, "📊 **Usage: 7 days · all chats**\n\n| Model |") || !strings.HasPrefix(r.Text, "📊 **Usage: 7 days · all chats**\n```\n") ||
 		!r.Edit || !reflect.DeepEqual(r.Buttons, wantUsageButtons(1)) {
 		t.Fatalf("%+v", r)
 	}
 	run(t, c, "/usage 30d")
-	if r := lastSent(t, sent); !strings.HasPrefix(r.Text, "📊 **Usage: 30 days**\n") || !reflect.DeepEqual(r.Buttons, wantUsageButtons(2)) {
+	if r := lastSent(t, sent); !strings.HasPrefix(r.Text, "📊 **Usage: 30 days · all chats**\n") || !reflect.DeepEqual(r.Buttons, wantUsageButtons(2)) {
+		t.Fatalf("%+v", r)
+	}
+	run(t, c, "/usage all")
+	if r := lastSent(t, sent); !strings.HasPrefix(r.Rich, "📊 **Usage: all time · all chats**\n\n| Model |") ||
+		!strings.HasPrefix(r.Text, "📊 **Usage: all time · all chats**\n```\n") || !reflect.DeepEqual(r.Buttons, wantUsageButtons(3)) {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -348,14 +357,14 @@ func TestUsageCommandSessionReply(t *testing.T) {
 	rows := seedUsage(t, c)
 	run(t, c, "/usage session")
 	r := lastSent(t, sent)
-	head := "📊 **Usage: \"my\\_trip\"**"
+	head := "📊 **Usage: this session, \"my\\_trip\"**"
 	if want := head + "\n\n" + obs.FormatUsageMarkdown(rows) + "\n\nCompactions: 0"; r.Rich != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", r.Rich, want)
 	}
 	if want := head + "\n```\n" + obs.FormatUsageNarrow(rows) + "\n```\nCompactions: 0"; r.Text != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", r.Text, want)
 	}
-	if !reflect.DeepEqual(r.Buttons, wantUsageButtons(3)) || !r.Edit {
+	if !reflect.DeepEqual(r.Buttons, wantUsageButtons(4)) || !r.Edit {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -365,10 +374,10 @@ func TestUsageCommandSessionEmpty(t *testing.T) {
 	c.Session = titled(t, c, "Plan the Bali trip", 0)
 	run(t, c, "/usage session")
 	r := lastSent(t, sent)
-	if r.Text != "📊 **Usage: \"Plan the Bali trip\"**\nNo model calls yet. 0 compactions." || r.Rich != "" {
+	if r.Text != "📊 **Usage: this session, \"Plan the Bali trip\"**\nNo model calls yet. 0 compactions." || r.Rich != "" {
 		t.Fatalf("%+v", r)
 	}
-	if !reflect.DeepEqual(r.Buttons, wantUsageButtons(3)) {
+	if !reflect.DeepEqual(r.Buttons, wantUsageButtons(4)) {
 		t.Fatalf("%+v", r.Buttons)
 	}
 }
@@ -377,7 +386,7 @@ func TestUsageCommandRangeEmpty(t *testing.T) {
 	c, sent := interactiveCtx(t)
 	run(t, c, "/usage")
 	r := lastSent(t, sent)
-	if r.Text != "📊 **Usage: today**\nNo model calls in this range." || r.Rich != "" || !reflect.DeepEqual(r.Buttons, wantUsageButtons(0)) {
+	if r.Text != "📊 **Usage: today · all chats**\nNo model calls in this range." || r.Rich != "" || !reflect.DeepEqual(r.Buttons, wantUsageButtons(0)) {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -386,7 +395,30 @@ func TestUsageCommandCLIKeepsWideTable(t *testing.T) {
 	c, out := cmdCtxDB(t, "cli:t")
 	rows := seedUsage(t, c)
 	run(t, c, "/usage")
-	if want := "📊 **Usage: today**\n" + obs.FormatUsage(rows) + "\n"; out.String() != want || !strings.Contains(want, "tok/s") {
+	if want := "📊 **Usage: today · all chats**\n" + obs.FormatUsage(rows) + "\nRanges: /usage today|7d|30d|all|session\n"; out.String() != want || !strings.Contains(want, "tok/s") {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// The ranges of /usage, without session, must be the ranges of obs, so that a new range goes
+// into both lists.
+func TestUsageRangesMatchObs(t *testing.T) {
+	var args []string
+	for _, u := range usageRanges {
+		if u.arg != "session" {
+			args = append(args, u.arg)
+		}
+	}
+	if !reflect.DeepEqual(args, obs.UsageRanges) {
+		t.Fatal(args, obs.UsageRanges)
+	}
+}
+
+func TestUsageCommandCLIRangesLine(t *testing.T) {
+	c, out := cmdCtxDB(t, "cli:t")
+	run(t, c, "/usage all")
+	want := "📊 **Usage: all time · all chats**\nNo model calls in this range.\nRanges: /usage today|7d|30d|all|session\n"
+	if out.String() != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
 	}
 }

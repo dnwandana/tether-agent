@@ -29,6 +29,9 @@ func TestTipsAreCopiedFromSpec(t *testing.T) {
 	if Tips[8] != "/archive hides a session from the list. /sessions archived shows the hidden sessions again." {
 		t.Fatal(Tips[8])
 	}
+	if Tips[17] != "Send /usage all to see the tokens, the cache use, and the cost of all chats since the start." {
+		t.Fatal(Tips[17])
+	}
 	if Tips[19] != "Run `tether update` in a terminal to install the newest release." {
 		t.Fatal(Tips[19])
 	}

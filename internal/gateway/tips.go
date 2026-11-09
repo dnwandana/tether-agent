@@ -26,7 +26,7 @@ var Tips = []string{
 	"Ask \"what do you remember about me?\" to see what the agent keeps in its memory.",
 	"The agent can search your old sessions. Ask \"what did we decide about the trip?\".",
 	"Ask the agent to \"save this as a skill\". It can use the skill again later.",
-	"Run `tether usage` in a terminal to see the cost of all chats.",
+	"Send /usage all to see the tokens, the cache use, and the cost of all chats since the start.",
 	"Run `tether doctor` in a terminal to check your setup.",
 	"Run `tether update` in a terminal to install the newest release.",
 }
