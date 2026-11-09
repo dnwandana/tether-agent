@@ -70,6 +70,8 @@ type VisionTool struct {
 	Client *http.Client
 	// MaxBytes limits the image size. Zero or less means 10 MB.
 	MaxBytes int64
+	// Record records the usage of each completed vision call. Nil records nothing.
+	Record provider.RecordUsage
 }
 
 type visionArgs struct {
@@ -141,27 +143,40 @@ func (t VisionTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (str
 	if q == "" {
 		q = defaultVisionQuestion
 	}
-	return askVision(ctx, t.Prov, img, q)
+	res, err := askVision(ctx, t.Prov, img, q)
+	if res != nil && t.Record != nil {
+		sessionID := ""
+		if env != nil {
+			sessionID = env.SessionID
+		}
+		t.Record(ctx, sessionID, "vision", t.Prov, *res)
+	}
+	if err != nil {
+		return "", err
+	}
+	return res.Text, nil
 }
 
-// askVision sends one user message with the question and the image to prov and returns
-// the answer text. An empty answer is an error.
-func askVision(ctx context.Context, prov provider.Provider, img provider.Image, q string) (string, error) {
+// askVision sends one user message with the question and the image to prov. It returns
+// the result whenever Collect completes, also with an empty answer, because the provider
+// billed the call. The result is nil when Stream or Collect fails. An empty answer is an
+// error.
+func askVision(ctx context.Context, prov provider.Provider, img provider.Image, q string) (*provider.Result, error) {
 	ch, err := prov.Stream(ctx, provider.Request{
 		Messages:   []provider.Message{{Role: provider.RoleUser, Content: q, Images: []provider.Image{img}}},
 		NeedVision: true,
 	})
 	if err != nil {
-		return "", toolErr("the vision model %s failed: %v", prov.Name(), err)
+		return nil, toolErr("the vision model %s failed: %v", prov.Name(), err)
 	}
 	res, err := provider.Collect(ch, nil)
 	if err != nil {
-		return "", toolErr("the vision model %s failed: %v", prov.Name(), err)
+		return nil, toolErr("the vision model %s failed: %v", prov.Name(), err)
 	}
 	if strings.TrimSpace(res.Text) == "" {
-		return "", toolErr("the vision model %s gave an empty answer", prov.Name())
+		return &res, toolErr("the vision model %s gave an empty answer", prov.Name())
 	}
-	return res.Text, nil
+	return &res, nil
 }
 
 // loadFile reads an image file.
@@ -244,8 +259,9 @@ func LoadImageFile(path string, maxBytes int64) (provider.Image, error) {
 
 // DescribeImage sends the image file at path and the prompt to the vision provider prov and
 // returns the trimmed answer. The file must be an image of 10 MB or less. An empty answer is
-// an error. The Telegram inbox uses it to describe a sticker.
-func DescribeImage(ctx context.Context, prov provider.Provider, path, prompt string) (string, error) {
+// an error. The Telegram inbox uses it to describe a sticker. A record that is not nil gets
+// the usage of the call with no session and the task "sticker".
+func DescribeImage(ctx context.Context, prov provider.Provider, path, prompt string, record provider.RecordUsage) (string, error) {
 	if prov == nil {
 		return "", errors.New("no vision model is configured")
 	}
@@ -253,9 +269,12 @@ func DescribeImage(ctx context.Context, prov provider.Provider, path, prompt str
 	if err != nil {
 		return "", errors.New(errorText("view_image", err))
 	}
-	out, err := askVision(ctx, prov, img, prompt)
+	res, err := askVision(ctx, prov, img, prompt)
+	if res != nil && record != nil {
+		record(ctx, "", "sticker", prov, *res)
+	}
 	if err != nil {
 		return "", errors.New(errorText("view_image", err))
 	}
-	return strings.TrimSpace(out), nil
+	return strings.TrimSpace(res.Text), nil
 }

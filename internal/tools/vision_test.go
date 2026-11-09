@@ -3,6 +3,8 @@ package tools
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -24,6 +26,7 @@ import (
 // records the requests.
 type recordingProvider struct {
 	name, reply string
+	usage       provider.Usage
 
 	mu       sync.Mutex
 	requests []provider.Request
@@ -37,7 +40,7 @@ func (p *recordingProvider) Stream(_ context.Context, req provider.Request) (<-c
 	p.mu.Unlock()
 	ch := make(chan provider.Event, 2)
 	ch <- provider.Event{Type: provider.EventText, Delta: p.reply}
-	ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop", Usage: &provider.Usage{}}
+	ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop", Usage: &p.usage}
 	close(ch)
 	return ch, nil
 }
@@ -173,7 +176,7 @@ func TestImagesFromMarkers(t *testing.T) {
 
 func TestDescribeImage(t *testing.T) {
 	fp := recording("  A duck waves.  ")
-	out, err := DescribeImage(ctx, fp, pngFile(t), "Describe this sticker.")
+	out, err := DescribeImage(ctx, fp, pngFile(t), "Describe this sticker.", nil)
 	if err != nil || out != "A duck waves." || len(fp.requests) != 1 {
 		t.Fatalf("%q %v", out, err)
 	}
@@ -181,12 +184,128 @@ func TestDescribeImage(t *testing.T) {
 	if m.Content != "Describe this sticker." || len(m.Images) != 1 || m.Images[0].MIME != "image/png" {
 		t.Fatalf("%+v", m)
 	}
-	if _, err := DescribeImage(ctx, recording(" "), pngFile(t), "q"); err == nil {
+	if _, err := DescribeImage(ctx, recording(" "), pngFile(t), "q", nil); err == nil {
 		t.Fatal("an empty answer must be an error")
 	}
 	txt := filepath.Join(t.TempDir(), "a.txt")
 	_ = os.WriteFile(txt, []byte("hello"), 0o600)
-	if _, err := DescribeImage(ctx, recording("x"), txt, "q"); err == nil {
+	if _, err := DescribeImage(ctx, recording("x"), txt, "q", nil); err == nil {
 		t.Fatal("a text file is not an image")
+	}
+}
+
+// usageCall is one call of a provider.RecordUsage.
+type usageCall struct {
+	sessionID, task string
+	prov            provider.Provider
+	out             provider.Result
+}
+
+// recorder returns a provider.RecordUsage that appends each call to calls.
+func recorder(calls *[]usageCall) provider.RecordUsage {
+	var mu sync.Mutex
+	return func(_ context.Context, sessionID, task string, prov provider.Provider, out provider.Result) {
+		mu.Lock()
+		defer mu.Unlock()
+		*calls = append(*calls, usageCall{sessionID, task, prov, out})
+	}
+}
+
+// failingVision fails in Stream, or in the stream when inStream is true.
+type failingVision struct{ inStream bool }
+
+func (failingVision) Name() string  { return "primary" }
+func (failingVision) Model() string { return "vision-model" }
+func (p failingVision) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	if !p.inStream {
+		return nil, errors.New("provider down")
+	}
+	ch := make(chan provider.Event, 1)
+	ch <- provider.Event{Type: provider.EventError, Err: errors.New("stream cut")}
+	close(ch)
+	return ch, nil
+}
+
+func TestViewImageRecordsUsage(t *testing.T) {
+	fp := recording("A red chart.")
+	// Collect fills the times only when they are 0, so the comparison below is exact.
+	fp.usage = provider.Usage{InputTokens: 1200, OutputTokens: 30, CacheReadTokens: 800, FirstTokenMS: 5, TotalMS: 9}
+	var calls []usageCall
+	env := newEnv(t)
+	env.SessionID = "s1"
+	out := runToolEnv(t, VisionTool{Prov: fp, Record: recorder(&calls)}, fmt.Sprintf(`{"path":%q}`, pngFile(t)), env)
+	if out != "A red chart." || len(calls) != 1 {
+		t.Fatalf("%q %d", out, len(calls))
+	}
+	c := calls[0]
+	if c.sessionID != "s1" || c.task != "vision" || c.prov != fp || c.out.Usage != fp.usage || c.out.Text != "A red chart." {
+		t.Fatalf("%+v", c)
+	}
+}
+
+// A billed call with an empty answer is recorded. The tool still returns an error.
+func TestViewImageRecordsEmptyAnswer(t *testing.T) {
+	var calls []usageCall
+	env := newEnv(t)
+	env.SessionID = "s1"
+	out := runToolEnvErr(t, VisionTool{Prov: recording(" "), Record: recorder(&calls)}, fmt.Sprintf(`{"path":%q}`, pngFile(t)), env)
+	if !strings.Contains(out, "empty answer") || len(calls) != 1 || calls[0].task != "vision" || calls[0].sessionID != "s1" {
+		t.Fatalf("%q %+v", out, calls)
+	}
+}
+
+func TestViewImageFailedCallRecordsNothing(t *testing.T) {
+	for _, p := range []failingVision{{inStream: false}, {inStream: true}} {
+		var calls []usageCall
+		runToolErr(t, VisionTool{Prov: p, Record: recorder(&calls)}, fmt.Sprintf(`{"path":%q}`, pngFile(t)))
+		if len(calls) != 0 {
+			t.Fatalf("inStream=%v: a failed call must record nothing: %+v", p.inStream, calls)
+		}
+	}
+	// A bad image makes no model call, so it records nothing.
+	var calls []usageCall
+	runToolErr(t, VisionTool{Prov: recording("x"), Record: recorder(&calls)}, `{"path":"/no/such/file.png"}`)
+	if len(calls) != 0 {
+		t.Fatal("a bad image must record nothing")
+	}
+}
+
+func TestViewImageNilEnvAndNilRecord(t *testing.T) {
+	var calls []usageCall
+	raw := json.RawMessage(fmt.Sprintf(`{"path":%q}`, pngFile(t)))
+	if _, err := (VisionTool{Prov: recording("ok"), Record: recorder(&calls)}).Run(ctx, raw, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 1 || calls[0].sessionID != "" || calls[0].task != "vision" {
+		t.Fatalf("a nil env gives an empty session ID: %+v", calls)
+	}
+	// A nil Record records nothing and does not panic.
+	if out, err := (VisionTool{Prov: recording("ok")}).Run(ctx, raw, newEnv(t)); err != nil || out != "ok" {
+		t.Fatal(out, err)
+	}
+}
+
+func TestDescribeImageRecordsSticker(t *testing.T) {
+	fp := recording("  A duck waves.  ")
+	fp.usage = provider.Usage{InputTokens: 700, OutputTokens: 9, FirstTokenMS: 5, TotalMS: 9}
+	var calls []usageCall
+	if out, err := DescribeImage(ctx, fp, pngFile(t), "Describe this sticker.", recorder(&calls)); err != nil || out != "A duck waves." {
+		t.Fatal(out, err)
+	}
+	if len(calls) != 1 || calls[0].sessionID != "" || calls[0].task != "sticker" || calls[0].prov != fp || calls[0].out.Usage != fp.usage {
+		t.Fatalf("%+v", calls)
+	}
+	// An empty answer is an error, but the billed call is recorded.
+	if _, err := DescribeImage(ctx, recording(" "), pngFile(t), "q", recorder(&calls)); err == nil || len(calls) != 2 || calls[1].task != "sticker" {
+		t.Fatal(err, calls)
+	}
+	// A failed call and a file that is not an image record nothing.
+	if _, err := DescribeImage(ctx, failingVision{}, pngFile(t), "q", recorder(&calls)); err == nil || len(calls) != 2 {
+		t.Fatal(err, calls)
+	}
+	txt := filepath.Join(t.TempDir(), "a.txt")
+	_ = os.WriteFile(txt, []byte("hello"), 0o600)
+	if _, err := DescribeImage(ctx, recording("x"), txt, "q", recorder(&calls)); err == nil || len(calls) != 2 {
+		t.Fatal(err, calls)
 	}
 }

@@ -142,6 +142,9 @@ type App struct {
 	telegramBaseURL string
 	// terminal is the registered terminal tool. The goal gates run through it.
 	terminal *tools.TerminalTool
+	// recordUsage records the usage of a model call outside a turn in an aux session. An
+	// error logs a warning and never fails the call.
+	recordUsage provider.RecordUsage
 	// gatewayRole is true when New got Options.Gateway.
 	gatewayRole bool
 	// cliWaker is the goal waker of the CLI that AttachCLI attached. It stays nil in the
@@ -233,10 +236,20 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 			a.Log.Warn("provider entry is not usable", "name", name, "reason", reason)
 		}
 	}
+	aux := &sessions.AuxLog{
+		Store: a.Store,
+		// a.Agent is nil here, so the closure reads it at call time.
+		Meta: func(p provider.Provider, o provider.Result) sessions.MessageMeta { return a.Agent.Meta(p, o) },
+	}
+	a.recordUsage = func(ctx context.Context, sessionID, task string, p provider.Provider, o provider.Result) {
+		if err := aux.Record(ctx, sessionID, task, p, o); err != nil {
+			a.Log.Warn("usage: cannot record the usage of the side call", "task", task, "session", sessionID, "err", err.Error())
+		}
+	}
 	a.Gate = security.NewGate(a.Cfg.Approvals, a.DB)
 	a.Gate.SudoPasswordSet = a.DotEnv["SUDO_PASSWORD"] != "" || os.Getenv("SUDO_PASSWORD") != ""
 	// The judge runs only in smart mode.
-	a.Gate.Judge = security.ProviderJudge{Prov: a.Prov}
+	a.Gate.Judge = security.ProviderJudge{Prov: a.Prov, Record: a.recordUsage}
 	a.Gate.Log = a.Log
 	a.Gate.InGateway = opts.Gateway
 	// CLI.Run attaches the prompt to the REPL input. With no CLI, a question gets no answer.
@@ -289,6 +302,8 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.Agent.Prompts = agent.NewPromptCache(a.Agent.SessionPrompt)
 	// A compaction starts a review of the part that the summary replaces.
 	a.Agent.Compactor.OnCompact = a.Agent.ReviewOnCompaction
+	// The compaction summary records its usage in an aux session.
+	a.Agent.Compactor.Record = a.recordUsage
 	// The chat type and the topic of a Telegram session go into its system prompt.
 	a.Agent.ChatInfo = telegram.ChatInfo(a.Cfg.Telegram, telegram.User{})
 	a.startACP(ctx, opts.Version)
@@ -502,12 +517,7 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 	}
 	ffmpeg, _ := exec.LookPath("ffmpeg")
 	// Static stickers go to the vision model. Nil Describe gives the fallback note.
-	var describe func(ctx context.Context, path, prompt string) (string, error)
-	if vp, ok := tools.VisionProvider(a.Cfg, a.Providers); ok {
-		describe = func(ctx context.Context, path, prompt string) (string, error) {
-			return tools.DescribeImage(ctx, vp, path, prompt)
-		}
-	}
+	describe := a.stickerDescriber()
 	ch := &telegram.Channel{
 		Cfg:  cfg,
 		C:    c,
@@ -556,6 +566,19 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 	}
 	a.Log.Info("telegram bot checked", "bot", me.Username)
 	return ch, nil
+}
+
+// stickerDescriber returns the function that describes a static sticker with the vision
+// model. The call has no session, so its usage goes to the aux session with no parent.
+// It returns nil when no vision provider exists.
+func (a *App) stickerDescriber() func(ctx context.Context, path, prompt string) (string, error) {
+	vp, ok := tools.VisionProvider(a.Cfg, a.Providers)
+	if !ok {
+		return nil
+	}
+	return func(ctx context.Context, path, prompt string) (string, error) {
+		return tools.DescribeImage(ctx, vp, path, prompt, a.recordUsage)
+	}
 }
 
 // cronChatIDs returns the Telegram chat ids of jobs. A deliver of "telegram:<chat>[:<thread>]"
@@ -768,7 +791,7 @@ func (a *App) registerTools(gatewayRole bool) {
 	})
 	// view_image exists only when a vision provider exists.
 	if vp, ok := tools.VisionProvider(cfg, a.Providers); ok {
-		a.RegisterTool(tools.VisionTool{Prov: vp, Client: a.WebClient, MaxBytes: 10 << 20})
+		a.RegisterTool(tools.VisionTool{Prov: vp, Client: a.WebClient, MaxBytes: 10 << 20, Record: a.recordUsage})
 	}
 	// execute_code needs python3. Without it, the tool is hidden and doctor reports it.
 	if python, err := exec.LookPath("python3"); err == nil {
