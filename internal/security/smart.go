@@ -39,11 +39,14 @@ Respond with exactly one line: "APPROVE: <short reason>" or "ESCALATE: <short re
 // gate then asks the user.
 type ProviderJudge struct {
 	Prov provider.Provider
+	// Record records the usage of each completed judge call. Nil records nothing.
+	Record provider.RecordUsage
 }
 
 // Judge returns risky=false only when the model gives an APPROVE verdict, for
-// example "APPROVE: <reason>". An error also returns risky=true.
-func (j ProviderJudge) Judge(ctx context.Context, command, description string) (bool, error) {
+// example "APPROVE: <reason>". An error also returns risky=true. After a
+// completed call, it records the usage with Record, also for an empty answer.
+func (j ProviderJudge) Judge(ctx context.Context, command, description, sessionID string) (bool, error) {
 	if j.Prov == nil {
 		return true, errors.New("smart approval: no provider is set")
 	}
@@ -60,7 +63,11 @@ func (j ProviderJudge) Judge(ctx context.Context, command, description string) (
 	if err != nil {
 		return true, fmt.Errorf("smart approval: model call failed: %w", err)
 	}
-	return !approves(res.Text), nil
+	risky := !approves(res.Text)
+	if j.Record != nil {
+		j.Record(ctx, sessionID, "approval", j.Prov, res)
+	}
+	return risky, nil
 }
 
 // approves reports whether the answer is an APPROVE verdict. The first line

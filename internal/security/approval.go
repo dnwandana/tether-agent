@@ -69,9 +69,10 @@ type Prompter interface {
 }
 
 // Judge decides if a dangerous command is risky. Smart mode asks the user
-// only about a risky command.
+// only about a risky command. sessionID is the session of the command. A judge
+// that makes a model call records the usage in that session.
 type Judge interface {
-	Judge(ctx context.Context, command, description string) (risky bool, err error)
+	Judge(ctx context.Context, command, description, sessionID string) (risky bool, err error)
 }
 
 // BlockedError tells the model why the gate did not let a command run.
@@ -172,7 +173,7 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 			pat.Description)
 	}
 	if g.Mode == "smart" && g.Judge != nil {
-		risky, err := g.Judge.Judge(ctx, req.Command, pat.Description)
+		risky, err := g.Judge.Judge(ctx, req.Command, pat.Description, req.SessionID)
 		if err != nil {
 			g.logf("approval: the smart judge failed, so the gate asks the user", "pattern", pat.ID, "err", err)
 		}

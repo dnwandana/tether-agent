@@ -16,16 +16,20 @@ import (
 // ctx is the context for the gate calls in the tests.
 var ctx = context.Background()
 
-// fixedJudge gives a fixed verdict.
+// fixedJudge gives a fixed verdict. It counts the calls in n and keeps the last session ID in session.
 type fixedJudge struct {
-	risky bool
-	err   error
-	n     *int
+	risky   bool
+	err     error
+	n       *int
+	session *string
 }
 
-func (j fixedJudge) Judge(context.Context, string, string) (bool, error) {
+func (j fixedJudge) Judge(_ context.Context, _, _, sessionID string) (bool, error) {
 	if j.n != nil {
 		*j.n++
+	}
+	if j.session != nil {
+		*j.session = sessionID
 	}
 	return j.risky, j.err
 }

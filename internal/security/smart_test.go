@@ -15,6 +15,7 @@ import (
 type judgeProvider struct {
 	reply string
 	err   error
+	usage provider.Usage
 
 	mu   sync.Mutex
 	last provider.Request
@@ -31,7 +32,7 @@ func (p *judgeProvider) Stream(ctx context.Context, req provider.Request) (<-cha
 	}
 	ch := make(chan provider.Event, 2)
 	ch <- provider.Event{Type: provider.EventText, Delta: p.reply}
-	ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop"}
+	ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop", Usage: &p.usage}
 	close(ch)
 	return ch, nil
 }
@@ -56,7 +57,7 @@ func (p *streamErrProvider) Stream(context.Context, provider.Request) (<-chan pr
 func TestJudgeLowRiskApproves(t *testing.T) {
 	prov := replyProvider("APPROVE: deleting a temp folder the agent created")
 	j := ProviderJudge{Prov: prov}
-	risky, err := j.Judge(ctx, "rm -rf /tmp/scrape-old", "recursive delete")
+	risky, err := j.Judge(ctx, "rm -rf /tmp/scrape-old", "recursive delete", "s1")
 	if err != nil || risky {
 		t.Fatal(risky, err)
 	}
@@ -74,7 +75,7 @@ func TestJudgeLowRiskApproves(t *testing.T) {
 }
 
 func TestJudgeHighRiskAsks(t *testing.T) {
-	risky, _ := ProviderJudge{Prov: replyProvider("ESCALATE: deletes user data")}.Judge(ctx, "rm -rf ~/projects", "recursive delete")
+	risky, _ := ProviderJudge{Prov: replyProvider("ESCALATE: deletes user data")}.Judge(ctx, "rm -rf ~/projects", "recursive delete", "s1")
 	if !risky {
 		t.Fatal()
 	}
@@ -95,7 +96,7 @@ func TestJudgeAnswerForms(t *testing.T) {
 		"APPROVE: ok\nESCALATE: wait":  true,
 		"ESCALATE: unsure\nAPPROVE: x": true,
 	} {
-		risky, err := ProviderJudge{Prov: replyProvider(reply)}.Judge(ctx, "x", "y")
+		risky, err := ProviderJudge{Prov: replyProvider(reply)}.Judge(ctx, "x", "y", "s1")
 		if err != nil || risky != want {
 			t.Fatalf("%q: risky=%v err=%v", reply, risky, err)
 		}
@@ -103,16 +104,16 @@ func TestJudgeAnswerForms(t *testing.T) {
 }
 
 func TestJudgeUnclearOrErrorEscalates(t *testing.T) {
-	if r, _ := (ProviderJudge{Prov: replyProvider("maybe")}).Judge(ctx, "x", "y"); !r {
+	if r, _ := (ProviderJudge{Prov: replyProvider("maybe")}).Judge(ctx, "x", "y", "s1"); !r {
 		t.Fatal("unclear → ask")
 	}
-	if r, _ := (ProviderJudge{Prov: errProvider()}).Judge(ctx, "x", "y"); !r {
+	if r, _ := (ProviderJudge{Prov: errProvider()}).Judge(ctx, "x", "y", "s1"); !r {
 		t.Fatal("error → ask")
 	}
-	if r, err := (ProviderJudge{Prov: &streamErrProvider{}}).Judge(ctx, "x", "y"); !r || err == nil {
+	if r, err := (ProviderJudge{Prov: &streamErrProvider{}}).Judge(ctx, "x", "y", "s1"); !r || err == nil {
 		t.Fatal("stream error → ask", err)
 	}
-	if r, err := (ProviderJudge{}).Judge(ctx, "x", "y"); !r || err == nil {
+	if r, err := (ProviderJudge{}).Judge(ctx, "x", "y", "s1"); !r || err == nil {
 		t.Fatal("no provider → ask", err)
 	}
 }
@@ -164,5 +165,80 @@ func TestGateSmartWithProviderJudge(t *testing.T) {
 	p := &countingPrompter{answer: ScopeDeny}
 	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "rm -rf /tmp/x"}, p); err != nil || p.n != 0 {
 		t.Fatal(err, p.n)
+	}
+}
+
+// usageCall is one call of a provider.RecordUsage.
+type usageCall struct {
+	sessionID, task string
+	prov            provider.Provider
+	out             provider.Result
+}
+
+// recorder returns a provider.RecordUsage that appends each call to calls.
+func recorder(calls *[]usageCall) provider.RecordUsage {
+	return func(_ context.Context, sessionID, task string, prov provider.Provider, out provider.Result) {
+		*calls = append(*calls, usageCall{sessionID, task, prov, out})
+	}
+}
+
+func TestJudgeRecordsUsage(t *testing.T) {
+	prov := replyProvider("APPROVE: temp files")
+	// Collect fills FirstTokenMS and TotalMS when they are 0, so the fake usage sets them.
+	prov.usage = provider.Usage{InputTokens: 900, OutputTokens: 12, CacheReadTokens: 300, FirstTokenMS: 5, TotalMS: 40}
+	var calls []usageCall
+	risky, err := ProviderJudge{Prov: prov, Record: recorder(&calls)}.Judge(ctx, "rm -rf /tmp/x", "recursive delete", "s1")
+	if err != nil || risky {
+		t.Fatal(risky, err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("%+v", calls)
+	}
+	c := calls[0]
+	if c.sessionID != "s1" || c.task != "approval" || c.prov != prov || c.out.Usage != prov.usage || c.out.Text != "APPROVE: temp files" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+// A billed call with an empty answer is recorded. The empty answer is risky.
+func TestJudgeRecordsEmptyAnswer(t *testing.T) {
+	var calls []usageCall
+	risky, err := ProviderJudge{Prov: replyProvider(""), Record: recorder(&calls)}.Judge(ctx, "x", "y", "s1")
+	if err != nil || !risky || len(calls) != 1 || calls[0].task != "approval" || calls[0].sessionID != "s1" {
+		t.Fatal(risky, err, calls)
+	}
+}
+
+func TestJudgeFailedCallRecordsNothing(t *testing.T) {
+	var calls []usageCall
+	for _, j := range []ProviderJudge{
+		{Prov: errProvider(), Record: recorder(&calls)},
+		{Prov: &streamErrProvider{}, Record: recorder(&calls)},
+		{Record: recorder(&calls)},
+	} {
+		if r, err := j.Judge(ctx, "x", "y", "s1"); !r || err == nil {
+			t.Fatal(r, err)
+		}
+	}
+	if len(calls) != 0 {
+		t.Fatalf("a failed call must record nothing: %+v", calls)
+	}
+}
+
+func TestJudgeNilRecord(t *testing.T) {
+	if r, err := (ProviderJudge{Prov: replyProvider("APPROVE")}).Judge(ctx, "x", "y", "s1"); r || err != nil {
+		t.Fatal(r, err)
+	}
+}
+
+func TestGateSmartPassesSessionID(t *testing.T) {
+	g := newGate(t, "smart", "deny")
+	var got string
+	g.Judge = fixedJudge{risky: false, session: &got}
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s-42", Command: "rm -rf /tmp/x"}, &countingPrompter{answer: ScopeDeny}); err != nil {
+		t.Fatal(err)
+	}
+	if got != "s-42" {
+		t.Fatalf("the judge got session %q", got)
 	}
 }
