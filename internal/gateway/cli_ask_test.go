@@ -300,3 +300,77 @@ func TestCLIPromptShowsHiddenRunesInCommand(t *testing.T) {
 		t.Fatalf("%q", s)
 	}
 }
+
+func TestCLIPromptNoAlways(t *testing.T) {
+	req := security.ApprovalRequest{Command: "go test ./...", Description: "claude-code wants to run a command",
+		Summary: "Run the tests", NoAlways: true}
+	const head = "⚠ Approval needed\n  Run the tests\n  Flagged: claude-code wants to run a command\n  go test ./...\n"
+	const p = "[o]nce / [s]ession / [d]eny: "
+	for _, c := range []struct {
+		in   string
+		want security.Scope
+		out  string
+	}{
+		{"o\n", security.ScopeOnce, head + p + "✅ Approval allowed · once\n"},
+		{"s\n", security.ScopeSession, head + p + "✅ Approval allowed · this session\n"},
+		{"d\n", security.ScopeDeny, head + p + "❌ Approval denied\n"},
+		{"a\ns\n", security.ScopeSession, head + p + "Type o, s, or d.\n" + p + "✅ Approval allowed · this session\n"},
+		{"always\nd\n", security.ScopeDeny, head + p + "Type o, s, or d.\n" + p + "❌ Approval denied\n"},
+		{"", security.ScopeDeny, head + p + "\n❌ Approval denied\n"},
+	} {
+		var out bytes.Buffer
+		ask := &CLIAsk{In: bufio.NewReader(strings.NewReader(c.in)), Out: &out}
+		got, err := ask.PromptApproval(context.Background(), req)
+		if got != c.want || err != nil {
+			t.Fatalf("%q: got %v %v, want %v", c.in, got, err, c.want)
+		}
+		if out.String() != c.out {
+			t.Fatalf("%q: got %q, want %q", c.in, out.String(), c.out)
+		}
+	}
+}
+
+func TestCLIPromptNoSession(t *testing.T) {
+	req := security.ApprovalRequest{Command: "1. Add the cache.\n2. Run the tests.",
+		Description: "claude-code wants to leave plan mode and start to code", Summary: "Ready to code?",
+		NoAlways: true, NoSession: true}
+	const head = "⚠ Approval needed\n  Ready to code?\n  Flagged: claude-code wants to leave plan mode and start to code\n" +
+		"  1. Add the cache.\n  2. Run the tests.\n"
+	const p = "[o]nce / [d]eny: "
+	for _, c := range []struct {
+		in   string
+		want security.Scope
+		out  string
+	}{
+		{"o\n", security.ScopeOnce, head + p + "✅ Approval allowed · once\n"},
+		{"d\n", security.ScopeDeny, head + p + "❌ Approval denied\n"},
+		{"s\na\no\n", security.ScopeOnce, head + p + "Type o or d.\n" + p + "Type o or d.\n" + p + "✅ Approval allowed · once\n"},
+	} {
+		var out bytes.Buffer
+		ask := &CLIAsk{In: bufio.NewReader(strings.NewReader(c.in)), Out: &out}
+		got, err := ask.PromptApproval(context.Background(), req)
+		if got != c.want || err != nil {
+			t.Fatalf("%q: got %v %v, want %v", c.in, got, err, c.want)
+		}
+		if out.String() != c.out {
+			t.Fatalf("%q: got %q, want %q", c.in, out.String(), c.out)
+		}
+	}
+	// NoSession wins also when NoAlways is false.
+	req.NoAlways = false
+	var out bytes.Buffer
+	ask := &CLIAsk{In: bufio.NewReader(strings.NewReader("a\nd\n")), Out: &out}
+	if got, _ := ask.PromptApproval(context.Background(), req); got != security.ScopeDeny ||
+		!strings.HasSuffix(out.String(), p+"Type o or d.\n"+p+"❌ Approval denied\n") {
+		t.Fatalf("got %v, %q", got, out.String())
+	}
+}
+
+func TestCLIPromptDefaultRetryLine(t *testing.T) {
+	var out bytes.Buffer
+	ask := &CLIAsk{In: bufio.NewReader(strings.NewReader("x\na\n")), Out: &out}
+	got, _ := ask.PromptApproval(context.Background(), security.ApprovalRequest{Command: "rm -rf /tmp/x", Description: "recursive delete"})
+	if got != security.ScopeAlways || !strings.Contains(out.String(), ApprovalPrompt+"Type o, s, a, or d.\n"+ApprovalPrompt) {
+		t.Fatalf("got %v, %q", got, out.String())
+	}
+}

@@ -22,6 +22,22 @@ func TestRestartReplies(t *testing.T) {
 		{RestartState{}, drain, "♻ **Restarting**\nThe gateway restarts now."},
 		{RestartState{}, 0, "♻ **Restarting**\nThe gateway restarts now."},
 		{RestartState{Already: true}, drain, "⏳ **Restart in progress**\nThe gateway already stops. Wait for it."},
+		{RestartState{Busy: 1, CodingTasks: []string{"claude-code"}}, drain,
+			"⏳ **Restarting**\n1 turn(s) still run. The gateway waits for them, for up to 3 min, and then restarts.\n" +
+				"A coding task of claude-code runs. It stops if it does not end in 3 min."},
+		{RestartState{Busy: 2, CodingTasks: []string{"claude-code", "codex"}}, drain,
+			"⏳ **Restarting**\n2 turn(s) still run. The gateway waits for them, for up to 3 min, and then restarts.\n" +
+				"A coding task of claude-code runs. It stops if it does not end in 3 min.\n" +
+				"A coding task of codex runs. It stops if it does not end in 3 min."},
+		// The agent id comes from the config, so it is escaped.
+		{RestartState{Busy: 1, CodingTasks: []string{"my_agent"}}, 90 * time.Second,
+			"⏳ **Restarting**\n1 turn(s) still run. The gateway waits for them, for up to 90 s, and then restarts.\n" +
+				"A coding task of my\\_agent runs. It stops if it does not end in 90 s."},
+		// With no drain, the turns stop now, so no line names a coding task.
+		{RestartState{Busy: 1, CodingTasks: []string{"claude-code"}}, 0,
+			"⏳ **Restarting**\n1 turn(s) still run. The gateway stops them now and restarts."},
+		// A coding task with no busy turn cannot wait for a drain.
+		{RestartState{CodingTasks: []string{"claude-code"}}, drain, "♻ **Restarting**\nThe gateway restarts now."},
 	} {
 		cc, sent := interactiveCtx(t)
 		var log []string

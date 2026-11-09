@@ -17,6 +17,33 @@ import (
 // ApprovalPrompt is the input prompt of the CLI approval question.
 const ApprovalPrompt = "[o]nce / [s]ession / [a]lways / [d]eny: "
 
+// The input prompts of a CLI approval question with fewer answers. A permission request of
+// a coding agent has no "always" answer, and some requests also have no "session" answer.
+const (
+	approvalPromptNoAlways  = "[o]nce / [s]ession / [d]eny: "
+	approvalPromptNoSession = "[o]nce / [d]eny: "
+)
+
+// The lines that ask again after an answer that the question does not permit.
+const (
+	cliRetry          = "Type o, s, a, or d."
+	cliRetryNoAlways  = "Type o, s, or d."
+	cliRetryNoSession = "Type o or d."
+)
+
+// approvalChoices returns the input prompt, the retry line, and the answers that req
+// permits. NoSession wins over NoAlways, the same rule as the Telegram keyboard.
+func approvalChoices(req security.ApprovalRequest) (prompt, retry string, session, always bool) {
+	switch {
+	case req.NoSession:
+		return approvalPromptNoSession, cliRetryNoSession, false, false
+	case req.NoAlways:
+		return approvalPromptNoAlways, cliRetryNoAlways, true, false
+	default:
+		return ApprovalPrompt, cliRetry, true, true
+	}
+}
+
 // The result lines of the CLI approval question. The Telegram headers have the same words.
 const (
 	cliAllowedOnce    = "✅ Approval allowed · once"
@@ -48,8 +75,9 @@ var (
 )
 
 // PromptApproval shows the summary, the reason for the flag, and the dangerous command,
-// and reads the answer. An unknown answer asks again. The end of the input denies the command. When ctx ends first, it returns
-// ScopeTimeout and ctx.Err().
+// and reads the answer. The permitted answers follow NoAlways and NoSession of req. An
+// unknown or not permitted answer asks again. The end of the input denies the command.
+// When ctx ends first, it returns ScopeTimeout and ctx.Err().
 func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalRequest) (security.Scope, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -60,8 +88,9 @@ func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalReques
 	if req.ChildName != "" {
 		fmt.Fprintf(out, "  (from subagent %s)\n", req.ChildName)
 	}
+	prompt, retry, session, always := approvalChoices(req)
 	for {
-		line, err := c.readLine(ctx, ApprovalPrompt)
+		line, err := c.readLine(ctx, prompt)
 		switch {
 		case ctx.Err() != nil:
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -79,16 +108,20 @@ func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalReques
 			fmt.Fprintln(out, cliAllowedOnce)
 			return security.ScopeOnce, nil
 		case "s", "session":
-			fmt.Fprintln(out, cliAllowedSession)
-			return security.ScopeSession, nil
+			if session {
+				fmt.Fprintln(out, cliAllowedSession)
+				return security.ScopeSession, nil
+			}
 		case "a", "always":
-			fmt.Fprintln(out, cliAllowedAlways)
-			return security.ScopeAlways, nil
+			if always {
+				fmt.Fprintln(out, cliAllowedAlways)
+				return security.ScopeAlways, nil
+			}
 		case "d", "deny":
 			fmt.Fprintln(out, cliDenied)
 			return security.ScopeDeny, nil
 		}
-		fmt.Fprintln(out, "Type o, s, a, or d.")
+		fmt.Fprintln(out, retry)
 	}
 }
 

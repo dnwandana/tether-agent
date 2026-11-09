@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -10,6 +11,8 @@ import (
 type RestartState struct {
 	// Busy is the number of turns that still run.
 	Busy int
+	// CodingTasks holds the agent ids of the running acp_delegate calls, one id for each call.
+	CodingTasks []string
 	// Already is true when a stop is in progress. The request then starts no new one.
 	Already bool
 }
@@ -52,8 +55,15 @@ func restartReply(st RestartState, drain time.Duration) string {
 	case st.Busy > 0 && drain <= 0:
 		return fmt.Sprintf("⏳ **Restarting**\n%d turn(s) still run. The gateway stops them now and restarts.", st.Busy)
 	case st.Busy > 0:
-		return fmt.Sprintf("⏳ **Restarting**\n%d turn(s) still run. The gateway waits for them, for up to %s, and then restarts.",
+		var b strings.Builder
+		fmt.Fprintf(&b, "⏳ **Restarting**\n%d turn(s) still run. The gateway waits for them, for up to %s, and then restarts.",
 			st.Busy, FormatDrain(drain))
+		// A coding task often runs longer than the drain, so tell the user that it can stop.
+		for _, id := range st.CodingTasks {
+			fmt.Fprintf(&b, "\nA coding task of %s runs. It stops if it does not end in %s.",
+				EscapeMarkdown(id), FormatDrain(drain))
+		}
+		return b.String()
 	}
 	return "♻ **Restarting**\nThe gateway restarts now."
 }
