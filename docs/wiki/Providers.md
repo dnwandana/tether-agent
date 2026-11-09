@@ -573,8 +573,11 @@ pricing:
 A plan entry, for example a Coding Plan, gets the API price. The key `flat_rate` does not exist
 any more. `tether doctor` warns when an entry still has it.
 
-To see the usage, run `tether usage [today|7d|30d]`, or send `/usage [today|7d|30d|session]`. A
-model with no known price shows `–`. A total with an unknown price ends with `+`.
+To see the usage, run `tether usage [today|7d|30d|all]`, or send
+`/usage [today|7d|30d|all|session]`. A range counts all chats. A total with an unknown price
+ends with `+`. A model with no known price, or with no input and so no hit rate, shows an
+empty cell. The Telegram tables show an empty cell as `–`. The terminal table (`tether usage`,
+and `/usage` in `tether chat`) shows it as `—`.
 
 ## Context window and token count
 

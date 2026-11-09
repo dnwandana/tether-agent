@@ -518,6 +518,7 @@ A session is one conversation. Each session has a kind:
 | `subagent` | One `delegate_task` child run. |
 | `review` | One background review. |
 | `goal_judge` | The judge calls and the draft calls of one goal. |
+| `aux` | The usage of the side calls of one session. See [Cost tracking](#cost-tracking). |
 
 A **session key** names the place where a conversation occurs. Each key points to its current
 session. Examples of keys:
@@ -529,7 +530,7 @@ session. Examples of keys:
 `/new` starts a new session on the same key. `/sessions`, `/resume`, and `/fork` move between
 sessions. See [Commands](Commands).
 
-The gateway deletes `cron`, `subagent`, `review`, and `goal_judge` sessions after
+The gateway deletes `cron`, `subagent`, `review`, `goal_judge`, and `aux` sessions after
 `sessions.retention_days` (default 90). Chat sessions always stay.
 
 ## Compaction
@@ -603,6 +604,10 @@ The agent saves usage data with each assistant message:
 - the model and the provider entry that answered
 - the cost in USD
 
+The input tokens are the input that did not come from the cache. A cache write is part of
+them. The "In" column of `/usage` shows the input tokens plus the cache read tokens. The
+cache hit rate is `cache_read ÷ (input + cache_read)`, as a whole percent, rounded down.
+
 The agent calculates the cost when it saves the message. It does not calculate it again later.
 The cost is empty only when the price is not known. A plan entry, for example the Z.AI Coding
 Plan, also gets the API price.
@@ -619,12 +624,35 @@ download does not block a turn.
 
 To see the usage, use one of these commands:
 
-- `tether usage [today|7d|30d]` in a terminal.
-- `/usage [today|7d|30d|session]` in a chat.
+- `tether usage [today|7d|30d|all]` in a terminal.
+- `/usage [today|7d|30d|all|session]` in a chat.
+
+A range counts all chats and all groups. `all` counts all stored usage. `session` counts
+the current session and its hidden child sessions at each depth: the `delegate_task`
+children, the reviews, the goal judge, and the side calls.
 
 Each goal judge call and each `/goal draft` call is saved in a hidden `goal_judge` session.
-`/usage` and `tether usage` count it. `/usage session` counts the judge calls of the
-session.
+
+Some model calls run outside a turn. These are the side calls:
+
+| Side call | Task name |
+|---|---|
+| The compaction summary | `compaction` |
+| The `view_image` tool | `vision` |
+| The description of a Telegram sticker | `sticker` |
+| The smart approval judge | `approval` |
+
+Each side call writes one assistant row into a hidden `aux` session. The `aux` session is a
+child of the session of the call. The row keeps the token counts, the model, the provider
+entry, and the cost. Its text is the task name. It keeps no prompt and no answer. A call
+with an empty answer also counts, because the provider billed it. A sticker description
+has no session, so it goes to one `aux` session with no parent. The ranges count it, but
+`/usage session` does not.
+
+`/fork` copies the messages of a session with their token counts and their old times.
+The usage report skips a copy: a row in a session of a visible kind that is older than its
+session. So each model call counts one time. `/usage session` on a fork counts only the
+calls after the fork.
 
 ## Heavy parts start late
 

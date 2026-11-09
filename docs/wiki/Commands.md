@@ -45,7 +45,7 @@ You can put flags after the positional arguments.
 | `sessions export <id>` | Writes one session as redacted JSONL. The default file is `<data dir>/exports/<id>.jsonl`. | `--out FILE` | `tether sessions export <id> --out chat.jsonl` |
 | `skills` | The subcommands are `list`, `install`, `uninstall`, `check`, `update`, and `reset`. See [Skills](Skills). | `--available`, `--skill`, `--ref`, `--yes`, `--force` | `tether skills install openai/skills --skill playwright` |
 | `pairing` | The subcommands are `list`, `approve`, and `revoke`. See [Telegram](Telegram#pairing). | | `tether pairing approve K7Q2MXRP` |
-| `usage [today\|7d\|30d]` | Shows the calls, the tokens, the speed, and the cost of each model. The default range is `today`. The cost comes from the price that Tether Agent stored with each call. | | `tether usage 7d` |
+| `usage [today\|7d\|30d\|all]` | Shows the calls, the tokens, the cached input tokens, the cache hit rate, the speed, and the cost of each model. A line under the table shows the total cache and hit rate. A range counts all chats and all groups. The default range is `today`. `all` shows all stored usage. The cost comes from the price that Tether Agent stored with each call. | | `tether usage 7d` |
 | `backup` | Writes a backup archive of the data dir. | `--out PATH` or `--out -` | `tether backup` |
 | `restore FILE` | Restores a backup archive. `-` reads from stdin. | `--yes` | `tether restore --yes backup.tar.gz` |
 | `update` | Installs the latest release over the binary. | `--check`, `--tag vX.Y.Z`, `--force`, `--restart`, `--no-restart` | `tether update --check` |
@@ -75,7 +75,7 @@ task runs.
 | `/fork` | `[title]` | Copies the session and changes to the copy. An active goal of the current session pauses. | `↩️ Back to "<title>"` | no |
 | `/compact` | | Summarizes the older messages now. | | no |
 | `/reload-mcp` | | Reloads the MCP servers. The next request does not use the prompt cache. | | no |
-| `/usage` | `[today\|7d\|30d\|session]` | Shows the tokens and the cost for each model. The default range is `today`. `session` also shows the number of compactions. `session` also counts the goal judge calls of the session. | Today, 7 days, 30 days, Session | yes |
+| `/usage` | `[today\|7d\|30d\|all\|session]` | Shows the tokens, the cached input tokens, the cache hit rate, and the cost for each model. The default range is `today`. A range counts all chats and all groups, and the header says "all chats". `all` shows all stored usage. `session` counts the current session and its subagents, reviews, goal judge calls, and side calls (compaction, `view_image`, and smart approval). A fork counts only the calls after the fork. `session` also shows the number of compactions. In the terminal, the last line shows the ranges. | Today, 7 days, and 30 days in the first row. All and Session in the second row. | yes |
 | `/help` | `[skills]` | Shows the main commands and the first 10 skill commands. `/help skills` shows all skill commands. | | yes |
 | `/stop` | `[keep]` | Stops the task. `keep` keeps the waiting messages. It also pauses an active goal. | | yes |
 | `/steer` | `<text>` | Adds guidance to the running task. | ⚡ Do this now | yes |
