@@ -75,6 +75,7 @@ To restart the gateway, send `/restart` in a chat, or run `systemctl --user relo
 | `cron` | Parallel cron jobs and the rule for missed runs. |
 | `telegram` | The bot: who can use it, group rules, home chat, streaming, and status lines. |
 | `mcp` | The MCP servers. |
+| `acp` | Coding agents for the `acp_delegate` tool: the adapter programs, the permission presets, and the folders where they can work. |
 | `media` | The backends of text to speech, speech to text, and image generation. |
 | `pricing` | The price data sources and manual prices. |
 | `log` | The log level and the log file rotation. |
@@ -227,6 +228,35 @@ mcp:
 
 The tools of this server have the names `mcp_github_<tool>`. The server starts at the first call
 and stops when it is idle. See [Tools](Tools#mcp-servers).
+
+### Give coding tasks to Claude Code
+
+Install the adapter, and log in to `claude` one time as the user that runs `tether`. Then
+add this block:
+
+```yaml
+acp:
+  enabled: true
+  workdir_allowlist: [~/projects]
+  agents:
+    claude-code:
+      command: [/home/me/.nvm/versions/node/v24.22.2/bin/claude-agent-acp]
+```
+
+The model can then call `acp_delegate` with a task and a folder in `~/projects`. Each
+permission request of Claude Code comes to you as an approval message.
+
+- `claude-code` and `codex` are built-in agents. An entry with no value turns on the agent
+  with the defaults.
+- On a host with nvm, set `command` to the absolute path of the adapter. The `tether`
+  service does not have the `PATH` of your shell.
+- `permission_preset` is `auto` by default. Use `all` or `risky` for more approval prompts.
+- Do not put an API key in `env`. The load fails, because the adapter must use the login of
+  the host user.
+
+The full list of keys is in
+[docs/CONFIG.md](https://github.com/dnwandana/tether-agent/blob/main/docs/CONFIG.md#acp).
+See [Security](Security#coding-agents) for the limits of a coding agent.
 
 ### Set a price manually
 

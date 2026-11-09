@@ -46,10 +46,23 @@ The doctor runs the checks in this order:
 8. **systemd unit**: a warning when the unit file is from an older release. The doctor
    shows this line only when a unit file exists.
 9. **mcp** (one line for each server): the server starts and lists its tools.
-10. **disk**: a warning when less than 1 GiB is free.
-11. **release**: a warning when a newer release exists or when the check cannot go online.
+10. **acp** (only when `acp.enabled` is `true`): the doctor starts each enabled coding agent
+    and stops it again. These lines show for each agent, for example `acp claude-code command`:
+    - **command**: the adapter program exists.
+    - **path**: a warning when the program comes from the `PATH` of your shell. The service does
+      not have that `PATH`, so set an absolute command.
+    - **node**: for a Node script, the Node version. A version before 22 is a failure.
+    - **handshake**: the adapter starts and gives its protocol version and agent version. A
+      warning tells you when the version is not `version_pin`.
+    - **session**: a test session starts. `not logged in` is a failure.
 
-When the config does not load, the doctor skips the provider, telegram, and mcp checks.
+    The lines of an agent stop at the first failure. The **acp allowlist** line gives a warning
+    when `acp.workdir_allowlist` is empty. The **acp agents** line gives a warning when no agent
+    is enabled.
+11. **disk**: a warning when less than 1 GiB is free.
+12. **release**: a warning when a newer release exists or when the check cannot go online.
+
+When the config does not load, the doctor skips the provider, telegram, mcp, and acp checks.
 
 The doctor does not need the gateway lock, so you can run it while the gateway runs. It masks
 the secrets in its output.
@@ -174,6 +187,35 @@ prompt only after the prompt is made again. A memory note never loads into the p
 **Fix:** send `/new`, or wait for the next compaction of the session. In the current
 session, ask the agent to search its memory. The `search` action of the `memory` tool
 finds a new entry at once.
+
+### `acp: <agent> is not logged in`
+
+The full text is
+`acp: <agent> is not logged in. Run "claude" on the host once and sign in, then send the task again.`
+
+**Cause:** the coding agent has no login for the user that runs Tether Agent. The adapter
+gets no API key from Tether Agent, so it uses the login of the host user.
+
+**Fix:**
+
+1. Run `claude` once on the host, as the user that runs Tether Agent.
+2. Sign in.
+3. Send the task again.
+
+The stored ACP session stays, so the next call continues it.
+
+### `acp: cannot start <agent>`
+
+The full text is `acp: cannot start <agent>: <cause>. Run tether doctor.`
+
+**Cause:** the adapter program is not installed, the command is wrong, or the adapter stops
+before the handshake.
+
+**Fix:**
+
+1. Install the adapter, for example `@agentclientprotocol/claude-agent-acp` for
+   `claude-code` or `codex-acp` for `codex`. Or set `acp.agents.<agent>.command`.
+2. Run `tether doctor`. The **acp** lines show the step that fails.
 
 ## Provider problems
 

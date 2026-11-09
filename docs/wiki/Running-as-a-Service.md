@@ -159,6 +159,15 @@ update to a new version, the home chat gets a message with the old and the new v
 
 `SIGINT` and `SIGTERM` stop the gateway with the same drain steps.
 
+A coding task of `acp_delegate` often takes longer than the drain. The reply to `/restart` names
+each running coding task, for example:
+
+`A coding task of claude-code runs. It stops if it does not end in 3 min.`
+
+After the drain, the gateway cancels the task and stops the coding agent. The files that the
+coding agent changed stay. The next `acp_delegate` call in the same session continues the
+context of the coding agent.
+
 ## Update
 
 `tether update` replaces the binary with the latest release.
@@ -192,6 +201,9 @@ When a gateway runs, the new binary is not active until the gateway restarts:
 - With no unit file, it tells you to stop the gateway and start it again.
 - Without a terminal, it prints the restart command.
 - `--restart` and `--no-restart` give the answer before the question.
+
+The restart after an update uses the same drain. A running coding task stops when the drain
+ends. Wait for the task to end before you restart, if you want its result.
 
 > **Note:** if the agent runs `tether update` from inside the gateway, the command cannot
 > restart the gateway. Send `/restart` in the chat after the update.

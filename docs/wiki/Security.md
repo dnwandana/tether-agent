@@ -16,6 +16,7 @@ repository gives the full rule lists.
 | Layer | What it protects |
 |---|---|
 | [The approval gate](#the-approval-gate) | Asks you before a dangerous shell command runs. |
+| [Coding agents](#coding-agents) | Asks you before a coding agent of `acp_delegate` acts. |
 | [Protected paths](#protected-paths) | Keeps the agent away from its own config, secrets, and database. |
 | [Secrets](#secrets) | Keeps API keys out of child processes, logs, and the model input. |
 | [Provider keys](#provider-keys) | Sends each API key only to its own host, and keeps it out of errors, exports, and backups. |
@@ -100,6 +101,10 @@ the CLI shows the pattern name and one line of the command.
 
 When a child agent asks, the question also shows `(from subagent N)`. Ctrl-D is a denial.
 
+A permission request of a coding agent has no `always` answer. The prompt is
+`[o]nce / [s]ession / [d]eny:`. A request with no session answer shows `[o]nce / [d]eny:`.
+See [Coding agents](#coding-agents).
+
 The command shows each control or format character as a mark, for example `<U+202E>`. A line
 break and a tab stay. Such a character can hide a part of the command or change its order on the
 screen.
@@ -114,6 +119,10 @@ one, the reason for the flag, and the command. The message has four buttons:
 - ✅ Always allow
 - ❌ Deny
 
+A permission request of a coding agent has three buttons: ✅ Allow once, ✅ Allow in this
+session, and ❌ Deny. A request with no session answer has two buttons: ✅ Allow once and
+❌ Deny.
+
 After your answer or after the timeout, the bot edits the message. It shows the result, for
 example "✅ **Approval allowed** · this session", the summary, and the command in a closed quote.
 Tap the quote to see the full command. Like the CLI, the message shows each control or format
@@ -127,6 +136,69 @@ You can also answer with a typed command:
 - Add `all` to answer all pending commands, for example `/approve all` or `/deny all`.
 
 These commands also work while a turn waits for the answer.
+
+On a coding agent request, `/approve always` gives `session`. When the request has no session
+answer, it gives `once`.
+
+## Coding agents
+
+The `acp_delegate` tool gives a coding task to an external coding agent, for example Claude
+Code or Codex. The coding agent runs as an adapter process on the host, as the same user as
+Tether Agent. Only a chat session can call the tool. A cron job and a child agent cannot call
+it. Refer to [Tools](Tools#coding-agents).
+
+### Approvals of a coding agent
+
+Each permission request of the coding agent comes to you as an approval message. The
+dangerous rules, `approvals.mode`, smart mode, and `approvals.cron_mode` do not apply. Also
+with `approvals.mode: off`, Tether Agent asks you.
+
+| Answer | Effect |
+|---|---|
+| `once` | Permits this request only. |
+| `session` | Permits the same kind of action in the same ACP session. For a command, the rule also holds the program name. |
+| `deny` | Refuses the action. |
+
+There is no `always` answer. Tether Agent never selects an "always" option of the coding agent,
+so the agent does not write a durable rule into its own settings.
+
+These rules apply to `session`:
+
+- For an edit, a read, a fetch, or another kind that is not a command, `session` permits all
+  requests of that kind in the same ACP session.
+- For a command, `session` on `go test ./...` also permits `go build`, but not `rm`.
+- `/new`, `/reset`, and `/delete` remove the `session` answers.
+
+These requests have no session answer. They ask each time:
+
+- a compound command: a command with `&`, `|`, `;`, `$(`, a backtick, `<`, `>`, or a new line
+- a wrapper program, for example `sudo`, `env`, `bash`, `xargs`, `nohup`, or `timeout`
+- a program name with shell syntax, for example a quoted name or `$SHELL`
+- a program word with a `/`, for example `./ls` or `/usr/bin/go`
+- a command that starts with a `NAME=value` word, for example `LD_PRELOAD=...` or `PATH=...`
+- a command request with no command text
+- a request to leave plan mode
+
+No answer in `approvals.timeout_s` refuses the action. `/stop` cancels the open requests. The
+[security model](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#coding-agents-acp)
+gives the full list of wrapper programs.
+
+### The limits of a coding agent
+
+- **The preset sets what the agent asks.** `acp.agents.<name>.permission_preset` sets the mode
+  of the coding agent. From strict to loose, the presets are `all`, `risky`, `auto`, and
+  `folder`. With `folder`, the agent asks for nothing. The model can choose a stricter preset,
+  but not a looser one. When the agent reports another mode after the change, and that mode is
+  not stricter, the task does not start.
+- **The work folder is not a sandbox.** The task must use a folder inside
+  `acp.workdir_allowlist`. An empty allowlist refuses each call. The coding agent itself can
+  still write outside the folder.
+- **The adapter gets no secrets.** The adapter process gets the child environment, so the
+  coding agent uses the login of the host user. Tether Agent never reads, stores, or sends a
+  login token of the coding agent.
+- **A process can stay alive.** A stop ends the process group of the adapter. A program that
+  the coding agent starts with `setsid` leaves the group. Under `tether chat` with no systemd,
+  such a program can stay alive after Tether Agent stops.
 
 ## Protected paths
 
@@ -171,6 +243,7 @@ These child processes get an environment with no secrets:
 - MCP stdio servers
 - media commands
 - goal gates
+- ACP adapter processes (`acp_delegate`)
 
 A name is a secret when one of these is true:
 
@@ -184,6 +257,8 @@ These names pass through to the child:
 - the `required_environment_variables` of a skill that the session loaded, except the bot token
   and the provider keys of Tether Agent
 - the `env` block of an MCP server, for that server only
+- the `env` block of an ACP agent entry (`acp.agents.<name>.env`), for that adapter only. A
+  secret name in this block is a config error.
 
 ### Redaction
 
@@ -201,8 +276,8 @@ and in the text that goes to the model.
 `tether backup` writes one archive with the mode 0600. These rules keep the secrets out of it:
 
 - The archive never contains `.env` or `.history`.
-- A literal key in `providers.<name>.api_key`, `telegram.bot_token`, or an MCP `env` or
-  `headers` block becomes a `${NAME}` reference.
+- A literal key in `providers.<name>.api_key`, `telegram.bot_token`, an MCP `env` or
+  `headers` block, or an `acp.agents.<name>.env` block becomes a `${NAME}` reference.
 - The backup masks each known secret value in the messages, the stored reasoning,
   the memory files and the memory notes, the skills, and the scripts.
 - `tether restore` lists the variables that `.env` must contain. The list has each `${NAME}` of
@@ -278,6 +353,8 @@ itself. Refer to [Skills](Skills#the-skill-guard).
   scripts, and the agent cannot write there without an approval.
 - **Goal gates run with no approval prompt.** You write each gate with `/goal gate add`. The
   gate is checked once when you add it.
+- **A coding agent can write outside its work folder.** Its permission preset sets which actions
+  it asks for. See [Coding agents](#coding-agents).
 
 ## Recommended settings for a VPS
 

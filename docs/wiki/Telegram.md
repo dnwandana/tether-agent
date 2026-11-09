@@ -234,6 +234,8 @@ a short preview of its main argument, for example the command or the search quer
 💻 terminal: "ls -la"
 🔍 web_search: "go 1.26 release notes" (×2)
 🔀 [1/3] web_fetch "https://example.com"
+🤖 acp_delegate: "Fix the flaky cron test"
+🔀 [claude-code] edit "internal/cron/scheduler.go"
 ```
 
 The status lines have these rules:
@@ -242,6 +244,9 @@ The status lines have these rules:
 - In the default mode, each tool has one line. A new call of the same tool replaces the
   preview with its own preview and adds the count `(×N)`.
 - A line that starts with `🔀 [i/n]` comes from a subagent. Each subagent has its own lines.
+- A line that starts with `🔀 [<agent>]`, for example `🔀 [claude-code]`, comes from a coding
+  agent of `acp_delegate`. The line shows the kind and the title of one tool call of the coding
+  agent. See [Coding agents](Tools#coding-agents).
 - The bot edits the status message a maximum of one time every 1.5 seconds.
 - After a streamed answer, the next tool line starts a new status message below the answer.
 - A status message that gets too long continues in a new message.
@@ -366,11 +371,24 @@ agent gives one, the reason for the flag, the command, and these buttons:
 No answer in 10 minutes counts as a denial. `approvals.timeout_s` sets this time. After the answer
 or the timeout, the message shows the result, the summary, and the command in a closed quote.
 
+A permission request of a coding agent (`acp_delegate`) has no **Always allow** button. It shows
+these buttons:
+
+- ✅ Allow once
+- ✅ Allow in this session
+- ❌ Deny
+
+A request with no session answer shows only ✅ Allow once and ❌ Deny. An example is a compound
+command. See [Security](Security#coding-agents) for the full rule.
+
 You can also answer with a command:
 
 - `/approve`, `/approve session`, or `/approve always`
 - `/deny`
 - Add `all` to answer all the waiting approvals.
+
+On a coding agent request, `/approve always` gives `session`, or `once` when the request has no
+session answer.
 
 These commands do not go through the gateway queue, so they work also while a task waits for
 the approval. See [Security](Security) for the approval rules.

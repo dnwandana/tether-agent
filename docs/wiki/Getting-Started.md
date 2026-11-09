@@ -485,6 +485,7 @@ changes a different `state.db`.
 | `.env` | The secrets. The mode must be 0600. |
 | `state.db` | The SQLite database: sessions, messages, usage, cron jobs, pairing, and approvals. |
 | `gateway.lock` | The lock and the process id of the running gateway. |
+| `acp/locks/` | One lock file for each session and coding agent of `acp_delegate`. Two Tether Agent processes cannot use the same coding agent session at the same time. |
 | `logs/tether.log` | The log of `chat` and `gateway`. |
 | `memory/memory.md` | The facts that the agent keeps. |
 | `memory/user_profile.md` | The facts about you that the agent keeps. |

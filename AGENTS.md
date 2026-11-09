@@ -33,7 +33,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   `sessions`, `pairing`, `usage`, `backup`, `restore`, `update`, `version`, `help`, and the
   hidden `gen-tools-doc`.
 - `internal/app` is the composition root. `app.New` builds config, DB, providers, tools, MCP,
-  and the agent. Only `Options.Gateway` builds the cron scheduler and the background
+  and the agent. When `acp.enabled` is true, it also builds the ACP manager (`acp.Manager`) and
+  its idle reaper, but it starts no adapter process. Only `Options.Gateway` builds the cron scheduler and the background
   `delegate_task` batches. Only the gateway role polls Telegram.
 - Message flow:
   1. `telegram.Channel` or `gateway.CLI` receives the message.
@@ -44,7 +45,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
      check, the gates, and the judge. On `continue`, the gateway adds a continuation turn to
      the end of the queue. The CLI runs it at once.
   5. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool and the script text
-     of `execute_code` go through `security.Gate.Check` (the approval gate).
+     of `execute_code` go through `security.Gate.Check` (the approval gate). The permission
+     requests of the coding agent of `acp_delegate` go through `security.Gate.AskACP`.
   6. `provider` streams the answer (`openai`, `anthropic`, or `responses` wire format). Each
      model call goes through a `provider.Chain` from `provider.Set.ChainFor`. The chain order
      is the pinned entry, `primary`, and then `agent.fallback`. The chain goes to the next
@@ -57,9 +59,11 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
 - Import rules: `tools` cannot import `agent` (`tools.ChildSpecLite` mirrors
   `agent.ChildSpec`), and `gateway` cannot import `app` (`app` builds `gateway.Deps`).
   `goals` cannot import `gateway`, `agent`, or `app`. `app` gives it the provider, cost, and
-  batch functions.
-- The browser, MCP servers, and media programs start on the first call and stop when idle.
-  `app.New` must not do network work, because `TestStartupUnder100ms` measures startup. For
+  batch functions. `internal/acp` imports only `config`, `security`, `db`, the SDK
+  `github.com/coder/acp-go-sdk`, and the standard library. `tools` reaches it through the
+  `tools.ACPDelegator` interface.
+- The browser, MCP servers, media programs, and ACP adapters (`claude-agent-acp`,
+  `codex-acp`) start on the first call and stop when idle. `app.New` must not do network work, because `TestStartupUnder100ms` measures startup. For
   example, `provider.ModelCache` makes no call before the first `/model <entry>`.
 
 ## Rules that span files

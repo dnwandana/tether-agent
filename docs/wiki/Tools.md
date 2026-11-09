@@ -21,7 +21,7 @@ gives the default of each key on this page.
 | `memory` | Keep facts and memory notes, and search past sessions. | `memory`, `session_search` | None. |
 | `skills` | Use and write skills. | `skills_list`, `skill_view`, `skill_manage` | None. |
 | `cron` | Create and manage scheduled jobs. | `cronjob` | The gateway runs the jobs. |
-| `delegation` | Start child agents. | `delegate_task` | The gateway, for background batches. |
+| `delegation` | Start child agents, and give coding tasks to a coding agent. | `delegate_task`, `acp_delegate` | The gateway, for background batches. `acp_delegate` needs `acp.enabled`, an agent, and `acp.workdir_allowlist`. |
 | `code_execution` | Run a Python script that calls tools. | `execute_code` | `python3` in `PATH`. |
 | `media` | Make images, speech, and transcripts. | `generate_image`, `text_to_speech`, `transcribe_audio` | A backend in `media.*`. |
 | `todo` | Keep a task list for work with many steps. | `todo_list` | None. |
@@ -33,6 +33,7 @@ Some tools are not registered when their requirement is missing:
 
 - `view_image` needs `agent.vision_provider`, or `vision: true` on the primary provider.
 - `execute_code` needs `python3` in `PATH`.
+- `acp_delegate` needs `acp.enabled: true` and at least one enabled agent in `acp.agents`.
 - A media tool needs a backend. `generate_image` has no default backend.
 
 A browser tool stays registered without Chrome. A call then returns an error.
@@ -281,6 +282,7 @@ A child cannot call these tools:
 - `memory`
 - `execute_code`
 - `cronjob`
+- `acp_delegate`
 
 A child can only make its toolsets smaller than the toolsets of its parent.
 
@@ -289,6 +291,67 @@ A child can only make its toolsets smaller than the toolsets of its parent.
 In the gateway, `background: true` returns a batch id at once. The parent can continue its work.
 When the batch ends, the results come back as a new turn with the text
 `[Background delegation <id> finished]`. `/stop` cancels the children.
+
+### Coding agents
+
+`acp_delegate` gives a coding task to an external coding agent, for example Claude Code. The
+coding agent runs on the host as a separate process. Tether Agent talks to it over the Agent
+Client Protocol (ACP). The coding agent uses its own login. Tether Agent never sends it an API
+key.
+
+The tool has these arguments:
+
+| Argument | Required | Meaning |
+|---|---|---|
+| `agent` | yes | The id of an enabled agent in `acp.agents`. |
+| `task` | yes | The full task brief. The coding agent sees only this text and the files. |
+| `workdir` | yes, except in `tether chat` | The folder of the repository. It must be inside an entry of `acp.workdir_allowlist`. `tether chat` uses its current folder. |
+| `model` | no | A model that the agent offers. |
+| `permission_preset` | no | The config preset or a stricter one. |
+| `timeout_s` | no | The limit of this turn. At most `acp.turn_timeout_s`. |
+
+The permission preset sets what the coding agent asks before it acts. The presets, from strict
+to loose, are `all`, `risky`, `auto`, and `folder`. The default is `auto`. Each request of the
+coding agent comes to you as an approval with three buttons: "Allow once", "Allow in this
+session", and "Deny". A request with no session answer, for example a compound command, has
+two buttons: "Allow once" and "Deny". There is no "Always" button. No answer in
+`approvals.timeout_s` denies the request. Refer to [Security](Security#coding-agents).
+
+The status message shows the `acp_delegate` call as its own tool line. Below it, the status
+message shows one line for each tool call of the coding agent, for example:
+
+```text
+🤖 acp_delegate: "Fix the flaky cron test"
+🔀 [claude-code] edit "internal/acp/client.go"
+```
+
+The coding agent session belongs to the Tether session:
+
+- A later task in the same session continues the context of the coding agent, also after an
+  idle stop or a restart.
+- An error also keeps the context. Examples are a rejected `model`, a mode that the agent does
+  not offer, a login error, a crash, and `/stop` or the turn timeout during the setup.
+- When the agent reports another mode after the mode change, and that mode is not stricter,
+  the next task starts a new ACP session. When a task cannot continue the earlier ACP session,
+  the tool result says `the earlier context of the coding agent is lost`.
+- `/new`, `/reset`, and `/delete` close the coding agent session. The next task starts a new
+  one.
+- `/stop` cancels the running task. Open approvals then end.
+- `acp.max_sessions` limits the number of coding agent processes in each Tether process.
+
+A cron job and a `delegate_task` child cannot use `acp_delegate`.
+
+Set up the host before you turn on the tool:
+
+1. Install Node 22 or later.
+2. Run `npm i -g @agentclientprotocol/claude-agent-acp`. Do not use `--omit=optional`.
+3. Run `claude` once as the user that runs `tether`, and sign in.
+4. Set `acp.enabled`, `acp.workdir_allowlist`, and `acp.agents`. Refer to
+   [Configuration](Configuration).
+5. Run `tether doctor`. It starts each enabled agent once and shows the result.
+
+On a host with nvm, set `command` to the absolute path of the adapter. The `tether` service does
+not have the `PATH` of your shell.
 
 ## Code execution
 

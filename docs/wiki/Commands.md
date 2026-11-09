@@ -38,7 +38,7 @@ You can put flags after the positional arguments.
 | Command | Purpose | Flags | Example |
 |---|---|---|---|
 | `setup` | Runs the setup wizard in five steps: the primary provider (a preset or Custom), the fallback chain, Telegram, the host programs, and the systemd unit. See [Providers](Providers). | `--system` writes a system unit instead of a user unit. Under `sudo`, the data dir and its files belong to the user who called `sudo`. | `tether setup` |
-| `doctor` | Checks the config, `.env`, each provider entry, Telegram, `state.db`, the last answer, the host programs, the systemd unit, MCP, the disk, and the release. Exits with 1 if a check fails. | | `tether doctor` |
+| `doctor` | Checks the config, `.env`, each provider entry, Telegram, `state.db`, the last answer, the host programs, the systemd unit, MCP, the coding agents of `acp` (when `acp.enabled` is `true`), the disk, and the release. Exits with 1 if a check fails. | | `tether doctor` |
 | `chat` | Starts a chat in the terminal. | `--log-stderr`, `--log-level` | `tether chat` |
 | `gateway` | Runs Telegram and cron until it gets SIGINT or SIGTERM. | `--log-stderr`, `--log-level` | `tether gateway` |
 | `sessions list` | Shows the 50 newest sessions. | | `tether sessions list` |
@@ -63,12 +63,12 @@ task runs.
 
 | Command | Arguments | Effect | Telegram buttons | Busy |
 |---|---|---|---|---|
-| `/new`, `/reset` | | Stops the task, clears the queue, and starts a new session. The new session has no `/model` pin, no `/effort` level, and no `/prompt` text. Only `/fork` copies them. The reply shows the model and the context size. An active goal of the old session pauses. | | yes |
+| `/new`, `/reset` | | Stops the task, clears the queue, and starts a new session. The new session has no `/model` pin, no `/effort` level, and no `/prompt` text. Only `/fork` copies them. The reply shows the model and the context size. An active goal of the old session pauses. The coding agent sessions of the old session close. | | yes |
 | `/sessions` | `[page] [search]` or `archived` | Lists the sessions of this chat, 8 for each page. | A number button for each session. ◀ Prev and Next ▶. | yes |
 | `/resume` | `[<id>]` or `[page] [search]` | Changes to another session. With no ID, it shows the list. It also takes a session out of the archive. An active goal of the current session pauses. An active goal of the session that you change to continues. | Number buttons | no |
 | `/rename` | `<title>` | Changes the title of the session. With no argument, it shows the title. | | no |
 | `/archive` | | Hides the session from `/sessions`. An active goal of the current session pauses. | ↩️ Undo, 🆕 New session | no |
-| `/delete` | `[<id>] [confirm]` | Deletes a session after a confirmation. With no ID, it shows the list. It also deletes the goal of the session. | 🗑 Delete, Cancel | no |
+| `/delete` | `[<id>] [confirm]` | Deletes a session after a confirmation. With no ID, it shows the list. It also deletes the goal of the session and closes its coding agent sessions. | 🗑 Delete, Cancel | no |
 | `/model` | `[<provider>[:<model>]]`, `<provider> config`, `providers`, or `clear` | With no argument or with `providers`, it shows the provider entries and the model that answers now. `/model <provider>` shows the model list of the entry. A model from the list, `config`, or `<provider>:<model>` sets the model for this session. `clear` uses the primary provider again. | One button for each provider entry. The list has 8 model buttons for each page, ◀ Prev and Next ▶, ↩ Providers, and ↻ Refresh. After a change, ↺ Use the default. | no |
 | `/effort` | `[<level>]` or `default` | Sets the reasoning effort for this session. See [/model and /effort](#model-and-effort). | `default` and the seven levels. After a change, ↺ Use the default. | no |
 | `/prompt` | `set <text>`, `show`, or `clear` | Replaces the base prompt for this session only. | 🧹 Use the base prompt | no |
@@ -178,7 +178,9 @@ The source is "this session", "from config", or "provider default". For the `eff
 `/restart` exists only in the gateway. The gateway waits up to `agent.restart_drain_timeout_s`
 for the running turns, and then restarts. With the default config, a turn that the restart
 cuts continues after the restart. The chat that sent `/restart` gets "♻ The gateway
-restarted. Your session continues." See [Running as a Service](Running-as-a-Service).
+restarted. Your session continues." The reply also names each running coding task of
+`acp_delegate`: "A coding task of <agent> runs. It stops if it does not end in <drain>." See
+[Running as a Service](Running-as-a-Service).
 
 ### Commands for one channel or one role
 
@@ -186,7 +188,7 @@ restarted. Your session continues." See [Running as a Service](Running-as-a-Serv
 |---|---|---|
 | `/start` | Telegram only | Shows a welcome message with 📋 Sessions, 🧠 Model, and 📊 Usage buttons. |
 | `/sethome` | Telegram only | Makes this chat or topic the home channel for cron results. |
-| `/approve` | Telegram only | `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. |
+| `/approve` | Telegram only | `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. On a coding agent request, `always` gives `session`, or `once` when the request has no session answer. |
 | `/deny` | Telegram only | `[all]`. Denies the oldest waiting command, or all of them. |
 | `/restart` | Gateway only | `tether chat` does not have it. |
 | `/exit`, `/quit` | CLI only | Ends the chat. |
@@ -285,6 +287,8 @@ no steer.
 - Ctrl-C during a turn stops the turn. The CLI prints "⚡ Stopped. You can continue this
   session."
 - Ctrl-C at the prompt, Ctrl-D, `/exit`, or `/quit` ends the chat.
+- SIGTERM ends the chat. SIGHUP also ends it, for example when the terminal closes. Under
+  `nohup`, SIGHUP is ignored, and the chat continues.
 - Ctrl-C during a goal turn also pauses the goal. The CLI prints "⏸ Goal paused — turn was
   interrupted. Use /goal resume to continue, or /goal clear to stop."
 - A goal runs its turns one after the other, with no input between them.

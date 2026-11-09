@@ -5,7 +5,8 @@ Telegram, and from cron jobs. It runs shell commands, edits files, reads the web
 browser, keeps a memory, learns skills, and delegates work to subagents.
 
 The agent costs almost nothing when it is idle. Heavy parts start on the first call and stop
-when they are idle. These parts are the browser, the MCP servers, and the media programs.
+when they are idle. These parts are the browser, the MCP servers, the media programs, and the
+adapters of the coding agents.
 
 ## The main facts
 
@@ -31,6 +32,8 @@ when they are idle. These parts are the browser, the MCP servers, and the media 
 - Remember facts about you and your work between sessions.
 - Write, install, and use skills: folders of instructions that the agent loads when it needs them.
 - Send work to parallel subagents, also in the background.
+- Give coding tasks to Claude Code or Codex over the Agent Client Protocol (ACP). Each
+  permission request of the coding agent comes to you as an approval.
 - Use tools from MCP servers.
 - Make images, speak answers as voice notes, and transcribe your voice notes.
 

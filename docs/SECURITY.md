@@ -9,7 +9,8 @@ limits. Read the limits before you give the agent access to a machine that holds
 
 - Commands run on the host, as the user that runs Tether Agent. There is no container and no
   sandbox.
-- The approval gate checks shell commands only. It does not check the tools of MCP servers.
+- The approval gate checks shell commands and the permission requests of a coding agent
+  (`acp_delegate`). It does not check the tools of MCP servers.
 - The approval gate checks the full text of each `execute_code` script before the script runs. It
   finds a dangerous command that is written in the script as literal text. It cannot find a
   command that the script builds while it runs.
@@ -22,6 +23,9 @@ limits. Read the limits before you give the agent access to a machine that holds
   folder (see "Files that the bot sends"). Use strict mode for a bot that other people use.
 - The browser tools have no check for private addresses. All sessions share one Chrome profile.
   `browser_cookies` does not return the cookie values.
+- A coding agent of `acp_delegate` runs on the host as the same user. Its permission
+  preset sets which actions it asks for. Tether Agent does not stop a write outside the
+  work folder.
 
 ## Approval gate for commands
 
@@ -105,6 +109,9 @@ The user answers with one of these scopes:
   `approvals_always` table of `state.db`. The running agent never writes its own `config.yaml`.
 - `deny`: refuses the command. The model gets the result `BLOCKED by user: <pattern name>`.
 
+A permission request of a coding agent has no `always` answer. Some requests also have
+no `session` answer. See [Coding agents (ACP)](#coding-agents-acp).
+
 ### Goal gates
 
 A goal gate is a shell command that must pass before the goal judge runs. The owner adds a
@@ -134,6 +141,77 @@ After the add check, these rules apply:
   call with no `workdir`. Write `cd /path && <command>` for another folder.
 - The timeout is 300 seconds. A timeout and a cancel count as exit -1.
 - Only the owner can add a gate. Each paired user is an owner.
+
+## Coding agents (ACP)
+
+The `acp_delegate` tool gives a coding task to an external coding agent, for example
+Claude Code, over the Agent Client Protocol (ACP). The agent runs as an adapter process
+on the host, as the same user as Tether Agent. Only a chat session can call the tool. A
+cron job and a `delegate_task` child cannot call it.
+
+### Approvals
+
+Each permission request of the coding agent comes to you as an approval message. The
+danger rules, `approvals.mode`, smart mode, and `approvals.cron_mode` do not apply. Also
+with `approvals.mode: off`, Tether Agent asks you.
+
+- The answers are `once`, `session`, and `deny`. There is no `always` answer. Tether Agent
+  never selects an "always" option of the agent, so the agent does not write a durable
+  rule into its own settings.
+- `session` permits the same kind of action in the same ACP session of the coding agent.
+  For an edit, a read, a fetch, or another kind that is not a command, it permits all
+  requests of that kind. For a command, the rule also holds the program name. So `session`
+  on `go test ./...` also permits `go build`, but not `rm`.
+- These requests have no `session` answer. They ask each time.
+  - A compound command: a command with `&`, `|`, `;`, `$(`, a backtick, `<`, `>`, or a new
+    line. This includes `&&`, `||`, redirects, and process substitutions.
+  - A wrapper program: `sudo`, `env`, `sh`, `bash`, `zsh`, `dash`, `ksh`, `fish`, `csh`,
+    `tcsh`, `busybox`, `xargs`, `nohup`, `timeout`, `nice`, `exec`, `eval`, `command`,
+    `builtin`, `time`, `setsid`, `doas`, `su`, `runuser`, `pkexec`, `stdbuf`, `ionice`,
+    `chroot`, `unshare`, `nsenter`, `flock`, `watch`, `script`, `strace`, `taskset`, or
+    `chrt`.
+  - A program name with shell syntax, for example a quoted name or `$SHELL`.
+  - A program word with a `/`, for example `./ls` or `/usr/bin/go`. A path can point to any
+    file.
+  - A command that starts with a `NAME=value` word, for example `LD_PRELOAD=...` or
+    `PATH=...`. Such a word can change what the program runs.
+  - A command request with no command text.
+  - A request to leave plan mode.
+- No answer in `approvals.timeout_s` refuses the action. `/stop` cancels the open requests.
+- `/new`, `/reset`, and `/delete` remove the `session` answers.
+
+### Permission presets
+
+`acp.agents.<name>.permission_preset` sets the mode of the coding agent. The presets from
+strict to loose are `all`, `risky`, `auto`, and `folder`. With `folder`, the agent asks for
+nothing. The model can choose the config preset or a stricter one, but not a looser one. So
+a text in a repository cannot make the model turn off the approvals. Tether Agent sets the
+mode again before each task. When the agent reports another mode after the change, and that
+mode is not stricter, the task does not start. Tether Agent then does not use that ACP
+session again, and the next task starts a new one.
+
+### Work folders
+
+The coding agent works only in a folder inside `acp.workdir_allowlist`. Tether Agent
+resolves the symbolic links of the folder and of each allowlist entry before the check. An
+empty allowlist refuses each call. The agent itself can still write outside the folder. Its
+preset and its own checks apply there.
+
+### The adapter environment
+
+The adapter process gets the child environment, with no secrets. So `ANTHROPIC_API_KEY`
+and `CLAUDE_CODE_OAUTH_TOKEN` do not reach it, and the agent uses the login of the host
+user. The `env` block of the agent entry cannot hold a secret name. Tether Agent never
+reads, stores, or sends a login token of the coding agent.
+
+### Known limits
+
+- A stop sends SIGTERM and then SIGKILL to the process group of the adapter. A program that
+  the coding agent starts with `setsid` leaves the group. Under systemd, the stop of the
+  service ends it. Under `tether chat` with no systemd, it can stay alive after Tether
+  Agent stops.
+- A SIGKILL of the `tether` process leaves the adapter alive outside systemd.
+- Telegram can show the approval message of an action before the status line of that action.
 
 ## Toolsets
 
@@ -209,6 +287,7 @@ These child processes get an environment with no secrets:
 - MCP stdio servers
 - media commands
 - goal gates
+- ACP adapter processes (`acp_delegate`)
 
 A name is a secret when `.env` has it, or when it ends in `_KEY`, `_TOKEN`, or `_SECRET`. A name
 that contains `PASSWORD` is also a secret. The check ignores case.
@@ -222,6 +301,8 @@ These names pass through to the child:
   configured provider. The author of a skill is not the owner. To give one of these names to a
   child, put it in `terminal.env_passthrough`.
 - the `env` block of an MCP server entry, for that server only
+- the `env` block of an ACP agent entry, for that adapter only. A secret name in this block is a
+  config error.
 
 ### Redaction
 
@@ -283,7 +364,8 @@ back in the data folder.
 - `tether backup` writes the archive with mode 0600. The archive holds every message.
 - The archive never holds `.env` or `.history`.
 - The backup replaces a literal key in `providers.<p>.api_key`, `telegram.bot_token`,
-  `mcp.servers.<s>.env`, and `mcp.servers.<s>.headers` with a `${NAME}` reference.
+  `mcp.servers.<s>.env`, `mcp.servers.<s>.headers`, and `acp.agents.<a>.env` with a
+  `${NAME}` reference.
 - The backup masks each known secret value in the messages, the reasoning text of the
   messages, the memory files and the memory notes, the skills, and the scripts. The list of
   known values is the same list that the redactor uses.

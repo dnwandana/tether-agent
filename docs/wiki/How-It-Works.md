@@ -38,6 +38,7 @@ The code is in `internal/`. These are the main packages:
 | `memory` | The two memory files and the memory notes. |
 | `skills` | The skill loader, the skill install, and the skill guard. |
 | `security` | The approval gate, protected paths, and secret redaction. |
+| `acp` | The client of the coding agents of `acp_delegate` over the Agent Client Protocol: the adapter processes, the ACP sessions, and the permission requests. |
 
 Other packages are smaller: `browser`, `mcp`, `media`, `sessions`, `pricing`, `obs` (logs and
 usage), `db`, `backup`, `setup`, `update`, `hostos`, and `gatewaylock`.
@@ -493,7 +494,7 @@ Cron runs, child runs, and reviews do not start reviews.
   [fallback chain](#fallback-chain) rules.
 - The child gets a short, focused system prompt, not the prompt of the parent.
 - The child cannot call the tools in `agent.ChildBlockedTools`: `delegate_task`, `clarify`,
-  `memory`, `execute_code`, and `cronjob`. An orchestrator child can call `delegate_task` when the
+  `memory`, `execute_code`, `cronjob`, and `acp_delegate`. An orchestrator child can call `delegate_task` when the
   depth limit permits it.
 - The toolsets of the child can only be smaller than the toolsets of the parent.
 - `delegation.max_iterations` limits the rounds, and `delegation.child_timeout_s` limits the
@@ -572,6 +573,7 @@ in name order when the program opens the database:
 - `002_turn_markers.sql` adds the `turn_markers` table.
 - `003_reasoning_effort.sql` adds `messages.reasoning` and `sessions.effort`.
 - `004_goals.sql` adds the `goals` table and `turn_markers.in_step`.
+- `005_acp_sessions.sql` adds the `acp_sessions` table.
 
 Do not run a second query while the rows of a query are open. The database has one connection,
 so the second query waits for ever.
@@ -589,6 +591,7 @@ so the second query waits for ever.
 | `delegation_batches` | Background `delegate_task` batches. |
 | `turn_markers` | The running turns, so that a restart can continue them. |
 | `goals` | The goal of each session: the text, the status, the turns, the contract, the gates, and the wait. |
+| `acp_sessions` | The ACP session id of each session and coding agent, so that a later `acp_delegate` call can continue it. |
 | `kv` | Small values, for example the Telegram update offset and the home chat. |
 
 ## Cost tracking
@@ -633,6 +636,7 @@ and it stops them when they are idle:
 | Browser (Chrome) | At the first browser tool call. | After `browser.idle_close_minutes` (default 10). |
 | MCP server | At the first call to one of its tools. | After `idle_stop_minutes` (default 10). |
 | Media programs | At each call. | When the call ends. |
+| ACP adapter (`claude-agent-acp`, `codex-acp`) | At the first `acp_delegate` call. | After `acp.idle_timeout_s` (default 300 s). |
 
 At startup, the MCP tools come from a cache on disk, so most MCP servers do not start. Only a
 server with no cache file (once, to list its tools) and an `always_on` server start at

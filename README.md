@@ -2,11 +2,13 @@
 
 Tether Agent is a personal AI agent in one static Go binary. It works from the CLI, from
 Telegram, and from cron jobs. It has tools for the shell, files, the web, a browser, memory,
-skills, a task list, delegation, MCP servers, and media. With `/goal`, the agent keeps
+skills, a task list, delegation, MCP servers, and media. It can give coding tasks to Claude
+Code and Codex over the Agent Client Protocol (ACP). With `/goal`, the agent keeps
 working over several turns until a judge model says that the goal is done.
 
 The agent uses little CPU and RAM when it is idle. Heavy parts start on the first call and
-stop when they are idle. These parts are the browser, the MCP servers, and the media programs.
+stop when they are idle. These parts are the browser, the MCP servers, the media programs, and
+the adapters of the coding agents.
 
 The [wiki](https://github.com/dnwandana/tether-agent/wiki) has the full guide.
 
@@ -179,7 +181,8 @@ tether skills check
   toolsets.
 - An approval gate checks dangerous shell commands before they run. A goal gate is checked
   once, when you add it.
-- The browser, MCP servers, and media programs start on the first call and stop when idle.
+- The browser, MCP servers, media programs, and the adapters of the coding agents start on the
+  first call and stop when idle.
 
 ## Build from source
 
