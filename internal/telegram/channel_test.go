@@ -981,8 +981,8 @@ func TestJoinEventMakesNoTurn(t *testing.T) {
 	prov := &tgProv{}
 	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
 	var m Message
-	raw := `{"message_id":1,"from":{"id":5,"is_bot":false,"first_name":"Dana"},
-	 "chat":{"id":-1004488060068,"title":"Kuli Online","is_forum":true,"type":"supergroup"},
+	raw := `{"message_id":1,"from":{"id":5,"is_bot":false,"first_name":"Alice"},
+	 "chat":{"id":-1001234567890,"title":"Test Group","is_forum":true,"type":"supergroup"},
 	 "date":1793175153,"new_chat_members":[{"id":99,"is_bot":true,"first_name":"Tether Agent"}]}`
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		t.Fatal(err)
@@ -993,7 +993,7 @@ func TestJoinEventMakesNoTurn(t *testing.T) {
 	if prov.count() != 0 || h.api.count("sendMessage") != 0 {
 		t.Fatalf("turns %d, sent %q", prov.count(), h.sentTexts())
 	}
-	if s := h.session("telegram:group:-1004488060068:1"); s != nil {
+	if s := h.session("telegram:group:-1001234567890:1"); s != nil {
 		t.Fatalf("session %+v", s)
 	}
 }
@@ -1081,16 +1081,16 @@ func TestBotJoinAndRemovalLogged(t *testing.T) {
 	prov := &tgProv{}
 	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
 	buf := debugLog(h)
-	const chat = `"chat":{"id":-1004488060068,"title":"Kuli Online","is_forum":true,"type":"supergroup"}`
-	const from = `"from":{"id":1071241487,"first_name":"Dana"}`
+	const chat = `"chat":{"id":-1001234567890,"title":"Test Group","is_forum":true,"type":"supergroup"}`
+	const from = `"from":{"id":111111111,"first_name":"Alice"}`
 	h.update(serviceMsg(t, `{"message_id":1,`+from+`,`+chat+`,"new_chat_members":[{"id":99,"is_bot":true}]}`))
 	h.update(serviceMsg(t, `{"message_id":2,`+from+`,`+chat+`,"new_chat_members":[{"id":7,"first_name":"Rani"}]}`))
 	h.update(serviceMsg(t, `{"message_id":3,`+from+`,`+chat+`,"left_chat_member":{"id":99,"is_bot":true}}`))
 	h.waitIdle()
 	out := buf.String()
 	for _, want := range []string{
-		`"level":"INFO","msg":"telegram: the bot was added to a group","chat":"-1004488060068","title":"Kuli Online","by":"1071241487"`,
-		`"level":"INFO","msg":"telegram: the bot was removed from a group","chat":"-1004488060068","title":"Kuli Online","by":"1071241487"`,
+		`"level":"INFO","msg":"telegram: the bot was added to a group","chat":"-1001234567890","title":"Test Group","by":"111111111"`,
+		`"level":"INFO","msg":"telegram: the bot was removed from a group","chat":"-1001234567890","title":"Test Group","by":"111111111"`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %s in\n%s", want, out)
@@ -1101,15 +1101,15 @@ func TestBotJoinAndRemovalLogged(t *testing.T) {
 	}
 	// The sender is not an allowed user and the group is unknown: no reply, no pairing code,
 	// no session, no turn.
-	if prov.count() != 0 || h.api.count("sendMessage") != 0 || h.session("telegram:group:-1004488060068:1") != nil {
+	if prov.count() != 0 || h.api.count("sendMessage") != 0 || h.session("telegram:group:-1001234567890:1") != nil {
 		t.Fatalf("turns %d, sent %q", prov.count(), h.sentTexts())
 	}
 }
 
 func TestMigrationLogged(t *testing.T) {
-	const old, next = "-4488060068", "-1004488060068"
-	migrate := `{"message_id":4,"from":{"id":5,"first_name":"Dana"},"chat":{"id":-4488060068,"title":"Kuli","type":"group"},"migrate_to_chat_id":-1004488060068}`
-	from := `{"message_id":1,"from":{"id":5,"first_name":"Dana"},"chat":{"id":-1004488060068,"title":"Kuli","type":"supergroup"},"migrate_from_chat_id":-4488060068}`
+	const old, next = "-1234567890", "-1001234567890"
+	migrate := `{"message_id":4,"from":{"id":5,"first_name":"Alice"},"chat":{"id":-1234567890,"title":"Test Group","type":"group"},"migrate_to_chat_id":-1001234567890}`
+	from := `{"message_id":1,"from":{"id":5,"first_name":"Alice"},"chat":{"id":-1001234567890,"title":"Test Group","type":"supergroup"},"migrate_from_chat_id":-1234567890}`
 	all := "allowed_chats, free_response_chats, group_allowed_chats, home_chat, home channel, cron jobs"
 
 	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) {

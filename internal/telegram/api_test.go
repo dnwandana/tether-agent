@@ -480,15 +480,15 @@ func TestDecodeMediaFields(t *testing.T) {
 func TestAPIErrorMigratedChat(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: group chat was upgraded to a supergroup chat","parameters":{"migrate_to_chat_id":-1004488060068}}`)
+		_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"Bad Request: group chat was upgraded to a supergroup chat","parameters":{"migrate_to_chat_id":-1001234567890}}`)
 	}))
 	defer srv.Close()
-	_, err := (&Client{Token: "T", BaseURL: srv.URL, HC: srv.Client()}).SendMessage(ctx, SendMessageParams{ChatID: -4488060068, Text: "hi"})
+	_, err := (&Client{Token: "T", BaseURL: srv.URL, HC: srv.Client()}).SendMessage(ctx, SendMessageParams{ChatID: -1234567890, Text: "hi"})
 	var ae *APIError
-	if !errors.As(err, &ae) || ae.MigrateToChatID != -1004488060068 || ae.Code != 400 {
+	if !errors.As(err, &ae) || ae.MigrateToChatID != -1001234567890 || ae.Code != 400 {
 		t.Fatal(err)
 	}
-	want := "telegram sendMessage: telegram API error 400: the group chat moved to chat id -1004488060068. " +
+	want := "telegram sendMessage: telegram API error 400: the group chat moved to chat id -1001234567890. " +
 		"Put the new id in the config, then run /sethome in the new chat."
 	if err.Error() != want {
 		t.Fatalf("%q", err.Error())
