@@ -178,10 +178,11 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	}
 	dir := dataDir(*dataFlag)
 	// Ctrl-C does not end the chat here: the CLI handles it. During a turn it stops the
-	// turn, and at the prompt it ends the chat.
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	// turn, and at the prompt it ends the chat. SIGTERM and SIGHUP end the chat.
+	ctx, stop := notifyContext(context.Background(), chatSignals()...)
 	defer stop()
-	a, err := app.New(ctx, app.Options{DataDir: dir, LogStderr: *logStderr, LogLevel: *logLevel, LogWriter: stderr})
+	a, err := app.New(ctx, app.Options{DataDir: dir, LogStderr: *logStderr, LogLevel: *logLevel, LogWriter: stderr,
+		Version: version})
 	if err != nil {
 		fmt.Fprintf(stderr, "chat: %v\n", err)
 		return 1
@@ -227,6 +228,18 @@ const shutdownGrace = 5 * time.Second
 
 // notifyContext is signal.NotifyContext. Tests replace it.
 var notifyContext = signal.NotifyContext
+
+// chatSignals returns the signals that end tether chat. SIGHUP comes when the terminal
+// closes, for example at an SSH drop. The normal stop then runs App.Close, which stops the
+// coding agents. Under nohup, SIGHUP is ignored, and it stays out of the list:
+// signal.Notify turns off the ignore. Ctrl-C is not in the list, because the CLI handles it.
+func chatSignals() []os.Signal {
+	sigs := []os.Signal{syscall.SIGTERM}
+	if !signal.Ignored(syscall.SIGHUP) {
+		sigs = append(sigs, syscall.SIGHUP)
+	}
+	return sigs
+}
 
 // notifySignal is signal.Notify for SIGUSR1, the reload signal of the unit. Tests replace it.
 var notifySignal = signal.Notify
@@ -281,7 +294,7 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	defer signal.Stop(reload)
 	// Only the gateway role builds the cron scheduler and polls Telegram.
 	a, err := app.New(ctx, app.Options{DataDir: dir, LogStderr: *logStderr, LogLevel: *logLevel, LogWriter: stderr,
-		Gateway: true, TelegramBaseURL: telegramBaseURL})
+		Gateway: true, TelegramBaseURL: telegramBaseURL, Version: version})
 	if err != nil {
 		fmt.Fprintf(stderr, "gateway: %v\n", err)
 		return 1

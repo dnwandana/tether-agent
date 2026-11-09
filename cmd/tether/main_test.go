@@ -1674,3 +1674,49 @@ func TestGatewayReloadReturns75UnderSystemd(t *testing.T) {
 		t.Fatal("the test read a unit file of the host: ", string(b))
 	}
 }
+
+// An SSH drop sends SIGHUP to tether chat. The chat must then stop, so that App.Close stops
+// the coding agents. Ctrl-C stays with the CLI.
+func TestChatStopsOnHangup(t *testing.T) {
+	t.Setenv("TETHER_HOME", t.TempDir())
+	var got []os.Signal
+	notifyContext = func(parent context.Context, sigs ...os.Signal) (context.Context, context.CancelFunc) {
+		got = append(got, sigs...)
+		return context.WithCancel(parent)
+	}
+	t.Cleanup(func() { notifyContext = signal.NotifyContext })
+	stdin = strings.NewReader("")
+	t.Cleanup(func() { stdin = os.Stdin })
+	var out, errb bytes.Buffer
+	// The data dir has no config, so the chat ends after the signal setup.
+	run([]string{"chat", "--data-dir", t.TempDir()}, &out, &errb)
+	if !slices.Contains(got, os.Signal(syscall.SIGHUP)) || !slices.Contains(got, os.Signal(syscall.SIGTERM)) {
+		t.Fatalf("the chat must stop on SIGHUP and SIGTERM: %v", got)
+	}
+	if slices.Contains(got, os.Interrupt) {
+		t.Fatal("Ctrl-C belongs to the CLI: it stops a turn, and at the prompt it ends the chat")
+	}
+}
+
+// Under nohup, SIGHUP is ignored. The chat must not install a handler for it, because
+// signal.Notify turns off the ignore.
+func TestChatSignalsKeepIgnoredSIGHUP(t *testing.T) {
+	if !slices.Contains(chatSignals(), os.Signal(syscall.SIGHUP)) {
+		t.Fatal("SIGHUP must stop a chat at a terminal")
+	}
+	signal.Ignore(syscall.SIGHUP)
+	// signal.Reset does not clear the ignore, so signal.Ignored stays true and a later test
+	// of the same rule fails. signal.Notify clears it, and signal.Stop then removes the handler.
+	t.Cleanup(func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGHUP)
+		signal.Stop(c)
+		signal.Reset(syscall.SIGHUP)
+	})
+	if slices.Contains(chatSignals(), os.Signal(syscall.SIGHUP)) {
+		t.Fatal("an ignored SIGHUP must stay ignored")
+	}
+	if !slices.Contains(chatSignals(), os.Signal(syscall.SIGTERM)) {
+		t.Fatal("SIGTERM must always stop the chat")
+	}
+}
