@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/acp"
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/hostos"
@@ -698,5 +699,138 @@ func TestDoctorRunWarnsOldFlatRate(t *testing.T) {
 	}
 	if out := Format(checks); !strings.Contains(out, "⚠ config: providers.primary.flat_rate is removed.") {
 		t.Fatal(out)
+	}
+}
+
+// acpYAML is an acp block with one claude-code agent at an absolute command.
+const acpYAML = "acp:\n  enabled: true\n  workdir_allowlist: [/srv/projects]\n  agents:\n    claude-code:\n" +
+	"      command: [/opt/acp/bin/claude-agent-acp]\n      version_pin: \"0.101.0\"\n"
+
+// probeOK is the probe result of a working agent.
+var probeOK = acp.ProbeResult{Program: "/opt/acp/bin/claude-agent-acp", NodeVersion: "v22.3.0",
+	ProtocolVersion: 1, AgentVersion: "0.101.0", SessionOK: true}
+
+// acpDoctor returns a doctor over a data dir with the acp block and a stub probe.
+func acpDoctor(t *testing.T, block string, r acp.ProbeResult, err error) *Doctor {
+	t.Helper()
+	prov := okProvider(t)
+	dir := writeDataDir(t, prov.URL, block)
+	return &Doctor{DataDir: dir, ConfigPath: filepath.Join(dir, "config.yaml"), HC: prov.Client(), LookPath: allPrograms,
+		Getenv: func(string) string { return "" }, UnitPaths: []string{filepath.Join(dir, "no-unit.service")},
+		freeBytes: func(string) (uint64, error) { return 50 << 30, nil },
+		probeACP: func(context.Context, string, config.ACPAgent, map[string]string) (acp.ProbeResult, error) {
+			return r, err
+		}}
+}
+
+// hasCheck reports whether checks has a check with the name.
+func hasCheck(checks []Check, name string) bool {
+	for _, c := range checks {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestACPChecksOnlyWhenEnabled(t *testing.T) {
+	for _, block := range []string{"", "acp:\n  enabled: false\n  agents:\n    claude-code:\n      enabled: true\n"} {
+		d := acpDoctor(t, block, probeOK, nil)
+		d.probeACP = func(context.Context, string, config.ACPAgent, map[string]string) (acp.ProbeResult, error) {
+			t.Fatal("no probe when acp.enabled is false")
+			return acp.ProbeResult{}, nil
+		}
+		for _, c := range d.Run(ctx) {
+			if strings.HasPrefix(c.Name, "acp") {
+				t.Fatalf("%q: %+v", block, c)
+			}
+		}
+	}
+}
+
+func TestACPChecksAllGreen(t *testing.T) {
+	checks := acpDoctor(t, acpYAML, probeOK, nil).Run(ctx)
+	for name, detail := range map[string]string{
+		"acp claude-code command":   "/opt/acp/bin/claude-agent-acp",
+		"acp claude-code node":      "node v22.3.0",
+		"acp claude-code handshake": "protocol 1, agent version 0.101.0",
+		"acp claude-code session":   "session start ok (the login is checked at the first prompt)",
+		"acp allowlist":             "/srv/projects",
+	} {
+		if c := find(t, checks, name); c.Status != StatusOK || c.Detail != detail {
+			t.Errorf("%+v", c)
+		}
+	}
+	if hasCheck(checks, "acp claude-code path") {
+		t.Fatal("an absolute command needs no PATH warning")
+	}
+}
+
+func TestACPCheckProblems(t *testing.T) {
+	old := probeOK
+	old.NodeVersion = "v20.11.1"
+	other := probeOK
+	other.AgentVersion = "0.102.0"
+	noAllow := "acp:\n  enabled: true\n  agents:\n    claude-code:\n      command: [/opt/acp/bin/claude-agent-acp]\n"
+	for _, c := range []struct {
+		name, block string
+		r           acp.ProbeResult
+		err         error
+		check       string
+		status      string
+		next        string
+		absent      []string
+	}{
+		{"no program", acpYAML, acp.ProbeResult{}, errors.New("not found"), "acp claude-code command", StatusFail,
+			"install @agentclientprotocol/claude-agent-acp, or set acp.agents.claude-code.command",
+			[]string{"acp claude-code handshake", "acp claude-code session"}},
+		{"old node", acpYAML, old, nil, "acp claude-code node", StatusFail, "install Node 22 or later", nil},
+		{"no start", acpYAML, acp.ProbeResult{Program: probeOK.Program}, errors.New("acp: claude-code stopped: exit status 1"),
+			"acp claude-code handshake", StatusFail, "run the command of acp.agents.claude-code by hand to see its error",
+			[]string{"acp claude-code session"}},
+		{"version pin", acpYAML, other, nil, "acp claude-code handshake", StatusWarn,
+			"install version 0.101.0 of the adapter, or change acp.agents.claude-code.version_pin", nil},
+		{"not logged in", acpYAML,
+			acp.ProbeResult{Program: probeOK.Program, ProtocolVersion: 1, AgentVersion: "0.101.0", NotLoggedIn: true},
+			&acp.NotLoggedInError{Agent: "claude-code"}, "acp claude-code session", StatusFail,
+			"run claude once as the user that runs tether, and sign in", nil},
+		{"empty allowlist", noAllow, probeOK, nil, "acp allowlist", StatusWarn,
+			"add the folder of your projects to acp.workdir_allowlist", nil},
+		{"no agent", "acp:\n  enabled: true\n  workdir_allowlist: [/srv/projects]\n", probeOK, nil, "acp agents", StatusWarn,
+			"add an agent to acp.agents, for example claude-code", nil},
+	} {
+		checks := acpDoctor(t, c.block, c.r, c.err).Run(ctx)
+		got := find(t, checks, c.check)
+		if got.Status != c.status || got.Next != c.next {
+			t.Errorf("%s: %+v", c.name, got)
+		}
+		for _, n := range c.absent {
+			if hasCheck(checks, n) {
+				t.Errorf("%s: unexpected check %s", c.name, n)
+			}
+		}
+	}
+	nl := find(t, acpDoctor(t, acpYAML, acp.ProbeResult{Program: probeOK.Program, ProtocolVersion: 1, NotLoggedIn: true},
+		&acp.NotLoggedInError{Agent: "claude-code"}).Run(ctx), "acp claude-code session")
+	if nl.Detail != "not logged in" {
+		t.Fatal(nl)
+	}
+}
+
+// A bare command that the shell PATH finds under the home folder does not work in the service.
+func TestACPDaemonPathWarns(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	bare := "acp:\n  enabled: true\n  workdir_allowlist: [/srv/projects]\n  agents:\n    claude-code:\n" +
+		"      command: [claude-agent-acp]\n"
+	r := probeOK
+	r.Program = filepath.Join(home, ".nvm", "versions", "node", "v22.3.0", "bin", "claude-agent-acp")
+	c := find(t, acpDoctor(t, bare, r, nil).Run(ctx), "acp claude-code path")
+	if c.Status != StatusWarn || c.Next != "set an absolute command; the tether service does not have your shell PATH" {
+		t.Fatal(c)
+	}
+	r.Program = "/usr/local/bin/claude-agent-acp"
+	if hasCheck(acpDoctor(t, bare, r, nil).Run(ctx), "acp claude-code path") {
+		t.Fatal("a program outside the home folder needs no PATH warning")
 	}
 }

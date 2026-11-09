@@ -14,11 +14,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/acp"
 	"github.com/dnwandana/tether-agent/internal/app"
 	"github.com/dnwandana/tether-agent/internal/browser"
 	"github.com/dnwandana/tether-agent/internal/config"
@@ -42,6 +44,10 @@ const (
 
 // checkTimeout limits each check that waits for the network or for a process.
 const checkTimeout = 10 * time.Second
+
+// acpCheckTimeout limits the check of one coding agent. A start of claude, or a first npx
+// download, takes longer than checkTimeout.
+const acpCheckTimeout = 30 * time.Second
 
 // minFreeBytes is the free disk space below which the disk check is a warning.
 const minFreeBytes = 1 << 30
@@ -79,6 +85,8 @@ type Doctor struct {
 
 	// freeBytes returns the free disk space of a folder. Tests replace it.
 	freeBytes func(dir string) (uint64, error)
+	// probeACP starts one coding agent. Tests replace it. Nil uses acp.Probe.
+	probeACP func(ctx context.Context, agentID string, a config.ACPAgent, dotenv map[string]string) (acp.ProbeResult, error)
 }
 
 // Run runs every check in a fixed order, so the output is stable. A check that depends on
@@ -108,6 +116,9 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	}
 	if cfg != nil {
 		out = append(out, d.checkMCP(ctx, cfg, dotenv)...)
+	}
+	if cfg != nil && cfg.ACP.Enabled {
+		out = append(out, d.checkACP(ctx, cfg, dotenv)...)
 	}
 	out = append(out, d.checkDisk())
 	// The release check needs no config, so it also runs when the config does not load.
@@ -534,6 +545,135 @@ func (d *Doctor) checkMCP(ctx context.Context, cfg *config.Config, dotenv map[st
 	}
 	closes.Wait()
 	return out
+}
+
+// checkACP probes each enabled coding agent and checks acp.workdir_allowlist. The
+// adapters stop again before it returns.
+func (d *Doctor) checkACP(ctx context.Context, cfg *config.Config, dotenv map[string]string) []Check {
+	probe := d.probeACP
+	if probe == nil {
+		probe = acp.Probe
+	}
+	var out []Check
+	ids := cfg.ACP.EnabledAgents()
+	if len(ids) == 0 {
+		out = append(out, Check{Name: "acp agents", Status: StatusWarn,
+			Detail: "acp.enabled is true, but no agent is enabled",
+			Next:   "add an agent to acp.agents, for example claude-code"})
+	}
+	for _, id := range ids {
+		a := cfg.ACP.Agents[id]
+		pctx, cancel := context.WithTimeout(ctx, acpCheckTimeout)
+		r, err := probe(pctx, id, a, dotenv)
+		cancel()
+		out = append(out, acpAgentChecks(id, a, r, err)...)
+	}
+
+	allow := Check{Name: "acp allowlist", Status: StatusOK}
+	if len(cfg.ACP.WorkdirAllowlist) == 0 {
+		allow.Status = StatusWarn
+		allow.Detail = "acp.workdir_allowlist is empty, so acp_delegate refuses each call"
+		allow.Next = "add the folder of your projects to acp.workdir_allowlist"
+	} else {
+		allow.Detail = strings.Join(cfg.ACP.WorkdirAllowlist, ", ")
+	}
+	return append(out, allow)
+}
+
+// acpAgentChecks returns the checks of one coding agent from its probe result. The rows stop
+// at the first failed step that blocks the next steps.
+func acpAgentChecks(id string, a config.ACPAgent, r acp.ProbeResult, err error) []Check {
+	prefix := "acp " + id + " "
+	runByHand := "run the command of acp.agents." + id + " by hand to see its error"
+	errText := func() string {
+		if err == nil {
+			return "unknown error"
+		}
+		return err.Error()
+	}
+
+	if r.Program == "" {
+		return []Check{{Name: prefix + "command", Status: StatusFail,
+			Detail: "cannot find the program: " + errText(), Next: acpInstallText(id)}}
+	}
+	out := []Check{{Name: prefix + "command", Status: StatusOK, Detail: r.Program}}
+
+	if len(a.Command) > 0 && !strings.ContainsRune(a.Command[0], '/') && underHome(r.Program) {
+		out = append(out, Check{Name: prefix + "path", Status: StatusWarn,
+			Detail: r.Program + " comes from the PATH of your shell",
+			Next:   "set an absolute command; the tether service does not have your shell PATH"})
+	}
+
+	if r.NodeVersion != "" {
+		c := Check{Name: prefix + "node", Status: StatusOK, Detail: "node " + r.NodeVersion}
+		if nodeMajor(r.NodeVersion) < 22 {
+			c.Status = StatusFail
+			c.Detail = "node " + r.NodeVersion + " is too old"
+			c.Next = "install Node 22 or later"
+		}
+		out = append(out, c)
+	}
+
+	if r.ProtocolVersion == 0 {
+		return append(out, Check{Name: prefix + "handshake", Status: StatusFail,
+			Detail: "cannot start: " + errText(), Next: runByHand})
+	}
+	version := r.AgentVersion
+	if version == "" {
+		version = "unknown"
+	}
+	hs := Check{Name: prefix + "handshake", Status: StatusOK,
+		Detail: fmt.Sprintf("protocol %d, agent version %s", r.ProtocolVersion, version)}
+	if a.VersionPin != "" && a.VersionPin != r.AgentVersion {
+		hs.Status = StatusWarn
+		hs.Detail += " (version_pin " + a.VersionPin + ")"
+		hs.Next = "install version " + a.VersionPin + " of the adapter, or change acp.agents." + id + ".version_pin"
+	}
+	out = append(out, hs)
+
+	sess := Check{Name: prefix + "session", Status: StatusOK}
+	switch {
+	case r.SessionOK:
+		sess.Detail = "session start ok (the login is checked at the first prompt)"
+	case r.NotLoggedIn:
+		sess.Status, sess.Detail = StatusFail, "not logged in"
+		sess.Next = "run claude once as the user that runs tether, and sign in"
+	default:
+		sess.Status, sess.Detail, sess.Next = StatusFail, "session start failed: "+errText(), runByHand
+	}
+	return append(out, sess)
+}
+
+// acpInstallText returns the next action for an adapter program that is not found.
+func acpInstallText(id string) string {
+	switch id {
+	case "claude-code":
+		return "install @agentclientprotocol/claude-agent-acp, or set acp.agents.claude-code.command"
+	case "codex":
+		return "install codex-acp, or set acp.agents.codex.command"
+	}
+	return "install the adapter of " + id + ", or set acp.agents." + id + ".command"
+}
+
+// underHome reports whether path is in the home folder of the user.
+func underHome(path string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return false
+	}
+	rel, err := filepath.Rel(home, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../") && !filepath.IsAbs(rel)
+}
+
+// nodeMajor returns the major version of a node version text such as "v22.3.0". A text that
+// does not parse gives 0, which counts as too old.
+func nodeMajor(v string) int {
+	major, _, _ := strings.Cut(strings.TrimPrefix(v, "v"), ".")
+	n, err := strconv.Atoi(major)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // checkDisk checks the free disk space of the data folder.
