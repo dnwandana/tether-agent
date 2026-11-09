@@ -233,7 +233,8 @@ func (c *configRedactor) taken(name, literal string) bool {
 }
 
 // secretName returns the derived reference name when path is one of the
-// secret key paths of config.yaml.
+// secret key paths of config.yaml. The env values of an MCP server and of a
+// coding agent count as secrets, because the user can put a key there.
 func secretName(path []string) (string, bool) {
 	switch {
 	case len(path) == 3 && path[0] == "providers" && path[2] == "api_key":
@@ -241,6 +242,8 @@ func secretName(path []string) (string, bool) {
 	case len(path) == 2 && path[0] == "telegram" && path[1] == "bot_token":
 		return "TELEGRAM_BOT_TOKEN", true
 	case len(path) == 5 && path[0] == "mcp" && path[1] == "servers" && path[3] == "env":
+		return path[4], true
+	case len(path) == 5 && path[0] == "acp" && path[1] == "agents" && path[3] == "env":
 		return path[4], true
 	case len(path) == 5 && path[0] == "mcp" && path[1] == "servers" && path[3] == "headers":
 		return "MCP_" + envName(path[2]) + "_" + envName(path[4]), true

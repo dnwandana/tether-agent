@@ -99,6 +99,35 @@ func TestRedactConfig(t *testing.T) {
 			replaced: []Replacement{{KeyPath: "mcp.servers.gh.env.GH_PAT", Name: "GH_PAT"}},
 		},
 		{
+			name:     "acp env",
+			in:       "acp:\n  agents:\n    claude-code:\n      env:\n        CLAUDE_CONFIG_DIR: /home/user/.claude-work\n",
+			contains: []string{"CLAUDE_CONFIG_DIR: ${CLAUDE_CONFIG_DIR}"},
+			absent:   []string{"/home/user/.claude-work"},
+			replaced: []Replacement{{KeyPath: "acp.agents.claude-code.env.CLAUDE_CONFIG_DIR", Name: "CLAUDE_CONFIG_DIR"}},
+		},
+		{
+			name: "acp env with the same name in two agents",
+			in: "acp:\n  agents:\n    claude-code:\n      env:\n        HTTPS_PROXY: http://proxy-one:3128\n" +
+				"    codex:\n      env:\n        HTTPS_PROXY: http://proxy-two:3128\n",
+			contains: []string{"HTTPS_PROXY: ${HTTPS_PROXY}", "HTTPS_PROXY: ${HTTPS_PROXY_2}"},
+			absent:   []string{"proxy-one", "proxy-two"},
+			replaced: []Replacement{
+				{KeyPath: "acp.agents.claude-code.env.HTTPS_PROXY", Name: "HTTPS_PROXY"},
+				{KeyPath: "acp.agents.codex.env.HTTPS_PROXY", Name: "HTTPS_PROXY_2"},
+			},
+		},
+		{
+			name: "acp env reference",
+			in:   "acp:\n  agents:\n    codex:\n      env:\n        CODEX_HOME: ${CODEX_HOME}\n",
+			same: true,
+		},
+		{
+			name: "acp keys outside env stay",
+			in: "acp:\n  enabled: true\n  agents:\n    claude-code:\n" +
+				"      command: [\"/opt/node/bin/claude-agent-acp\"]\n      model: opus\n      modes:\n        auto: auto\n",
+			same: true,
+		},
+		{
 			name:     "mcp header",
 			in:       "mcp:\n  servers:\n    github:\n      headers:\n        Authorization: Bearer abc0123456789xyz\n",
 			contains: []string{"Authorization: ${MCP_GITHUB_AUTHORIZATION}"},
