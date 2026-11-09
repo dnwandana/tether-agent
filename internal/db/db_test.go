@@ -57,7 +57,8 @@ func TestOpenCreatesSchemaAndWAL(t *testing.T) {
 		t.Fatal(mode)
 	}
 	for _, tbl := range []string{"sessions", "messages", "messages_fts", "compactions", "cron_jobs",
-		"approvals_always", "pairing", "active_session", "delegation_batches", "kv", "schema_version", "goals"} {
+		"approvals_always", "pairing", "active_session", "delegation_batches", "kv", "schema_version", "goals",
+		"acp_sessions"} {
 		var n int
 		if err := d.QueryRow("SELECT count(*) FROM sqlite_master WHERE name=?", tbl).Scan(&n); err != nil {
 			t.Fatal(err)
@@ -373,5 +374,24 @@ func TestMigrationReasoningEffortFrom002(t *testing.T) {
 	}
 	if v, err := d.SchemaVersion(ctx); err != nil || v != LatestVersion() {
 		t.Fatal(v, err)
+	}
+}
+
+func TestACPSessionsKeyIsSessionAndAgent(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	const ins = `INSERT INTO acp_sessions (session_id, agent, acp_session_id, cwd, created_at, updated_at)
+		VALUES (?, ?, ?, '/home/user/app', 1762560000000, 1762560000000)`
+	if _, err := d.Exec(ins, "s1", "claude-code", "acp-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(ins, "s1", "codex", "acp-2"); err != nil {
+		t.Fatal("another agent of the same session must get its own row:", err)
+	}
+	if _, err := d.Exec(ins, "s1", "claude-code", "acp-3"); err == nil {
+		t.Fatal("a second row for (s1, claude-code) must fail")
 	}
 }

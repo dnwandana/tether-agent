@@ -43,6 +43,7 @@ var stateColumns = map[string][]string{
 	"kv":                 {"key", "value"},
 	"schema_version":     {"name"},
 	"goals":              {"session_id"},
+	"acp_sessions":       {"session_id", "agent", "acp_session_id", "cwd"},
 }
 
 // maskCell is one cell that maskDB changes.

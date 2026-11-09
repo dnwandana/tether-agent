@@ -79,6 +79,7 @@ func (s *Store) pruneOnce(ctx context.Context, cutoff time.Time) ([]string, erro
 //   - the messages (the FTS triggers remove their index rows),
 //   - the compaction rows and the key mappings,
 //   - the goal rows,
+//   - the ACP session rows of the coding agents,
 //   - the delegation batches that the sessions started and that do not run now.
 //
 // It keeps the child sessions (forks, children, reviews) and clears their parent_id, as
@@ -95,6 +96,7 @@ func deleteSessions(ctx context.Context, tx *sql.Tx, ids []string) error {
 		`DELETE FROM compactions WHERE session_id IN (` + in + `)`,
 		`DELETE FROM active_session WHERE session_id IN (` + in + `)`,
 		`DELETE FROM goals WHERE session_id IN (` + in + `)`,
+		`DELETE FROM acp_sessions WHERE session_id IN (` + in + `)`,
 	} {
 		if _, err := tx.ExecContext(ctx, q, idArgs...); err != nil {
 			return err

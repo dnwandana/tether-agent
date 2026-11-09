@@ -299,3 +299,53 @@ func TestDeleteRemovesGoalRow(t *testing.T) {
 		t.Fatal("Delete must keep the goal of another session")
 	}
 }
+
+// addACPRow inserts one acp_sessions row for the session and the agent.
+func addACPRow(t *testing.T, d *db.DB, sessionID, agent string) {
+	t.Helper()
+	if _, err := d.ExecContext(context.Background(), `INSERT INTO acp_sessions
+		(session_id, agent, acp_session_id, cwd, created_at, updated_at)
+		VALUES (?, ?, 'acp-1', '/home/user/app', 1, 1)`, sessionID, agent); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeleteRemovesACPSessionRows(t *testing.T) {
+	d := openTestDB(t)
+	s := New(d)
+	ctx := context.Background()
+	sess, _ := s.Create(ctx, Session{Key: "telegram:1", Source: "telegram"})
+	other, _ := s.Create(ctx, Session{Key: "telegram:2", Source: "telegram"})
+	addACPRow(t, d, sess.ID, "claude-code")
+	addACPRow(t, d, sess.ID, "codex")
+	addACPRow(t, d, other.ID, "claude-code")
+	if err := s.Delete(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := rowCount(t, d, `SELECT count(*) FROM acp_sessions WHERE session_id = ?`, sess.ID); n != 0 {
+		t.Fatalf("Delete left %d acp_sessions rows", n)
+	}
+	if n := rowCount(t, d, `SELECT count(*) FROM acp_sessions WHERE session_id = ?`, other.ID); n != 1 {
+		t.Fatal("Delete must keep the acp_sessions row of another session")
+	}
+}
+
+func TestPruneRemovesACPSessionRows(t *testing.T) {
+	d := openTestDB(t)
+	s := New(d)
+	day := 24 * time.Hour
+	old := agedSession(t, d, s, "subagent", "telegram", 40*day)
+	chat := agedSession(t, d, s, "chat", "telegram", 400*day)
+	addACPRow(t, d, old.ID, "claude-code")
+	addACPRow(t, d, chat.ID, "claude-code")
+	got, err := s.PruneAutomatic(context.Background(), retNow.Add(-30*day))
+	if err != nil || len(got) != 1 || got[0] != old.ID {
+		t.Fatalf("pruned %v, want [%s]: %v", got, old.ID, err)
+	}
+	if n := rowCount(t, d, `SELECT count(*) FROM acp_sessions WHERE session_id = ?`, old.ID); n != 0 {
+		t.Fatalf("the prune left %d acp_sessions rows", n)
+	}
+	if n := rowCount(t, d, `SELECT count(*) FROM acp_sessions WHERE session_id = ?`, chat.ID); n != 1 {
+		t.Fatal("the prune must keep the acp_sessions row of a chat session")
+	}
+}
