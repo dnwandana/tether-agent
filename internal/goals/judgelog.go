@@ -60,20 +60,11 @@ func (l *JudgeLog) Record(ctx context.Context, goalSession *sessions.Session, st
 	return nil
 }
 
-// meta returns the meta of the assistant message. The fallback is the rule of Agent.meta with
-// no price: the stamp of the result wins over the name of the provider.
+// meta returns the meta of the assistant message. The fallback is sessions.ResultMeta, the rule
+// of Agent.meta with no price.
 func (l *JudgeLog) meta(prov provider.Provider, out provider.Result) sessions.MessageMeta {
 	if l.Meta != nil {
 		return l.Meta(prov, out)
 	}
-	m := sessions.MessageMeta{
-		Usage:        out.Usage,
-		Model:        prov.Model(),
-		Provider:     prov.Name(),
-		FinishReason: out.FinishReason,
-	}
-	if out.Provider != "" {
-		m.Provider, m.Model = out.Provider, out.Model
-	}
-	return m
+	return sessions.ResultMeta(prov, out)
 }

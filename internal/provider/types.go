@@ -2,7 +2,10 @@
 // for the OpenAI, Anthropic, and Responses formats, and the fallback chain.
 package provider
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Role is the author of a message.
 type Role string
@@ -137,3 +140,7 @@ type Result struct {
 	Provider     string
 	Model        string
 }
+
+// RecordUsage records the usage of one model call outside a turn. A nil RecordUsage records
+// nothing, so each caller checks for nil.
+type RecordUsage func(ctx context.Context, sessionID, task string, prov Provider, out Result)
