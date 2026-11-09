@@ -126,6 +126,8 @@ type Compactor struct {
 	// Todo returns the task list snapshot of the session for the end of the summary, or "".
 	// It can be nil.
 	Todo func(ctx context.Context, sessionID string) string
+	// Record records the usage of the summary call. It can be nil.
+	Record provider.RecordUsage
 
 	mu       sync.Mutex
 	failures map[string]int
@@ -246,7 +248,7 @@ func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, pr
 	if from == 0 || upto == 0 {
 		return false, comps, nil
 	}
-	summary, err := c.summarize(ctx, prov, msgs[start:end], trigger)
+	summary, err := c.summarize(ctx, prov, s.ID, msgs[start:end], trigger)
 	if err != nil {
 		if ctx.Err() != nil {
 			return false, comps, nil
@@ -294,8 +296,9 @@ func (c *Compactor) View(ctx context.Context, sessionID string) ([]StoredView, e
 	return BuildStoredView(stored, comps), nil
 }
 
-// summarize sends msgs to prov and returns the summary text.
-func (c *Compactor) summarize(ctx context.Context, prov provider.Provider, msgs []provider.Message, trigger int) (string, error) {
+// summarize sends msgs to prov and returns the summary text. sessionID is the session
+// that the summary call records its usage to.
+func (c *Compactor) summarize(ctx context.Context, prov provider.Provider, sessionID string, msgs []provider.Message, trigger int) (string, error) {
 	target := min(max(int(c.Cfg.SummaryTargetRatio*float64(trigger)), minSummaryTokens), maxSummaryTokens)
 	body := fmt.Sprintf("Make the checkpoint summary of the conversation turns below. Target about %d tokens.\n\nTURNS TO SUMMARIZE:\n\n%s",
 		target, serialize(msgs))
@@ -312,6 +315,11 @@ func (c *Compactor) summarize(ctx context.Context, prov provider.Provider, msgs 
 	res, err := provider.Collect(ch, nil)
 	if err != nil {
 		return "", err
+	}
+	// The provider billed the call, also when the text is empty. Record the usage before the
+	// empty-text check.
+	if c.Record != nil {
+		c.Record(ctx, sessionID, "compaction", prov, res)
 	}
 	text := strings.TrimSpace(res.Text)
 	if text == "" {

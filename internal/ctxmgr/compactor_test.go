@@ -25,6 +25,8 @@ type fakeSummarizer struct {
 	mu       sync.Mutex
 	reply    string
 	err      error
+	usage    provider.Usage // the usage of the EventDone
+	midErr   error          // when set, the stream sends an EventError in place of EventDone
 	requests []provider.Request
 }
 
@@ -34,14 +36,18 @@ func (f *fakeSummarizer) Model() string { return "test-model" }
 func (f *fakeSummarizer) Stream(_ context.Context, req provider.Request) (<-chan provider.Event, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, req)
-	reply, err := f.reply, f.err
+	reply, err, u, midErr := f.reply, f.err, f.usage, f.midErr
 	f.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
 	ch := make(chan provider.Event, 2)
 	ch <- provider.Event{Type: provider.EventText, Delta: reply}
-	ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop", Usage: &provider.Usage{}}
+	if midErr != nil {
+		ch <- provider.Event{Type: provider.EventError, Err: midErr}
+	} else {
+		ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop", Usage: &u}
+	}
 	close(ch)
 	return ch, nil
 }
@@ -88,6 +94,87 @@ func compactorWithSession(t *testing.T, n int) (*Compactor, *sessions.Session, *
 	appendPlain(t, st, sess.ID, 0, n)
 	c := &Compactor{Store: st, DB: d, Cfg: config.Default().Context}
 	return c, sess, &fakeSummarizer{reply: "S"}
+}
+
+// usageCall is one call of a provider.RecordUsage function.
+type usageCall struct {
+	sessionID, task string
+	prov            provider.Provider
+	out             provider.Result
+}
+
+// recordTo returns a provider.RecordUsage that appends each call to calls.
+func recordTo(calls *[]usageCall) provider.RecordUsage {
+	return func(_ context.Context, sessionID, task string, prov provider.Provider, out provider.Result) {
+		*calls = append(*calls, usageCall{sessionID, task, prov, out})
+	}
+}
+
+func TestCompactionRecordsTheSummaryCall(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	fp.usage = provider.Usage{InputTokens: 1200, CacheReadTokens: 300, OutputTokens: 40}
+	var got []usageCall
+	c.Record = recordTo(&got)
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	if len(got) != 1 || got[0].sessionID != sess.ID || got[0].task != "compaction" || got[0].prov != fp ||
+		got[0].out.Text != "S" || got[0].out.Usage.InputTokens != 1200 ||
+		got[0].out.Usage.CacheReadTokens != 300 || got[0].out.Usage.OutputTokens != 40 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// A billed compaction call with an empty answer is recorded.
+func TestCompactionRecordsAnEmptySummary(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	fp.reply = "  "
+	fp.usage = provider.Usage{InputTokens: 1200, OutputTokens: 1}
+	var got []usageCall
+	c.Record = recordTo(&got)
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); did || err != nil {
+		t.Fatal(did, err)
+	}
+	if comps, _ := LoadCompactions(ctx, c.DB, sess.ID); len(comps) != 0 {
+		t.Fatal("an empty summary must not be stored")
+	}
+	if len(got) != 1 || got[0].sessionID != sess.ID || got[0].task != "compaction" ||
+		got[0].out.Usage.InputTokens != 1200 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestCompactionFailedCallRecordsNothing(t *testing.T) {
+	for name, set := range map[string]func(*fakeSummarizer){
+		"stream":  func(f *fakeSummarizer) { f.err = errors.New("summary down") },
+		"collect": func(f *fakeSummarizer) { f.midErr = errors.New("stream cut") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, sess, fp := compactorWithSession(t, 80)
+			set(fp)
+			var got []usageCall
+			c.Record = recordTo(&got)
+			if did, err := c.Maybe(ctx, sess, fp, 2000, false); did || err != nil {
+				t.Fatal(did, err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("%+v", got)
+			}
+		})
+	}
+}
+
+// A nil Record records nothing, and the compaction still runs.
+func TestCompactionNilRecord(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	fp.reply = "  "
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); did || err != nil {
+		t.Fatal(did, err)
+	}
+	fp.reply = "S"
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal(did, err)
+	}
 }
 
 // viewOf returns the model view of the session.
