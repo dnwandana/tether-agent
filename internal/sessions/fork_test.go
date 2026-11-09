@@ -6,6 +6,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
@@ -131,5 +132,63 @@ func TestForkKeepsEffortAndReasoning(t *testing.T) {
 	ms, err := st.Messages(ctx, f.ID)
 	if err != nil || len(ms) != 2 || ms[0].Msg.Reasoning != nil || !reflect.DeepEqual(ms[1].Msg.Reasoning, r) {
 		t.Fatal(err, ms)
+	}
+}
+
+// A row of the original can have the same millisecond as the fork, or a later time after a
+// clock step. The fork must start after the newest copied message and compaction, so the
+// usage report never counts a copy.
+func TestForkStartsAfterTheNewestCopy(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	orig := seedSession(t, s, 2)
+	ahead := time.Now().Add(5 * time.Second).UnixMilli()
+	mid, err := s.Append(ctx, orig.ID, provider.Message{Role: provider.RoleAssistant, Content: "answer"}, MessageMeta{Model: "glm-5.3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE messages SET timestamp = ? WHERE id = ?`, ahead, mid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO compactions (session_id, from_message_id,
+		upto_message_id, summary, created_at) VALUES (?, ?, ?, 'sum', ?)`, orig.ID, mid, mid, ahead+1); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.Fork(ctx, orig.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := f.StartedAt.UnixMilli(); got <= ahead+1 {
+		t.Fatalf("fork start %d is not after the newest copy %d", got, ahead+1)
+	}
+}
+
+func TestForkTakesStartTimeAfterBeginTx(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	orig := seedSession(t, s, 2)
+	forkBeforeTx = func() {
+		if _, err := s.Append(ctx, orig.ID, provider.Message{Role: provider.RoleAssistant, Content: "late answer"}, MessageMeta{Model: "glm-5.3"}); err != nil {
+			t.Error(err)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Cleanup(func() { forkBeforeTx = nil })
+	f, err := s.Fork(ctx, orig.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(ctx, f.ID)
+	if err != nil || got.StartedAt.UnixMilli() != f.StartedAt.UnixMilli() {
+		t.Fatal(got, err)
+	}
+	ms, err := s.Messages(ctx, f.ID)
+	if err != nil || len(ms) != 3 || ms[2].Msg.Content != "late answer" {
+		t.Fatal(ms, err)
+	}
+	for _, m := range ms {
+		if m.At.UnixMilli() >= got.StartedAt.UnixMilli() {
+			t.Fatalf("copy %d at %d is not older than the fork start %d", m.ID, m.At.UnixMilli(), got.StartedAt.UnixMilli())
+		}
 	}
 }

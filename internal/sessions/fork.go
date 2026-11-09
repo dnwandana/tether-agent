@@ -7,11 +7,17 @@ import (
 	"time"
 )
 
+// forkBeforeTx runs just before Fork starts its transaction. Tests set it to write in
+// that gap. It is nil in the program.
+var forkBeforeTx func()
+
 // Fork copies the session with the id into a new session with parent_id set to id. The
 // copy has all the messages in order and all the compaction rows, with their message ids
 // changed to the ids of the copies. An empty title gives "<old title> (fork)", or
 // "New session (fork)" when the old session has no title, so no title shows an id.
 // All copies happen in one transaction, so a failure leaves no partial session.
+// The copies keep their old timestamps and their token counts. The compactor reads the
+// counts. The usage report does not count a copy, because the copy is older than the fork.
 func (s *Store) Fork(ctx context.Context, id, title string) (*Session, error) {
 	orig, err := s.Get(ctx, id)
 	if err != nil {
@@ -23,19 +29,35 @@ func (s *Store) Fork(ctx context.Context, id, title string) (*Session, error) {
 			title = "New session (fork)"
 		}
 	}
+	if forkBeforeTx != nil {
+		forkBeforeTx()
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("sessions: fork %s: %w", id, err)
+	}
+	defer tx.Rollback()
+	// The database has one connection, so no message of the original can be written
+	// after this time and before the copy. A row can still have the same millisecond as
+	// now, or a later time after a clock step. So the fork starts 1 ms after the newest
+	// copied row at the earliest, and each copy is older than the fork.
+	var newest int64
+	if err := tx.QueryRowContext(ctx, `SELECT MAX(
+		COALESCE((SELECT MAX(timestamp) FROM messages WHERE session_id = ?), 0),
+		COALESCE((SELECT MAX(created_at) FROM compactions WHERE session_id = ?), 0))`,
+		id, id).Scan(&newest); err != nil {
+		return nil, fmt.Errorf("sessions: fork %s: %w", id, err)
+	}
 	now := time.Now().UTC()
+	if after := time.UnixMilli(newest + 1).UTC(); now.Before(after) {
+		now = after
+	}
 	f := *orig
 	f.ID = newID(now)
 	f.ParentID = orig.ID
 	f.Title = title
 	f.StartedAt, f.LastActive = now, now
 	f.Archived = false
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("sessions: fork %s: %w", id, err)
-	}
-	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (`+sessionCols+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
 		f.ID, f.Key, f.Source, f.ChatID, f.ThreadID, f.UserID, f.Title, f.ModelOverride,
