@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -74,5 +76,45 @@ func TestTurnKeepsChannelProgress(t *testing.T) {
 	}
 	if len(got) != 1 || strings.Contains(out.String(), "🔀") {
 		t.Fatalf("the progress function of the channel must stay: %q %q", got, out.String())
+	}
+}
+
+// cacheProv answers "ok" with a fixed usage that has cache reads.
+type cacheProv struct{}
+
+func (cacheProv) Name() string  { return "primary" }
+func (cacheProv) Model() string { return "fake-model" }
+func (cacheProv) Stream(context.Context, provider.Request) (<-chan provider.Event, error) {
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventText, Delta: "ok"}
+	ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop",
+		Usage: &provider.Usage{InputTokens: 100, CacheReadTokens: 900, OutputTokens: 7}}
+	close(ch)
+	return ch, nil
+}
+
+func TestTurnEndLogHasCacheReadTokens(t *testing.T) {
+	ctx := context.Background()
+	d := providerDeps(t, sessions.New(openTestDB(t)), cacheProv{})
+	var logs bytes.Buffer
+	d.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	sess, err := d.Store.Create(ctx, sessions.Session{Key: "cli:test", Source: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Turn(ctx, sess, TurnInput{Text: "hi", Channel: "cli", Sink: &CLISink{W: io.Discard}}); err != nil {
+		t.Fatal(err)
+	}
+	var end string
+	for line := range strings.SplitSeq(logs.String(), "\n") {
+		if strings.Contains(line, `msg="turn end"`) {
+			end = line
+		}
+	}
+	// input_tokens keeps its meaning: the input plus the cache read.
+	for _, want := range []string{" input_tokens=1000 ", " cache_read_tokens=900 ", " output_tokens=7 "} {
+		if !strings.Contains(end, want) {
+			t.Fatalf("want %q in the turn end line: %q", want, end)
+		}
 	}
 }

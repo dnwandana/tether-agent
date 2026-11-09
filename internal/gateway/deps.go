@@ -105,7 +105,8 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 	start := time.Now()
 	res, err := d.Agent.RunTurn(ctx, t)
 	attrs := []any{"session", sess.ID, "channel", in.Channel, "tool_rounds", res.ToolRounds,
-		"input_tokens", res.Usage.InputTokens + res.Usage.CacheReadTokens, "output_tokens", res.Usage.OutputTokens,
+		"input_tokens", res.Usage.InputTokens + res.Usage.CacheReadTokens,
+		"cache_read_tokens", res.Usage.CacheReadTokens, "output_tokens", res.Usage.OutputTokens,
 		"first_token_ms", res.Usage.FirstTokenMS, "total_ms", time.Since(start).Milliseconds()}
 	if err != nil {
 		attrs = append(attrs, "err", err.Error())
