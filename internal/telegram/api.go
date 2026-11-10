@@ -15,8 +15,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -111,6 +114,30 @@ type Update struct {
 	CallbackQuery *CallbackQuery `json:"callback_query,omitempty"`
 }
 
+// UnmarshalJSON decodes an update. Then it records, for the message and for the edited
+// message, the names of the fields that Message does not read. The second step cannot
+// fail the decode, because the poller cannot go past an update that does not decode.
+func (u *Update) UnmarshalJSON(b []byte) error {
+	// plain has the fields of Update and no UnmarshalJSON method, so this call does not
+	// call itself.
+	type plain Update
+	if err := json.Unmarshal(b, (*plain)(u)); err != nil {
+		return err
+	}
+	var names struct {
+		Message       map[string]json.RawMessage `json:"message"`
+		EditedMessage map[string]json.RawMessage `json:"edited_message"`
+	}
+	_ = json.Unmarshal(b, &names)
+	if u.Message != nil {
+		u.Message.Unread = unreadFieldNames(names.Message)
+	}
+	if u.EditedMessage != nil {
+		u.EditedMessage.Unread = unreadFieldNames(names.EditedMessage)
+	}
+	return nil
+}
+
 // Message is a Telegram message, with only the fields that Tether Agent uses.
 type Message struct {
 	MessageID       int             `json:"message_id"`
@@ -133,11 +160,55 @@ type Message struct {
 	Sticker         *Sticker        `json:"sticker,omitempty"`
 	Location        *Location       `json:"location,omitempty"`
 	Venue           *Venue          `json:"venue,omitempty"`
+	// RichMessage is the raw rich_message field of the message. It stays raw
+	// JSON, so a value with a wrong shape cannot fail the decode of an update
+	// batch or of a send reply. richOf parses it.
+	RichMessage json.RawMessage `json:"rich_message,omitempty"`
 	// The service fields. A service message has no text and no media.
 	NewChatMembers    []User `json:"new_chat_members,omitempty"`
 	LeftChatMember    *User  `json:"left_chat_member,omitempty"`
 	MigrateToChatID   int64  `json:"migrate_to_chat_id,omitempty"`
 	MigrateFromChatID int64  `json:"migrate_from_chat_id,omitempty"`
+
+	// Unread holds the sorted names of the top-level fields of the message that Message
+	// does not read. Only the decoder of Update sets it. It is nil when no name is left.
+	Unread []string `json:"-"`
+
+	// rich is the cache of richOf. cacheRich sets it. The JSON decoder does
+	// not read it.
+	rich *richDoc
+}
+
+// knownMessageFields returns the JSON names that Message reads, and the three old names
+// of the join and leave fields. It reads the struct tags one time.
+var knownMessageFields = sync.OnceValue(func() map[string]bool {
+	known := map[string]bool{
+		"new_chat_participant":  true,
+		"new_chat_member":       true,
+		"left_chat_participant": true,
+	}
+	t := reflect.TypeFor[Message]()
+	for f := range t.Fields() {
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name != "" && name != "-" {
+			known[name] = true
+		}
+	}
+	return known
+})
+
+// unreadFieldNames returns the sorted names in fields that Message does not read. It
+// returns nil when it finds no name.
+func unreadFieldNames(fields map[string]json.RawMessage) []string {
+	known := knownMessageFields()
+	var out []string
+	for name := range fields {
+		if !known[name] {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // Chat is the chat of a message.
@@ -519,6 +590,9 @@ func (c *Client) do(ctx context.Context, method string, chatID int64, counted bo
 	}
 }
 
+// errNotJSON marks a reply that is not JSON. GetUpdatesN finds it with errors.Is.
+var errNotJSON = errors.New("reply is not JSON")
+
 // once sends one request and decodes the reply envelope. A reply that is not
 // JSON gives an error with the HTTP status. sent is false when the request
 // did not go out: the body or the request could not be made, or ctx ended
@@ -559,7 +633,7 @@ func (c *Client) once(ctx context.Context, method string, timeout time.Duration,
 			return envelope{ErrorCode: http.StatusTooManyRequests, Description: "Too Many Requests",
 				Parameters: &replyParameters{RetryAfter: int(defaultRetryAfter / time.Second)}}, true, nil
 		}
-		return env, true, fmt.Errorf("telegram %s: HTTP %d: reply is not JSON", method, resp.StatusCode)
+		return env, true, fmt.Errorf("telegram %s: HTTP %d: %w", method, resp.StatusCode, errNotJSON)
 	}
 	if !env.OK && env.ErrorCode == 0 {
 		env.ErrorCode = resp.StatusCode
@@ -577,16 +651,67 @@ func (c *Client) GetMe(ctx context.Context) (User, error) {
 // GetUpdates long-polls for updates from offset. The request deadline is
 // timeoutS + 10 seconds.
 func (c *Client) GetUpdates(ctx context.Context, offset int64, timeoutS int) ([]Update, error) {
-	var ups []Update
+	return c.GetUpdatesN(ctx, offset, timeoutS, 0)
+}
+
+// UnreadableError is a getUpdates reply that the client cannot read: the reply is not
+// JSON, or the result does not decode. A new call with the same offset gives the same
+// error, so the poller must not only try again. HasID is true when the reply has exactly
+// one update and its update_id could be read. UpdateID is then that id.
+type UnreadableError struct {
+	UpdateID int64
+	HasID    bool
+	Err      error
+}
+
+// Error returns the text of Err.
+func (e *UnreadableError) Error() string {
+	if e.Err == nil {
+		return "telegram getUpdates: the reply cannot be read"
+	}
+	return e.Err.Error()
+}
+
+// Unwrap returns Err.
+func (e *UnreadableError) Unwrap() error { return e.Err }
+
+// GetUpdatesN is GetUpdates with a limit for the number of updates in the reply. A limit
+// of 0 sends no limit, and Telegram then sends up to 100 updates. It returns an
+// *UnreadableError when the reply is not JSON or the result does not decode.
+func (c *Client) GetUpdatesN(ctx context.Context, offset int64, timeoutS, limit int) ([]Update, error) {
 	params := map[string]any{
 		"offset":          offset,
 		"timeout":         timeoutS,
 		"allowed_updates": []string{"message", "edited_message", "callback_query"},
 	}
+	if limit > 0 {
+		params["limit"] = limit
+	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutS+10)*time.Second)
 	defer cancel()
-	err := c.call(ctx, "getUpdates", 0, params, &ups, 0)
-	return ups, err
+	var raw json.RawMessage
+	if err := c.call(ctx, "getUpdates", 0, params, &raw, 0); err != nil {
+		if errors.Is(err, errNotJSON) {
+			return nil, &UnreadableError{Err: err}
+		}
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var ups []Update
+	err := json.Unmarshal(raw, &ups)
+	if err == nil {
+		return ups, nil
+	}
+	ue := &UnreadableError{Err: fmt.Errorf("telegram getUpdates: decode result: %w", err)}
+	var ids []struct {
+		UpdateID int64 `json:"update_id"`
+	}
+	if json.Unmarshal(raw, &ids) == nil && len(ids) == 1 && ids[0].UpdateID != 0 {
+		ue.UpdateID, ue.HasID = ids[0].UpdateID, true
+	}
+	return nil, ue
 }
 
 // SendMessage sends a text message.

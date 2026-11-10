@@ -504,3 +504,258 @@ func TestDefaultClientKeepsMoreIdleConnections(t *testing.T) {
 		t.Fatal(tr.MaxIdleConnsPerHost, tr.Proxy == nil)
 	}
 }
+
+// decodeUpdate decodes raw as an Update.
+func decodeUpdate(t *testing.T, raw string) Update {
+	t.Helper()
+	var u Update
+	if err := json.Unmarshal([]byte(raw), &u); err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func TestUnreadFieldNames(t *testing.T) {
+	const head = `"message_id":1,"from":{"id":5,"first_name":"U"},"chat":{"id":5,"type":"private"},"date":1`
+	cases := []struct {
+		name, fields string
+		want         []string
+	}{
+		{"video note", `,"video_note":{"file_id":"v","length":240,"duration":3}`, []string{"video_note"}},
+		{"poll and dice", `,"poll":{"id":"1"},"dice":{"emoji":"🎲","value":3}`, []string{"dice", "poll"}},
+		{"plain text", `,"text":"hi","entities":[{"type":"bold","offset":0,"length":2}]`, nil},
+		{"join with the old names", `,"new_chat_members":[{"id":7}],"new_chat_participant":{"id":7},"new_chat_member":{"id":7}`, nil},
+		{"leave with the old name", `,"left_chat_member":{"id":7},"left_chat_participant":{"id":7}`, nil},
+		{"rich message", `,"rich_message":{"blocks":[{"type":"divider"}]}`, nil},
+		{"rich message and pin", `,"rich_message":{"blocks":[]},"pinned_message":{"message_id":2,"chat":{"id":5}}`, []string{"pinned_message"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			u := decodeUpdate(t, `{"update_id":3,"message":{`+head+c.fields+`}}`)
+			if u.UpdateID != 3 || u.Message == nil || u.Message.MessageID != 1 || u.Message.Chat.ID != 5 {
+				t.Fatalf("%+v", u)
+			}
+			if !reflect.DeepEqual(u.Message.Unread, c.want) {
+				t.Fatalf("unread %#v, want %#v", u.Message.Unread, c.want)
+			}
+		})
+	}
+}
+
+func TestUnreadFieldNamesOfAnEdit(t *testing.T) {
+	u := decodeUpdate(t, `{"update_id":4,"edited_message":{"message_id":1,"chat":{"id":5,"type":"private"},"date":1,"edit_date":2,"video_note":{"file_id":"v"}}}`)
+	if u.Message != nil || u.EditedMessage == nil {
+		t.Fatalf("%+v", u)
+	}
+	if want := []string{"edit_date", "video_note"}; !reflect.DeepEqual(u.EditedMessage.Unread, want) {
+		t.Fatalf("unread %#v, want %#v", u.EditedMessage.Unread, want)
+	}
+}
+
+func TestUnreadFieldNamesInABatch(t *testing.T) {
+	var ups []Update
+	raw := `[{"update_id":1,"message":{"message_id":1,"chat":{"id":5},"text":"a"}},
+	 {"update_id":2,"message":{"message_id":2,"chat":{"id":5},"contact":{"phone_number":"1"}}}]`
+	if err := json.Unmarshal([]byte(raw), &ups); err != nil || len(ups) != 2 {
+		t.Fatal(ups, err)
+	}
+	if ups[0].Message.Unread != nil || !reflect.DeepEqual(ups[1].Message.Unread, []string{"contact"}) {
+		t.Fatalf("%#v %#v", ups[0].Message.Unread, ups[1].Message.Unread)
+	}
+}
+
+// Only the decoder of Update reads the field names, and only for message and edited_message.
+func TestUnreadIsNotSetInOtherPlaces(t *testing.T) {
+	u := decodeUpdate(t, `{"update_id":5,"message":{"message_id":2,"chat":{"id":5},"text":"x",
+	 "reply_to_message":{"message_id":1,"chat":{"id":5},"poll":{"id":"1"}}}}`)
+	if u.Message.Unread != nil || u.Message.ReplyToMessage == nil || u.Message.ReplyToMessage.Unread != nil {
+		t.Fatalf("%+v", u.Message)
+	}
+	// A callback update with a wrong rich_message decodes with no error.
+	u = decodeUpdate(t, `{"update_id":6,"callback_query":{"id":"q","from":{"id":5},"data":"d",
+	 "message":{"message_id":1,"chat":{"id":5},"rich_message":5,"poll":{"id":"1"}}}}`)
+	if u.UpdateID != 6 || u.CallbackQuery == nil || u.CallbackQuery.Message == nil || u.CallbackQuery.Message.Unread != nil {
+		t.Fatalf("%+v", u)
+	}
+	// The reply of a send call is a Message. It decodes with no error and gets no names.
+	var m Message
+	err := json.Unmarshal([]byte(`{"message_id":9,"chat":{"id":5},"rich_message":5,"video_note":{"file_id":"v"}}`), &m)
+	if err != nil || m.MessageID != 9 || m.Unread != nil {
+		t.Fatal(m, err)
+	}
+}
+
+func TestUpdateRoundTrip(t *testing.T) {
+	in := Update{
+		UpdateID: 9,
+		Message: &Message{MessageID: 4, From: &User{ID: 5, FirstName: "U"}, Chat: Chat{ID: 6, Type: "private"}, Date: 1,
+			Text: "hi @bot", Entities: []MessageEntity{{Type: "mention", Offset: 3, Length: 4}},
+			ReplyToMessage: &Message{MessageID: 3, Chat: Chat{ID: 6}},
+			RichMessage:    json.RawMessage(`{"blocks":[]}`)},
+		EditedMessage: &Message{MessageID: 4, Chat: Chat{ID: 6}, Caption: "c", Photo: []PhotoSize{{FileID: "p"}}},
+		CallbackQuery: &CallbackQuery{ID: "q", From: User{ID: 5}, Data: "d", Message: &Message{MessageID: 1, Chat: Chat{ID: 6}}},
+	}
+	raw, err := json.Marshal([]Update{in, {UpdateID: 10}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []Update
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatal(err)
+	}
+	if want := []Update{in, {UpdateID: 10}}; !reflect.DeepEqual(out, want) {
+		t.Fatalf("got  %+v\nwant %+v", out, want)
+	}
+}
+
+// The decoder returns the error of the plain decode, and update_id is set, as before.
+func TestUpdateDecodeErrorDoesNotChange(t *testing.T) {
+	for _, raw := range []string{`{"update_id":7,"message":5}`, `{"message":5,"update_id":7}`} {
+		var u Update
+		err := json.Unmarshal([]byte(raw), &u)
+		var te *json.UnmarshalTypeError
+		if !errors.As(err, &te) || te.Value != "number" || !strings.HasSuffix(te.Field, "message") {
+			t.Fatalf("%s: err %v", raw, err)
+		}
+		if u.UpdateID != 7 {
+			t.Fatalf("%s: update id %d, want 7", raw, u.UpdateID)
+		}
+	}
+}
+
+// updatesReply returns a client for a fake Bot API that answers each call with the status
+// and the body. Rate-limit waits take no time.
+func updatesReply(t *testing.T, status int, body string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	c := &Client{Token: "T", BaseURL: srv.URL, HC: srv.Client()}
+	c.sleep = func(context.Context, time.Duration) error { return nil }
+	return c
+}
+
+func TestGetUpdatesNLimit(t *testing.T) {
+	var bodies []map[string]any
+	srv := tgServer(t, func(method string, body map[string]any) any {
+		if method != "getUpdates" {
+			t.Errorf("method %q", method)
+		}
+		bodies = append(bodies, body)
+		return []any{}
+	})
+	c := &Client{Token: "T", BaseURL: srv.URL, HC: srv.Client()}
+	for _, limit := range []int{0, 1} {
+		if ups, err := c.GetUpdatesN(ctx, 5, 0, limit); err != nil || len(ups) != 0 {
+			t.Fatal(ups, err)
+		}
+	}
+	if ups, err := c.GetUpdates(ctx, 5, 0); err != nil || len(ups) != 0 {
+		t.Fatal(ups, err)
+	}
+	if len(bodies) != 3 {
+		t.Fatal(bodies)
+	}
+	if _, ok := bodies[0]["limit"]; ok {
+		t.Fatalf("limit 0 must send no limit: %v", bodies[0])
+	}
+	if bodies[1]["limit"] != float64(1) {
+		t.Fatalf("limit 1 must send limit 1: %v", bodies[1])
+	}
+	if _, ok := bodies[2]["limit"]; ok {
+		t.Fatalf("GetUpdates must send no limit: %v", bodies[2])
+	}
+	for _, b := range bodies {
+		if b["offset"] != float64(5) || b["timeout"] != float64(0) ||
+			!reflect.DeepEqual(b["allowed_updates"], []any{"message", "edited_message", "callback_query"}) {
+			t.Fatalf("body %v", b)
+		}
+	}
+}
+
+func TestGetUpdatesNUnreadable(t *testing.T) {
+	cases := []struct {
+		name, body string
+		id         int64
+		hasID      bool
+	}{
+		{"the reply is not JSON", `not json`, 0, false},
+		{"the reply is cut", `{"ok":true,"result":[{"update_id":7,"mess`, 0, false},
+		{"one update does not decode", `{"ok":true,"result":[{"update_id":7,"message":5}]}`, 7, true},
+		{"one of two updates does not decode", `{"ok":true,"result":[{"update_id":7,"message":5},{"update_id":8}]}`, 0, false},
+		{"one update with no id", `{"ok":true,"result":[{"message":5}]}`, 0, false},
+		{"the result is not an array", `{"ok":true,"result":{"update_id":7}}`, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ups, err := updatesReply(t, http.StatusOK, c.body).GetUpdatesN(ctx, 0, 0, 1)
+			var ue *UnreadableError
+			if !errors.As(err, &ue) {
+				t.Fatalf("err %v, want an UnreadableError", err)
+			}
+			if ue.UpdateID != c.id || ue.HasID != c.hasID || ue.Unwrap() == nil || ue.Error() == "" || len(ups) != 0 {
+				t.Fatalf("%+v, updates %v", ue, ups)
+			}
+		})
+	}
+	// GetUpdates gives the same error.
+	_, err := updatesReply(t, http.StatusOK, `not json`).GetUpdates(ctx, 0, 0)
+	var ue *UnreadableError
+	if !errors.As(err, &ue) || ue.HasID {
+		t.Fatal(err)
+	}
+}
+
+func TestGetUpdatesNOtherErrors(t *testing.T) {
+	unreadable := func(err error) bool {
+		var ue *UnreadableError
+		return errors.As(err, &ue)
+	}
+	// A 409: another process polls.
+	_, err := updatesReply(t, http.StatusConflict,
+		`{"ok":false,"error_code":409,"description":"Conflict: terminated by other getUpdates request"}`).GetUpdatesN(ctx, 0, 0, 0)
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code != 409 || unreadable(err) {
+		t.Fatal(err)
+	}
+	// A 429 with a body that is not JSON.
+	_, err = updatesReply(t, http.StatusTooManyRequests, "<html>429</html>").GetUpdatesN(ctx, 0, 0, 0)
+	ae = nil
+	if !errors.As(err, &ae) || ae.Code != 429 || unreadable(err) {
+		t.Fatal(err)
+	}
+	// A network error.
+	c := &Client{Token: "T", BaseURL: "http://127.0.0.1:1", HC: &http.Client{Transport: failTransport{}}}
+	if _, err = c.GetUpdatesN(ctx, 0, 0, 0); err == nil || unreadable(err) {
+		t.Fatal(err)
+	}
+	// A context that ended.
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err = updatesReply(t, http.StatusOK, `{"ok":true,"result":[]}`).GetUpdatesN(cctx, 0, 0, 0); err == nil || unreadable(err) {
+		t.Fatal(err)
+	}
+}
+
+func TestGetUpdatesNGoodBatch(t *testing.T) {
+	const body = `{"ok":true,"result":[
+	 {"update_id":7,"message":{"message_id":1,"chat":{"id":6,"type":"private"},"text":"a"}},
+	 {"update_id":8,"edited_message":{"message_id":1,"chat":{"id":6,"type":"private"},"text":"b"}}]}`
+	c := updatesReply(t, http.StatusOK, body)
+	viaN, err := c.GetUpdatesN(ctx, 7, 0, 0)
+	if err != nil || len(viaN) != 2 || viaN[0].UpdateID != 7 || viaN[0].Message.Text != "a" ||
+		viaN[1].UpdateID != 8 || viaN[1].EditedMessage.Text != "b" {
+		t.Fatal(viaN, err)
+	}
+	via, err := c.GetUpdates(ctx, 7, 0)
+	if err != nil || !reflect.DeepEqual(via, viaN) {
+		t.Fatal(via, err)
+	}
+	// An ok reply with no result gives no update and no error.
+	ups, err := updatesReply(t, http.StatusOK, `{"ok":true}`).GetUpdatesN(ctx, 0, 0, 0)
+	if err != nil || len(ups) != 0 {
+		t.Fatal(ups, err)
+	}
+}

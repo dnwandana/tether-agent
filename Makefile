@@ -27,7 +27,8 @@ FUZZ_TARGETS := \
 	./internal/telegram:FuzzMarkdownV2 \
 	./internal/telegram:FuzzSplitUTF16 \
 	./internal/telegram:FuzzSplitMarkdownV2 \
-	./internal/telegram:FuzzApprovalMessages
+	./internal/telegram:FuzzApprovalMessages \
+	./internal/telegram:FuzzRichMessage
 FUZZTIME ?= 30s
 
 # The soak length in minutes. For the full release soak, run
