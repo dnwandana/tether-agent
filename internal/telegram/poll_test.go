@@ -1,14 +1,19 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,7 +28,7 @@ type fakeUpdates struct {
 	mu      sync.Mutex
 	ups     []Update
 	offsets []int64
-	fails   int // the number of HTTP 502 replies before the first ok reply
+	fails   int // the number of API error 502 replies before the first ok reply
 }
 
 func (f *fakeUpdates) firstOffset() int64 {
@@ -49,7 +54,7 @@ func updatesServer(t *testing.T, ups []Update) (*httptest.Server, *fakeUpdates) 
 			f.fails--
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusBadGateway)
-			_, _ = w.Write([]byte("bad gateway"))
+			_, _ = w.Write([]byte(`{"ok":false,"error_code":502,"description":"Bad Gateway"}`))
 			return
 		}
 		var out []Update
@@ -468,5 +473,267 @@ func TestChatQueuesCountWaitingUpdates(t *testing.T) {
 	wg.Wait()
 	if got := n.Load(); got != 0 {
 		t.Fatalf("inflight %d after the handlers returned, want 0", got)
+	}
+}
+
+// pollReq is one getUpdates request that scriptServer received.
+type pollReq struct {
+	Offset int64
+	Limit  int // 0 when the request has no limit
+}
+
+// emptyBatch is a getUpdates reply with no update.
+const emptyBatch = `{"ok":true,"result":[]}`
+
+// scriptServer is a fake getUpdates peer that sends raw reply bodies. reply gets the number
+// of the request, from 0, and the request. It returns the body of the reply. The second
+// result of scriptServer returns the requests until now.
+func scriptServer(t *testing.T, reply func(i int, r pollReq) string) (*httptest.Server, func() []pollReq) {
+	t.Helper()
+	var mu sync.Mutex
+	var reqs []pollReq
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Offset int64 `json:"offset"`
+			Limit  int   `json:"limit"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		req := pollReq{Offset: body.Offset, Limit: body.Limit}
+		mu.Lock()
+		i := len(reqs)
+		reqs = append(reqs, req)
+		mu.Unlock()
+		out := reply(i, req)
+		if out == emptyBatch {
+			// A real long poll waits. Wait a little, so the loop does not spin.
+			select {
+			case <-r.Context().Done():
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+		_, _ = io.WriteString(w, out)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []pollReq {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(reqs)
+	}
+}
+
+// scriptPoller is a poller for srv. It writes its log to the buffer, and it records each
+// backoff wait in slept. A wait takes no time.
+func scriptPoller(t *testing.T, srv *httptest.Server) (p *Poller, logb *bytes.Buffer, slept *[]time.Duration) {
+	t.Helper()
+	logb, slept = &bytes.Buffer{}, &[]time.Duration{}
+	p = &Poller{C: client(srv), DB: openTestDB(t), TimeoutS: 1,
+		Log: slog.New(slog.NewJSONHandler(logb, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	p.sleep = func(_ context.Context, d time.Duration) error {
+		*slept = append(*slept, d)
+		return nil
+	}
+	return p, logb, slept
+}
+
+// runScript runs p until done returns true or 3 seconds pass. Then it stops p and waits for
+// Run to return, so the test can read the log and the waits of p.
+func runScript(t *testing.T, p *Poller, handle func(context.Context, Update), done func() bool) {
+	t.Helper()
+	c, cancel := context.WithCancel(ctx)
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); _ = p.Run(c, handle) }()
+	for end := time.Now().Add(3 * time.Second); !done() && time.Now().Before(end); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-stopped
+}
+
+// limits returns the limit of each request.
+func limits(reqs []pollReq) []int {
+	out := make([]int, len(reqs))
+	for i, r := range reqs {
+		out[i] = r.Limit
+	}
+	return out
+}
+
+func TestUnreadableReplyStartsSingleMode(t *testing.T) {
+	srv, reqs := scriptServer(t, func(i int, _ pollReq) string {
+		if i == 0 {
+			return "not json"
+		}
+		return emptyBatch
+	})
+	p, logb, slept := scriptPoller(t, srv)
+	runScript(t, p, func(context.Context, Update) {}, func() bool { return len(reqs()) >= 2 })
+	got := reqs()
+	if len(got) < 2 || got[0].Limit != 0 || got[1].Limit != 1 {
+		t.Fatalf("limits %v, want 0 and then 1", limits(got))
+	}
+	if len(*slept) != 0 {
+		t.Fatalf("the poller waited %v before the single mode", *slept)
+	}
+	want := `"level":"WARN","msg":"telegram: cannot read the update batch, read one update at a time"}`
+	if strings.Count(logb.String(), want) != 1 {
+		t.Fatalf("want one line %s in\n%s", want, logb)
+	}
+}
+
+func TestEmptyReplyEndsSingleMode(t *testing.T) {
+	srv, reqs := scriptServer(t, func(i int, _ pollReq) string {
+		if i == 0 {
+			return "not json"
+		}
+		return emptyBatch
+	})
+	p, _, _ := scriptPoller(t, srv)
+	runScript(t, p, func(context.Context, Update) {}, func() bool { return len(reqs()) >= 4 })
+	if got := limits(reqs()); len(got) < 4 || !reflect.DeepEqual(got[:4], []int{0, 1, 0, 0}) {
+		t.Fatalf("limits %v, want 0, 1, 0, 0", got)
+	}
+}
+
+func TestSingleModeSkipsTheUpdateThatDoesNotDecode(t *testing.T) {
+	ups := []string{
+		`{"update_id":1,"message":{"message_id":1,"chat":{"id":6,"type":"private"},"text":"SECRET-1"}}`,
+		`{"update_id":2,"message":5}`,
+		`{"update_id":3,"message":{"message_id":3,"chat":{"id":6,"type":"private"},"text":"SECRET-3"}}`,
+	}
+	srv, reqs := scriptServer(t, func(_ int, r pollReq) string {
+		var out []string
+		for i, u := range ups {
+			if int64(i+1) >= r.Offset && (r.Limit == 0 || len(out) < r.Limit) {
+				out = append(out, u)
+			}
+		}
+		return `{"ok":true,"result":[` + strings.Join(out, ",") + `]}`
+	})
+	p, logb, slept := scriptPoller(t, srv)
+	var mu sync.Mutex
+	var handled []int64
+	handle := func(_ context.Context, u Update) {
+		mu.Lock()
+		defer mu.Unlock()
+		handled = append(handled, u.UpdateID)
+	}
+	// Request 5 is the first request after the single mode: 0 is the batch, 1 to 3 are the
+	// three updates, and 4 is the empty reply.
+	runScript(t, p, handle, func() bool { return len(reqs()) >= 6 })
+	mu.Lock()
+	defer mu.Unlock()
+	if !reflect.DeepEqual(handled, []int64{1, 3}) {
+		t.Fatalf("handled %v, want 1 and 3 in order", handled)
+	}
+	want := []pollReq{{0, 0}, {0, 1}, {2, 1}, {3, 1}, {4, 1}, {4, 0}}
+	if got := reqs(); len(got) < 6 || !reflect.DeepEqual(got[:6], want) {
+		t.Fatalf("requests %v, want %v", got, want)
+	}
+	if v, _, _ := p.DB.KVGet(ctx, offsetKey); v != "4" {
+		t.Fatalf("stored offset %q, want 4", v)
+	}
+	skip := `"level":"WARN","msg":"telegram: update cannot be read, skip it","update":2}`
+	if out := logb.String(); strings.Count(out, skip) != 1 || strings.Count(out, "skip it") != 1 ||
+		strings.Count(out, "cannot read the update batch") != 1 {
+		t.Fatalf("want one line %s and one batch line in\n%s", skip, out)
+	}
+	if strings.Contains(logb.String(), "SECRET") {
+		t.Fatalf("the log holds the text of a message:\n%s", logb)
+	}
+	if len(*slept) != 0 {
+		t.Fatalf("the poller waited %v", *slept)
+	}
+}
+
+// failFirst fails the first n requests with a network error. It sends the other requests.
+type failFirst struct {
+	n    atomic.Int32
+	next http.RoundTripper
+}
+
+func (f *failFirst) RoundTrip(r *http.Request) (*http.Response, error) {
+	if f.n.Add(-1) >= 0 {
+		return nil, errors.New("connection refused")
+	}
+	return f.next.RoundTrip(r)
+}
+
+func TestNetworkErrorDoesNotStartSingleMode(t *testing.T) {
+	srv, reqs := scriptServer(t, func(int, pollReq) string { return emptyBatch })
+	p, logb, slept := scriptPoller(t, srv)
+	ft := &failFirst{next: srv.Client().Transport}
+	ft.n.Store(1)
+	p.C.HC = &http.Client{Transport: ft}
+	runScript(t, p, func(context.Context, Update) {}, func() bool { return len(reqs()) >= 2 })
+	// The server did not get the failed request.
+	if got := limits(reqs()); len(got) < 2 || got[0] != 0 || got[1] != 0 {
+		t.Fatalf("limits %v, want no limit", got)
+	}
+	if !reflect.DeepEqual(*slept, []time.Duration{time.Second}) {
+		t.Fatalf("waits %v, want 1 s", *slept)
+	}
+	if out := logb.String(); strings.Contains(out, "cannot read the update batch") ||
+		!strings.Contains(out, `"msg":"telegram getUpdates failed, wait and retry"`) {
+		t.Fatal(out)
+	}
+}
+
+func TestSingleModeWaitsWhenTheUpdateHasNoID(t *testing.T) {
+	srv, reqs := scriptServer(t, func(int, pollReq) string { return "not json" })
+	p, logb, _ := scriptPoller(t, srv)
+	c, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var slept []time.Duration
+	// The third wait stops the poller.
+	p.sleep = func(_ context.Context, d time.Duration) error {
+		slept = append(slept, d)
+		if len(slept) == 3 {
+			cancel()
+			return c.Err()
+		}
+		return nil
+	}
+	stopped := make(chan error, 1)
+	go func() { stopped <- p.Run(c, func(context.Context, Update) {}) }()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the poller did not wait three times")
+	}
+	if !reflect.DeepEqual(slept, []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}) {
+		t.Fatalf("waits %v", slept)
+	}
+	// Request 0 starts the single mode with no wait. Each later request has one wait after it.
+	if got := limits(reqs()); !reflect.DeepEqual(got, []int{0, 1, 1, 1}) {
+		t.Fatalf("limits %v, want 0, 1, 1, 1", got)
+	}
+	line := `"level":"WARN","msg":"telegram: the update at the offset cannot be read","offset":0}`
+	if strings.Count(logb.String(), line) != 3 {
+		t.Fatalf("want three lines %s in\n%s", line, logb)
+	}
+}
+
+func TestSingleModeEndsAfter100Updates(t *testing.T) {
+	// The queue never gets empty: each request gets the update at its offset.
+	srv, reqs := scriptServer(t, func(i int, r pollReq) string {
+		if i == 0 {
+			return "not json"
+		}
+		id := strconv.FormatInt(max(r.Offset, 1), 10)
+		return `{"ok":true,"result":[{"update_id":` + id + `}]}`
+	})
+	p, _, _ := scriptPoller(t, srv)
+	runScript(t, p, func(context.Context, Update) {}, func() bool { return len(reqs()) >= 102 })
+	got := limits(reqs())
+	if len(got) < 102 {
+		t.Fatalf("%d requests, want 102", len(got))
+	}
+	for i := 1; i <= 100; i++ {
+		if got[i] != 1 {
+			t.Fatalf("request %d has the limit %d, want 1", i, got[i])
+		}
+	}
+	if got[101] != 0 {
+		t.Fatalf("request 101 has the limit %d, want no limit", got[101])
 	}
 }

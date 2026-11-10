@@ -23,6 +23,9 @@ const (
 	defaultPollTimeoutS = 50
 	// maxPollBackoff is the longest wait after a failed getUpdates call.
 	maxPollBackoff = 30 * time.Second
+	// singleModeMax is the number of updates after which the single mode ends. One
+	// getUpdates reply holds 100 updates at most, so the batch that failed is then read.
+	singleModeMax = 100
 )
 
 // Poller reads updates with the getUpdates long poll. It stores the offset in
@@ -50,8 +53,9 @@ type Poller struct {
 // order. The messages of other chats run in parallel. A callback query runs in
 // its own goroutine, because a button press must not wait for a message. So
 // handle must return soon: it must not wait for a turn. For an edited
-// message, handle gets the edit in both Message and EditedMessage. Run returns
-// only after each handle call that it started has returned.
+// message, handle gets the edit in both Message and EditedMessage. After a reply that
+// it cannot read, Run reads one update for each call. It skips a single update that does
+// not decode. Run returns only after each handle call that it started has returned.
 func (p *Poller) Run(ctx context.Context, handle func(ctx context.Context, u Update)) error {
 	hctx := p.HandleCtx
 	if hctx == nil {
@@ -69,23 +73,65 @@ func (p *Poller) Run(ctx context.Context, handle func(ctx context.Context, u Upd
 		p.logger().Warn("telegram offset read failed, start from the server offset", "err", err.Error())
 	}
 	var backoff time.Duration
+	// single is true while the poller reads one update for each call. seen counts the
+	// updates of the single mode, also the updates that the poller skips.
+	single, seen := false, 0
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		ups, err := p.C.GetUpdates(ctx, offset, timeout)
+		limit := 0
+		if single {
+			limit = 1
+		}
+		ups, err := p.C.GetUpdatesN(ctx, offset, timeout, limit)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			var ue *UnreadableError
+			unreadable := errors.As(err, &ue)
+			switch {
+			case unreadable && !single:
+				// A new call with the same offset gives the same reply. Read the updates
+				// one at a time, to find the update that the poller cannot read.
+				single, seen = true, 0
+				p.logger().Warn("telegram: cannot read the update batch, read one update at a time")
+				continue
+			case unreadable && ue.HasID && ue.UpdateID >= offset:
+				p.logger().Warn("telegram: update cannot be read, skip it", "update", ue.UpdateID)
+				offset = ue.UpdateID + 1
+				if err := p.DB.KVSet(ctx, offsetKey, strconv.FormatInt(offset, 10)); err != nil {
+					if ctx.Err() != nil {
+						return ctx.Err()
+					}
+					p.logger().Warn("telegram offset write failed", "err", err.Error())
+				}
+				backoff = 0
+				if seen++; seen >= singleModeMax {
+					single = false
+				}
+				continue
+			}
 			backoff = nextBackoff(backoff)
-			p.logger().Warn("telegram getUpdates failed, wait and retry", "err", err.Error(), "wait_s", backoff.Seconds())
+			if unreadable {
+				// The poller cannot go past this update, because it has no id to skip.
+				p.logger().Warn("telegram: the update at the offset cannot be read", "offset", offset)
+			} else {
+				p.logger().Warn("telegram getUpdates failed, wait and retry", "err", err.Error(), "wait_s", backoff.Seconds())
+			}
 			if err := p.wait(ctx, backoff); err != nil {
 				return err
 			}
 			continue
 		}
 		backoff = 0
+		if single {
+			seen += len(ups)
+			if len(ups) == 0 || seen >= singleModeMax {
+				single = false
+			}
+		}
 		for _, u := range ups {
 			if u.UpdateID < offset {
 				continue
