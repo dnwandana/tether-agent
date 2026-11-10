@@ -1,8 +1,11 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -548,5 +551,349 @@ func TestStaticStickerFallbacks(t *testing.T) {
 		if txt != c.want || cache.puts != 0 {
 			t.Errorf("%s: %q puts=%d", c.name, txt, cache.puts)
 		}
+	}
+}
+
+// inboxPhoto returns the JSON of a photo block of a rich message. The file id is "rp<n>",
+// and the unique id is "ru<n>".
+func inboxPhoto(n int, caption string) string {
+	id := strconv.Itoa(n)
+	b := `{"type":"photo","photo":[{"file_id":"rp` + id + `","file_unique_id":"ru` + id +
+		`","width":320,"height":240,"file_size":4}]`
+	if caption != "" {
+		b += `,"caption":{"text":"` + caption + `"}`
+	}
+	return b + `}`
+}
+
+// inboxPhotos makes the fake serve the files of the photo blocks first to last. It returns
+// the JSON of these blocks, joined with commas.
+func inboxPhotos(api *fakeBot, first, last int) string {
+	var blocks []string
+	for n := first; n <= last; n++ {
+		id := strconv.Itoa(n)
+		api.addFile("rp"+id, "photos/rp"+id+".jpg", []byte("JPEG"+id))
+		blocks = append(blocks, inboxPhoto(n, ""))
+	}
+	return strings.Join(blocks, ",")
+}
+
+// richLimitNote is the note for a photo after the first 10 media parts.
+const richLimitNote = "[photo not read: Tether Agent reads the first 10 media files of a message]"
+
+func TestRichMediaNoteBetweenParagraphs(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("rp1", "photos/rp1.jpg", []byte("JPEG1"))
+	m := richMsg(`[{"type":"paragraph","text":"Before"},` + inboxPhoto(1, "Cap") +
+		`,{"type":"paragraph","text":"After"}]`)
+	txt, imgs, files, err := in.BuildFor(ctx, []Message{m}, "")
+	if err != nil || len(imgs) != 1 || len(files) != 0 {
+		t.Fatal(txt, imgs, files, err)
+	}
+	if want := "Before\n\n[image: " + imgs[0].Path + "]\nCap\n\nAfter"; txt != want {
+		t.Fatalf("got %q, want %q", txt, want)
+	}
+	if string(imgs[0].Data) != "JPEG1" || !strings.HasSuffix(imgs[0].Path, "-ru1.jpg") {
+		t.Fatal(imgs[0].Path, string(imgs[0].Data))
+	}
+}
+
+func TestRichMediaLimitOfTen(t *testing.T) {
+	if maxRichMedia != 10 {
+		t.Fatal(maxRichMedia)
+	}
+	in, api := inbox(t)
+	// The fake does not have the file of photo 11, and the inbox must not ask for it.
+	m := richMsg(`[` + inboxPhotos(api, 1, 10) + `,` + inboxPhoto(11, "eleven") + `]`)
+	txt, imgs, _, err := in.BuildFor(ctx, []Message{m}, "")
+	if err != nil || len(imgs) != 10 || api.count("getFile") != 10 {
+		t.Fatal(txt, len(imgs), api.count("getFile"), err)
+	}
+	if strings.Count(txt, "[image: ") != 10 || strings.Count(txt, richLimitNote) != 1 ||
+		!strings.HasSuffix(txt, "\n\n"+richLimitNote+"\neleven") {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestRichMediaKinds(t *testing.T) {
+	in, api := inbox(t)
+	in.Transcribe = func(context.Context, string) (string, error) { return "turn on the lights", nil }
+	api.addFile("rd1", "documents/a.txt", []byte("hello"))
+	api.addFile("rv1", "voice/v.oga", []byte("OGG"))
+	api.addFile("rvid1", "videos/clip.mp4", []byte("mp4"))
+	api.addFile("ran1", "animations/fun.mp4", []byte("mp4"))
+	api.addFile("rau1", "music/song.mp3", []byte("ID3"))
+	m := richMsg(`[
+		{"type":"document","document":{"file_id":"rd1","file_unique_id":"ud1","file_name":"a.txt","mime_type":"text/plain","file_size":5}},
+		{"type":"voice_note","voice_note":{"file_id":"rv1","file_unique_id":"uv1","file_size":3}},
+		{"type":"video","video":{"file_id":"rvid1","file_unique_id":"uvid1","file_name":"clip.mp4","mime_type":"video/mp4","file_size":3}},
+		{"type":"animation","animation":{"file_id":"ran1","file_unique_id":"uan1","file_name":"fun.mp4","mime_type":"video/mp4","file_size":3}},
+		{"type":"audio","audio":{"file_id":"rau1","file_unique_id":"uau1","file_name":"song.mp3","mime_type":"audio/mpeg","file_size":3}}]`)
+	txt, imgs, files, err := in.BuildFor(ctx, []Message{m}, "")
+	if err != nil || len(imgs) != 0 || len(files) != 5 {
+		t.Fatal(txt, imgs, files, err)
+	}
+	want := strings.Join([]string{
+		textDocNote("a.txt", files[0]) + "\n\n[Content of a.txt]:\nhello",
+		`[The user sent a voice message~ Here's what they said: "turn on the lights"]`,
+		videoNote("clip.mp4", files[2]),
+		videoNote("fun.mp4", files[3]),
+		audioNote("song.mp3", files[4]),
+	}, "\n\n")
+	if txt != want {
+		t.Fatalf("got %q, want %q", txt, want)
+	}
+	if !strings.HasSuffix(files[1], "-uv1.ogg") || !strings.HasSuffix(files[3], "-uan1.mp4") {
+		t.Fatal(files)
+	}
+}
+
+func TestRichMediaInboxCollage(t *testing.T) {
+	in, api := inbox(t)
+	m := richMsg(`[{"type":"collage","blocks":[` + inboxPhotos(api, 1, 1) + `],"caption":{"text":"Trip"}}]`)
+	txt, imgs, _, err := in.BuildFor(ctx, []Message{m}, "")
+	if err != nil || len(imgs) != 1 {
+		t.Fatal(txt, imgs, err)
+	}
+	// The note comes first, and the caption of the collage is the last line.
+	if !strings.HasPrefix(txt, "[image: "+imgs[0].Path+"]\n") || !strings.HasSuffix(txt, "\nTrip") {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestRichMediaInQuotation(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("rp1", "photos/rp1.jpg", []byte("JPEG1"))
+	m := richMsg(`[{"type":"blockquote","blocks":[{"type":"paragraph","text":"quoted"},` + inboxPhoto(1, "Cap") + `]}]`)
+	txt, imgs, _, err := in.BuildFor(ctx, []Message{m}, "")
+	if err != nil || len(imgs) != 1 {
+		t.Fatal(txt, imgs, err)
+	}
+	// The note line and the caption line have the prefix of the quotation.
+	if !strings.HasPrefix(txt, "> quoted\n") || !strings.HasSuffix(txt, "\n> [image: "+imgs[0].Path+"]\n> Cap") {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestRichMediaDownloadFailsForOnePart(t *testing.T) {
+	in, api := inbox(t)
+	// The fake does not have the file of photo 2.
+	api.addFile("rp1", "photos/rp1.jpg", []byte("JPEG1"))
+	api.addFile("rp3", "photos/rp3.jpg", []byte("JPEG3"))
+	m := richMsg(`[` + inboxPhoto(1, "") + `,` + inboxPhoto(2, "") + `,` + inboxPhoto(3, "") + `]`)
+	txt, imgs, _, err := in.BuildFor(ctx, []Message{m}, "")
+	if err != nil || len(imgs) != 2 {
+		t.Fatal(txt, imgs, err)
+	}
+	want := "[image: " + imgs[0].Path + "]\n\n[photo could not be downloaded]\n\n[image: " + imgs[1].Path + "]"
+	if txt != want || !strings.HasSuffix(imgs[1].Path, "-ru3.jpg") {
+		t.Fatalf("got %q, want %q", txt, want)
+	}
+}
+
+func TestRichMediaBotMentionRemoved(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("rp1", "photos/rp1.jpg", []byte("JPEG1"))
+	m := richMsg(`[{"type":"paragraph","text":"@tether_bot what is this?"},` + inboxPhoto(1, "@tether_bot look") + `]`)
+	txt, imgs, _, err := in.BuildFor(ctx, []Message{m}, "tether_bot")
+	if err != nil || len(imgs) != 1 {
+		t.Fatal(txt, imgs, err)
+	}
+	if want := "what is this?\n\n[image: " + imgs[0].Path + "]\nlook"; txt != want {
+		t.Fatalf("got %q, want %q", txt, want)
+	}
+	// Build gives no bot user name, so the mention stays.
+	txt, _, _, err = in.Build(ctx, []Message{m})
+	if err != nil || !strings.HasPrefix(txt, "@tether_bot what is this?\n\n") || !strings.HasSuffix(txt, "\n@tether_bot look") {
+		t.Fatalf("%q %v", txt, err)
+	}
+}
+
+func TestRichMediaEmptyPhotoArray(t *testing.T) {
+	in, api := inbox(t)
+	m := richMsg(`[{"type":"photo","photo":[],"caption":{"text":"only the caption"}}]`)
+	txt, imgs, files, err := in.BuildFor(ctx, []Message{m}, "")
+	if err != nil || txt != "only the caption" || len(imgs) != 0 || len(files) != 0 || api.count("getFile") != 0 {
+		t.Fatalf("%q %v %v %v", txt, imgs, files, err)
+	}
+}
+
+func TestRichAlbumSharesTheLimit(t *testing.T) {
+	in, api := inbox(t)
+	a := richMsg(`[` + inboxPhotos(api, 1, 6) + `]`)
+	b := richMsg(`[` + inboxPhotos(api, 7, 12) + `]`)
+	a.MediaGroupID, b.MediaGroupID = "g1", "g1"
+	txt, imgs, _, err := in.BuildFor(ctx, []Message{a, b}, "")
+	if err != nil || len(imgs) != 10 || api.count("getFile") != 10 || strings.Count(txt, richLimitNote) != 2 {
+		t.Fatal(txt, len(imgs), api.count("getFile"), err)
+	}
+}
+
+func TestAlbumClassicPhotoDoesNotCount(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("p320", "photos/classic.jpg", []byte("CLASSIC"))
+	classic := photoMsg("", sizes(320))
+	rich := richMsg(`[{"type":"paragraph","text":"Notes"},` + inboxPhotos(api, 1, 10) + `]`)
+	classic.MediaGroupID, rich.MediaGroupID = "g1", "g1"
+	txt, imgs, _, err := in.BuildFor(ctx, []Message{classic, rich}, "")
+	if err != nil || len(imgs) != 11 || strings.Contains(txt, "not read") {
+		t.Fatal(txt, len(imgs), err)
+	}
+	// The classic note comes first. The rich text takes the place of the caption.
+	if string(imgs[0].Data) != "CLASSIC" ||
+		!strings.HasPrefix(txt, "[image: "+imgs[0].Path+"]\n\nNotes\n\n[image: "+imgs[1].Path+"]") {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestRichMediaContextEndsBetweenParts(t *testing.T) {
+	in, api := inbox(t)
+	var logb bytes.Buffer
+	in.Log = slog.New(slog.NewTextHandler(&logb, nil))
+	api.addFile("rv1", "voice/rv1.oga", []byte("OGG"))
+	api.addFile("rv2", "voice/rv2.oga", []byte("OGG"))
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	// The context ends when part 1 is ready.
+	in.Transcribe = func(context.Context, string) (string, error) {
+		cancel()
+		return "one", nil
+	}
+	m := richMsg(`[{"type":"voice_note","voice_note":{"file_id":"rv1","file_unique_id":"uv1","file_size":3}},` +
+		`{"type":"voice_note","voice_note":{"file_id":"rv2","file_unique_id":"uv2","file_size":3}}]`)
+	txt, imgs, files, err := in.BuildFor(cctx, []Message{m}, "")
+	if !errors.Is(err, context.Canceled) || txt != "" || imgs != nil || files != nil {
+		t.Fatal(txt, imgs, files, err)
+	}
+	// Part 2 does not start, so no download fails.
+	if api.count("getFile") != 1 || strings.Contains(logb.String(), "download failed") {
+		t.Fatal(api.methods(), logb.String())
+	}
+}
+
+// slowFiles is a transport that holds the download of each file whose path contains "slow"
+// until the context of the request ends.
+type slowFiles struct{ next http.RoundTripper }
+
+func (s slowFiles) RoundTrip(r *http.Request) (*http.Response, error) {
+	if strings.Contains(r.URL.Path, "/file/") && strings.Contains(r.URL.Path, "slow") {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	}
+	return s.next.RoundTrip(r)
+}
+
+// slowInbox returns an inbox whose client holds the download of each "slow" file.
+func slowInbox(t *testing.T) (*Inbox, *fakeBot) {
+	t.Helper()
+	in, api := inbox(t)
+	in.C.HC = &http.Client{Transport: slowFiles{next: api.srv.Client().Transport}}
+	return in, api
+}
+
+// limitPhoto returns the JSON of a photo block of a rich message with the file id "lp<n>".
+func limitPhoto(n int, caption string) string {
+	id := strconv.Itoa(n)
+	b := `{"type":"photo","photo":[{"file_id":"lp` + id + `","file_unique_id":"lu` + id +
+		`","width":320,"height":240,"file_size":4}]`
+	if caption != "" {
+		b += `,"caption":{"text":"` + caption + `"}`
+	}
+	return b + `}`
+}
+
+// timeLimitNote is the note for a photo that the time limit stopped.
+const timeLimitNote = "[photo not read: the time limit for the media of one message ended]"
+
+func TestRichMediaLimitDefault(t *testing.T) {
+	if defaultRichMediaLimit != 2*time.Minute {
+		t.Fatal(defaultRichMediaLimit)
+	}
+	if got := (&Inbox{}).richMediaLimit(); got != 2*time.Minute {
+		t.Fatal(got)
+	}
+	if got := (&Inbox{RichMediaLimit: 50 * time.Millisecond}).richMediaLimit(); got != 50*time.Millisecond {
+		t.Fatal(got)
+	}
+}
+
+func TestRichMediaTimeLimit(t *testing.T) {
+	in, api := slowInbox(t)
+	in.RichMediaLimit = 50 * time.Millisecond
+	api.addFile("lp1", "photos/lp1.jpg", []byte("ONE"))
+	api.addFile("lp2", "slow/lp2.jpg", []byte("TWO"))
+	api.addFile("lp3", "photos/lp3.jpg", []byte("THREE"))
+	m := richMsg(`[{"type":"paragraph","text":"Intro"},` + limitPhoto(1, "first") + `,` + limitPhoto(2, "second") + `,` +
+		limitPhoto(3, "third") + `,{"type":"paragraph","text":"End"}]`)
+	// The context of the caller has a long limit. So a missing time limit fails the test and
+	// does not block it.
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	txt, imgs, files, err := in.BuildFor(cctx, []Message{m}, "")
+	if err != nil || len(imgs) != 1 || len(files) != 0 {
+		t.Fatal(txt, imgs, files, err)
+	}
+	// Part 1 is ready. The limit stops part 2. Part 3 does not start.
+	want := "Intro\n\n[image: " + imgs[0].Path + "]\nfirst\n\n" + timeLimitNote + "\nsecond\n\n" +
+		timeLimitNote + "\nthird\n\nEnd"
+	if txt != want {
+		t.Fatalf("got %q, want %q", txt, want)
+	}
+	if string(imgs[0].Data) != "ONE" || api.count("getFile") != 2 || api.lastCall("getFile").Body["file_id"] != "lp2" {
+		t.Fatal(api.all())
+	}
+}
+
+func TestRichMediaTimeLimitStopsTranscription(t *testing.T) {
+	in, api := inbox(t)
+	in.RichMediaLimit = 50 * time.Millisecond
+	// The transcription waits until its context ends.
+	in.Transcribe = func(c context.Context, _ string) (string, error) {
+		<-c.Done()
+		return "", c.Err()
+	}
+	api.addFile("lv1", "voice/lv1.oga", []byte("OGG"))
+	m := richMsg(`[{"type":"voice_note","voice_note":{"file_id":"lv1","file_unique_id":"luv1","file_size":3},` +
+		`"caption":{"text":"listen"}}]`)
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	txt, imgs, files, err := in.BuildFor(cctx, []Message{m}, "")
+	// The stopped part gives the note and its caption. Its file is not in the result.
+	want := "[voice note not read: the time limit for the media of one message ended]\nlisten"
+	if err != nil || txt != want || len(imgs) != 0 || len(files) != 0 {
+		t.Fatalf("%q %v %v %v", txt, imgs, files, err)
+	}
+}
+
+func TestClassicMediaIsNotUnderTheRichLimit(t *testing.T) {
+	in, api := slowInbox(t)
+	in.RichMediaLimit = 50 * time.Millisecond
+	api.addFile("lp1", "slow/lp1.jpg", []byte("ONE"))
+	api.addFile("p320", "photos/classic.jpg", []byte("CLASSIC"))
+	rich := richMsg(`[` + limitPhoto(1, "") + `]`)
+	classic := photoMsg("", sizes(320))
+	rich.MediaGroupID, classic.MediaGroupID = "g1", "g1"
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// The classic photo comes after the end of the limit, and the inbox reads it.
+	txt, imgs, _, err := in.BuildFor(cctx, []Message{rich, classic}, "")
+	if err != nil || len(imgs) != 1 || string(imgs[0].Data) != "CLASSIC" {
+		t.Fatal(txt, imgs, err)
+	}
+	if want := "[image: " + imgs[0].Path + "]\n\n" + timeLimitNote; txt != want {
+		t.Fatalf("got %q, want %q", txt, want)
+	}
+}
+
+func TestRichMediaCallerContextEnds(t *testing.T) {
+	in, api := slowInbox(t)
+	in.RichMediaLimit = time.Minute
+	api.addFile("lp1", "slow/lp1.jpg", []byte("ONE"))
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	time.AfterFunc(20*time.Millisecond, cancel)
+	txt, imgs, files, err := in.BuildFor(cctx, []Message{richMsg(`[` + limitPhoto(1, "") + `]`)}, "")
+	if !errors.Is(err, context.Canceled) || txt != "" || imgs != nil || files != nil {
+		t.Fatal(txt, imgs, files, err)
 	}
 }

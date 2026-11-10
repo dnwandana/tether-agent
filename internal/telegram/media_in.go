@@ -28,6 +28,13 @@ const (
 	// defaultAlbumWait is the wait for the other parts of an album (Hermes
 	// MEDIA_GROUP_WAIT_SECONDS).
 	defaultAlbumWait = 800 * time.Millisecond
+	// maxRichMedia is the most media parts that one BuildFor call reads from rich
+	// messages. It is the size of a Telegram album.
+	maxRichMedia = 10
+	// defaultRichMediaLimit is the time limit for the media parts of the rich messages of one
+	// BuildFor call. BuildFor runs in the worker of the chat, so each later update of the chat
+	// waits for it.
+	defaultRichMediaLimit = 2 * time.Minute
 	// stickerVisionPrompt is the Hermes prompt for a static sticker.
 	stickerVisionPrompt = "Describe this sticker in 1-2 sentences. Focus on what it depicts -- character, action, emotion. Be concise and objective."
 )
@@ -143,14 +150,35 @@ type Inbox struct {
 	Stickers    StickerCache
 	MaxDocBytes int64
 	Log         *slog.Logger
+	// RichMediaLimit is the time limit for the media parts of the rich messages of one
+	// BuildFor call. Zero means defaultRichMediaLimit. Tests change it.
+	RichMediaLimit time.Duration
 }
 
-// Build returns the user text for msgs (one message, or the parts of an
+// richMediaLimit returns the time limit for the media parts of the rich messages.
+func (in *Inbox) richMediaLimit() time.Duration {
+	if in.RichMediaLimit <= 0 {
+		return defaultRichMediaLimit
+	}
+	return in.RichMediaLimit
+}
+
+// Build is BuildFor with no bot user name.
+func (in *Inbox) Build(ctx context.Context, msgs []Message) (text string, images []provider.Image, files []string, err error) {
+	return in.BuildFor(ctx, msgs, "")
+}
+
+// BuildFor returns the user text for msgs (one message, or the parts of an
 // album), the images for the model, and the paths of the other saved files.
 // The notes about the media come first, then the captions (Hermes). A file
-// that fails gets a note in the text. err is set only when ctx ends.
-func (in *Inbox) Build(ctx context.Context, msgs []Message) (text string, images []provider.Image, files []string, err error) {
+// that fails gets a note in the text. err is set only when ctx ends. botUser
+// is the bot user name without "@". The inbox removes the mention of this bot
+// from the text of a rich message. The media parts of the rich messages share one time limit.
+// The end of the limit gives a note and no error.
+func (in *Inbox) BuildFor(ctx context.Context, msgs []Message, botUser string) (text string, images []provider.Image, files []string, err error) {
 	var notes, captions []string
+	read := 0
+	var end time.Time
 	for _, m := range msgs {
 		if err := ctx.Err(); err != nil {
 			return "", nil, nil, err
@@ -180,6 +208,13 @@ func (in *Inbox) Build(ctx context.Context, msgs []Message) (text string, images
 		if c == "" {
 			c = m.Text
 		}
+		if d := richOf(m); d != nil {
+			// The rich content is active only when Caption and Text are empty. So the text
+			// from the rich parts takes the place of the caption.
+			if c, err = in.buildRich(ctx, d.Lines(botUser), &read, &end, &images, &files); err != nil {
+				return "", nil, nil, err
+			}
+		}
 		if c = strings.TrimSpace(c); c != "" && !containsString(captions, c) {
 			captions = append(captions, c)
 		}
@@ -188,6 +223,72 @@ func (in *Inbox) Build(ctx context.Context, msgs []Message) (text string, images
 		return "", nil, nil, err
 	}
 	return strings.Join(append(notes, captions...), "\n\n"), images, files, nil
+}
+
+// buildRich returns the text of one rich message from its lines. Each media part gets the
+// note of its download at the position of its block. read counts the media parts of the rich
+// messages of one BuildFor call. end is the end of the time limit. It is zero until the first
+// media part starts.
+func (in *Inbox) buildRich(ctx context.Context, lines []richLine, read *int, end *time.Time, images *[]provider.Image, files *[]string) (string, error) {
+	notes := map[*richMedia]string{}
+	for _, l := range lines {
+		if l.Media == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if *read >= maxRichMedia {
+			notes[l.Media] = "[" + l.Media.KindName() + " not read: Tether Agent reads the first 10 media files of a message]"
+			continue
+		}
+		*read++
+		if end.IsZero() {
+			// The limit starts at the first media part of a rich message.
+			*end = time.Now().Add(in.richMediaLimit())
+		}
+		ended := "[" + l.Media.KindName() + " not read: the time limit for the media of one message ended]"
+		if !time.Now().Before(*end) {
+			notes[l.Media] = ended
+			continue
+		}
+		nImages, nFiles := len(*images), len(*files)
+		pctx, cancel := context.WithDeadline(ctx, *end)
+		note := in.readRichMedia(pctx, l.Media, images, files)
+		// Read the two contexts before cancel, because cancel also ends pctx.
+		stopped := pctx.Err() != nil && ctx.Err() == nil
+		cancel()
+		if stopped {
+			// Keep only the parts that the text names.
+			*images, *files = (*images)[:nImages], (*files)[:nFiles]
+			note = ended
+		}
+		notes[l.Media] = note
+	}
+	return richJoin(lines, func(m *richMedia) string { return notes[m] }), nil
+}
+
+// readRichMedia reads one media part with the function of the classic media. It returns the
+// note of that function. A part with no usable object keeps its placeholder.
+func (in *Inbox) readRichMedia(ctx context.Context, m *richMedia, images *[]provider.Image, files *[]string) string {
+	var notes []string
+	switch {
+	case m.Kind == "photo" && len(m.Photo) > 0:
+		p := largestPhoto(m.Photo)
+		notes = in.addImage(ctx, nil, images, p.FileID, p.FileUniqueID, p.FileSize, "", "photo")
+	case m.Kind == "voice_note" && m.Voice != nil:
+		notes = in.addVoice(ctx, nil, files, m.Voice)
+	case m.Kind == "audio" && m.Audio != nil:
+		notes = in.addAudio(ctx, nil, files, m.Audio)
+	case (m.Kind == "video" || m.Kind == "animation") && m.Video != nil:
+		v := m.Video
+		notes = in.addVideo(ctx, nil, files, v.FileID, v.FileUniqueID, v.FileName, videoExt(v.FileName, v.MimeType), v.FileSize)
+	case m.Kind == "document" && m.Document != nil:
+		notes = in.addDocument(ctx, nil, images, files, m.Document)
+	default:
+		return m.Placeholder
+	}
+	return strings.Join(notes, "\n")
 }
 
 // locationNote returns the note for a location pin. v is nil for a plain
@@ -530,7 +631,11 @@ func (in *Inbox) failed(what string, err error) string {
 	if errors.As(err, &e) {
 		return in.tooLarge(what, e.size)
 	}
-	in.logger().Warn("telegram media download failed", "what", what, "err", err.Error())
+	// A stop by a time limit or by a cancel is not a download failure. The
+	// caller gives its own note, so no warn line is needed.
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
+		in.logger().Warn("telegram media download failed", "what", what, "err", err.Error())
+	}
 	return "[" + what + " could not be downloaded]"
 }
 

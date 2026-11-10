@@ -203,6 +203,25 @@ func (h *tgHarness) edit(m Message) {
 	}()
 }
 
+// updateJSON decodes raw as an Update and handles it like update. The decoder of Update
+// sets the unread field names. A Message that a test builds by hand does not have them.
+func (h *tgHarness) updateJSON(raw string) {
+	h.t.Helper()
+	var u Update
+	if err := json.Unmarshal([]byte(raw), &u); err != nil {
+		h.t.Fatal(err)
+	}
+	if u.Message == nil && u.EditedMessage != nil {
+		// The poller gives an edit in Message and in EditedMessage.
+		u.Message = u.EditedMessage
+	}
+	h.wg.Add(1)
+	go func() {
+		defer h.wg.Done()
+		h.ch.handleUpdate(ctx, h.gw, u)
+	}()
+}
+
 func debugLog(h *tgHarness) *bytes.Buffer {
 	var buf bytes.Buffer
 	h.ch.Log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
@@ -1268,4 +1287,260 @@ func TestMessageAfterTheStopGetsANotice(t *testing.T) {
 	h.update(m)
 	h.waitIdle()
 	wantDropNotice(t, h, logb, 42)
+}
+
+// richDM is a DM from the user uid whose only content is a rich message with the given
+// blocks.
+func richDM(uid int64, blocksJSON string) Message {
+	m := richMsg(blocksJSON)
+	m.MessageID, m.Chat, m.From = 1, Chat{ID: uid, Type: "private", FirstName: "U"}, &User{ID: uid, FirstName: "U"}
+	return m
+}
+
+// richDMPhoto is the JSON of a photo block. The fake file "cp1" serves it.
+const richDMPhoto = `{"type":"photo","photo":[{"file_id":"cp1","file_unique_id":"cu1","width":1280,"height":960,"file_size":4}]}`
+
+func TestRichDMTurn(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	h.update(richDM(5, `[{"type":"heading","size":2,"text":"Plan"},{"type":"paragraph","text":["do ",{"type":"bold","text":"this"}]}]`))
+	h.waitIdle()
+	s := h.session("telegram:dm:5")
+	if s == nil || prov.count() != 1 {
+		t.Fatalf("session %+v, turns %d", s, prov.count())
+	}
+	// The stored user message is the Markdown text.
+	msgs := h.messages(s)
+	if len(msgs) < 2 || msgs[0].Msg.Role != provider.RoleUser || msgs[0].Msg.Content != "## Plan\n\ndo **this**" {
+		t.Fatalf("%+v", msgs)
+	}
+}
+
+func TestRichPhotoTurn(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	h.api.addFile("cp1", "photos/cp1.jpg", []byte("JPEG"))
+	h.update(richDM(5, `[{"type":"paragraph","text":"@tether_bot what is this?"},`+richDMPhoto+`]`))
+	h.waitIdle()
+	s := h.session("telegram:dm:5")
+	if s == nil || prov.count() != 1 {
+		t.Fatalf("session %+v, turns %d", s, prov.count())
+	}
+	// The turn has one image. With no vision model, the agent replaces the image marker with
+	// a note. The mention of the bot is not in the text.
+	user := h.messages(s)[0].Msg.Content
+	if !strings.HasPrefix(user, "what is this?\n\n[image") || strings.Count(user, "[image") != 1 ||
+		strings.Contains(user, "@tether_bot") {
+		t.Fatal(user)
+	}
+	if h.api.count("getFile") != 1 || h.api.count("download") != 1 {
+		t.Fatal(h.api.methods())
+	}
+}
+
+func TestEditedRichMessageGetsATurn(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	h.edit(richDM(5, `[{"type":"paragraph","text":"fixed typo"}]`))
+	h.waitIdle()
+	if prov.count() != 1 {
+		t.Fatalf("turns %d, want 1", prov.count())
+	}
+}
+
+func TestRichCommandRuns(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	h.update(richDM(5, `[{"type":"paragraph","text":"/new"}]`))
+	h.waitIdle()
+	// /new makes a session with no message, and it makes no model call.
+	s := h.session("telegram:dm:5")
+	if s == nil || len(h.messages(s)) != 0 || prov.count() != 0 || h.api.count("sendChatAction") != 0 {
+		t.Fatalf("session %+v, turns %d, calls %v", s, prov.count(), h.api.methods())
+	}
+}
+
+func TestRichMessageAnswersClarify(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	h.api.addFile("cp1", "photos/cp1.jpg", []byte("JPEG"))
+	actx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	out := make(chan tools.Answer, 1)
+	go func() {
+		a, _ := h.ch.UI.For(5, "").Ask(actx, tools.Question{Text: "Favourite color?"})
+		out <- a
+	}()
+	waitSends(t, h.api, 1)
+	// A rich message with a media part is not an answer. It goes to the agent.
+	h.update(richDM(5, `[{"type":"paragraph","text":"red"},`+richDMPhoto+`]`))
+	h.waitIdle()
+	// A rich message that starts with "/" is not an answer. It runs as a command.
+	h.update(richDM(5, `[{"type":"paragraph","text":"/new"}]`))
+	h.waitIdle()
+	if prov.count() != 1 {
+		t.Fatalf("turns %d, want 1", prov.count())
+	}
+	// A rich message with text and no media part is the answer, without the bot mention.
+	h.update(richDM(5, `[{"type":"paragraph","text":["@tether_bot my answer is ",{"type":"bold","text":"blue"}]}]`))
+	h.waitIdle()
+	select {
+	case a := <-out:
+		if a.Text != "my answer is **blue**" {
+			t.Fatalf("%+v", a)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the rich message did not answer the question")
+	}
+	if prov.count() != 1 {
+		t.Fatal("the answer must not go to the agent")
+	}
+}
+
+func TestRichUnknownTypesLogged(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	buf := debugLog(h)
+	h.update(richDM(5, `[{"type":"sidebar","text":"a note"}]`))
+	h.waitIdle()
+	want := `"level":"DEBUG","msg":"telegram: the rich message has unknown types","chat":"5","types":"sidebar"`
+	if out := buf.String(); !strings.Contains(out, want) || strings.Count(out, "the rich message has unknown types") != 1 {
+		t.Fatalf("want one line %s in\n%s", want, out)
+	}
+	// The fallback gives the text of the unknown block, so the message makes a turn.
+	if prov.count() != 1 {
+		t.Fatalf("turns %d, want 1", prov.count())
+	}
+}
+
+func TestRichFailureLogged(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	buf := debugLog(h)
+	m := richDM(5, `[{"type":"paragraph","text":"hello"}]`)
+	// A cached document with the failed flag stands for a converter panic.
+	m.rich = &richDoc{failed: true}
+	h.update(m)
+	// A channel post returns before the converter, so it writes no line.
+	post := richDM(5, `[{"type":"paragraph","text":"post"}]`)
+	post.Chat = Chat{ID: -5, Type: "channel", Title: "News"}
+	post.rich = &richDoc{failed: true}
+	h.update(post)
+	h.waitIdle()
+	out := buf.String()
+	want := `"level":"WARN","msg":"telegram: the rich message cannot be read","chat":"5"`
+	if !strings.Contains(out, want) || strings.Count(out, "the rich message cannot be read") != 1 {
+		t.Fatalf("want one line %s in\n%s", want, out)
+	}
+	// The message has no rich content after the failure, so the gate drops it.
+	if !strings.Contains(out, `"reason":"no_content"`) || prov.count() != 0 || h.session("telegram:dm:5") != nil {
+		t.Fatalf("turns %d, log\n%s", prov.count(), out)
+	}
+}
+
+func TestPlainAndClassicPhotoWriteNoRichLine(t *testing.T) {
+	prov := &tgProv{}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
+	buf := debugLog(h)
+	h.api.addFile("p1280", "photos/file_1.jpg", []byte("JPEG"))
+	h.update(dmText(5, "hi"))
+	h.waitIdle()
+	photo := dmText(5, "")
+	photo.Text, photo.Entities = "", nil
+	photo.Caption, photo.Photo = "@tether_bot what is this?", sizes(1280)
+	h.update(photo)
+	h.waitIdle()
+	var users []string
+	for _, m := range h.messages(h.session("telegram:dm:5")) {
+		if m.Msg.Role == provider.RoleUser {
+			users = append(users, m.Msg.Content)
+		}
+	}
+	if prov.count() != 2 || len(users) != 2 || users[0] != "hi" || !strings.HasPrefix(users[1], "[image") ||
+		!strings.HasSuffix(users[1], "\n\nwhat is this?") || strings.Contains(users[1], "@tether_bot") {
+		t.Fatalf("turns %d, users %q", prov.count(), users)
+	}
+	if out := buf.String(); strings.Contains(out, "the rich message cannot be read") ||
+		strings.Contains(out, "the rich message has unknown types") {
+		t.Fatal(out)
+	}
+}
+
+// notAccepted returns the records of the line "telegram: message not accepted" in buf.
+func notAccepted(buf *bytes.Buffer) []map[string]any {
+	var out []map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "telegram: message not accepted" {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+func TestNotAcceptedLineNamesTheUnreadFields(t *testing.T) {
+	const (
+		dm5   = `"from":{"id":5,"first_name":"U"},"chat":{"id":5,"type":"private"},"date":1`
+		dm6   = `"from":{"id":6,"first_name":"V"},"chat":{"id":6,"type":"private"},"date":1`
+		grp5  = `"from":{"id":5,"first_name":"U"},"chat":{"id":-100,"type":"supergroup","title":"G"},"date":1`
+		note  = `,"video_note":{"file_id":"SECRET-FILE","length":240,"duration":3}`
+		empty = `,"rich_message":{"blocks":[{"type":"divider"}]}`
+	)
+	cases := []struct {
+		name, msg     string
+		level, reason string
+		fields        any // nil when the line has no fields attribute
+	}{
+		{"video note from an allowed user", dm5 + note, "INFO", "no_content", "video_note"},
+		{"video note from a user that is not allowed", dm6 + note, "DEBUG", "no_content", "video_note"},
+		{"join", grp5 + `,"new_chat_members":[{"id":7,"first_name":"SECRET-NAME"}],"new_chat_participant":{"id":7},"new_chat_member":{"id":7}`,
+			"DEBUG", "no_content", nil},
+		{"rich message with only a divider", dm5 + empty, "INFO", "no_content", "rich_message"},
+		{"rich message with only a divider, and one more field", dm5 + empty + `,"has_protected_content":true`,
+			"INFO", "no_content", "has_protected_content,rich_message"},
+		{"pin", dm5 + `,"pinned_message":{"message_id":1,"chat":{"id":5,"type":"private"},"text":"SECRET-PIN"}`,
+			"INFO", "no_content", "pinned_message"},
+		{"poll and dice", dm5 + `,"poll":{"id":"1","question":"SECRET-POLL"},"dice":{"emoji":"🎲","value":3}`,
+			"INFO", "no_content", "dice,poll"},
+		{"group message that drops", grp5 + `,"text":"SECRET-TEXT","has_protected_content":true`, "DEBUG", "drop", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			prov := &tgProv{}
+			h := harness(t, prov, func(cfg *config.TelegramConfig) {
+				cfg.AllowedUsers = []string{"5"}
+				cfg.RequireMention = true
+			})
+			buf := debugLog(h)
+			h.updateJSON(`{"update_id":1,"message":{"message_id":1,` + c.msg + `}}`)
+			h.waitIdle()
+			recs := notAccepted(buf)
+			if len(recs) != 1 {
+				t.Fatalf("want one line, got %v in\n%s", recs, buf)
+			}
+			r := recs[0]
+			if r["level"] != c.level || r["reason"] != c.reason || r["fields"] != c.fields {
+				t.Fatalf("line %v, want level %s, reason %s, fields %v", r, c.level, c.reason, c.fields)
+			}
+			if strings.Contains(buf.String(), "SECRET") {
+				t.Fatalf("the log holds a value of the message:\n%s", buf)
+			}
+			if prov.count() != 0 || h.api.count("sendMessage") != 0 {
+				t.Fatalf("turns %d, sent %q", prov.count(), h.sentTexts())
+			}
+		})
+	}
+}
+
+// The attributes are chat, reason, and fields, in this order. An edit gives the same line.
+func TestNotAcceptedLineAttributeOrder(t *testing.T) {
+	h := harness(t, &tgProv{}, func(cfg *config.TelegramConfig) { cfg.AllowedUsers = []string{"5"} })
+	buf := debugLog(h)
+	h.updateJSON(`{"update_id":1,"edited_message":{"message_id":1,"from":{"id":5,"first_name":"U"},
+	 "chat":{"id":5,"type":"private"},"date":1,"video_note":{"file_id":"v"}}}`)
+	h.waitIdle()
+	want := `"level":"INFO","msg":"telegram: message not accepted","chat":"5","reason":"no_content","fields":"video_note"}`
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("want %s in\n%s", want, buf)
+	}
 }

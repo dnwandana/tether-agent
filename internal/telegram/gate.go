@@ -53,6 +53,9 @@ func Normalize(m Message) Normalized {
 	if n.Text == "" {
 		n.Text = m.Caption
 	}
+	if d := richOf(m); d != nil && d.HasText() {
+		n.Text = d.Text("")
+	}
 	switch m.Chat.Type {
 	case "group", "supergroup":
 		n.Kind = KindGroup
@@ -90,16 +93,26 @@ func Normalize(m Message) Normalized {
 }
 
 // mediaPresent reports if the message has a media field that Tether Agent
-// reads. Gate and hasMedia use this one list.
+// reads, or a media part in its rich content. Gate and hasMedia use this one
+// list.
 func mediaPresent(m Message) bool {
-	return len(m.Photo) > 0 || m.Document != nil || m.Voice != nil || m.Video != nil ||
-		m.Audio != nil || m.Sticker != nil || m.Location != nil || m.Venue != nil
+	if len(m.Photo) > 0 || m.Document != nil || m.Voice != nil || m.Video != nil ||
+		m.Audio != nil || m.Sticker != nil || m.Location != nil || m.Venue != nil {
+		return true
+	}
+	d := richOf(m)
+	return d != nil && d.MediaCount() > 0
 }
 
-// hasContent reports if the message has text, a caption, or media. It reads m,
-// not the normalized text, so a caption and a bare mention count.
+// hasContent reports if the message has text, a caption, media, or rich
+// content with text. It reads m, not the normalized text, so a caption and a
+// bare mention count.
 func hasContent(m Message) bool {
-	return m.Text != "" || m.Caption != "" || mediaPresent(m)
+	if m.Text != "" || m.Caption != "" || mediaPresent(m) {
+		return true
+	}
+	d := richOf(m)
+	return d != nil && d.HasText()
 }
 
 // Gate decides if the bot answers a message. It runs the gate steps of Hermes
@@ -107,7 +120,13 @@ func hasContent(m Message) bool {
 // without "@", and botID is the bot user id.
 func Gate(cfg config.TelegramConfig, botUser string, botID int64, m Message, n Normalized) Decision {
 	accept := func(reason string) Decision {
-		return Decision{Accept: true, Text: StripMention(n.Text, botUser), Reason: reason}
+		text := StripMention(n.Text, botUser)
+		// The converter removes the bot mention from rich content before it
+		// writes the Markdown markers. StripMention on Markdown leaves empty markers.
+		if d := richOf(m); d != nil && d.HasText() {
+			text = strings.TrimSpace(d.Text(botUser))
+		}
+		return Decision{Accept: true, Text: text, Reason: reason}
 	}
 	drop := func(reason string) Decision { return Decision{Reason: reason} }
 
@@ -206,11 +225,23 @@ func observeAllowed(cfg config.TelegramConfig, chatID string) bool {
 	return len(cfg.AllowedChats) == 0 || inList(cfg.AllowedChats, chatID)
 }
 
-// isCommand reports whether the message starts with a bot command.
+// isCommand reports whether the message starts with a bot command. The
+// command can also be in a rich message.
 func isCommand(m Message) bool {
 	for _, e := range m.Entities {
 		if e.Type == "bot_command" && e.Offset == 0 {
 			return true
+		}
+	}
+	if d := richOf(m); d != nil {
+		_, ents := d.Addressing()
+		for _, e := range ents {
+			if e.Offset > 0 {
+				break
+			}
+			if e.Type == "bot_command" && e.Offset == 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -240,10 +271,41 @@ var rawBotMention = regexp.MustCompile(`(?i)@([a-z0-9_]{2,29}bot)\b`)
 type textSource struct {
 	text     string
 	entities []MessageEntity
+	// texts holds the text of each entity of the rich source. It is nil for Text and
+	// Caption, where entityText computes the text.
+	texts []string
+}
+
+// entity returns the text of entity i of the source.
+func (s textSource) entity(i int) (string, bool) {
+	if s.texts != nil {
+		if i < 0 || i >= len(s.texts) {
+			return "", false
+		}
+		return s.texts[i], true
+	}
+	return entityText(s.text, s.entities[i])
 }
 
 func sources(m Message) []textSource {
-	return []textSource{{m.Text, m.Entities}, {m.Caption, m.CaptionEntities}}
+	out := []textSource{
+		{text: m.Text, entities: m.Entities},
+		{text: m.Caption, entities: m.CaptionEntities},
+	}
+	if d := richOf(m); d != nil {
+		text, ents := d.Addressing()
+		src := textSource{
+			text:     text,
+			entities: make([]MessageEntity, 0, len(ents)),
+			texts:    make([]string, 0, len(ents)),
+		}
+		for _, e := range ents {
+			src.entities = append(src.entities, MessageEntity{Type: e.Type, Offset: e.Offset, Length: e.Length, User: e.User})
+			src.texts = append(src.texts, e.Text)
+		}
+		out = append(out, src)
+	}
+	return out
 }
 
 // entityText returns the part of text that e marks. Telegram counts the
@@ -271,11 +333,11 @@ func botMentions(m Message) []string {
 		}
 	}
 	for _, src := range sources(m) {
-		for _, e := range src.entities {
+		for i, e := range src.entities {
 			if e.Type != "mention" && e.Type != "bot_command" {
 				continue
 			}
-			s, ok := entityText(src.text, e)
+			s, ok := src.entity(i)
 			if !ok {
 				continue
 			}
@@ -315,10 +377,10 @@ func noMentionBefore(c byte) bool {
 func mentionsBot(m Message, self string, botID int64) bool {
 	want := "@" + self
 	for _, src := range sources(m) {
-		for _, e := range src.entities {
+		for i, e := range src.entities {
 			switch e.Type {
 			case "mention":
-				if s, ok := entityText(src.text, e); ok && self != "" && strings.ToLower(strings.TrimSpace(s)) == want {
+				if s, ok := src.entity(i); ok && self != "" && strings.ToLower(strings.TrimSpace(s)) == want {
 					return true
 				}
 			case "text_mention":
@@ -326,7 +388,7 @@ func mentionsBot(m Message, self string, botID int64) bool {
 					return true
 				}
 			case "bot_command":
-				s, ok := entityText(src.text, e)
+				s, ok := src.entity(i)
 				if !ok || self == "" {
 					continue
 				}
@@ -347,6 +409,12 @@ func mentionsBot(m Message, self string, botID int64) bool {
 var patternCache sync.Map // string → *regexp.Regexp
 
 func matchesPatterns(patterns []string, m Message) bool {
+	texts := []string{m.Text, m.Caption}
+	if len(patterns) > 0 {
+		if d := richOf(m); d != nil {
+			texts = append(texts, d.Plain())
+		}
+	}
 	for _, p := range patterns {
 		if strings.TrimSpace(p) == "" {
 			continue
@@ -361,7 +429,7 @@ func matchesPatterns(patterns []string, m Message) bool {
 		if re == nil {
 			continue
 		}
-		for _, s := range []string{m.Text, m.Caption} {
+		for _, s := range texts {
 			if s != "" && re.MatchString(s) {
 				return true
 			}

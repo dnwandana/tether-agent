@@ -1,9 +1,11 @@
 package telegram
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 )
@@ -404,5 +406,305 @@ func TestMediaPresentCoversEveryType(t *testing.T) {
 		if !mediaPresent(m) || !hasMedia([]Message{m}) {
 			t.Errorf("%+v: media expected", m)
 		}
+	}
+}
+
+func TestRichContentCheck(t *testing.T) {
+	cases := []struct {
+		name, blocks   string
+		content, media bool
+		text           string
+	}{
+		{"text", `[{"type":"paragraph","text":"hello"}]`, true, false, "hello"},
+		{"divider only", `[{"type":"divider"}]`, false, false, ""},
+		{"empty heading", `[{"type":"heading","size":2,"text":""}]`, false, false, ""},
+		{"no blocks", `[]`, false, false, ""},
+		{"photo only", `[{"type":"photo","photo":[{"file_id":"p1"}]}]`, true, true, ""},
+		{"photo with a caption", `[{"type":"photo","photo":[{"file_id":"p1"}],"caption":{"text":"look"}}]`, true, true, "[photo]\nlook"},
+		{"photo with no usable object", `[{"type":"photo","photo":[]}]`, false, false, ""},
+		{"bold mention", `[{"type":"paragraph","text":[{"type":"bold","text":"@tether_bot"}," hi"]}]`, true, false, "**@tether_bot** hi"},
+	}
+	for _, c := range cases {
+		m := richMsg(c.blocks)
+		m.MessageID, m.Chat, m.From = 1, Chat{ID: 123, Type: "private", FirstName: "Ana"}, ana()
+		if got := hasContent(m); got != c.content {
+			t.Errorf("%s: hasContent = %v, want %v", c.name, got, c.content)
+		}
+		if got := mediaPresent(m); got != c.media {
+			t.Errorf("%s: mediaPresent = %v, want %v", c.name, got, c.media)
+		}
+		if got := hasMedia([]Message{m}); got != c.media {
+			t.Errorf("%s: hasMedia = %v, want %v", c.name, got, c.media)
+		}
+		if got := Normalize(m).Text; got != c.text {
+			t.Errorf("%s: n.Text = %q, want %q", c.name, got, c.text)
+		}
+	}
+}
+
+func TestRichContentGate(t *testing.T) {
+	base := config.Default().Telegram // require_mention is false
+	rich := func(m Message, blocks string) Message {
+		m.Text, m.Entities = "", nil
+		m.RichMessage = richMsg(blocks).RichMessage
+		return m
+	}
+	cases := []struct {
+		name string
+		msg  Message
+		want Decision
+	}{
+		{"dm text", rich(dm(""), `[{"type":"heading","size":1,"text":"Report"},{"type":"paragraph","text":["Plain, ",{"type":"bold","text":"bold"}]}]`),
+			Decision{Accept: true, Text: "# Report\n\nPlain, **bold**", Reason: "dm"}},
+		{"dm divider only", rich(dm(""), `[{"type":"divider"}]`), Decision{Reason: "no_content"}},
+		{"group divider only", rich(group(""), `[{"type":"divider"}]`), Decision{Reason: "no_content"}},
+		{"dm photo only", rich(dm(""), `[{"type":"photo","photo":[{"file_id":"p1"}]}]`), Decision{Accept: true, Reason: "dm"}},
+		{"group text", rich(group(""), `[{"type":"paragraph","text":"hello"}]`),
+			Decision{Accept: true, Text: "hello", Reason: "require_mention_off"}},
+		{"bold mention", rich(dm(""), `[{"type":"paragraph","text":[{"type":"bold","text":"@tether_bot"}," hi"]}]`),
+			Decision{Accept: true, Text: "hi", Reason: "dm"}},
+		{"mention at the end", rich(dm(""), `[{"type":"paragraph","text":"what now @tether_bot"}]`),
+			Decision{Accept: true, Text: "what now", Reason: "dm"}},
+		{"only the mention", rich(dm(""), `[{"type":"paragraph","text":"@tether_bot"}]`),
+			Decision{Accept: true, Text: "@tether_bot", Reason: "dm"}},
+		{"bold command", rich(dm(""), `[{"type":"paragraph","text":{"type":"bold","text":"/new"}}]`),
+			Decision{Accept: true, Text: "**/new**", Reason: "dm"}},
+		{"photo with a caption for the bot", rich(dm(""), `[{"type":"photo","photo":[{"file_id":"p1"}],"caption":{"text":"@tether_bot look"}}]`),
+			Decision{Accept: true, Text: "[photo]\nlook", Reason: "dm"}},
+	}
+	for _, c := range cases {
+		if d := Gate(base, "tether_bot", 99, c.msg, Normalize(c.msg)); d != c.want {
+			t.Errorf("%s: %+v, want %+v", c.name, d, c.want)
+		}
+	}
+}
+
+func TestRichContentIgnoredWithText(t *testing.T) {
+	base := config.Default().Telegram
+	raw := richMsg(`[{"type":"paragraph","text":"rich"},{"type":"photo","photo":[{"file_id":"p1"}]}]`).RichMessage
+
+	// A message with text: each reader ignores the rich message, also its media.
+	m := dm("typed")
+	m.RichMessage = raw
+	n := Normalize(m)
+	if n.Text != "typed" || mediaPresent(m) || !hasContent(m) {
+		t.Errorf("text: n.Text = %q, mediaPresent = %v, hasContent = %v", n.Text, mediaPresent(m), hasContent(m))
+	}
+	if d := Gate(base, "tether_bot", 99, m, n); d != (Decision{Accept: true, Text: "typed", Reason: "dm"}) {
+		t.Errorf("text: %+v", d)
+	}
+
+	// A message with a caption and no classic media field.
+	m = Message{MessageID: 1, Chat: Chat{ID: 123, Type: "private"}, From: ana(), Caption: "cap", RichMessage: raw}
+	if n := Normalize(m); n.Text != "cap" || mediaPresent(m) || !hasContent(m) {
+		t.Errorf("caption: n.Text = %q, mediaPresent = %v, hasContent = %v", n.Text, mediaPresent(m), hasContent(m))
+	}
+}
+
+func TestRichContentRegression(t *testing.T) {
+	cfg := config.Default().Telegram
+	cfg.RequireMention = true
+	join := Message{MessageID: 3, Chat: Chat{ID: -100, Type: "supergroup", Title: "G"}, From: ana(), NewChatMembers: []User{{ID: 5, FirstName: "Bo"}}}
+	photo := Message{Chat: Chat{ID: -100, Type: "group"}, From: ana(), Caption: "photo for @tether_bot", Photo: []PhotoSize{{FileID: "p"}}}
+	photo.CaptionEntities = autoEntities(photo.Caption)
+	cases := []struct {
+		name string
+		msg  Message
+		want Decision
+	}{
+		{"service message", join, Decision{Reason: "no_content"}},
+		{"dm plain text", dm("hi"), Decision{Accept: true, Text: "hi", Reason: "dm"}},
+		{"dm plain text with spaces", dm("  hi  "), Decision{Accept: true, Text: "hi", Reason: "dm"}},
+		{"group mention", group("@tether_bot, scrape it"), Decision{Accept: true, Text: "scrape it", Reason: "mention"}},
+		{"group text with no mention", group("chatter"), Decision{Reason: "drop"}},
+		{"photo with a caption", photo, Decision{Accept: true, Text: "photo for", Reason: "mention"}},
+	}
+	for _, c := range cases {
+		if d := Gate(cfg, "tether_bot", 99, c.msg, Normalize(c.msg)); d != c.want {
+			t.Errorf("%s: %+v, want %+v", c.name, d, c.want)
+		}
+	}
+	if n := Normalize(photo); n.Text != "photo for @tether_bot" || !mediaPresent(photo) {
+		t.Errorf("photo: n.Text = %q, mediaPresent = %v", n.Text, mediaPresent(photo))
+	}
+}
+
+// richInGroup is a group message from Ana whose only content is a rich message with the
+// given blocks. Text and Caption are empty.
+func richInGroup(blocksJSON string) Message {
+	m := richMsg(blocksJSON)
+	m.MessageID, m.Chat, m.From = 2, Chat{ID: -100, Type: "supergroup", Title: "G"}, ana()
+	return m
+}
+
+func TestGateRichAddressing(t *testing.T) {
+	const bot32 = "abcdefghijklmnopqrstuvwxyz012bot"
+	if len(bot32) != 32 {
+		t.Fatal(len(bot32))
+	}
+	const photo = `{"type":"photo","photo":[{"file_id":"p1","file_unique_id":"u1","width":320,"height":240}],` +
+		`"caption":{"text":"look @tether_bot"}}`
+	type mut = func(*config.TelegramConfig)
+	cases := []struct {
+		name   string
+		bot    string
+		mut    mut
+		blocks string
+		accept bool
+		reason string
+	}{
+		{"mention span", "tether_bot", nil,
+			`[{"type":"paragraph","text":[{"type":"mention","text":"@tether_bot","username":"tether_bot"}," hello"]}]`,
+			true, "mention"},
+		{"plain string", "tether_bot", nil,
+			`[{"type":"paragraph","text":"hello @tether_bot"}]`, true, "mention"},
+		{"text_mention of the bot id", "tether_bot", nil,
+			`[{"type":"paragraph","text":["hey ",{"type":"text_mention","text":"Tether","user":{"id":42,"is_bot":true,"first_name":"Tether"}}]}]`,
+			true, "mention"},
+		{"text_mention of another user", "tether_bot", nil,
+			`[{"type":"paragraph","text":["hey ",{"type":"text_mention","text":"Bo","user":{"id":7,"first_name":"Bo"}}]}]`,
+			false, "drop"},
+		{"command at the bot", "tether_bot", nil,
+			`[{"type":"paragraph","text":"/status@tether_bot"}]`, true, "mention"},
+		{"command with no bot", "tether_bot", nil,
+			`[{"type":"paragraph","text":"/status"}]`, false, "drop"},
+		{"code span", "tether_bot", nil,
+			`[{"type":"paragraph","text":["use ",{"type":"code","text":"@tether_bot"}]}]`, false, "drop"},
+		{"pre block", "tether_bot", nil,
+			`[{"type":"pre","language":"go","text":"@tether_bot"}]`, false, "drop"},
+		{"url label", "tether_bot", nil,
+			`[{"type":"paragraph","text":["see ",{"type":"url","text":"@tether_bot","url":"https://example.com/"}]}]`,
+			false, "drop"},
+		{"url value", "tether_bot", nil,
+			`[{"type":"paragraph","text":["see ",{"type":"url","text":"the page","url":"https://example.com/?u=@tether_bot"}]}]`,
+			false, "drop"},
+		{"photo caption", "tether_bot", nil, `[` + photo + `]`, true, "mention"},
+		{"emoji before the mention", "tether_bot", nil,
+			`[{"type":"paragraph","text":"😀 @tether_bot hi"}]`, true, "mention"},
+		{"user name of 32 characters", bot32, nil,
+			`[{"type":"paragraph","text":"hi @` + bot32 + `"}]`, true, "mention"},
+		{"other bot only", "tether_bot", func(c *config.TelegramConfig) { c.ExclusiveBotMentions = true },
+			`[{"type":"paragraph","text":"@other_bot do it"}]`, false, "exclusive_bot_mentions"},
+		{"command at another bot", "tether_bot", func(c *config.TelegramConfig) { c.ExclusiveBotMentions = true },
+			`[{"type":"paragraph","text":"/status@other_bot"}]`, false, "exclusive_bot_mentions"},
+		{"pattern in a paragraph", "tether_bot", func(c *config.TelegramConfig) { c.MentionPatterns = []string{`^hey tether`} },
+			`[{"type":"paragraph","text":[{"type":"bold","text":"hey"}," tether, status"]}]`, true, "mention_patterns"},
+		{"pattern only in a hidden URL", "tether_bot", func(c *config.TelegramConfig) { c.MentionPatterns = []string{`chompy`} },
+			`[{"type":"paragraph","text":["see ",{"type":"url","text":"the page","url":"https://example.com/chompy"}]}]`,
+			false, "drop"},
+	}
+	for _, c := range cases {
+		cfg := config.Default().Telegram
+		cfg.RequireMention = true
+		if c.mut != nil {
+			c.mut(&cfg)
+		}
+		m := richInGroup(c.blocks)
+		d := Gate(cfg, c.bot, 42, m, Normalize(m))
+		if d.Accept != c.accept || d.Observe || d.Reason != c.reason {
+			t.Errorf("%s: %+v", c.name, d)
+		}
+	}
+}
+
+func TestSourcesRichMessage(t *testing.T) {
+	m := richInGroup(`[{"type":"paragraph","text":"😀 @tether_bot hi"}]`)
+	srcs := sources(m)
+	if len(srcs) != 3 {
+		t.Fatalf("want 3 sources, got %d", len(srcs))
+	}
+	s := srcs[2]
+	if s.text != "😀 @tether_bot hi" || len(s.entities) != 1 {
+		t.Fatalf("%q %+v", s.text, s.entities)
+	}
+	// The emoji is 2 UTF-16 code units, so the mention starts at offset 3.
+	if e := s.entities[0]; e.Type != "mention" || e.Offset != 3 || e.Length != 11 {
+		t.Fatalf("%+v", e)
+	}
+	// A text_mention entity keeps the user of its span.
+	tm := richInGroup(`[{"type":"paragraph","text":["hey ",{"type":"text_mention","text":"Tether","user":{"id":42,"is_bot":true,"first_name":"Tether"}}]}]`)
+	var user *User
+	for _, e := range sources(tm)[2].entities {
+		if e.Type == "text_mention" {
+			user = e.User
+		}
+	}
+	if user == nil || user.ID != 42 {
+		t.Fatalf("%+v", user)
+	}
+	// When Text is not empty, the rich content is not active.
+	m.Text = "hello"
+	if n := len(sources(m)); n != 2 {
+		t.Fatalf("a message with a text: %d sources", n)
+	}
+	if n := len(sources(group("hi"))); n != 2 {
+		t.Fatalf("a plain message: %d sources", n)
+	}
+}
+
+func TestIsCommandRich(t *testing.T) {
+	cases := map[string]bool{
+		`[{"type":"paragraph","text":"/new"}]`:                                 true,
+		`[{"type":"paragraph","text":[{"type":"bold","text":"/new"}]}]`:        true,
+		`[{"type":"paragraph","text":"say /new"}]`:                             false,
+		`[{"type":"paragraph","text":["run ",{"type":"code","text":"/new"}]}]`: false,
+		`[{"type":"pre","text":"/new"}]`:                                       false,
+	}
+	for blocks, want := range cases {
+		if got := isCommand(richInGroup(blocks)); got != want {
+			t.Errorf("%s: got %v, want %v", blocks, got, want)
+		}
+	}
+}
+
+func TestGateRichObserve(t *testing.T) {
+	cfg := config.Default().Telegram
+	cfg.RequireMention = true
+	cfg.ObserveUnmentionedGroupMessages = true
+	cfg.GroupAllowedChats = []string{"-100"}
+	gate := func(blocks string) (Decision, Normalized) {
+		m := richInGroup(blocks)
+		n := Normalize(m)
+		return Gate(cfg, "tether_bot", 42, m, n), n
+	}
+	// The observed text is the Markdown text with the sender line.
+	d, _ := gate(`[{"type":"heading","size":1,"text":"Report"},{"type":"paragraph","text":["some ",{"type":"bold","text":"chatter"}]}]`)
+	if !d.Observe || d.Accept || d.Reason != "observe" || d.Text != "[Ana|123]\n# Report\n\nsome **chatter**" {
+		t.Fatalf("%+v", d)
+	}
+	// A message that starts with a command is not observed, also a command with a style.
+	for _, blocks := range []string{
+		`[{"type":"paragraph","text":"/new"}]`,
+		`[{"type":"paragraph","text":[{"type":"bold","text":"/new"}]}]`,
+		`[{"type":"paragraph","text":[{"type":"bot_command","text":"/new","bot_command":"/new"}," please"]}]`,
+	} {
+		if d, _ := gate(blocks); d.Observe || d.Accept || d.Reason != "drop" {
+			t.Fatalf("%s: %+v", blocks, d)
+		}
+	}
+	// A rich message with only a photo has no text. Gate gives Observe, and Channel.observe
+	// saves nothing for an empty n.Text.
+	d, n := gate(`[{"type":"photo","photo":[{"file_id":"p1","file_unique_id":"u1","width":320,"height":240}]}]`)
+	if !d.Observe || d.Accept || d.Reason != "observe" || n.Text != "" {
+		t.Fatalf("%+v %+v", d, n)
+	}
+}
+
+func TestGateRichCost(t *testing.T) {
+	text, err := json.Marshal(strings.Repeat("@ab ", 8192)) // 32768 characters
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := richInGroup(`[{"type":"paragraph","text":` + string(text) + `}]`)
+	cfg := config.Default().Telegram
+	cfg.RequireMention = true
+	cfg.ExclusiveBotMentions = true
+	start := time.Now()
+	d := Gate(cfg, "tether_bot", 42, m, Normalize(m))
+	if took := time.Since(start); took > 100*time.Millisecond {
+		t.Fatalf("Gate took %v for 8192 mentions. The gate work must be linear.", took)
+	}
+	if d.Accept || d.Observe || d.Reason != "drop" {
+		t.Fatalf("%+v", d)
 	}
 }

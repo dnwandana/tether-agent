@@ -196,7 +196,8 @@ func (ch *Channel) SendNotice(ctx context.Context, key string, sess *sessions.Se
 // handleUpdate handles one update. The order is: the free-text answer hook, the gate, the
 // authorization, and then the session key. So an unauthorized user never creates a session
 // row. The gateway does not check the authorization again on the busy path, so this
-// function must check it before gw.Submit.
+// function must check it before gw.Submit. The converter of a rich message runs first, before
+// the answer hook and the gate.
 func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Update) {
 	defer func() {
 		if v := recover(); v != nil {
@@ -222,6 +223,11 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 	if m.From != nil && m.From.IsBot {
 		return
 	}
+	// A channel post gets no work, so this check comes before the converter.
+	if m.Chat.Type == "channel" {
+		return
+	}
+	ch.loadRich(&m)
 	n := Normalize(m)
 	if n.Kind == KindChannel {
 		return
@@ -235,10 +241,12 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 	}
 	// A free-text answer to the clarify tool. It comes before the gate, because the answer in a
 	// group does not mention the bot. Only an authorized user can answer.
-	if ch.UI != nil && m.Text != "" && !strings.HasPrefix(m.Text, "/") &&
-		Authorize(ch.Cfg, n, ch.pairApproved(ctx)) == AuthAllow &&
-		ch.UI.TakeText(m.Chat.ID, n.ThreadID, StripMention(m.Text, ch.Bot.Username)) {
-		return
+	if ch.UI != nil {
+		if answer := ch.answerText(m); answer != "" &&
+			Authorize(ch.Cfg, n, ch.pairApproved(ctx)) == AuthAllow &&
+			ch.UI.TakeText(m.Chat.ID, n.ThreadID, answer) {
+			return
+		}
 	}
 	d := Gate(ch.Cfg, ch.Bot.Username, ch.Bot.ID, m, n)
 	if d.Observe {
@@ -246,7 +254,7 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		return
 	}
 	if !d.Accept {
-		ch.logger().Debug("telegram: message not accepted", "chat", n.ChatID, "reason", d.Reason)
+		ch.logNotAccepted(ctx, u, m, n, d.Reason)
 		return
 	}
 	// This line comes before Authorize, so a debug run shows each gate decision.
@@ -279,6 +287,74 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		return
 	}
 	ch.dispatch(ctx, gw, n, []Message{m}, text)
+}
+
+// loadRich parses the rich content of m one time and keeps the document in m, so each later
+// reader uses the same document. It runs each view here, so a converter failure shows before
+// the gate. After a failure, m has no rich content.
+func (ch *Channel) loadRich(m *Message) {
+	m.cacheRich()
+	d := richOf(*m)
+	if d == nil {
+		return
+	}
+	_ = d.Plain()
+	_, _ = d.Addressing()
+	_ = d.Lines(ch.Bot.Username)
+	_ = d.MediaCount()
+	types := d.Unknown()
+	chat := strconv.FormatInt(m.Chat.ID, 10)
+	switch {
+	case d.Failed():
+		ch.logger().Warn("telegram: the rich message cannot be read", "chat", chat)
+		m.RichMessage, m.rich = nil, nil
+	case len(types) > 0:
+		ch.logger().Debug("telegram: the rich message has unknown types", "chat", chat, "types", strings.Join(types, ","))
+	}
+}
+
+// answerText returns the text of m that can answer a free-text question of the clarify
+// tool. It returns "" for a command, for a message with media, and for a message with no
+// text.
+func (ch *Channel) answerText(m Message) string {
+	if m.Text != "" {
+		if strings.HasPrefix(m.Text, "/") {
+			return ""
+		}
+		return StripMention(m.Text, ch.Bot.Username)
+	}
+	if d := richOf(m); d != nil && d.HasText() && d.MediaCount() == 0 {
+		t := strings.TrimSpace(d.Text(ch.Bot.Username))
+		if strings.HasPrefix(t, "/") {
+			return ""
+		}
+		return t
+	}
+	return ""
+}
+
+// logNotAccepted writes the line for a message that the gate did not accept. For the
+// reason no_content, the line names the fields of the message that Tether Agent does not
+// read. The line is at the info level only for an allowed sender, because the gate drops
+// such a message before the authorization, and any person can send one.
+func (ch *Channel) logNotAccepted(ctx context.Context, u Update, m Message, n Normalized, reason string) {
+	attrs := []any{"chat", n.ChatID, "reason", reason}
+	level := slog.LevelDebug
+	if reason == "no_content" {
+		fields := slices.Clone(m.Unread)
+		// m can have no rich_message after a converter failure. The update keeps it.
+		if len(u.Message.RichMessage) > 0 {
+			fields = append(fields, "rich_message")
+			slices.Sort(fields)
+		}
+		if len(fields) > 0 {
+			attrs = append(attrs, "fields", strings.Join(fields, ","))
+			if Authorize(ch.Cfg, n, ch.pairApproved(ctx)) == AuthAllow {
+				level = slog.LevelInfo
+			}
+		}
+	}
+	ch.logger().Log(ctx, level, "telegram: message not accepted", attrs...)
 }
 
 // logServiceEvent writes one log line for a service event that concerns the bot. It only
@@ -388,9 +464,9 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 			m.Text = StripMention(m.Text, ch.Bot.Username)
 			clean[i] = m
 		}
-		t, images, files, err := ch.Inbox.Build(ctx, clean)
+		t, images, files, err := ch.Inbox.BuildFor(ctx, clean, ch.Bot.Username)
 		if err != nil {
-			// Build fails only when ctx ends, that is at a gateway stop.
+			// BuildFor fails only when ctx ends, that is at a gateway stop.
 			ch.dropAtStop(ctx, n, chatID, msgs[0].MessageID, err)
 			return
 		}
