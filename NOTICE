@@ -22,6 +22,8 @@ copied from Hermes Agent. These parts include:
   agent/context_compressor.py).
 - The Telegram message format, stream, group gate, incoming media notes, sticker
   cache, and media delivery rules (internal/telegram/, from gateway/).
+- The rich message reader: the plain text, the addressing text, and the Markdown
+  conversion with its media parts (internal/telegram/rich*.go, from gateway/).
 - The fuzzy match of the patch tool (internal/tools/patch.go).
 - The tool preview keys (internal/tools/preview.go, from agent/display.py).
 - The skill install flow, the trust policy, the TRUSTED_REPOS list, the lockfile

@@ -112,6 +112,34 @@ exists, the default action for an unknown user in a private chat is `ignore`, no
 
 Refer to [Telegram](Telegram#pairing).
 
+### The bot does not answer one kind of Telegram message
+
+**Cause:** the message has only content that the bot does not read, for example a video
+note, a contact, a dice, or a poll. The bot drops such a message. The log then has the line
+`telegram: message not accepted` with `reason=no_content` and `fields=`:
+
+```json
+{"time":"2026-11-10T09:15:02.118+07:00","level":"INFO","msg":"telegram: message not accepted","chat":"-1001234567890","reason":"no_content","fields":"video_note"}
+```
+
+`fields` names the fields of the message that the bot does not read. The line has field
+names only. It has no content of the message. The line is at the info level for an allowed
+sender. For each other sender, it is at the debug level.
+
+**Fix:** send the content in a type that the bot reads. Refer to
+[Telegram](Telegram#media-that-you-send).
+
+### The log shows `telegram: update cannot be read, skip it`
+
+**Cause:** Telegram sent one update that the bot cannot read. The bot did not read that
+update, and it went on with the next update. The field `update` of the line is the id of the
+update. The line has no content of the update. Before this line, the log has the line
+`telegram: cannot read the update batch, read one update at a time`.
+
+**Fix:** the sender must send the message again, because the bot did not get it. If the
+line shows again for the same type of message, report the problem. Refer to
+[Report a problem](#report-a-problem).
+
 ### A command shows old data, or `state.db` does not exist
 
 **Cause:** the command uses a different data dir. This happens when `TETHER_HOME` is set in

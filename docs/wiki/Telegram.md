@@ -164,6 +164,9 @@ These keys control the answers in groups. The bot applies them in this order:
 
 All these keys are in the `telegram` section.
 
+A mention or a command in a rich message counts like a mention in a plain text. A mention in
+code or in a link does not count.
+
 ### Sessions in groups and topics
 
 Each chat has its own session. The session key has this form:
@@ -482,6 +485,7 @@ applies to a button too. The **Resume** button of a goal notice starts the next 
 | Album | The bot waits 800 ms and joins the parts into one message. |
 | Sticker | The vision model describes a static sticker. |
 | Video, audio, location, venue | The bot handles these types too. |
+| Rich message | The agent gets the text as Markdown, with its headings, lists, tables, and code blocks. The bot reads the first 10 media files of one message or one album. The media of one rich message has a time limit of 2 minutes. The agent gets a note for each media file that the bot did not read. |
 
 To set up speech-to-text, see [Tools](Tools#media).
 
