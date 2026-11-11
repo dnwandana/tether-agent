@@ -272,10 +272,12 @@ func (c *CommandCtx) listReply(ctx context.Context, mode listMode, a listArgs, n
 			b.WriteString(" · ")
 			b.WriteString(s.ID)
 		}
-		numbers = append(numbers, Button{Text: strconv.Itoa(pos), Data: action + s.ID})
+		if c.Owner {
+			numbers = append(numbers, Button{Text: strconv.Itoa(pos), Data: action + s.ID})
+		}
 	}
 
-	if len(rows) > 0 {
+	if len(rows) > 0 && c.Owner {
 		b.WriteString("\n\n")
 		switch {
 		case interactive && mode == listDelete:

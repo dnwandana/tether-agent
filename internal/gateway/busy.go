@@ -13,10 +13,10 @@ import (
 	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
-// maxQueuedMessages is the maximum number of messages of the owner that wait in the queue
-// of one key (ownerQueued). Each one keeps its text and its images until its turn. The
+// maxQueuedMessages is the maximum number of messages of the sender that wait in the queue
+// of one key (senderQueued). Each one keeps its text and its images until its turn. The
 // limit applies only to a new message in acceptMessage. A path that moves or keeps a text
-// that the owner already sent does not check it: flushBusyText, /steer before the start,
+// that the sender already sent does not check it: flushBusyText, /steer before the start,
 // the text that /now moves, the leftover steer, and the resume path.
 const maxQueuedMessages = 20
 
@@ -61,6 +61,10 @@ const (
 
 // stopButton is on the reply to a command that cannot run during a task. It runs /stop.
 var stopButton = []Button{{Text: "⏹ Stop the task", Data: "/stop"}}
+
+// canNow reports whether the sender of in can use /now. /now changes the session, so it is
+// owner-only for a member in a shared session.
+func canNow(in Inbound) bool { return in.Owner || !in.Shared }
 
 // nowButton returns the button of the busy replies. It runs /now for the turn of the reply,
 // so a tap on the reply of an old turn does nothing.
@@ -126,9 +130,9 @@ func (c ackClose) run() <-chan struct{} {
 }
 
 func init() {
-	Register(Command{Name: "stop", Help: "Stop the running task", Run: cmdStop, WhileBusy: true})
-	Register(Command{Name: "steer", Help: "Guide the running task: /steer <text>", Run: cmdSteer, WhileBusy: true})
-	Register(Command{Name: "now", Help: "Stop the task and run your waiting message now", Run: cmdNow, WhileBusy: true})
+	Register(Command{Name: "stop", Help: "Stop the running task", Run: cmdStop, WhileBusy: true, MemberOK: true, MemberOwnSession: true})
+	Register(Command{Name: "steer", Help: "Guide the running task: /steer <text>", Run: cmdSteer, WhileBusy: true, MemberOK: true})
+	Register(Command{Name: "now", Help: "Stop the task and run your waiting message now", Run: cmdNow, WhileBusy: true, MemberOK: true, MemberOwnSession: true})
 }
 
 // cmdStop stops the run of the key. The Stop hook of the channel sends the reply. With no
@@ -238,7 +242,7 @@ func cmdSteer(_ context.Context, c *CommandCtx, args string) error {
 	return nil
 }
 
-// cmdNow stops the running task and runs the waiting messages of the owner at once. The
+// cmdNow stops the running task and runs the waiting messages of the sender at once. The
 // argument is the number of the turn of the button. With no number, /now acts on the
 // current turn. Each reply edits the message of the pressed button.
 func cmdNow(_ context.Context, c *CommandCtx, args string) error {
@@ -283,6 +287,7 @@ func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer
 		g.mu.Unlock()
 		return false
 	}
+	addSteerSenderLocked(rs, seq, senderOf(in))
 	turn := 0
 	if ks := g.keys[in.Key]; ks != nil {
 		turn = ks.currentTurn()
@@ -290,7 +295,7 @@ func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer
 	slot, send := g.reserveAckLocked(rs, in.Key, ackSteer, seq)
 	g.mu.Unlock()
 	if send {
-		g.sendAck(slot, SteerAck, turn, r)
+		g.sendAckFor(slot, SteerAck, turn, in, r)
 	}
 	return true
 }
@@ -338,7 +343,7 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 	g.mu.Unlock()
 	g.sendMarker(op)
 	if send {
-		g.sendAck(slot, QueueAck, turn, r)
+		g.sendAckFor(slot, QueueAck, turn, in, r)
 	}
 }
 
@@ -357,12 +362,13 @@ func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func
 	}
 	if rs := ks.running; !g.stopping.Load() && rs != nil && rs.Steer != nil && !rs.ended && !rs.stopped {
 		if seq, ok := rs.Steer.PushSeq(text); ok {
+			addSteerSenderLocked(rs, seq, senderOf(in))
 			// The /steer ack has no busy limit, so its slot has no mark.
 			slot := &ackSlot{kind: ackSteer, seq: seq}
 			rs.steerAcks = append(rs.steerAcks, slot)
 			turn := ks.currentTurn()
 			g.mu.Unlock()
-			g.sendAck(slot, SteerAck, turn, r)
+			g.sendAckFor(slot, SteerAck, turn, in, r)
 			return rest
 		}
 	}
@@ -487,11 +493,11 @@ func (g *Gateway) stopKeepQueue(key string) (stopped bool, waiting int) {
 	return stopped, waiting
 }
 
-// takeOver stops the turn of key and runs the waiting messages of the owner at once. A
+// takeOver stops the turn of key and runs the waiting messages of the sender at once. A
 // turn above 0 must still hold the key, else nothing changes. The waiting steer text and
 // the merged busy text become the next turn, before the queue. Queued slash commands and
 // Enqueue turns do not count, and they stay in their place. took is false when the turn
-// was already stopped, or when no message of the owner waits, and then nothing changes.
+// was already stopped, or when no message of the sender waits, and then nothing changes.
 // waiting is the number of the turns that wait now. stopping is true when the gateway
 // stops, and then nothing changes. msgID is the message ID of the pressed button, or 0. The
 // open busy ack of that message closes with no edit, because the /now reply goes into that
@@ -521,25 +527,29 @@ func (g *Gateway) takeOver(key string, turn, msgID int) (took bool, waiting int,
 	// The agent drains the steer queue without g.mu, so the decision uses the drained text.
 	var parts []string
 	var drained uint64
+	var sender textSender
 	rs := ks.running
 	if rs != nil {
 		if s, seq := rs.Steer.DrainSeq(); s != "" {
 			parts = append(parts, s)
 			drained = seq
+			takeSteerSendersLocked(rs, seq, &sender)
 		}
 	}
-	if s := g.debouncerLocked().Take(key); s != "" {
+	if s, id := g.debouncerLocked().TakeFrom(key); s != "" {
 		parts = append(parts, s)
+		sender.add(id)
 	}
 	text := strings.Join(parts, "\n")
-	waiting = ownerQueued(ks)
+	waiting = senderQueued(ks)
 	if text == "" && waiting == 0 {
 		g.mu.Unlock()
 		return false, 0, false
 	}
 	tappedClose = g.closeSlotLocked(tapped, "")
 	if text != "" {
-		in := cur.in
+		// The text gets a sender only when all of its parts come from one sender.
+		in := withSender(cur.in, sender.id())
 		in.Text, in.Images, in.Files, in.IsText, in.Slash = text, nil, nil, true, false
 		// The agent cannot read the drained text now. Its steer acks move with the text, so
 		// the start, the drop, or a restart of the new message closes them.
@@ -600,11 +610,27 @@ func (g *Gateway) reserveAckLocked(rs *RunState, key string, kind ackKind, seq u
 	return slot, true
 }
 
-// sendAck sends text with the button of turn to r and attaches the handle to slot. When the
-// slot closed before the send returned, it edits the ack to the outcome at once. The caller
-// must not hold g.mu.
+// sendAckFor sends the busy ack of the message in. The ack has the button of turn only when
+// the sender of in can use /now (canNow), because a tap of another sender always fails.
+// The caller must not hold g.mu.
+func (g *Gateway) sendAckFor(slot *ackSlot, text string, turn int, in Inbound, r Renderer) {
+	if canNow(in) {
+		g.sendAck(slot, text, turn, r)
+		return
+	}
+	g.sendAckReply(slot, Reply{Text: text}, r)
+}
+
+// sendAck sends text with the button of turn to r and attaches the handle to slot. The
+// caller must not hold g.mu.
 func (g *Gateway) sendAck(slot *ackSlot, text string, turn int, r Renderer) {
-	h := ackReply(r, Reply{Text: text, Buttons: [][]Button{nowButton(turn)}})
+	g.sendAckReply(slot, Reply{Text: text, Buttons: [][]Button{nowButton(turn)}}, r)
+}
+
+// sendAckReply sends rep to r and attaches the handle to slot. When the slot closed before
+// the send returned, it edits the ack to the outcome at once. The caller must not hold g.mu.
+func (g *Gateway) sendAckReply(slot *ackSlot, rep Reply, r Renderer) {
+	h := ackReply(r, rep)
 	if h == nil {
 		return
 	}
@@ -718,6 +744,7 @@ func tappedSlotLocked(ks *keyState, msgID int) *ackSlot {
 func (g *Gateway) steerRead(rs *RunState, seq uint64) {
 	g.mu.Lock()
 	closes := g.closeSteerAcksLocked(rs, seq, SteerReadAck)
+	takeSteerSendersLocked(rs, seq, nil)
 	g.mu.Unlock()
 	for _, c := range closes {
 		c.run()
@@ -772,10 +799,10 @@ func isCommandText(in Inbound) bool {
 	return ok
 }
 
-// ownerQueued returns the number of messages of the owner in the queue of ks. A system
+// senderQueued returns the number of messages of the sender in the queue of ks. A system
 // entry does not count. A slash command does not count, because next drops it. The caller
 // holds g.mu.
-func ownerQueued(ks *keyState) int {
+func senderQueued(ks *keyState) int {
 	n := 0
 	for _, p := range ks.queue {
 		if !p.system && !isCommandText(p.in) {
@@ -854,9 +881,11 @@ type Debouncer struct {
 
 type debounceEntry struct {
 	texts []string
-	first time.Time
-	timer *time.Timer
-	flush func(merged string)
+	// sender is the sender of the merged text.
+	sender textSender
+	first  time.Time
+	timer  *time.Timer
+	flush  func(merged, sender string)
 	// gen counts the texts, so that an old timer does not flush.
 	gen int
 }
@@ -866,9 +895,15 @@ func NewDebouncer(window, hardCap time.Duration) *Debouncer {
 	return &Debouncer{window: window, hardCap: hardCap, pending: map[string]*debounceEntry{}}
 }
 
-// Add adds text for key. flush receives the texts of the key joined with "\n". The flush
-// function of the last Add runs, in a goroutine of its own.
+// Add adds text with no sender for key. flush receives the texts of the key joined with
+// "\n". The flush function of the last Add runs, in a goroutine of its own.
 func (d *Debouncer) Add(key, text string, flush func(merged string)) {
+	d.AddFrom(key, "", text, func(merged, _ string) { flush(merged) })
+}
+
+// AddFrom is Add for a text of sender. flush also receives the sender of the merged text:
+// the sender when all texts come from one sender, else "".
+func (d *Debouncer) AddFrom(key, sender, text string, flush func(merged, sender string)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e := d.pending[key]
@@ -877,6 +912,7 @@ func (d *Debouncer) Add(key, text string, flush func(merged string)) {
 		d.pending[key] = e
 	}
 	e.texts = append(e.texts, text)
+	e.sender.add(sender)
 	e.flush = flush
 	e.gen++
 	gen := e.gen
@@ -903,15 +939,22 @@ func (d *Debouncer) Drop(key string) {
 // Take returns the merged waiting text of key and forgets it, with no flush. It returns ""
 // when no text waits.
 func (d *Debouncer) Take(key string) string {
+	text, _ := d.TakeFrom(key)
+	return text
+}
+
+// TakeFrom is Take, and it also returns the sender of the merged text, as AddFrom gives it
+// to flush.
+func (d *Debouncer) TakeFrom(key string) (text, sender string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e := d.pending[key]
 	if e == nil {
-		return ""
+		return "", ""
 	}
 	e.timer.Stop()
 	delete(d.pending, key)
-	return strings.Join(e.texts, "\n")
+	return strings.Join(e.texts, "\n"), e.sender.id()
 }
 
 func (d *Debouncer) fire(key string, e *debounceEntry, gen int) {
@@ -922,14 +965,83 @@ func (d *Debouncer) fire(key string, e *debounceEntry, gen int) {
 	}
 	delete(d.pending, key)
 	d.flushing++
-	merged, flush := strings.Join(e.texts, "\n"), e.flush
+	merged, sender, flush := strings.Join(e.texts, "\n"), e.sender.id(), e.flush
 	d.mu.Unlock()
 	defer func() {
 		d.mu.Lock()
 		d.flushing--
 		d.mu.Unlock()
 	}()
-	flush(merged)
+	flush(merged, sender)
+}
+
+// textSender is the sender of a text of several parts, for example a merged busy text or
+// a left-over steer. The text has a sender only when all parts come from one sender. Else
+// its sender is "", and only an owner answers the prompts of its turn.
+type textSender struct {
+	first string
+	parts int
+	mixed bool
+}
+
+// add counts one part of the sender id.
+func (s *textSender) add(id string) {
+	if s.parts > 0 && id != s.first {
+		s.mixed = true
+	}
+	if s.parts == 0 {
+		s.first = id
+	}
+	s.parts++
+}
+
+// id returns the sender of the text, or "" when the parts have several senders or the text
+// has no part.
+func (s textSender) id() string {
+	if s.mixed {
+		return ""
+	}
+	return s.first
+}
+
+// withSender returns in with the sender id. An empty id also clears UserID, so the turn has
+// no sender.
+func withSender(in Inbound, id string) Inbound {
+	in.SenderID = id
+	if id == "" {
+		in.UserID = ""
+	}
+	return in
+}
+
+// steerSender is the sender of one steer text of a run.
+type steerSender struct {
+	seq uint64
+	id  string
+}
+
+// addSteerSenderLocked keeps the sender of the steer text seq of rs. The caller holds g.mu.
+func addSteerSenderLocked(rs *RunState, seq uint64, id string) {
+	rs.steerSenders = append(rs.steerSenders, steerSender{seq: seq, id: id})
+}
+
+// takeSteerSendersLocked removes the senders of the steer texts of rs with seq <= upTo and
+// adds them to s. The caller holds g.mu.
+func takeSteerSendersLocked(rs *RunState, upTo uint64, s *textSender) {
+	if rs == nil {
+		return
+	}
+	kept := rs.steerSenders[:0]
+	for _, ss := range rs.steerSenders {
+		if ss.seq <= upTo {
+			if s != nil {
+				s.add(ss.id)
+			}
+			continue
+		}
+		kept = append(kept, ss)
+	}
+	rs.steerSenders = kept
 }
 
 // Pending reports whether a text waits or a flush function runs.

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -9,11 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -212,6 +215,104 @@ func TestHousekeepingRemovesOldSpill(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Fatal("the new spill file must stay")
+	}
+}
+
+// agedFile writes a small file at path with a modification time of age before now.
+func agedFile(t *testing.T, path string, age time.Duration) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(-age)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCleanMediaRemovesOldFiles(t *testing.T) {
+	a := newApp(t)
+	media := filepath.Join(a.DataDir, "cache", "media")
+	shots := filepath.Join(a.DataDir, "cache", "screenshots")
+	old := []string{filepath.Join(media, "1-AgAD.jpg"), filepath.Join(media, ".dl-123"), filepath.Join(shots, "a.png")}
+	fresh := []string{filepath.Join(media, "2-AgAE.jpg"), filepath.Join(shots, "b.png")}
+	for _, p := range old {
+		agedFile(t, p, 8*24*time.Hour)
+	}
+	for _, p := range fresh {
+		agedFile(t, p, 6*24*time.Hour)
+	}
+	a.cleanMedia()
+	for _, p := range old {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatal("an old file must be removed:", p)
+		}
+	}
+	for _, p := range fresh {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatal("a new file must stay:", p)
+		}
+	}
+}
+
+func TestCleanMediaZeroKeepsAll(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t), "media:\n  cache_retention_days: 0\n")
+	a, err := New(ctx, Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	p := filepath.Join(dir, "cache", "media", "1-AgAD.jpg")
+	agedFile(t, p, 400*24*time.Hour)
+	a.cleanMedia()
+	if _, err := os.Stat(p); err != nil {
+		t.Fatal("cache_retention_days 0 must keep all files:", err)
+	}
+}
+
+func TestCleanMediaDoesNotFollowLinks(t *testing.T) {
+	a := newApp(t)
+	media := filepath.Join(a.DataDir, "cache", "media")
+	if err := os.MkdirAll(media, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "keep.jpg")
+	agedFile(t, target, 30*24*time.Hour)
+	link := filepath.Join(media, "link.jpg")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(media, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inner := filepath.Join(sub, "old.jpg")
+	agedFile(t, inner, 30*24*time.Hour)
+	a.cleanMedia()
+	if _, err := os.Stat(target); err != nil {
+		t.Fatal("the target of a link must stay:", err)
+	}
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatal("the link itself is not a regular file, so it stays:", err)
+	}
+	if _, err := os.Stat(inner); err != nil {
+		t.Fatal("cleanMedia must not go into a folder:", err)
+	}
+}
+
+func TestHousekeepingCleansMedia(t *testing.T) {
+	a := newApp(t)
+	p := filepath.Join(a.DataDir, "cache", "media", "1-AgAD.jpg")
+	agedFile(t, p, 8*24*time.Hour)
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.Housekeeping(hctx)
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("Housekeeping must clean the media cache at start")
 	}
 }
 
@@ -516,6 +617,19 @@ func TestAddTelegramWiresChannelCronAndPrompts(t *testing.T) {
 	ui, ok := env.Ask.(*telegram.ChatUI)
 	if !ok || ui.ChatID != 5 || env.Gate.(tools.GateApprover).Prompter != security.Prompter(ui) {
 		t.Fatalf("%+v", env)
+	}
+	// A forum topic shares one session. The prompt UI gets the user of the turn, not the user
+	// who created the session.
+	topicSess := &sessions.Session{ID: "s2", Key: "telegram:group:-100:17585", Source: "telegram", ChatID: "-100",
+		ThreadID: "17585", UserID: "7", Kind: "chat"}
+	if ui, ok := a.NewTurnEnv(topicSess, "telegram", "8").Ask.(*telegram.ChatUI); !ok || ui.UserID != "8" || ui.ThreadID != "17585" {
+		t.Fatalf("%+v", ui)
+	}
+	if ui, ok := a.NewEnv(topicSess, "telegram").Ask.(*telegram.ChatUI); !ok || ui.UserID != "" {
+		t.Fatalf("%+v", ui)
+	}
+	if a.Deps().NewTurnEnv == nil {
+		t.Fatal("Deps has no NewTurnEnv")
 	}
 	if info := a.Agent.ChatInfo(&sessions.Session{Source: "telegram", Key: "telegram:group:-1", ChatID: "-1"}); !strings.Contains(info, "@tether_bot") {
 		t.Fatal(info)
@@ -959,7 +1073,7 @@ func (r *ackRenderer) Ack(text string) {
 func handleCommand(t *testing.T, a *App, key, text string) []string {
 	t.Helper()
 	r := &ackRenderer{}
-	in := gateway.Inbound{Key: key, Source: "telegram", ChatID: "42", ThreadID: "7", Text: text, IsText: true}
+	in := gateway.Inbound{Key: key, Source: "telegram", ChatID: "42", ThreadID: "7", Text: text, IsText: true, Owner: true}
 	if err := a.Gateway().Handle(ctx, in, func() gateway.Renderer { return r }); err != nil {
 		t.Fatal(err)
 	}
@@ -1242,5 +1356,128 @@ func TestRestartStateCodingTasks(t *testing.T) {
 	st, _ = b.requestRestart(ctx, "telegram:1", gateway.Target{})
 	if len(st.CodingTasks) != 0 {
 		t.Fatal(st.CodingTasks)
+	}
+}
+
+func TestAppWiresSkillEnvStatus(t *testing.T) {
+	a := newApp(t)
+	tool, ok := a.Registry.Get("skill_view")
+	if !ok || tool.(tools.SkillViewTool).EnvStatus == nil {
+		t.Fatal("skill_view has no EnvStatus")
+	}
+	d := a.Deps()
+	if d.EnvStatus == nil {
+		t.Fatal("Deps has no EnvStatus")
+	}
+	if got := d.EnvStatus([]string{"TETHER_TEST_MISSING"}); !slices.Equal(got, []string{"not set"}) {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestNewSetsProtectedPathsOnMediaTools(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t), "agent:\n  vision_provider: primary\n")
+	a, err := New(ctx, Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	want := filepath.Join(dir, ".env")
+	if !slices.Contains(a.Media.Protected, want) {
+		t.Fatal("transcribe_audio must get the protected paths:", a.Media.Protected)
+	}
+	vt, ok := a.Registry.Get("view_image")
+	if !ok {
+		t.Fatal("view_image must exist with a vision provider")
+	}
+	if !slices.Contains(vt.(tools.VisionTool).Protected, want) {
+		t.Fatal("view_image must get the protected paths")
+	}
+}
+
+func TestNewTightensDataDirModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix modes")
+	}
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t))
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(dir, "state.db")
+	// An empty file is a valid empty SQLite database.
+	if err := os.WriteFile(dbPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dbPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	a, err := New(ctx, Options{DataDir: dir, LogStderr: true, LogWriter: &logs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if fi, err := os.Stat(dir); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("data folder mode: %v %v", fi.Mode().Perm(), err)
+	}
+	if fi, err := os.Stat(dbPath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("state.db mode: %v %v", fi.Mode().Perm(), err)
+	}
+	if fi, err := os.Stat(dbPath + "-wal"); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("state.db-wal mode: %v", fi.Mode().Perm())
+	}
+	out := logs.String()
+	for _, want := range []string{"data folder: mode changed to 0700", `"old_mode":"0755"`, "database file: mode changed to 0600", `"old_mode":"0644"`} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("no %q in the log:\n%s", want, out)
+		}
+	}
+}
+
+func TestNewKeepsPrivateDataDirQuiet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix modes")
+	}
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t))
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	a, err := New(ctx, Options{DataDir: dir, LogStderr: true, LogWriter: &logs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if strings.Contains(logs.String(), "mode changed") {
+		t.Fatalf("a private data folder must log no mode change:\n%s", logs.String())
+	}
+}
+
+func TestNewTightensNewDatabaseFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no Unix modes")
+	}
+	oldMask := syscall.Umask(0o022)
+	defer syscall.Umask(oldMask)
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t))
+	a, err := New(ctx, Options{DataDir: dir, LogStderr: true, LogWriter: &bytes.Buffer{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm"} {
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			if name == "state.db" {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if fi.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("%s mode: %v", name, fi.Mode().Perm())
+		}
 	}
 }

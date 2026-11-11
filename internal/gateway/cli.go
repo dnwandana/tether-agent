@@ -480,6 +480,7 @@ func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args, t
 	cc := &CommandCtx{
 		Deps:    c.deps(),
 		Key:     c.Key,
+		Owner:   true,
 		Session: sess,
 		Reply:   func(text string) { fmt.Fprintln(c.Out, StripMarkdown(stopGoalText(text, goalPaused))) },
 		Confirm: func(prompt string) bool {

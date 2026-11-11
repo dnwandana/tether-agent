@@ -27,7 +27,7 @@ func cmdCtx(t *testing.T, key string) (*CommandCtx, *bytes.Buffer) {
 	t.Helper()
 	var out bytes.Buffer
 	d := testDeps(t, &fakeProv{})
-	return &CommandCtx{Deps: d, Key: key, Reply: func(s string) { fmt.Fprintln(&out, s) }}, &out
+	return &CommandCtx{Deps: d, Key: key, Owner: true, Reply: func(s string) { fmt.Fprintln(&out, s) }}, &out
 }
 
 // run runs one command line in c.
@@ -1361,7 +1361,7 @@ func TestModelShowPinnedChainFallback(t *testing.T) {
 		t.Fatalf("%+v", r.Buttons)
 	}
 	// Another session of the same agent has the default chain, and primary answers.
-	other := &CommandCtx{Deps: c.Deps, Key: "telegram:dm:2", Send: c.Send}
+	other := &CommandCtx{Deps: c.Deps, Key: "telegram:dm:2", Owner: true, Send: c.Send}
 	run(t, other, "/model")
 	if r := lastSent(t, sent); r.Text != "🧠 **Model: default**\n`primary` · glm-4.7\nTap a provider to see its models." {
 		t.Fatalf("got:\n%s", r.Text)
@@ -1706,5 +1706,179 @@ func TestModelShowStoredUnusableOverrideFallback(t *testing.T) {
 	}
 	if !reflect.DeepEqual(r.Buttons, wantB) {
 		t.Fatalf("%+v", r.Buttons)
+	}
+}
+
+// member returns inb(key, text) from a sender that is not an owner.
+func member(key, text string) Inbound {
+	in := inb(key, text)
+	in.Owner = false
+	return in
+}
+
+func TestMemberCommandAccess(t *testing.T) {
+	ctx := context.Background()
+	registerTestCommand(t, Command{Name: "t_noflag", WhileBusy: true,
+		Run: func(_ context.Context, c *CommandCtx, _ string) error { c.Reply("ran"); return nil }})
+	for name, cmd := range Commands() {
+		g := &Gateway{Deps: testDeps(t, &fakeProv{})}
+		key := "telegram:group:-100:" + name
+		r := &recRenderer{}
+		if err := g.Handle(ctx, member(key, "/"+name), func() Renderer { return r }); err != nil {
+			t.Fatal(name, err)
+		}
+		refused := len(r.acks) == 1 && r.acks[0] == "⛔ Only the owner can use /"+EscapeMarkdown(name)+"."
+		if refused == cmd.MemberOK {
+			t.Fatalf("%s: MemberOK %v, replies %q", name, cmd.MemberOK, r.acks)
+		}
+		if s, _ := g.Deps.Store.Active(ctx, key); !cmd.MemberOK && s != nil {
+			t.Fatalf("%s: a refused command created a session", name)
+		}
+	}
+	for _, name := range []string{"help", "new", "reset", "sessions", "usage"} {
+		if !Commands()[name].MemberOK {
+			t.Fatal(name, "needs MemberOK")
+		}
+	}
+	for _, name := range []string{"new", "reset"} {
+		if !Commands()[name].MemberOwnSession {
+			t.Fatal(name, "needs MemberOwnSession")
+		}
+	}
+	// The refusal escapes the command word, and an owner runs the command.
+	g := &Gateway{Deps: testDeps(t, &fakeProv{})}
+	r := &recRenderer{}
+	_ = g.Handle(ctx, member("k", "/t_noflag"), func() Renderer { return r })
+	if len(r.acks) != 1 || r.acks[0] != "⛔ Only the owner can use /t\\_noflag." {
+		t.Fatalf("%q", r.acks)
+	}
+	r = &recRenderer{}
+	_ = g.Handle(ctx, inb("k", "/t_noflag"), func() Renderer { return r })
+	if len(r.acks) != 1 || r.acks[0] != "ran" {
+		t.Fatalf("%q", r.acks)
+	}
+}
+
+func TestMemberSharedSessionCommands(t *testing.T) {
+	ctx := context.Background()
+	g := &Gateway{Deps: testDeps(t, &fakeProv{})}
+	key := "telegram:group:-100:17"
+	for _, name := range []string{"new", "reset"} {
+		in := member(key, "/"+name)
+		in.Shared = true
+		r := &recRenderer{}
+		_ = g.Handle(ctx, in, func() Renderer { return r })
+		if want := "⛔ Only the owner can use /" + name + " in a shared session."; len(r.acks) != 1 || r.acks[0] != want {
+			t.Fatalf("%s: %q", name, r.acks)
+		}
+	}
+	if s, _ := g.Deps.Store.Active(ctx, key); s != nil {
+		t.Fatal("a refused /new created a session")
+	}
+	// A member's /sessions in a shared session runs.
+	in := member(key, "/sessions")
+	in.Shared = true
+	r := &recRenderer{}
+	_ = g.Handle(ctx, in, func() Renderer { return r })
+	if len(r.acks) != 1 || strings.HasPrefix(r.acks[0], "⛔") {
+		t.Fatalf("%q", r.acks)
+	}
+	// In a session of its own, a member starts a new session.
+	r = &recRenderer{}
+	_ = g.Handle(ctx, member("telegram:group:-100:5", "/new"), func() Renderer { return r })
+	if len(r.acks) != 1 || !strings.HasPrefix(r.acks[0], "✨ Starting new session.") {
+		t.Fatalf("%q", r.acks)
+	}
+	// An owner in a shared session starts a new session.
+	in = inb(key, "/new")
+	in.Shared = true
+	r = &recRenderer{}
+	_ = g.Handle(ctx, in, func() Renderer { return r })
+	if len(r.acks) != 1 || !strings.HasPrefix(r.acks[0], "✨ Starting new session.") {
+		t.Fatalf("%q", r.acks)
+	}
+}
+
+func TestOwnerCheckComesBeforeBusyReply(t *testing.T) {
+	g, _, _, _ := busyGateway(t)
+	r := &recRenderer{}
+	_ = g.Handle(context.Background(), member("k", "/model primary"), func() Renderer { return r })
+	if len(r.acks) != 1 || r.acks[0] != "⛔ Only the owner can use /model." {
+		t.Fatalf("%q", r.acks)
+	}
+	// A refused /new does not stop the run.
+	in := member("k", "/new")
+	in.Shared = true
+	_ = g.Handle(context.Background(), in, func() Renderer { return &recRenderer{} })
+	if _, ok := g.Running("k"); !ok {
+		t.Fatal("the run must go on")
+	}
+}
+
+func TestCommandCtxGetsOwnerAndShared(t *testing.T) {
+	var got []bool
+	registerTestCommand(t, Command{Name: "t-flags", MemberOK: true, WhileBusy: true,
+		Run: func(_ context.Context, c *CommandCtx, _ string) error {
+			got = append(got, c.Owner, c.Shared)
+			return nil
+		}})
+	g := &Gateway{Deps: testDeps(t, &fakeProv{})}
+	in := member("k", "/t-flags")
+	in.Shared = true
+	_ = g.Handle(context.Background(), in, func() Renderer { return &recRenderer{} })
+	_ = g.Handle(context.Background(), inb("k", "/t-flags"), func() Renderer { return &recRenderer{} })
+	if !reflect.DeepEqual(got, []bool{false, true, true, false}) {
+		t.Fatal(got)
+	}
+}
+
+func TestMemberUsage(t *testing.T) {
+	c, sent := interactiveCtx(t)
+	c.Owner = false
+	seedUsage(t, c)
+	run(t, c, "/usage")
+	if r := lastSent(t, sent); !strings.HasPrefix(r.Text, "📊 **Usage: this session") || r.Buttons != nil {
+		t.Fatalf("%q %+v", r.Text, r.Buttons)
+	}
+	for _, arg := range []string{"today", "7d", "30d", "all", "1y"} {
+		run(t, c, "/usage "+arg)
+		if r := lastSent(t, sent); r.Text != "⛔ Only the owner can see the usage of all chats. Send /usage session." || r.Buttons != nil {
+			t.Fatalf("%s: %q", arg, r.Text)
+		}
+	}
+	run(t, c, "/usage session")
+	if r := lastSent(t, sent); !strings.HasPrefix(r.Text, "📊 **Usage: this session") || r.Buttons != nil {
+		t.Fatalf("%q", r.Text)
+	}
+	// The owner keeps the range form and the buttons.
+	c.Owner = true
+	run(t, c, "/usage")
+	if r := lastSent(t, sent); !strings.HasPrefix(r.Text, "📊 **Usage: today · all chats**") || !reflect.DeepEqual(r.Buttons, wantUsageButtons(0)) {
+		t.Fatalf("%q %+v", r.Text, r.Buttons)
+	}
+}
+
+func TestHelpMember(t *testing.T) {
+	c, sent := interactiveCtx(t)
+	c.Owner = false
+	run(t, c, "/help")
+	want := "📖 **Commands**\n\n" +
+		"**Sessions**\n/new · start a new session\n/sessions · see the sessions\n\n" +
+		"**This session**\n/usage · see tokens and cost\n\n" +
+		"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n/todo · see the task list\n\n" +
+		"Only the owner can use the other commands."
+	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+func TestHelpMemberShared(t *testing.T) {
+	c, sent := interactiveCtx(t)
+	c.Owner = false
+	c.Shared = true
+	run(t, c, "/help")
+	want := helpMember + "\nIn a shared session, only the owner can use /new, /stop, and /now."
+	if r := lastSent(t, sent); r.Text != want {
+		t.Fatalf("got:\n%s", r.Text)
 	}
 }

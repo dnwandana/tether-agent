@@ -407,3 +407,31 @@ func TestListReplySearchFindsCurrent(t *testing.T) {
 		t.Fatal(d)
 	}
 }
+
+func TestSessionsMemberHasNoActionButtons(t *testing.T) {
+	c, sent := interactiveCtx(t)
+	c.Owner = false
+	for i := range 12 {
+		titled(t, c, fmt.Sprintf("s%d", i), 1)
+	}
+	run(t, c, "/sessions")
+	r := lastSent(t, sent)
+	next := false
+	for _, row := range r.Buttons {
+		for _, b := range row {
+			if strings.HasPrefix(b.Data, "/resume ") || strings.HasPrefix(b.Data, "/delete ") {
+				t.Fatalf("a member got the action button %+v", b)
+			}
+			next = next || b.Text == "Next ▶"
+		}
+	}
+	if !next || strings.Contains(r.Text, "Tap a number") {
+		t.Fatalf("%q %+v", r.Text, r.Buttons)
+	}
+	// The owner gets the number buttons.
+	c.Owner = true
+	run(t, c, "/sessions")
+	if r := lastSent(t, sent); len(r.Buttons) == 0 || !strings.HasPrefix(r.Buttons[0][0].Data, "/resume ") {
+		t.Fatalf("%+v", r.Buttons)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 )
 
@@ -136,8 +137,15 @@ func TestAckReplyHandleNil(t *testing.T) {
 func TestCallbackInboundHasButtonMsgID(t *testing.T) {
 	h := harness(t, &tgProv{}, nil)
 	n := Normalize(Message{Chat: Chat{ID: 7, Type: "private"}, From: &User{ID: 7, FirstName: "U"}})
-	in := h.ch.callbackInbound(n, "/now 1", 55)
+	in := h.ch.callbackInbound(ctx, n, "/now 1", 55)
 	if in.ButtonMsgID != 55 || in.Text != "/now 1" || !in.IsText || in.Key != h.ch.sessionKey(n) || in.Source != "telegram" {
+		t.Fatalf("%+v", in)
+	}
+	if in.Owner || in.Shared {
+		t.Fatalf("no allowlist: %+v", in)
+	}
+	owner := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"7"} })
+	if in := owner.ch.callbackInbound(ctx, n, "/now 1", 55); !in.Owner || in.Shared {
 		t.Fatalf("%+v", in)
 	}
 }

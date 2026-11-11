@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/dnwandana/tether-agent/internal/skills"
@@ -59,14 +58,14 @@ func catalogWithEnv(t *testing.T, name string, names []string) *SkillCatalog {
 
 func TestSkillViewBodyAndFile(t *testing.T) {
 	cat := catalogWith(t, "deploy", "Deploy steps.", "# Steps\n1. build", map[string]string{"references/env.md": "ENV notes"})
-	out := runTool(t, SkillViewTool{cat}, `{"name":"deploy"}`)
+	out := runTool(t, SkillViewTool{Catalog: cat}, `{"name":"deploy"}`)
 	if !strings.Contains(out, "# Steps") || !strings.Contains(out, "references/env.md") {
 		t.Fatal(out)
 	}
-	if out := runTool(t, SkillViewTool{cat}, `{"name":"deploy","file":"references/env.md"}`); out != "ENV notes" {
+	if out := runTool(t, SkillViewTool{Catalog: cat}, `{"name":"deploy","file":"references/env.md"}`); out != "ENV notes" {
 		t.Fatal(out)
 	}
-	if out := runToolErr(t, SkillViewTool{cat}, `{"name":"deploy","file":"references/none.md"}`); !strings.Contains(out, "references/env.md") {
+	if out := runToolErr(t, SkillViewTool{Catalog: cat}, `{"name":"deploy","file":"references/none.md"}`); !strings.Contains(out, "references/env.md") {
 		t.Fatal(out)
 	}
 }
@@ -77,7 +76,7 @@ func TestSkillViewRejectsPathEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, f := range []string{"../../.env", "../.env", "a/../../.env"} {
-		out := runToolErr(t, SkillViewTool{cat}, fmt.Sprintf(`{"name":"deploy","file":%q}`, f))
+		out := runToolErr(t, SkillViewTool{Catalog: cat}, fmt.Sprintf(`{"name":"deploy","file":%q}`, f))
 		if !strings.Contains(out, "file must be inside the skill folder") {
 			t.Fatal(f, out)
 		}
@@ -86,7 +85,7 @@ func TestSkillViewRejectsPathEscape(t *testing.T) {
 	if err := os.Symlink(filepath.Join(cat.Dir, ".env"), filepath.Join(cat.Dir, "deploy", "link")); err != nil {
 		t.Fatal(err)
 	}
-	if out := runToolErr(t, SkillViewTool{cat}, `{"name":"deploy","file":"link"}`); !strings.Contains(out, "file must be inside the skill folder") {
+	if out := runToolErr(t, SkillViewTool{Catalog: cat}, `{"name":"deploy","file":"link"}`); !strings.Contains(out, "file must be inside the skill folder") {
 		t.Fatal(out)
 	}
 }
@@ -94,56 +93,51 @@ func TestSkillViewRejectsPathEscape(t *testing.T) {
 func TestSkillViewUnknownListsNames(t *testing.T) {
 	cat := catalogWith(t, "deploy", "Deploy steps.", "body", nil)
 	writeSkill(t, cat.Dir, "backup", "Backup steps.", "", "body", nil)
-	out := runToolErr(t, SkillViewTool{cat}, `{"name":"nope"}`)
+	out := runToolErr(t, SkillViewTool{Catalog: cat}, `{"name":"nope"}`)
 	if !strings.Contains(out, "backup") || !strings.Contains(out, "deploy") {
 		t.Fatal(out)
 	}
 }
 
-func TestSkillViewRegistersRequiredEnv(t *testing.T) {
-	cat := catalogWithEnv(t, "helius", []string{"HELIUS_API_KEY"})
+func TestSkillViewEnvStatusLine(t *testing.T) {
+	cat := catalogWithEnv(t, "helius", []string{"HELIUS_API_KEY", "HELIUS_REGION"})
+	var asked []string
+	tool := SkillViewTool{Catalog: cat, EnvStatus: func(names []string) []string {
+		asked = names
+		return []string{"not passed: add it to terminal.env_passthrough in config.yaml", "passed"}
+	}}
 	env := &Env{Values: map[string]any{}}
-	out := runToolEnv(t, SkillViewTool{cat}, `{"name":"helius"}`, env)
-	if !slices.Contains(PassthroughFor(env), "HELIUS_API_KEY") || !strings.Contains(out, "HELIUS_API_KEY") {
+	out := runToolEnv(t, tool, `{"name":"helius"}`, env)
+	if !slices.Equal(asked, []string{"HELIUS_API_KEY", "HELIUS_REGION"}) {
+		t.Fatalf("EnvStatus got %q", asked)
+	}
+	want := "\nRequired environment variables: HELIUS_API_KEY (not passed: add it to terminal.env_passthrough in config.yaml), HELIUS_REGION (passed).\n"
+	if !strings.Contains(out, want) || strings.Contains(out, "gets them in this session") {
 		t.Fatal(out)
 	}
-	// The passthrough is per session.
-	if len(PassthroughFor(&Env{Values: map[string]any{}})) != 0 || len(PassthroughFor(nil)) != 0 {
-		t.Fatal("the passthrough must not leak to another session")
+	// skill_view does not register the names in the session.
+	if _, ok := env.Values["env_passthrough"]; ok {
+		t.Fatal("skill_view must not register env names")
 	}
-	// A second view adds no duplicate.
-	runToolEnv(t, SkillViewTool{cat}, `{"name":"helius"}`, env)
-	if len(PassthroughFor(env)) != 1 {
-		t.Fatal(PassthroughFor(env))
+	// A nil EnvStatus gives "not set" for each name.
+	out = runToolEnv(t, SkillViewTool{Catalog: cat}, `{"name":"helius"}`, env)
+	if !strings.Contains(out, "Required environment variables: HELIUS_API_KEY (not set), HELIUS_REGION (not set).") {
+		t.Fatal(out)
 	}
 }
 
-func TestSkillViewParallelRegistration(t *testing.T) {
-	dir := t.TempDir()
-	for i := range 10 {
-		writeSkill(t, dir, fmt.Sprintf("s%d", i), "x", fmt.Sprintf("required_environment_variables: [KEY_%d]\n", i), "b", nil)
-	}
-	cat := &SkillCatalog{Dir: dir}
-	env := &Env{}
-	var wg sync.WaitGroup
-	for i := range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			dispatch(t, SkillViewTool{cat}, fmt.Sprintf(`{"name":"s%d"}`, i), env)
-		}()
-	}
-	wg.Wait()
-	if len(PassthroughFor(env)) != 10 {
-		t.Fatal(PassthroughFor(env))
+func TestSkillViewSchemaNamesEnvPassthrough(t *testing.T) {
+	desc := SkillViewTool{}.Schema().Description
+	if !strings.Contains(desc, "terminal.env_passthrough") || strings.Contains(desc, "gets them in this session") {
+		t.Fatal(desc)
 	}
 }
 
 func TestSkillViewSeesNewSkill(t *testing.T) {
 	cat := catalogWith(t, "deploy", "Deploy steps.", "body", nil)
-	runToolErr(t, SkillViewTool{cat}, `{"name":"later"}`)
+	runToolErr(t, SkillViewTool{Catalog: cat}, `{"name":"later"}`)
 	writeSkill(t, cat.Dir, "later", "Made later.", "", "new body", nil)
-	if out := runTool(t, SkillViewTool{cat}, `{"name":"later"}`); !strings.Contains(out, "new body") {
+	if out := runTool(t, SkillViewTool{Catalog: cat}, `{"name":"later"}`); !strings.Contains(out, "new body") {
 		t.Fatal(out)
 	}
 }
@@ -159,7 +153,7 @@ func TestSkillsListShowsNamesAndDescriptions(t *testing.T) {
 	if out := runTool(t, SkillsListTool{empty}, `{}`); !strings.Contains(out, "no skills") {
 		t.Fatal(out)
 	}
-	for _, tool := range []Tool{SkillsListTool{cat}, SkillViewTool{cat}} {
+	for _, tool := range []Tool{SkillsListTool{cat}, SkillViewTool{Catalog: cat}} {
 		if tool.Toolset() != SetSkills || !tool.ParallelSafe() {
 			t.Fatal(tool.Name())
 		}
@@ -203,18 +197,18 @@ func TestSkillManageRoundTrip(t *testing.T) {
 	}
 	runToolEnv(t, tool, `{"action":"patch","name":"deploy","old_string":"1. build","new_string":"1. build\n2. ship"}`, env)
 	runToolEnv(t, tool, `{"action":"write_file","name":"deploy","file":"references/env.md","content":"ENV notes"}`, env)
-	if got := runToolEnv(t, SkillViewTool{tool.Catalog}, `{"name":"deploy","file":"references/env.md"}`, env); got != "ENV notes" {
+	if got := runToolEnv(t, SkillViewTool{Catalog: tool.Catalog}, `{"name":"deploy","file":"references/env.md"}`, env); got != "ENV notes" {
 		t.Fatal(got)
 	}
 	runToolEnv(t, tool, `{"action":"patch","name":"deploy","file":"references/env.md","old_string":"ENV","new_string":"Env"}`, env)
-	if got := runToolEnv(t, SkillViewTool{tool.Catalog}, `{"name":"deploy","file":"references/env.md"}`, env); got != "Env notes" {
+	if got := runToolEnv(t, SkillViewTool{Catalog: tool.Catalog}, `{"name":"deploy","file":"references/env.md"}`, env); got != "Env notes" {
 		t.Fatal(got)
 	}
-	if got := runToolEnv(t, SkillViewTool{tool.Catalog}, `{"name":"deploy"}`, env); !strings.Contains(got, "2. ship") {
+	if got := runToolEnv(t, SkillViewTool{Catalog: tool.Catalog}, `{"name":"deploy"}`, env); !strings.Contains(got, "2. ship") {
 		t.Fatal(got)
 	}
 	runToolEnv(t, tool, `{"action":"delete","name":"deploy"}`, env)
-	runToolEnvErr(t, SkillViewTool{tool.Catalog}, `{"name":"deploy"}`, env)
+	runToolEnvErr(t, SkillViewTool{Catalog: tool.Catalog}, `{"name":"deploy"}`, env)
 }
 
 func TestSkillManageGuardResults(t *testing.T) {
@@ -253,7 +247,7 @@ func TestSkillInvocationText(t *testing.T) {
 	t.Run("no env, no files, no args", func(t *testing.T) {
 		dir := t.TempDir()
 		s := skills.Skill{Name: "arxiv", Description: "Search arXiv.", Body: "raw body", Dir: dir}
-		got := SkillInvocationText(s, "\n  # arXiv\nSearch papers.\n\n", "")
+		got := SkillInvocationText(s, "\n  # arXiv\nSearch papers.\n\n", "", nil)
 		want := strings.Join([]string{
 			header,
 			"",
@@ -276,7 +270,7 @@ func TestSkillInvocationText(t *testing.T) {
 		})
 		dir := filepath.Join(root, "arxiv")
 		s := skills.Skill{Name: "arxiv", Body: "raw body", Dir: dir, RequiredEnv: []string{"ARXIV_KEY", "ARXIV_USER"}}
-		got := SkillInvocationText(s, "Search papers.", "transformers 2026\nonly new papers")
+		got := SkillInvocationText(s, "Search papers.", "transformers 2026\nonly new papers", func([]string) []string { return []string{"passed", "not set"} })
 		want := strings.Join([]string{
 			header,
 			"",
@@ -285,7 +279,7 @@ func TestSkillInvocationText(t *testing.T) {
 			"[Skill directory: " + dir + "]",
 			resolve,
 			"",
-			"[Required environment variables (the terminal tool gets them in this session): ARXIV_KEY, ARXIV_USER]",
+			"[Required environment variables: ARXIV_KEY (passed), ARXIV_USER (not set).]",
 			"",
 			"[This skill has supporting files (paths relative to the skill directory above):]",
 			"- references/api.md",
@@ -301,15 +295,6 @@ func TestSkillInvocationText(t *testing.T) {
 	})
 }
 
-func TestAddPassthroughExported(t *testing.T) {
-	env := &Env{Values: map[string]any{}}
-	AddPassthrough(env, []string{"B_KEY", "A_KEY", "B_KEY"})
-	if got := PassthroughFor(env); !slices.Equal(got, []string{"A_KEY", "B_KEY"}) {
-		t.Fatal(got)
-	}
-	AddPassthrough(nil, []string{"A_KEY"}) // A nil env is a no-op.
-}
-
 func TestSkillViewReplacesTemplateTokens(t *testing.T) {
 	cat := catalogWith(t, "deploy", "Deploy steps.",
 		"Run ${HERMES_SKILL_DIR}/scripts/run.sh for ${HERMES_SESSION_ID}.",
@@ -320,16 +305,16 @@ func TestSkillViewReplacesTemplateTokens(t *testing.T) {
 	}
 	dir := all[0].Dir
 	env := &Env{SessionID: "sess-42", Values: map[string]any{}}
-	out := runToolEnv(t, SkillViewTool{cat}, `{"name":"deploy"}`, env)
+	out := runToolEnv(t, SkillViewTool{Catalog: cat}, `{"name":"deploy"}`, env)
 	if !strings.Contains(out, "Run "+dir+"/scripts/run.sh for sess-42.") {
 		t.Fatal(out)
 	}
 	// A support file read with file does not change.
-	if out := runToolEnv(t, SkillViewTool{cat}, `{"name":"deploy","file":"scripts/notes.md"}`, env); out != "See ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID}." {
+	if out := runToolEnv(t, SkillViewTool{Catalog: cat}, `{"name":"deploy","file":"scripts/notes.md"}`, env); out != "See ${HERMES_SKILL_DIR} and ${HERMES_SESSION_ID}." {
 		t.Fatal(out)
 	}
 	// With a nil env, the session ID is empty, so its token stays.
-	out, err = SkillViewTool{cat}.Run(context.Background(), json.RawMessage(`{"name":"deploy"}`), nil)
+	out, err = SkillViewTool{Catalog: cat}.Run(context.Background(), json.RawMessage(`{"name":"deploy"}`), nil)
 	if err != nil || !strings.Contains(out, "Run "+dir+"/scripts/run.sh for ${HERMES_SESSION_ID}.") {
 		t.Fatal(out, err)
 	}

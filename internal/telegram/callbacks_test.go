@@ -16,7 +16,7 @@ import (
 func interactions(t *testing.T) (*Interactions, *fakeBot) {
 	t.Helper()
 	api := newFakeBot(t)
-	return &Interactions{C: api.client()}, api
+	return &Interactions{C: api.client(), Owner: func(context.Context, CallbackQuery) bool { return true }}, api
 }
 
 // waitSends waits until the fake got n sendMessage calls.
@@ -81,7 +81,7 @@ func TestApprovalButtonsAndEdit(t *testing.T) {
 		it.HandleCallback(ctx, press(5, data[1]))
 	}()
 	req := security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /tmp/x", Description: "recursive delete"}
-	sc, err := it.For(5, "").PromptApproval(ctx, req)
+	sc, err := it.For(5, "", "").PromptApproval(ctx, req)
 	if err != nil || sc != security.ScopeSession {
 		t.Fatal(sc, err)
 	}
@@ -105,14 +105,14 @@ func TestApprovalTimeoutEdits(t *testing.T) {
 	it, api := interactions(t)
 	tctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
-	sc, err := it.For(5, "").PromptApproval(tctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /", Description: "x"})
+	sc, err := it.For(5, "", "").PromptApproval(tctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /", Description: "x"})
 	if sc != security.ScopeTimeout || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(sc, err)
 	}
 	if got := api.lastCall("editMessageText").Body["text"]; got != "⌛ *Approval denied* · no answer\nx: `rm -rf /`\n**>rm \\-rf /||" {
 		t.Fatal(api.all())
 	}
-	if it.ResolveApprovals(5, security.ScopeOnce, true) != 0 {
+	if it.ResolveApprovals(5, "", security.ScopeOnce, true) != 0 {
 		t.Fatal("a timed out approval must not stay pending")
 	}
 }
@@ -126,12 +126,12 @@ func TestApproveAllFallback(t *testing.T) {
 	out := make(chan res, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			sc, err := it.For(5, "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d"})
+			sc, err := it.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d"})
 			out <- res{sc, err}
 		}()
 	}
 	waitSends(t, api, 2)
-	if n := it.ResolveApprovals(5, security.ScopeOnce, true); n != 2 {
+	if n := it.ResolveApprovals(5, "", security.ScopeOnce, true); n != 2 {
 		t.Fatal(n)
 	}
 	for i := 0; i < 2; i++ {
@@ -147,7 +147,7 @@ func TestApprovalPromptText(t *testing.T) {
 	prompt := func(req security.ApprovalRequest) {
 		tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 		defer cancel()
-		_, _ = it.For(5, "").PromptApproval(tctx, req)
+		_, _ = it.For(5, "", "").PromptApproval(tctx, req)
 	}
 	const timeoutLine = "\n_No answer in 10 min \\= deny\\._"
 	for _, c := range []struct {
@@ -196,7 +196,7 @@ func TestApprovalEditKeepsCommand(t *testing.T) {
 			_, data := keyboardOf(api, 0)
 			it.HandleCallback(ctx, press(5, data[i]))
 		}()
-		if _, err := it.For(5, "").PromptApproval(ctx, req); err != nil {
+		if _, err := it.For(5, "", "").PromptApproval(ctx, req); err != nil {
 			t.Fatal(err)
 		}
 		edit := api.lastCall("editMessageText").Body
@@ -212,7 +212,7 @@ func TestApprovalEditKeepsCommand(t *testing.T) {
 	it.ApprovalTimeout = 10 * time.Minute
 	tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel()
-	_, _ = it.For(5, "").PromptApproval(tctx, req)
+	_, _ = it.For(5, "", "").PromptApproval(tctx, req)
 	if got := api.lastCall("editMessageText").Body["text"]; got != "⌛ *Approval denied* · no answer in 10 min"+body {
 		t.Fatal(got)
 	}
@@ -223,7 +223,7 @@ func TestApprovalEditKeepsCommand(t *testing.T) {
 		waitSends(t, api, 1)
 		stop()
 	}()
-	_, _ = it.For(5, "").PromptApproval(sctx, req)
+	_, _ = it.For(5, "", "").PromptApproval(sctx, req)
 	if got := api.lastCall("editMessageText").Body["text"]; got != "❌ *Approval denied*"+body {
 		t.Fatal(got)
 	}
@@ -282,23 +282,23 @@ func TestApproveOldestFirst(t *testing.T) {
 	it, api := interactions(t)
 	first := make(chan security.Scope, 1)
 	go func() {
-		sc, _ := it.For(5, "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "a", Description: "first"})
+		sc, _ := it.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "a", Description: "first"})
 		first <- sc
 	}()
 	waitSends(t, api, 1)
 	second := make(chan security.Scope, 1)
 	go func() {
-		sc, _ := it.For(5, "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "b", Description: "second"})
+		sc, _ := it.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "b", Description: "second"})
 		second <- sc
 	}()
 	waitSends(t, api, 2)
-	if it.ResolveApprovals(7, security.ScopeOnce, false) != 0 {
+	if it.ResolveApprovals(7, "", security.ScopeOnce, false) != 0 {
 		t.Fatal("an approval of another chat must not resolve")
 	}
-	if it.ResolveApprovals(5, security.ScopeDeny, false) != 1 || <-first != security.ScopeDeny {
+	if it.ResolveApprovals(5, "", security.ScopeDeny, false) != 1 || <-first != security.ScopeDeny {
 		t.Fatal("the oldest approval must resolve first")
 	}
-	if it.ResolveApprovals(5, security.ScopeAlways, false) != 1 || <-second != security.ScopeAlways {
+	if it.ResolveApprovals(5, "", security.ScopeAlways, false) != 1 || <-second != security.ScopeAlways {
 		t.Fatal("second")
 	}
 }
@@ -307,7 +307,7 @@ func TestChildNameShown(t *testing.T) {
 	it, api := interactions(t)
 	tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel()
-	_, _ = it.For(5, "").PromptApproval(tctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d", ChildName: "2/5"})
+	_, _ = it.For(5, "", "").PromptApproval(tctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d", ChildName: "2/5"})
 	if !strings.Contains(StripMarkdownV2(api.lastCall("sendMessage").Body["text"].(string)), "(from subagent 2/5)") {
 		t.Fatal(api.lastCall("sendMessage").Body)
 	}
@@ -317,7 +317,7 @@ func TestCallbackFromOtherChatRefused(t *testing.T) {
 	it, api := interactions(t)
 	done := make(chan security.Scope, 1)
 	go func() {
-		sc, _ := it.For(5, "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d"})
+		sc, _ := it.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d"})
 		done <- sc
 	}()
 	waitSends(t, api, 1)
@@ -354,7 +354,7 @@ func TestAskSingleChoice(t *testing.T) {
 		_, data := keyboardOf(api, 0)
 		it.HandleCallback(ctx, press(5, data[1]))
 	}()
-	ans, err := it.For(5, "").Ask(ctx, tools.Question{Text: "Which?", Choices: []string{"a", "b"}})
+	ans, err := it.For(5, "", "").Ask(ctx, tools.Question{Text: "Which?", Choices: []string{"a", "b"}})
 	if err != nil || !reflect.DeepEqual(ans.Choices, []string{"b"}) {
 		t.Fatal(ans, err)
 	}
@@ -378,7 +378,7 @@ func TestAskMultiSelectDone(t *testing.T) {
 		}
 		it.HandleCallback(ctx, press(5, data[3]))
 	}()
-	ans, err := it.For(5, "").Ask(ctx, tools.Question{Text: "Which?", Choices: []string{"a", "b", "c"}, Multi: true})
+	ans, err := it.For(5, "", "").Ask(ctx, tools.Question{Text: "Which?", Choices: []string{"a", "b", "c"}, Multi: true})
 	if err != nil || !reflect.DeepEqual(ans.Choices, []string{"a", "c"}) {
 		t.Fatal(ans, err)
 	}
@@ -393,7 +393,7 @@ func TestAskFreeTextNextMessage(t *testing.T) {
 	}
 	out := make(chan res, 1)
 	go func() {
-		a, err := h.ch.UI.For(5, "").Ask(ctx, tools.Question{Text: "Favourite color?"})
+		a, err := h.ch.UI.For(5, "", "").Ask(ctx, tools.Question{Text: "Favourite color?"})
 		out <- res{a, err}
 	}()
 	waitSends(t, h.api, 1)
@@ -418,7 +418,7 @@ func TestApproveCommandInChat(t *testing.T) {
 	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
 	out := make(chan security.Scope, 1)
 	go func() {
-		sc, _ := h.ch.UI.For(5, "").PromptApproval(ctx, security.ApprovalRequest{Command: "rm -rf /x", Description: "d"})
+		sc, _ := h.ch.UI.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{Command: "rm -rf /x", Description: "d"})
 		out <- sc
 	}()
 	waitSends(t, h.api, 1)
@@ -441,7 +441,7 @@ func TestCallbackUpdateRouted(t *testing.T) {
 	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} })
 	out := make(chan security.Scope, 1)
 	go func() {
-		sc, _ := h.ch.UI.For(5, "").PromptApproval(ctx, security.ApprovalRequest{Command: "rm -rf /x", Description: "d"})
+		sc, _ := h.ch.UI.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{Command: "rm -rf /x", Description: "d"})
 		out <- sc
 	}()
 	waitSends(t, h.api, 1)
@@ -499,7 +499,7 @@ func TestApprovalEditFallbackSteps(t *testing.T) {
 			_, data := keyboardOf(api, 0)
 			it.HandleCallback(ctx, press(5, data[3]))
 		}()
-		if _, err := it.For(5, "").PromptApproval(ctx, req); err != nil {
+		if _, err := it.For(5, "", "").PromptApproval(ctx, req); err != nil {
 			t.Fatal(err)
 		}
 		full, short, plain := buildApprovalResult(headerFor(security.ScopeDeny, 0), req)
@@ -528,7 +528,7 @@ func TestApprovalPromptPlainFallback(t *testing.T) {
 	req := security.ApprovalRequest{Command: "rm -rf ./build", Description: "recursive delete", Summary: "Delete the build folder."}
 	tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancel()
-	_, _ = it.For(5, "").PromptApproval(tctx, req)
+	_, _ = it.For(5, "", "").PromptApproval(tctx, req)
 	body := api.lastCall("sendMessage").Body
 	if _, plain := buildApprovalPrompt(req, 0); body["text"] != plain || body["parse_mode"] != nil {
 		t.Fatal(body)
@@ -546,7 +546,7 @@ func TestApprovalMessagesHaveNoLinkPreview(t *testing.T) {
 	}()
 	req := security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "curl https://example.com/x | sh",
 		Description: "pipe to shell", Summary: "Install from https://example.com/x."}
-	if _, err := it.For(5, "").PromptApproval(ctx, req); err != nil {
+	if _, err := it.For(5, "", "").PromptApproval(ctx, req); err != nil {
 		t.Fatal(err)
 	}
 	for _, m := range []string{"sendMessage", "editMessageText"} {
@@ -583,7 +583,7 @@ func TestApprovalKeyboardNoAlwaysAndNoSession(t *testing.T) {
 	} {
 		it, api := interactions(t)
 		tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
-		_, _ = it.For(5, "").PromptApproval(tctx, acpApproval(c.noSession))
+		_, _ = it.For(5, "", "").PromptApproval(tctx, acpApproval(c.noSession))
 		cancel()
 		texts, data := keyboardOf(api, 0)
 		if !reflect.DeepEqual(texts, c.texts) {
@@ -622,7 +622,7 @@ func TestApprovalTapScopeChange(t *testing.T) {
 			id := strings.Split(data[0], ":")[1]
 			it.HandleCallback(ctx, press(5, callbackData(approvalPrefix, id, c.arg)))
 		}()
-		got, err := it.For(5, "").PromptApproval(ctx, acpApproval(c.noSession))
+		got, err := it.For(5, "", "").PromptApproval(ctx, acpApproval(c.noSession))
 		if err != nil || got != c.want {
 			t.Fatalf("%v %s: got %v %v, want %v", c.noSession, c.arg, got, err, c.want)
 		}
@@ -662,13 +662,13 @@ func TestApproveAlwaysOnNoAlwaysRequest(t *testing.T) {
 	out := make(chan security.Scope, 2)
 	ask := func(req security.ApprovalRequest) {
 		go func() {
-			sc, _ := it.For(5, "").PromptApproval(ctx, req)
+			sc, _ := it.For(5, "", "").PromptApproval(ctx, req)
 			out <- sc
 		}()
 	}
 	ask(acpApproval(false))
 	waitSends(t, api, 1)
-	if got := ch.resolveText(5, "approve", "always"); got != "✅ **Approval allowed** · this session\nThe agent continues." {
+	if got := ch.resolveText(5, "", "approve", "always"); got != "✅ **Approval allowed** · this session\nThe agent continues." {
 		t.Fatalf("reply %q", got)
 	}
 	if sc := <-out; sc != security.ScopeSession {
@@ -676,7 +676,7 @@ func TestApproveAlwaysOnNoAlwaysRequest(t *testing.T) {
 	}
 	ask(acpApproval(true))
 	waitSends(t, api, 2)
-	if got := ch.resolveText(5, "approve", "session"); got != "✅ **Approval allowed** · once\nThe agent continues." {
+	if got := ch.resolveText(5, "", "approve", "session"); got != "✅ **Approval allowed** · once\nThe agent continues." {
 		t.Fatalf("reply %q", got)
 	}
 	if sc := <-out; sc != security.ScopeOnce {
@@ -687,7 +687,7 @@ func TestApproveAlwaysOnNoAlwaysRequest(t *testing.T) {
 	waitSends(t, api, 3)
 	ask(security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d"})
 	waitSends(t, api, 4)
-	if n := it.ResolveApprovals(5, security.ScopeAlways, true); n != 2 {
+	if n := it.ResolveApprovals(5, "", security.ScopeAlways, true); n != 2 {
 		t.Fatal(n)
 	}
 	got := map[security.Scope]int{}
@@ -716,7 +716,166 @@ func TestAddSetsFlagsBeforePublish(t *testing.T) {
 	if got != p || !got.noAlways || !got.noSession {
 		t.Fatalf("pending prompt %+v", got)
 	}
-	if n, applied := it.resolveApprovals(42, security.ScopeAlways, true); n != 1 || applied != security.ScopeOnce {
+	if n, applied := it.resolveApprovals(42, "", security.ScopeAlways, true); n != 1 || applied != security.ScopeOnce {
 		t.Fatalf("n %d, applied %v", n, applied)
+	}
+}
+
+// pressFrom returns press(chat, data) from the user with the id uid.
+func pressFrom(chat, uid int64, data string) CallbackQuery {
+	cq := press(chat, data)
+	cq.From.ID = uid
+	return cq
+}
+
+func TestApprovalTapNeedsOwner(t *testing.T) {
+	it, api := interactions(t)
+	it.Owner = func(_ context.Context, cq CallbackQuery) bool { return cq.From.ID == 5 || cq.From.ID == 7 }
+	out := make(chan security.Scope, 1)
+	go func() {
+		sc, _ := it.For(-100, "", "5").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:group:-100", Command: "rm -rf /x", Description: "d"})
+		out <- sc
+	}()
+	waitSends(t, api, 1)
+	_, data := keyboardOf(api, 0)
+	it.HandleCallback(ctx, pressFrom(-100, 6, data[0]))
+	if got := api.lastCall("answerCallbackQuery").Body["text"]; got != "⛔ Only the owner can answer this prompt." {
+		t.Fatal(got)
+	}
+	// Another owner answers the approval of the turn of user 5.
+	it.HandleCallback(ctx, pressFrom(-100, 7, data[0]))
+	if sc := <-out; sc != security.ScopeOnce {
+		t.Fatal(sc)
+	}
+}
+
+func TestApprovalTapNilOwnerHookRefuses(t *testing.T) {
+	it, api := interactions(t)
+	it.Owner = nil
+	go func() {
+		_, _ = it.For(5, "", "5").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /x", Description: "d"})
+	}()
+	waitSends(t, api, 1)
+	_, data := keyboardOf(api, 0)
+	it.HandleCallback(ctx, press(5, data[0]))
+	if got := api.lastCall("answerCallbackQuery").Body["text"]; got != "⛔ Only the owner can answer this prompt." {
+		t.Fatal(got)
+	}
+	if n := it.ResolveApprovals(5, "", security.ScopeDeny, true); n != 1 {
+		t.Fatal("the refused tap must not answer the approval", n)
+	}
+}
+
+func TestClarifyTapIsForTheUserOfTheTurn(t *testing.T) {
+	it, api := interactions(t)
+	it.Owner = func(_ context.Context, cq CallbackQuery) bool { return cq.From.ID == 5 }
+	out := make(chan tools.Answer, 1)
+	go func() {
+		a, _ := it.For(-100, "", "8").Ask(ctx, tools.Question{Text: "Pick", Choices: []string{"a", "b"}})
+		out <- a
+	}()
+	waitSends(t, api, 1)
+	_, data := keyboardOf(api, 0)
+	// An owner that is another user cannot answer.
+	it.HandleCallback(ctx, pressFrom(-100, 5, data[1]))
+	if got := api.lastCall("answerCallbackQuery").Body["text"]; got != "⛔ This question is for another user." {
+		t.Fatal(got)
+	}
+	// The user of the turn answers, also as a member.
+	it.HandleCallback(ctx, pressFrom(-100, 8, data[0]))
+	if a := <-out; !reflect.DeepEqual(a.Choices, []string{"a"}) {
+		t.Fatal(a)
+	}
+	// A question with no user needs an owner.
+	go func() {
+		a, _ := it.For(-100, "", "").Ask(ctx, tools.Question{Text: "Pick", Choices: []string{"a", "b"}})
+		out <- a
+	}()
+	waitSends(t, api, 2)
+	_, data = keyboardOf(api, 1)
+	it.HandleCallback(ctx, pressFrom(-100, 8, data[1]))
+	if got := api.lastCall("answerCallbackQuery").Body["text"]; got != "⛔ Only the owner can answer this prompt." {
+		t.Fatal(got)
+	}
+	it.HandleCallback(ctx, pressFrom(-100, 5, data[1]))
+	if a := <-out; !reflect.DeepEqual(a.Choices, []string{"b"}) {
+		t.Fatal(a)
+	}
+}
+
+func TestTakeTextBindsTheUser(t *testing.T) {
+	it, api := interactions(t)
+	out := make(chan tools.Answer, 1)
+	go func() { a, _ := it.For(-100, "17", "8").Ask(ctx, tools.Question{Text: "Color?"}); out <- a }()
+	waitSends(t, api, 1)
+	if it.TakeText(-100, "17", "5", true, "red") {
+		t.Fatal("another user, also an owner, must not answer")
+	}
+	if !it.TakeText(-100, "17", "8", false, "blue") {
+		t.Fatal("the user of the turn answers")
+	}
+	if a := <-out; a.Text != "blue" {
+		t.Fatal(a)
+	}
+	// A question with no user takes the text of an owner only.
+	go func() { a, _ := it.For(-100, "17", "").Ask(ctx, tools.Question{Text: "Color?"}); out <- a }()
+	waitSends(t, api, 2)
+	if it.TakeText(-100, "17", "6", false, "x") {
+		t.Fatal("a member must not answer for the session")
+	}
+	if !it.TakeText(-100, "17", "6", true, "y") || (<-out).Text != "y" {
+		t.Fatal("an owner answers a question with no user")
+	}
+}
+
+func TestTakeTextNoUserIsNotAMatch(t *testing.T) {
+	it, api := interactions(t)
+	out := make(chan tools.Answer, 1)
+	go func() { a, _ := it.For(-100, "", "").Ask(ctx, tools.Question{Text: "Color?"}); out <- a }()
+	waitSends(t, api, 1)
+	// A text with no user ID is not the user of a question with no user.
+	if it.TakeText(-100, "", "", false, "x") {
+		t.Fatal("a text with no user and no owner must not answer")
+	}
+	if !it.TakeText(-100, "", "", true, "y") || (<-out).Text != "y" {
+		t.Fatal("an owner answers a question with no user")
+	}
+}
+
+func TestClarifyTapNoUserNeedsOwner(t *testing.T) {
+	it, api := interactions(t)
+	it.Owner = func(context.Context, CallbackQuery) bool { return false }
+	out := make(chan tools.Answer, 1)
+	go func() {
+		a, _ := it.For(-100, "", "").Ask(ctx, tools.Question{Text: "Pick", Choices: []string{"a", "b"}})
+		out <- a
+	}()
+	waitSends(t, api, 1)
+	_, data := keyboardOf(api, 0)
+	// A tap from a user with the ID 0 does not match a question with no user.
+	it.HandleCallback(ctx, pressFrom(-100, 0, data[0]))
+	if got := api.lastCall("answerCallbackQuery").Body["text"]; got != notAuthorized {
+		t.Fatal(got)
+	}
+	select {
+	case a := <-out:
+		t.Fatal("the tap must not answer", a)
+	default:
+	}
+}
+
+func TestResolveApprovalsOnlyItsTopic(t *testing.T) {
+	it, api := interactions(t)
+	out := make(chan security.Scope, 1)
+	go func() {
+		sc, _ := it.For(-100, "17", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:group:-100:17", Command: "rm -rf /x", Description: "d"})
+		out <- sc
+	}()
+	waitSends(t, api, 1)
+	if n := it.ResolveApprovals(-100, "18", security.ScopeOnce, true); n != 0 {
+		t.Fatal("an approval of another topic was answered")
+	}
+	if n := it.ResolveApprovals(-100, "17", security.ScopeOnce, true); n != 1 || <-out != security.ScopeOnce {
+		t.Fatal(n)
 	}
 }

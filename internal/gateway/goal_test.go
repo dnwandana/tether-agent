@@ -99,7 +99,7 @@ func goalCtx(t *testing.T, interactive bool) (*CommandCtx, *goalRec) {
 	t.Helper()
 	d := goalDeps(t, &fakeProv{}, fixedJudge{reply: doneVerdict})
 	rec := &goalRec{}
-	c := &CommandCtx{Deps: d, Key: "telegram:dm:1", Hooks: CommandHooks{
+	c := &CommandCtx{Deps: d, Key: "telegram:dm:1", Owner: true, Hooks: CommandHooks{
 		StartGoalTurn: func(gc goals.Continuation) { rec.starts = append(rec.starts, gc) },
 		DropGoalTurns: func() { rec.drops++ },
 	}}
@@ -214,7 +214,7 @@ func TestGoalPauseResumeClear(t *testing.T) {
 	run(t, c, "/goal pause")
 	st := loadGoal(t, c.Deps, c.Session.ID)
 	if rec.lastText(t) != "⏸ Goal paused: ship it" || st.Status != goals.StatusPaused ||
-		st.PausedReason == nil || *st.PausedReason != "paused by the owner" || st.WaitingOnPID != nil || rec.drops != 1 {
+		st.PausedReason == nil || *st.PausedReason != "paused by the user" || st.WaitingOnPID != nil || rec.drops != 1 {
 		t.Fatalf("%q %+v %d", rec.lastText(t), st, rec.drops)
 	}
 	run(t, c, "/goal resume")

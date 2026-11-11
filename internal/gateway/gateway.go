@@ -67,7 +67,16 @@ type Inbound struct {
 	Target Target
 	// ButtonMsgID is the message ID of the pressed button, or 0 for a typed message.
 	ButtonMsgID int
-	// Slash is true when the owner typed a slash command that is not a built-in and not a
+	// Owner is true when the sender is an owner. The channel sets it. A member runs only the
+	// commands with MemberOK.
+	Owner bool
+	// Shared is true when all users of the chat or the topic share the session of Key.
+	Shared bool
+	// SenderID is the user ID of the sender. The channel sets it. It stays set when the
+	// channel clears UserID for a shared session, so a prompt of the turn binds to the
+	// sender. When it is "", the turn uses UserID (senderOf).
+	SenderID string
+	// Slash is true when the sender typed a slash command that is not a built-in and not a
 	// reserved name. The gateway treats the text as a message. Deps.Turn runs the skill of
 	// the command at the start of the turn.
 	Slash bool
@@ -124,6 +133,9 @@ type RunState struct {
 	ended, stopped bool
 	// steerAcks holds the steer acks of the run that are not closed. Gateway.mu guards it.
 	steerAcks []*ackSlot
+	// steerSenders holds the senders of the steer texts that the agent did not read.
+	// Gateway.mu guards it.
+	steerSenders []steerSender
 }
 
 // Gateway routes the inbound messages of all channels to the agent. It runs one turn for
@@ -201,7 +213,7 @@ type pendingTurn struct {
 	// keeps its steer. Gateway.mu guards it.
 	takeOver bool
 	// system is true for a turn from Enqueue, for example a batch result or a resume note.
-	// The queue limit and /now do not count it as a waiting message of the owner.
+	// The queue limit and /now do not count it as a waiting message of the sender.
 	system bool
 	// handed is true when next gave the key to the message. Then the message counts in
 	// Gateway.active, and its waiter must run it, so the key goes on. Gateway.mu guards it.
@@ -330,15 +342,16 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	if steerable(in) {
 		// Several texts in a short time become one steer (Hermes debounce). The text goes
 		// in under g.mu, so BeginStopping either takes it or refuses it.
-		g.debouncerLocked().Add(in.Key, in.Text, func(merged string) {
-			m := in
+		// The merged text gets a sender only when all of its texts come from one sender.
+		g.debouncerLocked().AddFrom(in.Key, senderOf(in), in.Text, func(merged, sender string) {
+			m := withSender(in, sender)
 			m.Text = merged
 			g.flushBusyText(ctx, m, newRenderer)
 		})
 		g.mu.Unlock()
 		return func() error { return nil }
 	}
-	if ownerQueued(ks) >= maxQueuedMessages {
+	if senderQueued(ks) >= maxQueuedMessages {
 		g.mu.Unlock()
 		ackReply(newRenderer(), Reply{Text: QueueFullReply})
 		return func() error { return nil }
@@ -357,7 +370,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	g.mu.Unlock()
 	g.sendMarker(op)
 	if send {
-		g.sendAck(slot, QueueAck, turn, newRenderer())
+		g.sendAckFor(slot, QueueAck, turn, in, newRenderer())
 	}
 	return func() error {
 		select {
@@ -402,7 +415,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 // follow-up. It runs after the current turn and the turns that wait before it. Enqueue
 // does not wait for the turn. The answer goes to the channel of the newest message of the
 // key, or else to the channel and the chat of the active session of the key. While the
-// gateway stops, it returns ErrStopping. The turn is not a message of the owner, so the
+// gateway stops, it returns ErrStopping. The turn is not a message of the sender, so the
 // queue limit and /now do not count it.
 func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
 	return g.enqueue(ctx, key, text, true)
@@ -464,7 +477,7 @@ func removeGoalTurnsLocked(ks *keyState, sessionID string, epoch int64) {
 	})
 }
 
-// enqueue is Enqueue. system is false for a message of the owner, for example a queued
+// enqueue is Enqueue. system is false for a message of the sender, for example a queued
 // text that a restart resumes.
 func (g *Gateway) enqueue(ctx context.Context, key, text string, system bool) error {
 	p := &pendingTurn{system: system}
@@ -494,7 +507,9 @@ func (g *Gateway) enqueueTurn(ctx context.Context, key string, p *pendingTurn) e
 		}
 	}
 	in.Key, in.Text, in.Images, in.Files, in.IsText = key, text, nil, nil, true
-	// in can be a copy of a skill command. Only a text of the owner can be a slash command,
+	// An enqueued turn has no sender, so its prompts go to any owner.
+	in.UserID, in.SenderID = "", ""
+	// in can be a copy of a skill command. Only a text of the sender can be a slash command,
 	// so a restart keeps a queued skill command, and a system text never is one. The restart
 	// marker does not keep the source of a text. So a steer text that the agent did not read
 	// before a restart, for example "/arxiv x" from "/steer /arxiv x", runs as a skill
@@ -569,6 +584,15 @@ func (g *Gateway) Wait(timeout time.Duration) bool {
 	return true
 }
 
+// senderOf returns the user ID of the sender of in: SenderID, or else UserID. The CLI and
+// some tests set only UserID.
+func senderOf(in Inbound) string {
+	if in.SenderID != "" {
+		return in.SenderID
+	}
+	return in.UserID
+}
+
 // routeOf returns in with no text, images, or files. A keyState keeps it as the newest
 // message of the key, and the users of that message use only the route of the message:
 // they set their own text, and no images or files. Thus the key does not keep the image
@@ -616,12 +640,13 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 	g.active.Add(1)
 	defer g.active.Add(-1)
 	end := g.turn(ctx, p)
-	// The goal step runs while the key is still busy, so an owner text that comes during
+	// The goal step runs while the key is still busy, so a sender text that comes during
 	// the step goes into the steer queue of the run, and the steer turn runs first.
 	cont := g.goalStep(ctx, p, end)
 	g.mu.Lock()
 	ks := g.key(p.in.Key)
 	var pending string
+	var sender textSender
 	var closes []ackClose
 	rs := ks.running
 	if rs != nil {
@@ -629,6 +654,7 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 		// The steer that the turn did not deliver is in the queue of the run. A steer that
 		// came after the last check of the agent is there too, so it is not lost.
 		pending = rs.Steer.Drain()
+		takeSteerSendersLocked(rs, math.MaxUint64, &sender)
 		// While the gateway stops, BeginStopping closes the acks.
 		if text, ok := steerEndText(pending, p.discard, p.takeOver, g.stopping.Load()); ok {
 			closes = g.closeSteerAcksLocked(rs, math.MaxUint64, text)
@@ -641,17 +667,18 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 		g.logger().Warn("gateway: a steer text is lost in the stop", "key", p.in.Key)
 	}
 	// A stop drops the steer, because the run that it guides has ended (Hermes). A
-	// take-over keeps it, because the owner asked for the waiting text to run now.
+	// take-over keeps it, because the sender asked for the waiting text to run now.
 	if pending != "" && (!p.discard || p.takeOver && !g.stopping.Load()) {
 		// The steer that the turn did not deliver becomes the next turn, before the queue.
-		in := p.in
+		// It gets a sender only when all of its texts come from one sender.
+		in := withSender(p.in, sender.id())
 		in.Text, in.Images, in.Files, in.IsText = pending, nil, nil, true
 		// p can be a skill command. A steer text is never one.
 		in.Slash = false
 		ks.queue = append([]*pendingTurn{{in: in, newRenderer: p.newRenderer}}, ks.queue...)
 	}
 	// The continuation goes to the end of the queue, after the leftover steer and each
-	// queued owner message. It replaces a goal turn that a wake queued during the step.
+	// queued sender message. It replaces a goal turn that a wake queued during the step.
 	// /stop or the stop of the gateway can come during the step, so the check runs again
 	// under g.mu. A goal turn has no marker text, so it needs no marker op.
 	if cont != nil && !p.discard && (rs == nil || !rs.stopped) && !g.stopping.Load() {
@@ -802,8 +829,12 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 		}
 	}
 	end.ran = true
+	turnUser := senderOf(p.in)
+	if p.system {
+		turnUser = ""
+	}
 	res, err := g.Deps.Turn(tctx, sess, TurnInput{
-		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, Sink: r, Steer: rs.Steer, Notify: notify,
+		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, UserID: turnUser, Sink: r, Steer: rs.Steer, Notify: notify,
 		Slash:       p.in.Slash,
 		OnSteerRead: func(seq uint64) { g.steerRead(rs, seq) },
 	})
@@ -822,11 +853,21 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 // the command name.
 const BusyCommandReply = "⏳ **Busy**\n`/%s` cannot run during a task. Wait for the answer, or stop the task."
 
+// ownerOnlyReply is the reply to a member that sends an owner-only command. %s is the
+// command word, with its Markdown characters escaped.
+const ownerOnlyReply = "⛔ Only the owner can use /%s."
+
+// ownerOnlySharedReply is the reply to a member that sends a command that changes a shared
+// session. %s is the command word, with its Markdown characters escaped.
+const ownerOnlySharedReply = "⛔ Only the owner can use /%s in a shared session."
+
 // commandErrorReply is the reply to a command that failed. The first %s is the command name,
 // and the second %s is the error text with its Markdown characters escaped.
 const commandErrorReply = "⚠️ **/%s failed**\n%s. Try again later."
 
-// runCommand runs one slash command for the key of in. While the key is busy, a command
+// runCommand runs one slash command for the key of in. The owner check comes first: a
+// member gets a refusal for an owner-only command, before any session, run, or goal step is
+// touched. While the key is busy, a command
 // without WhileBusy gets BusyCommandReply, because it can change the session of the turn
 // (Hermes). A new goal text or /goal draft on a busy key gets goalRunningReply. /new and
 // /reset first stop the run of the key and drop its queue.
@@ -834,6 +875,14 @@ const commandErrorReply = "⚠️ **/%s failed**\n%s. Try again later."
 func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func() Renderer, cmd Command, args string) (rest func() error) {
 	rest = func() error { return nil }
 	r := newRenderer()
+	if !in.Owner && !cmd.MemberOK {
+		ackReply(r, Reply{Text: fmt.Sprintf(ownerOnlyReply, EscapeMarkdown(cmd.Name))})
+		return rest
+	}
+	if !in.Owner && in.Shared && cmd.MemberOwnSession {
+		ackReply(r, Reply{Text: fmt.Sprintf(ownerOnlySharedReply, EscapeMarkdown(cmd.Name))})
+		return rest
+	}
 	if !cmd.WhileBusy {
 		g.mu.Lock()
 		ks := g.key(in.Key)
@@ -880,6 +929,8 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 	c := &CommandCtx{
 		Deps:    g.Deps,
 		Key:     in.Key,
+		Owner:   in.Owner,
+		Shared:  in.Shared,
 		Session: sess,
 		Reply:   func(text string) { r.Ack(stopGoalText(text, goalPaused)) },
 		Hooks: CommandHooks{

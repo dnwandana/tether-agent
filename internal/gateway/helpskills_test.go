@@ -67,6 +67,19 @@ func TestHelpThreeSkillsTelegram(t *testing.T) {
 	}
 }
 
+func TestHelpThreeSkillsMember(t *testing.T) {
+	c, sent := interactiveCtx(t)
+	c.Owner = false
+	withSkills(c, threeSkills()...)
+	run(t, c, "/help")
+	want := helpMember + "\n\n⚡ **Skills** (3)\n" +
+		"/arxiv · Search and summarize arXiv papers\n" +
+		"/git\\_helper · Run \\*git\\* and \\[links\\]\n" + notesLine
+	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
 func TestHelpThreeSkillsCLI(t *testing.T) {
 	c, out := cmdCtx(t, "cli:t")
 	withSkills(c, threeSkills()...)

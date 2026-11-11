@@ -205,3 +205,19 @@ func TestCompactorTodoOfSubagentReadsHistory(t *testing.T) {
 		t.Fatal("a child compaction must not add an entry to the values of the app")
 	}
 }
+
+func TestGoalDepsGateFlags(t *testing.T) {
+	t.Setenv("SUDO_PASSWORD", "")
+	if d := newApp(t).goalDeps(); d.InGateway || d.SudoPasswordSet {
+		t.Fatalf("chat role with no sudo password: InGateway %v, SudoPasswordSet %v", d.InGateway, d.SudoPasswordSet)
+	}
+	t.Setenv("SUDO_PASSWORD", "pw")
+	if d := newApp(t).goalDeps(); !d.SudoPasswordSet {
+		t.Fatal("SUDO_PASSWORD is set, so the goal deps must have SudoPasswordSet")
+	}
+	url, _, _ := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, "telegram:\n  enabled: true\n  bot_token: T\n")
+	if d := a.goalDeps(); !d.InGateway || d.InGateway != a.Gate.InGateway || d.SudoPasswordSet != a.Gate.SudoPasswordSet {
+		t.Fatalf("the gateway role must copy the gate flags: %v %v", d.InGateway, d.SudoPasswordSet)
+	}
+}

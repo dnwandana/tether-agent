@@ -566,3 +566,29 @@ func TestCLIAgentTurnSummaryError(t *testing.T) {
 		t.Fatalf("a failed call is not a turn with no summary: %q", out)
 	}
 }
+
+func TestCLICommandIsOwner(t *testing.T) {
+	owner, shared := false, true
+	registerTestCommand(t, Command{Name: "t-flags",
+		Run: func(_ context.Context, c *CommandCtx, _ string) error { owner, shared = c.Owner, c.Shared; return nil }})
+	out := runCLI(t, testDeps(t, &fakeProv{}), "/t-flags\n")
+	if !owner || shared || strings.Contains(out, "Only the owner") {
+		t.Fatal(owner, shared, out)
+	}
+}
+
+func TestCLIOwnerHelpAndUsage(t *testing.T) {
+	d := testDeps(t, &fakeProv{})
+	db := openTestDB(t)
+	d.Store = sessions.New(db)
+	d.Agent.Store, d.Agent.DB = d.Store, db
+	out := runCLI(t, d, "/help\n/usage\n")
+	for _, want := range []string{"/model · change the model", "/reload-mcp · reload the MCP servers", "Usage: today · all chats"} {
+		if !strings.Contains(out, want) {
+			t.Fatal(want, "\n", out)
+		}
+	}
+	if strings.Contains(out, "Only the owner") {
+		t.Fatal(out)
+	}
+}

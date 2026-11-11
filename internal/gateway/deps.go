@@ -31,6 +31,9 @@ type Deps struct {
 	// NewEnv returns the tool context of a session on a channel. Its Values map must be the
 	// same for a session across turns. Nil gives a context with the session ids only.
 	NewEnv func(sess *sessions.Session, channel string) *tools.Env
+	// NewTurnEnv is NewEnv with the user of the turn, so a prompt of the turn binds to that
+	// user. Nil uses NewEnv.
+	NewTurnEnv func(sess *sessions.Session, channel, userID string) *tools.Env
 	// ToolLine returns the progress line of a tool call. Nil uses defaultToolLine.
 	ToolLine func(tool, preview string) string
 	// BeforeNew runs before /new replaces the session of a key. It can be nil.
@@ -54,6 +57,9 @@ type Deps struct {
 	// the skill catalog. Nil turns the skill commands off. It reads the skill folders, so
 	// the gateway does not call it in accept, under Gateway.mu, or at startup.
 	Skills func() ([]skills.Skill, []skills.Warning, error)
+	// EnvStatus returns the status of each env name of a skill for the skill command text.
+	// Nil gives "not set" for each name.
+	EnvStatus func(names []string) []string
 }
 
 // TurnInput is the input of one agent turn that a channel starts.
@@ -61,14 +67,17 @@ type TurnInput struct {
 	Text    string
 	Images  []provider.Image
 	Channel string
-	Sink    agent.Sink
-	Steer   *agent.SteerQueue
+	// UserID is the sender of the message of the turn, also in a shared session. It is ""
+	// for a goal turn, a resumed turn, a system turn, and a merged text of several senders.
+	UserID string
+	Sink   agent.Sink
+	Steer  *agent.SteerQueue
 	// Notify receives the notices of the background reviews of the turn. Wrap the send
 	// function with agent.HoldNotices, so that a notice waits for the answer. It can be nil.
 	Notify func(text string)
 	// OnSteerRead runs after the agent reads the steer texts up to seq. It can be nil.
 	OnSteerRead func(seq uint64)
-	// Slash is true when the owner typed Text as a slash command that is not a built-in.
+	// Slash is true when the sender typed Text as a slash command that is not a built-in.
 	// Turn then runs the skill of the command, when the channel has one. A goal text, a
 	// steer, or a system text has Slash false, also when it starts with "/".
 	Slash bool
@@ -88,10 +97,12 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 		Notify:      in.Notify,
 		OnSteerRead: in.OnSteerRead,
 	}
-	if d.NewEnv != nil {
+	if d.NewTurnEnv != nil {
+		t.Env = d.NewTurnEnv(sess, in.Channel, in.UserID)
+	} else if d.NewEnv != nil {
 		t.Env = d.NewEnv(sess, in.Channel)
 	}
-	t.UserText = d.userText(sess, in, t.Env)
+	t.UserText = d.userText(sess, in)
 	// The progress lines of the delegate_task children go through the CLI sink. Its lock
 	// keeps each line apart from the streamed answer text. The CLI does not group the
 	// lines, so it does not use the batch number. A channel with its own progress
@@ -121,9 +132,8 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 }
 
 // userText returns the user text of the turn. A marked slash text that names a skill of
-// the channel gives the skill invocation text, and the env names of the skill go into
-// env. Any other text stays as it is.
-func (d *Deps) userText(sess *sessions.Session, in TurnInput, env *tools.Env) string {
+// the channel gives the skill invocation text. Any other text stays as it is.
+func (d *Deps) userText(sess *sessions.Session, in TurnInput) string {
 	if !in.Slash {
 		return in.Text
 	}
@@ -138,11 +148,8 @@ func (d *Deps) userText(sess *sessions.Session, in TurnInput, env *tools.Env) st
 	}
 	body := skills.SubstituteTemplateVars(sc.Skill.Body, sc.Skill.Dir, sess.ID)
 	body = d.cutSkillBody(body)
-	if env != nil {
-		tools.AddPassthrough(env, sc.Skill.RequiredEnv)
-	}
 	d.logger().Info("skill command", "session", sess.ID, "skill", sc.Skill.Name, "channel", in.Channel)
-	return tools.SkillInvocationText(sc.Skill, body, args)
+	return tools.SkillInvocationText(sc.Skill, body, args, d.EnvStatus)
 }
 
 // cutSkillBody cuts a skill body to the limit of a tool output, like a skill_view result.

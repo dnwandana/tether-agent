@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	Register(Command{Name: "todo", Help: "Show the task list of this session", Run: cmdTodo, WhileBusy: true})
+	Register(Command{Name: "todo", Help: "Show the task list of this session", Run: cmdTodo, WhileBusy: true, MemberOK: true})
 }
 
 // todoNoList is the /todo reply for a session with no item.

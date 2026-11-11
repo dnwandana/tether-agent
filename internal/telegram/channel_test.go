@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -120,6 +123,7 @@ func harness(t *testing.T, prov *tgProv, mut func(*config.TelegramConfig)) *tgHa
 		typingEvery: 20 * time.Millisecond,
 	}
 	ch.UI.Authorized = ch.callbackAuthorized
+	ch.UI.Owner = ch.callbackOwner
 	gw := &gateway.Gateway{Deps: deps, Channels: map[string]gateway.Channel{"telegram": ch}, Log: log}
 	return &tgHarness{t: t, api: api, prov: prov, ch: ch, gw: gw, st: st}
 }
@@ -1368,7 +1372,7 @@ func TestRichMessageAnswersClarify(t *testing.T) {
 	defer cancel()
 	out := make(chan tools.Answer, 1)
 	go func() {
-		a, _ := h.ch.UI.For(5, "").Ask(actx, tools.Question{Text: "Favourite color?"})
+		a, _ := h.ch.UI.For(5, "", "").Ask(actx, tools.Question{Text: "Favourite color?"})
 		out <- a
 	}()
 	waitSends(t, h.api, 1)
@@ -1542,5 +1546,194 @@ func TestNotAcceptedLineAttributeOrder(t *testing.T) {
 	want := `"level":"INFO","msg":"telegram: message not accepted","chat":"5","reason":"no_content","fields":"video_note"}`
 	if !strings.Contains(buf.String(), want) {
 		t.Fatalf("want %s in\n%s", want, buf)
+	}
+}
+
+// flagCommand registers the gateway command t-flags for the test. Each call adds
+// "owner=<bool> shared=<bool>" to the result.
+func flagCommand(t *testing.T) func() []string {
+	var mu sync.Mutex
+	var got []string
+	gateway.Register(gateway.Command{Name: "t-flags", MemberOK: true, WhileBusy: true,
+		Run: func(_ context.Context, c *gateway.CommandCtx, _ string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			got = append(got, fmt.Sprintf("owner=%v shared=%v", c.Owner, c.Shared))
+			return nil
+		}})
+	t.Cleanup(func() { gateway.Unregister("t-flags") })
+	return func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(got) }
+}
+
+func TestObservedChatKeepsTheOwnerFlag(t *testing.T) {
+	got := flagCommand(t)
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) {
+		c.ObserveUnmentionedGroupMessages = true
+		c.GroupAllowedChats = []string{"-100"}
+		c.GroupAllowedUsers = []string{"123"}
+	})
+	h.update(group("/t-flags@tether_bot"))
+	h.waitIdle()
+	h.update(fromUser(group("/t-flags@tether_bot"), 456, "M"))
+	h.waitIdle()
+	if want := []string{"owner=true shared=true", "owner=false shared=true"}; !slices.Equal(got(), want) {
+		t.Fatal(got())
+	}
+}
+
+func TestSharedFlagFollowsTheSessionKey(t *testing.T) {
+	got := flagCommand(t)
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"123"} })
+	for _, m := range []Message{dm("/t-flags"), group("/t-flags@tether_bot"), topic("17585", "/t-flags@tether_bot")} {
+		h.update(m)
+		h.waitIdle()
+	}
+	want := []string{"owner=true shared=false", "owner=true shared=false", "owner=true shared=true"}
+	if !slices.Equal(got(), want) {
+		t.Fatal(got())
+	}
+}
+
+func TestMemberCommandsInTelegram(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.GroupAllowedChats = []string{"-100"} })
+	h.update(fromUser(group("/sethome"), 456, "M"))
+	h.waitIdle()
+	h.update(fromUser(group("/approve"), 456, "M"))
+	h.waitIdle()
+	h.update(fromUser(group("/model@tether_bot"), 456, "M"))
+	h.waitIdle()
+	for _, want := range []string{"⛔ Only the owner can use /sethome.", "⛔ Only the owner can answer this prompt.",
+		"⛔ Only the owner can use /model."} {
+		if !strings.Contains(h.sentTexts(), want) {
+			t.Fatal(want, "\n", h.sentTexts())
+		}
+	}
+	if _, ok := HomeTarget(ctx, h.ch.DB, config.Default().Telegram, false); ok {
+		t.Fatal("a member moved the home channel")
+	}
+	// A member tap on the button of an owner-only command gets the owner-only text.
+	// The reply can be a new message or an edit of the tapped message.
+	h.tap(cmdTap(-100, 456, 55, encodeCmd("456", "/model")))
+	h.waitIdle()
+	all := h.sentTexts()
+	for _, s := range h.api.textsOf("editMessageText") {
+		all += "\n" + StripMarkdownV2(s)
+	}
+	if strings.Count(all, "⛔ Only the owner can use /model.") != 2 {
+		t.Fatal(all)
+	}
+}
+
+func TestApproveCommandAnswersOnlyItsTopic(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowedUsers = []string{"123"} })
+	out := make(chan security.Scope, 1)
+	go func() {
+		sc, _ := h.ch.UI.For(-100, "17585", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:group:-100:17585", Command: "rm -rf /x", Description: "d"})
+		out <- sc
+	}()
+	waitSends(t, h.api, 1)
+	h.update(topic("18", "/approve"))
+	h.waitIdle()
+	if !strings.Contains(h.sentTexts(), "No command waits for approval") {
+		t.Fatal(h.sentTexts())
+	}
+	h.update(topic("17585", "/approve"))
+	h.waitIdle()
+	if sc := <-out; sc != security.ScopeOnce {
+		t.Fatal(sc)
+	}
+}
+
+// waitFor waits until cond is true, or fails the test after 5 s.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	end := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(end) {
+			t.Fatal("timeout")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestSharedTopicClarifyBindsTheTurnUser(t *testing.T) {
+	prov := &tgProv{script: []tgStep{
+		{text: "hello"},
+		{calls: []provider.ToolCall{{ID: "c1", Name: "clarify", Args: `{"question":"Which color?"}`}}},
+		{text: "done"},
+	}}
+	h := harness(t, prov, func(c *config.TelegramConfig) { c.GroupAllowedUsers = []string{"7", "8"} })
+	h.gw.Deps.Agent.Tools.Register(tools.ClarifyTool{})
+	h.gw.Deps.NewTurnEnv = func(sess *sessions.Session, _ string, userID string) *tools.Env {
+		chat, _ := strconv.ParseInt(sess.ChatID, 10, 64)
+		ui := h.ch.UI.For(chat, sess.ThreadID, userID)
+		return &tools.Env{SessionID: sess.ID, SessionKey: sess.Key, Values: map[string]any{}, Ask: ui}
+	}
+	h.update(fromUser(topic("17585", "@tether_bot hi"), 7, "A"))
+	h.waitIdle()
+	h.update(fromUser(topic("17585", "@tether_bot pick a color"), 8, "B"))
+	waitFor(t, func() bool { h.ch.UI.mu.Lock(); defer h.ch.UI.mu.Unlock(); return len(h.ch.UI.pending) == 1 })
+	// The user who created the session does not answer the question of user 8.
+	h.update(fromUser(topic("17585", "red"), 7, "A"))
+	h.update(fromUser(topic("17585", "blue"), 8, "B"))
+	h.waitIdle()
+	s := h.session("telegram:group:-100:17585")
+	if s.UserID != "7" {
+		t.Fatal(s.UserID)
+	}
+	var result string
+	for _, m := range h.messages(s) {
+		if m.Msg.Role == provider.RoleTool {
+			result = m.Msg.Content
+		}
+	}
+	if !strings.Contains(result, "blue") || strings.Contains(result, "red") {
+		t.Fatal(result)
+	}
+}
+
+func TestObservedChatClarifyBindsTheMember(t *testing.T) {
+	prov := &tgProv{script: []tgStep{
+		{calls: []provider.ToolCall{{ID: "c1", Name: "clarify", Args: `{"question":"Which color?"}`}}},
+		{text: "done"},
+	}}
+	h := harness(t, prov, func(c *config.TelegramConfig) {
+		c.ObserveUnmentionedGroupMessages = true
+		c.GroupAllowedChats = []string{"-100"}
+		c.GroupAllowedUsers = []string{"123"}
+	})
+	h.gw.Deps.Agent.Tools.Register(tools.ClarifyTool{})
+	h.gw.Deps.NewTurnEnv = func(sess *sessions.Session, _ string, userID string) *tools.Env {
+		chat, _ := strconv.ParseInt(sess.ChatID, 10, 64)
+		ui := h.ch.UI.For(chat, sess.ThreadID, userID)
+		return &tools.Env{SessionID: sess.ID, SessionKey: sess.Key, Values: map[string]any{}, Ask: ui}
+	}
+	// User 456 is a member: only group_allowed_chats admits the user.
+	h.update(fromUser(group("@tether_bot pick a color"), 456, "M"))
+	waitFor(t, func() bool { h.ch.UI.mu.Lock(); defer h.ch.UI.mu.Unlock(); return len(h.ch.UI.pending) == 1 })
+	h.ch.UI.mu.Lock()
+	var bound string
+	for _, p := range h.ch.UI.pending {
+		bound = p.userID
+	}
+	h.ch.UI.mu.Unlock()
+	if bound != "456" {
+		t.Fatalf("the question binds to %q, want the member 456", bound)
+	}
+	// The shared session has no user, but the member answers the question of the turn.
+	h.update(fromUser(group("blue"), 456, "M"))
+	h.waitIdle()
+	s := h.session("telegram:group:-100")
+	if s.UserID != "" {
+		t.Fatal(s.UserID)
+	}
+	var result string
+	for _, m := range h.messages(s) {
+		if m.Msg.Role == provider.RoleTool {
+			result = m.Msg.Content
+		}
+	}
+	if !strings.Contains(result, "blue") {
+		t.Fatal(result)
 	}
 }

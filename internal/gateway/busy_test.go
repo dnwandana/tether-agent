@@ -1033,7 +1033,7 @@ func TestNowWhileTheGatewayStops(t *testing.T) {
 	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
 	// A stopping gateway sends no reply to /now.
 	var got []string
-	c := &CommandCtx{Reply: func(s string) { got = append(got, s) }, Hooks: CommandHooks{
+	c := &CommandCtx{Owner: true, Reply: func(s string) { got = append(got, s) }, Hooks: CommandHooks{
 		Now: func(int) (bool, int, bool) { return false, 0, true },
 	}}
 	if err := cmdNow(context.Background(), c, ""); err != nil || len(got) != 0 {
@@ -1044,7 +1044,7 @@ func TestNowWhileTheGatewayStops(t *testing.T) {
 func TestNowWithNoHookRepliesNothingWaits(t *testing.T) {
 	// The CLI sets no Now hook.
 	var got []string
-	c := &CommandCtx{Reply: func(s string) { got = append(got, s) }}
+	c := &CommandCtx{Owner: true, Reply: func(s string) { got = append(got, s) }}
 	if err := cmdNow(context.Background(), c, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -1254,4 +1254,171 @@ func TestBusyReplyAfterTakeOver(t *testing.T) {
 	wantBusyReply(t, rf.replies()[1], SteerAck, []Button{{Text: "⚡ Do this now", Data: "/now 2"}})
 	// Drop the steer, so that it does not run as a third turn after the test.
 	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+}
+
+func TestMemberRunsTaskCommands(t *testing.T) {
+	for _, name := range []string{"stop", "steer", "now", "todo"} {
+		if !Commands()[name].MemberOK {
+			t.Fatal(name, "needs MemberOK")
+		}
+	}
+	for _, name := range []string{"stop", "now"} {
+		if !Commands()[name].MemberOwnSession {
+			t.Fatal(name, "needs MemberOwnSession")
+		}
+	}
+	for _, name := range []string{"steer", "todo", "goal"} {
+		if Commands()[name].MemberOwnSession {
+			t.Fatal(name, "must not have MemberOwnSession")
+		}
+	}
+	if Commands()["goal"].MemberOK {
+		t.Fatal("/goal stays owner-only")
+	}
+	g, _, _, _ := busyGateway(t)
+	send := func(in Inbound) []string {
+		r := &recRenderer{}
+		if err := g.Handle(context.Background(), in, func() Renderer { return r }); err != nil {
+			t.Fatal(err)
+		}
+		return r.acks
+	}
+	if got := send(member("k", "/todo")); len(got) != 1 || got[0] != todoNoList {
+		t.Fatalf("%q", got)
+	}
+	if got := send(member("k", "/goal ship it")); len(got) != 1 || got[0] != "⛔ Only the owner can use /goal." {
+		t.Fatalf("%q", got)
+	}
+	// In a shared session, a member cannot stop the run.
+	for _, name := range []string{"stop", "now"} {
+		in := member("k", "/"+name)
+		in.Shared = true
+		want := "⛔ Only the owner can use /" + name + " in a shared session."
+		if got := send(in); len(got) != 1 || got[0] != want {
+			t.Fatalf("%s: %q", name, got)
+		}
+	}
+	if _, ok := g.Running("k"); !ok {
+		t.Fatal("the run must go on")
+	}
+	// In a shared session, a member's /steer and /todo still run.
+	for _, text := range []string{"/steer check the log", "/todo"} {
+		in := member("k", text)
+		in.Shared = true
+		for _, a := range send(in) {
+			if strings.HasPrefix(a, "⛔") {
+				t.Fatalf("%s: %q", text, a)
+			}
+		}
+	}
+	// In a session of its own, a member stops the run.
+	if got := send(member("k", "/stop")); len(got) != 1 || got[0] != StopReply {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestDebounceKeepsOneSender(t *testing.T) {
+	type flushed struct{ text, sender string }
+	out := make(chan flushed, 4)
+	fl := func(m, s string) { out <- flushed{m, s} }
+	d := NewDebouncer(20*time.Millisecond, time.Second)
+	d.AddFrom("k", "7", "a", fl)
+	d.AddFrom("k", "7", "b", fl)
+	if got := <-out; got != (flushed{"a\nb", "7"}) {
+		t.Fatal(got)
+	}
+	// The texts of two senders have no sender.
+	d.AddFrom("k", "7", "a", fl)
+	d.AddFrom("k", "8", "b", fl)
+	if got := <-out; got != (flushed{"a\nb", ""}) {
+		t.Fatal(got)
+	}
+	d = NewDebouncer(time.Hour, time.Hour)
+	d.AddFrom("k", "8", "a", fl)
+	if text, sender := d.TakeFrom("k"); text != "a" || sender != "8" {
+		t.Fatal(text, sender)
+	}
+	d.AddFrom("k", "8", "a", fl)
+	d.AddFrom("k", "", "b", fl)
+	if text, sender := d.TakeFrom("k"); text != "a\nb" || sender != "" {
+		t.Fatal(text, sender)
+	}
+}
+
+// nowMovedUser runs a turn of the user "7", puts the steer texts into the run and the late
+// texts into the debouncer, sends /now, and returns the user of the moved turn.
+func nowMovedUser(t *testing.T, steers, late []Inbound) string {
+	t.Helper()
+	ctx := context.Background()
+	g, fp := gatewayWithSlowProvider(t, 2*time.Second)
+	g.debounce = NewDebouncer(time.Millisecond, 10*time.Millisecond)
+	users := recordTurnUsers(g)
+	done := make(chan struct{})
+	go func() { _ = g.Handle(ctx, sharedInb("k", "7", "first"), (&recFactory{}).new); close(done) }()
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 1 })
+	rs := g.mustRun(t, "k")
+	for _, in := range steers {
+		_ = g.Handle(ctx, in, (&recFactory{}).new)
+		waitFor(t, func() bool { return strings.Contains(rs.Steer.Pending(), in.Text) })
+	}
+	g.mu.Lock()
+	g.debounce = NewDebouncer(time.Hour, time.Hour)
+	g.mu.Unlock()
+	for _, in := range late {
+		_ = g.Handle(ctx, in, (&recFactory{}).new)
+	}
+	wantNowReply(t, sendNow(t, g, "/now"), nowOneReply)
+	waitClosed(t, done, "/now must end the run")
+	waitFor(t, func() bool { return len(users()) == 2 })
+	g.mustRun(t, "k").Cancel()
+	if !g.Wait(5 * time.Second) {
+		t.Fatal("wait")
+	}
+	return users()[1]
+}
+
+func TestNowMovedTextKeepsItsSender(t *testing.T) {
+	if got := nowMovedUser(t, []Inbound{sharedInb("k", "8", "a")}, []Inbound{sharedInb("k", "8", "b")}); got != "8" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestNowMovedTextOfTwoSendersHasNoSender(t *testing.T) {
+	if got := nowMovedUser(t, []Inbound{sharedInb("k", "8", "a")}, []Inbound{sharedInb("k", "7", "b")}); got != "" {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestMemberInSharedSessionGetsNoNowButton(t *testing.T) {
+	g, _, _, _ := busyGateway(t)
+	ctx := context.Background()
+	member := func(in Inbound, shared bool) Inbound {
+		in.Owner, in.Shared, in.SenderID = false, shared, "8"
+		return in
+	}
+	// /now is owner-only for a member in a shared session, so the busy acks have no button.
+	f := &replyFactory{}
+	_ = g.Handle(ctx, member(inb("k", "note"), true), f.new)
+	waitFor(t, func() bool { return len(f.replies()) == 1 })
+	g.Submit(ctx, member(media("k"), true), f.new, nil)
+	waitFor(t, func() bool { return len(f.replies()) == 2 })
+	for i, rep := range f.replies() {
+		if want := []string{SteerAck, QueueAck}[i]; rep.Text != want || rep.Buttons != nil {
+			t.Fatalf("%d: %+v", i, rep)
+		}
+	}
+	r := &replyRenderer{}
+	_ = g.Handle(ctx, member(inb("k", "/steer use the cache"), true), func() Renderer { return r })
+	if len(r.replies) != 1 || r.replies[0].Text != SteerAck || r.replies[0].Buttons != nil {
+		t.Fatalf("%+v %q", r.replies, r.acks)
+	}
+	// A member in a session of its own can use /now.
+	r = &replyRenderer{}
+	_ = g.Handle(ctx, member(inb("k", "/steer use the cache"), false), func() Renderer { return r })
+	if len(r.replies) != 1 {
+		t.Fatalf("%+v %q", r.replies, r.acks)
+	}
+	wantBusyReply(t, r.replies[0], SteerAck, []Button{{Text: "⚡ Do this now", Data: "/now 1"}})
+	// The stop drops the queued media, so the cleanup does not wait for its turn.
+	_ = g.Handle(ctx, inb("k", "/stop"), func() Renderer { return &recRenderer{} })
 }

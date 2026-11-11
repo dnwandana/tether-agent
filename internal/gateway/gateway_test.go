@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -69,7 +70,7 @@ func (f *recFactory) finals() []string {
 }
 
 func inb(key, text string) Inbound {
-	return Inbound{Key: key, Source: "telegram", ChatID: "1", Text: text, IsText: true}
+	return Inbound{Key: key, Source: "telegram", ChatID: "1", Text: text, IsText: true, Owner: true}
 }
 
 // gatewayWithSlowProvider returns a gateway whose provider waits d before each answer.
@@ -485,5 +486,145 @@ func TestLazyRendererAckReply(t *testing.T) {
 	(&lazyRenderer{new: func() Renderer { return plain }}).AckReply(Reply{Text: "z"})
 	if !reflect.DeepEqual(plain.acks, []string{"z"}) {
 		t.Fatal(plain.acks)
+	}
+}
+
+func TestTurnUserReachesNewTurnEnv(t *testing.T) {
+	ctx := context.Background()
+	g := &Gateway{Deps: testDeps(t, &fakeProv{})}
+	var mu sync.Mutex
+	var users []string
+	g.Deps.NewTurnEnv = func(sess *sessions.Session, _ string, userID string) *tools.Env {
+		mu.Lock()
+		users = append(users, userID)
+		mu.Unlock()
+		return &tools.Env{SessionID: sess.ID, SessionKey: sess.Key, Values: map[string]any{}}
+	}
+	key := "telegram:group:-100:17"
+	a := inb(key, "hi")
+	a.UserID = "7"
+	b := inb(key, "next")
+	b.UserID = "8"
+	for _, in := range []Inbound{a, b} {
+		if err := g.Handle(ctx, in, func() Renderer { return &recRenderer{} }); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// An enqueued turn has no user.
+	if err := g.Enqueue(ctx, key, "batch result"); err != nil {
+		t.Fatal(err)
+	}
+	if !g.Wait(5 * time.Second) {
+		t.Fatal("the turns did not end")
+	}
+	mu.Lock()
+	got := slices.Clone(users)
+	mu.Unlock()
+	if !slices.Equal(got, []string{"7", "8", ""}) {
+		t.Fatalf("%q", got)
+	}
+	// The session keeps the user who created it.
+	if s, err := g.Deps.Store.Active(ctx, key); err != nil || s.UserID != "7" {
+		t.Fatal(s, err)
+	}
+	// With no NewTurnEnv, the turn uses NewEnv.
+	g.Deps.NewTurnEnv = nil
+	called := false
+	g.Deps.NewEnv = func(sess *sessions.Session, _ string) *tools.Env {
+		called = true
+		return &tools.Env{SessionID: sess.ID, SessionKey: sess.Key, Values: map[string]any{}}
+	}
+	_ = g.Handle(ctx, b, func() Renderer { return &recRenderer{} })
+	if !called {
+		t.Fatal("NewEnv was not called")
+	}
+}
+
+// recordTurnUsers sets NewTurnEnv of g. It returns a function that gives the user of each
+// turn that started, in order.
+func recordTurnUsers(g *Gateway) func() []string {
+	var mu sync.Mutex
+	var users []string
+	g.Deps.NewTurnEnv = func(sess *sessions.Session, _ string, userID string) *tools.Env {
+		mu.Lock()
+		users = append(users, userID)
+		mu.Unlock()
+		return &tools.Env{SessionID: sess.ID, SessionKey: sess.Key, Values: map[string]any{}}
+	}
+	return func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(users) }
+}
+
+// sharedInb is a text of the user uid in a shared session. The channel clears UserID and
+// keeps the sender in SenderID.
+func sharedInb(key, uid, text string) Inbound {
+	in := inb(key, text)
+	in.SenderID, in.Shared = uid, true
+	return in
+}
+
+func TestSenderIDReachesNewTurnEnv(t *testing.T) {
+	ctx := context.Background()
+	g := &Gateway{Deps: testDeps(t, &fakeProv{})}
+	users := recordTurnUsers(g)
+	key := "telegram:group:-100"
+	if err := g.Handle(ctx, sharedInb(key, "9", "hi"), func() Renderer { return &recRenderer{} }); err != nil {
+		t.Fatal(err)
+	}
+	// An enqueued turn copies the route of the newest message, but it has no sender.
+	if err := g.Enqueue(ctx, key, "batch result"); err != nil {
+		t.Fatal(err)
+	}
+	if !g.Wait(5 * time.Second) {
+		t.Fatal("the turns did not end")
+	}
+	if got := users(); !slices.Equal(got, []string{"9", ""}) {
+		t.Fatalf("%q", got)
+	}
+	// The shared session has no user.
+	if s, err := g.Deps.Store.Active(ctx, key); err != nil || s.UserID != "" {
+		t.Fatal(s, err)
+	}
+}
+
+// leftoverSteerUsers runs a turn of the user "7" on a shared key, sends texts while the turn
+// runs, and returns the user of each turn. The texts that the turn did not read become the
+// next turn.
+func leftoverSteerUsers(t *testing.T, texts ...Inbound) []string {
+	t.Helper()
+	ctx := context.Background()
+	g, fp := gatewayWithSlowProvider(t, 300*time.Millisecond)
+	// The window is long enough to merge the texts into one steer.
+	g.debounce = NewDebouncer(50*time.Millisecond, time.Second)
+	users := recordTurnUsers(g)
+	f := &recFactory{}
+	done := make(chan struct{})
+	go func() { _ = g.Handle(ctx, sharedInb("k", "7", "first"), f.new); close(done) }()
+	waitFor(t, func() bool { return len(fp.lastUserTexts()) == 1 })
+	rs, _ := g.Running("k")
+	for _, in := range texts {
+		_ = g.Handle(ctx, in, f.new)
+	}
+	waitFor(t, func() bool { return rs.Steer.Pending() != "" })
+	<-done
+	if !g.Wait(5 * time.Second) {
+		t.Fatal("the turns did not end")
+	}
+	if got := fp.lastUserTexts(); len(got) != 2 {
+		t.Fatal(got)
+	}
+	return users()
+}
+
+func TestLeftoverSteerKeepsItsSender(t *testing.T) {
+	got := leftoverSteerUsers(t, sharedInb("k", "8", "a"), sharedInb("k", "8", "b"))
+	if !slices.Equal(got, []string{"7", "8"}) {
+		t.Fatalf("%q", got)
+	}
+}
+
+func TestLeftoverSteerOfTwoSendersHasNoSender(t *testing.T) {
+	got := leftoverSteerUsers(t, sharedInb("k", "8", "a"), sharedInb("k", "7", "b"))
+	if !slices.Equal(got, []string{"7", ""}) {
+		t.Fatalf("%q", got)
 	}
 }

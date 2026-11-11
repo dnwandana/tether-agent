@@ -8,18 +8,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/skills"
 )
-
-// passthroughKey is the Env.Values key of the env names that skill_view
-// registered in the session.
-const passthroughKey = "env_passthrough"
 
 // maxLinkedFiles limits the support files that skill_view lists.
 const maxLinkedFiles = 50
@@ -63,61 +57,30 @@ func (c *SkillCatalog) find(name string) (skills.Skill, error) {
 	return skills.Skill{}, toolErr("no skill named %q; the skills are: %s", name, strings.Join(names, ", "))
 }
 
-// passthroughSet holds the env names of one session.
-type passthroughSet struct {
-	mu    sync.Mutex
-	names []string
-}
-
-// AddPassthrough registers names for the session of env. The terminal tool
-// passes these env names to a child process of the session. A nil env does
-// nothing.
-func AddPassthrough(env *Env, names []string) {
-	if env == nil || len(names) == 0 {
-		return
-	}
-	valuesMu.Lock()
-	if env.Values == nil {
-		env.Values = map[string]any{}
-	}
-	set, ok := env.Values[passthroughKey].(*passthroughSet)
-	if !ok {
-		set = &passthroughSet{}
-		env.Values[passthroughKey] = set
-	}
-	valuesMu.Unlock()
-	set.mu.Lock()
-	defer set.mu.Unlock()
-	for _, n := range names {
-		if !slices.Contains(set.names, n) {
-			set.names = append(set.names, n)
-		}
-	}
-}
-
-// PassthroughFor returns the env names that skill_view and the skill commands
-// of the session of env registered, sorted. TerminalTool.Passthrough adds them to
-// terminal.env_passthrough, so a child process of this session keeps them.
-func PassthroughFor(env *Env) []string {
-	if env == nil {
-		return nil
-	}
-	valuesMu.Lock()
-	set, ok := env.Values[passthroughKey].(*passthroughSet)
-	valuesMu.Unlock()
-	if !ok {
-		return nil
-	}
-	set.mu.Lock()
-	defer set.mu.Unlock()
-	out := slices.Clone(set.names)
-	sort.Strings(out)
-	return out
-}
-
 // SkillViewTool is the skill_view tool.
 type SkillViewTool struct {
 	Catalog *SkillCatalog
+	// EnvStatus returns the status of each env name of a skill, in the same order. Nil
+	// gives "not set" for each name.
+	EnvStatus func(names []string) []string
+}
+
+// envStatusLine returns the status line of the env names of a skill. It calls status one
+// time. A nil status or a missing item gives "not set".
+func envStatusLine(names []string, status func(names []string) []string) string {
+	var got []string
+	if status != nil {
+		got = status(names)
+	}
+	items := make([]string, len(names))
+	for i, n := range names {
+		st := "not set"
+		if i < len(got) && got[i] != "" {
+			st = got[i]
+		}
+		items[i] = n + " (" + st + ")"
+	}
+	return "Required environment variables: " + strings.Join(items, ", ") + "."
 }
 
 type skillViewArgs struct {
@@ -141,7 +104,8 @@ func (SkillViewTool) Schema() provider.ToolSchema {
 		Description: "Load a skill: its SKILL.md instructions and the list of its support files. " +
 			"Load a skill before you do a task that it covers. To read a support file, pass its path " +
 			"in the skill folder as file, for example references/api.md. When the skill needs environment " +
-			"variables, the terminal tool gets them in this session after the view.",
+			"variables, the result gives the status of each one. A secret reaches the terminal tool only " +
+			"when the owner adds its name to terminal.env_passthrough in config.yaml.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -175,7 +139,6 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 		sessionID = env.SessionID
 	}
 	body := skills.SubstituteTemplateVars(s.Body, s.Dir, sessionID)
-	AddPassthrough(env, s.RequiredEnv)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "skill %s: %s\nfolder: %s\n\n%s", s.Name, s.Description, s.Dir, strings.TrimLeft(body, "\n"))
@@ -186,8 +149,7 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 		fmt.Fprintf(&b, "\nSupport files (read one with skill_view and file):\n- %s\n", strings.Join(files, "\n- "))
 	}
 	if len(s.RequiredEnv) > 0 {
-		fmt.Fprintf(&b, "\nRequired environment variables (the terminal tool gets them in this session): %s\n",
-			strings.Join(s.RequiredEnv, ", "))
+		fmt.Fprintf(&b, "\n%s\n", envStatusLine(s.RequiredEnv, t.EnvStatus))
 	}
 	return b.String(), nil
 }
@@ -271,10 +233,11 @@ func linkedFiles(dir string) []string {
 }
 
 // SkillInvocationText returns the user message of a skill command. body is the
-// prepared skill body, and args is the text after the command. The text follows
+// prepared skill body, args is the text after the command, and status gives the status of
+// each env name of the skill (see SkillViewTool.EnvStatus). The text follows
 // Hermes _build_skill_message. The skill_view hint uses the Tether Agent
 // arguments name and file.
-func SkillInvocationText(s skills.Skill, body, args string) string {
+func SkillInvocationText(s skills.Skill, body, args string, status func(names []string) []string) string {
 	parts := []string{
 		fmt.Sprintf(`[IMPORTANT: The user has invoked the "%s" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]`, s.Name),
 		"",
@@ -285,7 +248,7 @@ func SkillInvocationText(s skills.Skill, body, args string) string {
 	}
 	if len(s.RequiredEnv) > 0 {
 		parts = append(parts, "",
-			"[Required environment variables (the terminal tool gets them in this session): "+strings.Join(s.RequiredEnv, ", ")+"]")
+			"["+envStatusLine(s.RequiredEnv, status)+"]")
 	}
 	if files := linkedFiles(s.Dir); len(files) > 0 {
 		parts = append(parts, "", "[This skill has supporting files (paths relative to the skill directory above):]")

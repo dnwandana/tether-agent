@@ -25,6 +25,10 @@ type CommandCtx struct {
 	Deps *Deps
 	// Key is the session key of the caller.
 	Key string
+	// Owner is true when the caller is an owner. The CLI is always the owner.
+	Owner bool
+	// Shared is true when all users of the chat or the topic share the session of Key.
+	Shared bool
 	// Session is the active session of Key. It can be nil.
 	Session *sessions.Session
 	// Reply sends a text to the caller.
@@ -62,7 +66,7 @@ type CommandHooks struct {
 	StopKeep func() (stopped bool, waiting int)
 	// Steer adds guidance to the run of the key.
 	Steer func(text string)
-	// Now stops the task of the key and runs the waiting messages of the owner at once. A
+	// Now stops the task of the key and runs the waiting messages of the sender at once. A
 	// turn of 0 is the current turn. It returns false when nothing waits, the number of
 	// the turns that wait, and true for stopping when the gateway stops.
 	Now func(turn int) (took bool, waiting int, stopping bool)
@@ -84,6 +88,11 @@ type Command struct {
 	// can change the session of the turn must not set it (Hermes). /new and /reset set it,
 	// because they stop the run first.
 	WhileBusy bool
+	// MemberOK lets a member run the command. A command without it is owner-only.
+	MemberOK bool
+	// MemberOwnSession lets a member run the command only in a session of its own, not in a
+	// shared session.
+	MemberOwnSession bool
 }
 
 var (
@@ -93,10 +102,10 @@ var (
 
 func init() {
 	for _, c := range []Command{
-		{Name: "sessions", Help: "List the recent sessions of this chat", Run: cmdSessions, WhileBusy: true},
+		{Name: "sessions", Help: "List the recent sessions of this chat", Run: cmdSessions, WhileBusy: true, MemberOK: true},
 		{Name: "resume", Help: "Switch to another session: /resume <id>", Run: cmdResume},
-		{Name: "new", Help: "Start a new session", Run: cmdNew, WhileBusy: true},
-		{Name: "reset", Help: "Start a new session (the same as /new)", Run: cmdNew, WhileBusy: true},
+		{Name: "new", Help: "Start a new session", Run: cmdNew, WhileBusy: true, MemberOK: true, MemberOwnSession: true},
+		{Name: "reset", Help: "Start a new session (the same as /new)", Run: cmdNew, WhileBusy: true, MemberOK: true, MemberOwnSession: true},
 		{Name: "rename", Help: "Rename the current session: /rename <title>", Run: cmdRename},
 		{Name: "archive", Help: "Hide the current session from /sessions", Run: cmdArchive},
 		{Name: "delete", Help: "Delete a session", Run: cmdDelete},
@@ -106,8 +115,8 @@ func init() {
 		{Name: "fork", Help: "Copy the current session and switch to the copy: /fork [title]", Run: cmdFork},
 		{Name: "compact", Help: "Replace the older messages of this session with a summary now", Run: cmdCompact},
 		ReloadMCPCommand(nil),
-		{Name: "usage", Help: "Show the token use, the cache use, and the cost of each model: /usage [today|7d|30d|all|session]", Run: cmdUsage, WhileBusy: true},
-		{Name: "help", Help: "Show all commands: /help [skills]", Run: cmdHelp, WhileBusy: true},
+		{Name: "usage", Help: "Show the token use, the cache use, and the cost of each model: /usage [today|7d|30d|all|session]", Run: cmdUsage, WhileBusy: true, MemberOK: true},
+		{Name: "help", Help: "Show all commands: /help [skills]", Run: cmdHelp, WhileBusy: true, MemberOK: true},
 	} {
 		Register(c)
 	}
@@ -223,7 +232,7 @@ type notFoundError struct{ id string }
 func (e notFoundError) Error() string { return notFoundText(e.id) }
 
 // notFoundText returns the reply for a session ID that this chat does not have. The reply
-// shows the ID, because the owner typed it.
+// shows the ID, because the sender typed it.
 func notFoundText(id string) string {
 	return fmt.Sprintf("⚠️ **Session not found**\nThis chat has no session `%s`. Send /sessions to see your sessions.", id)
 }
@@ -920,6 +929,14 @@ const helpCLI = "📖 **Commands**\n\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
 	"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
 
+// helpMember is the reply to /help for a member. It lists only the commands that a member
+// can run.
+const helpMember = "📖 **Commands**\n\n" +
+	"**Sessions**\n/new · start a new session\n/sessions · see the sessions\n\n" +
+	"**This session**\n/usage · see tokens and cost\n\n" +
+	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n/todo · see the task list\n\n" +
+	"Only the owner can use the other commands."
+
 // helpSkillsMax is the number of skill commands that /help shows with no argument.
 const helpSkillsMax = 10
 
@@ -932,6 +949,12 @@ func cmdHelp(_ context.Context, c *CommandCtx, args string) error {
 	text, channel := helpCLI, "cli"
 	if c.interactive() {
 		text, channel = helpTelegram, "telegram"
+	}
+	if !c.Owner {
+		text = helpMember
+		if c.Shared {
+			text += "\nIn a shared session, only the owner can use /new, /stop, and /now."
+		}
 	}
 	cmds := c.Deps.SkillCommandsFor(channel)
 	lines := skillHelpLines(cmds, c.interactive())
@@ -1081,6 +1104,10 @@ func usageArgs() []string {
 	return names
 }
 
+// memberUsageReply refuses a usage range to a member, because a range shows the totals of
+// all chats.
+const memberUsageReply = "⛔ Only the owner can see the usage of all chats. Send /usage session."
+
 func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 	if c.Deps.Agent == nil || c.Deps.Agent.DB == nil {
 		c.send(Reply{Text: "📊 **Usage is not available**"})
@@ -1089,6 +1116,13 @@ func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 	scope := strings.ToLower(strings.TrimSpace(args))
 	if scope == "" {
 		scope = "today"
+		if !c.Owner {
+			scope = "session"
+		}
+	}
+	if !c.Owner && scope != "session" {
+		c.send(Reply{Text: memberUsageReply})
+		return nil
 	}
 	var since time.Time
 	var head string
@@ -1118,7 +1152,7 @@ func cmdUsage(ctx context.Context, c *CommandCtx, args string) error {
 		return err
 	}
 	r := Reply{Edit: args != ""}
-	if c.interactive() {
+	if c.interactive() && c.Owner {
 		r.Buttons = usageButtons(scope)
 	}
 	// tail is the last line of a session report.

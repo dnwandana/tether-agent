@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -79,17 +78,19 @@ func TestTurnExpandsSkillCommand(t *testing.T) {
 	d.NewEnv = func(s *sessions.Session, _ string) *tools.Env {
 		return &tools.Env{SessionID: s.ID, Values: vals}
 	}
+	d.EnvStatus = func(names []string) []string { return []string{"passed"} }
 	sess := skillTurn(t, d, "/arxiv transformers 2026", true)
 	list, _, err := cat.Load()
 	if err != nil || len(list) != 1 {
 		t.Fatal(list, err)
 	}
 	sk := list[0]
-	want := tools.SkillInvocationText(sk, skills.SubstituteTemplateVars(sk.Body, sk.Dir, sess.ID), "transformers 2026")
+	want := tools.SkillInvocationText(sk, skills.SubstituteTemplateVars(sk.Body, sk.Dir, sess.ID), "transformers 2026", d.EnvStatus)
 	if got := fp.lastUserTexts(); len(got) != 1 || got[0] != want {
 		t.Fatalf("%q", got)
 	}
 	if !strings.HasPrefix(want, skillHeader) ||
+		!strings.Contains(want, "[Required environment variables: ARXIV_KEY (passed).]") ||
 		!strings.Contains(want, "Run "+sk.Dir+"/scripts/search.py for session "+sess.ID+".") ||
 		!strings.Contains(want, "The user has provided the following instruction alongside the skill invocation: transformers 2026") {
 		t.Fatalf("%q", want)
@@ -102,8 +103,8 @@ func TestTurnExpandsSkillCommand(t *testing.T) {
 	if err != nil || s.Title != "/arxiv transformers 2026" {
 		t.Fatalf("the title: %+v %v", s, err)
 	}
-	if got := tools.PassthroughFor(&tools.Env{Values: vals}); !reflect.DeepEqual(got, []string{"ARXIV_KEY"}) {
-		t.Fatalf("the passthrough: %q", got)
+	if _, ok := vals["env_passthrough"]; ok {
+		t.Fatal("a skill command must not register env names")
 	}
 }
 
@@ -163,8 +164,8 @@ func TestTurnWithoutSlashKeepsText(t *testing.T) {
 	if got := fp.lastUserTexts(); len(got) != 1 || got[0] != "/arxiv x" {
 		t.Fatalf("%q", got)
 	}
-	if got := tools.PassthroughFor(&tools.Env{Values: vals}); len(got) != 0 {
-		t.Fatalf("the passthrough: %q", got)
+	if _, ok := vals["env_passthrough"]; ok {
+		t.Fatal("a skill command must not register env names")
 	}
 }
 

@@ -28,12 +28,13 @@ const maxCommandPreview = 3800
 
 // The answers to a button press that cannot act.
 const (
-	resolvedText     = "✔️ This prompt has an answer already."
-	notAuthorized    = "⛔ Only the owner can answer this prompt."
-	wrongChat        = "⛔ This button is for another chat."
-	invalidCallback  = "⚠️ This button is too old. Send the command again."
-	askDoneButton    = "Done"
-	askNoAnswerLabel = "⏱ No answer."
+	resolvedText      = "✔️ This prompt has an answer already."
+	notAuthorized     = "⛔ Only the owner can answer this prompt."
+	otherUserQuestion = "⛔ This question is for another user."
+	wrongChat         = "⛔ This button is for another chat."
+	invalidCallback   = "⚠️ This button is too old. Send the command again."
+	askDoneButton     = "Done"
+	askNoAnswerLabel  = "⏱ No answer."
 )
 
 // Interactions shows the approval buttons and the clarify prompts in Telegram chats. It
@@ -45,6 +46,9 @@ type Interactions struct {
 	// Authorized reports whether the user of a button press may answer. Nil allows every
 	// user. Channel.Run sets it to the authorization check of the channel.
 	Authorized func(ctx context.Context, cq CallbackQuery) bool
+	// Owner reports whether the user of a button press is an owner. Nil refuses each
+	// approval tap. Channel.Run sets it to the owner check of the channel.
+	Owner func(ctx context.Context, cq CallbackQuery) bool
 	// ApprovalTimeout is the time that the approval gate waits for an answer. The approval
 	// message shows it. Zero leaves out the line about the time.
 	ApprovalTimeout time.Duration
@@ -60,8 +64,11 @@ type prompt struct {
 	kind     string // approvalPrefix or askPrefix
 	chatID   int64
 	threadID string
-	seq      int64 // the order of creation, for the FIFO of /approve
-	msgID    int
+	// userID is the user of the turn that made the prompt, or "" when the turn has no
+	// user. It does not change after add, so a reader needs no lock.
+	userID string
+	seq    int64 // the order of creation, for the FIFO of /approve
+	msgID  int
 	// text and parseMode are the sent text, for the edits of a multi-select keyboard.
 	text, parseMode string
 	choices         []string
@@ -85,6 +92,8 @@ type ChatUI struct {
 	it       *Interactions
 	ChatID   int64
 	ThreadID string
+	// UserID is the user that For got. A clarify question binds to this user.
+	UserID string
 }
 
 var (
@@ -92,28 +101,30 @@ var (
 	_ tools.Asker       = (*ChatUI)(nil)
 )
 
-// For returns the prompt UI of a chat and a topic.
-func (it *Interactions) For(chatID int64, threadID string) *ChatUI {
-	return &ChatUI{it: it, ChatID: chatID, ThreadID: threadID}
+// For returns the prompt UI of a chat, a topic, and the user of the turn. The user is ""
+// when the turn has no user.
+func (it *Interactions) For(chatID int64, threadID, userID string) *ChatUI {
+	return &ChatUI{it: it, ChatID: chatID, ThreadID: threadID, UserID: userID}
 }
 
 // PromptApproval asks in the chat of the UI.
 func (c *ChatUI) PromptApproval(ctx context.Context, req security.ApprovalRequest) (security.Scope, error) {
-	return c.it.promptApproval(ctx, c.ChatID, c.ThreadID, req)
+	return c.it.promptApproval(ctx, c.ChatID, c.ThreadID, c.UserID, req)
 }
 
 // Ask asks in the chat of the UI.
 func (c *ChatUI) Ask(ctx context.Context, q tools.Question) (tools.Answer, error) {
-	return c.it.ask(ctx, c.ChatID, c.ThreadID, q)
+	return c.it.ask(ctx, c.ChatID, c.ThreadID, c.UserID, q)
 }
 
 // promptApproval sends the approval message with its buttons and waits for the answer.
 // After the answer, the message shows the result and loses its buttons. When ctx ends, it
 // returns ScopeTimeout and the context error.
-func (it *Interactions) promptApproval(ctx context.Context, chatID int64, threadID string, req security.ApprovalRequest) (security.Scope, error) {
+func (it *Interactions) promptApproval(ctx context.Context, chatID int64, threadID, userID string, req security.ApprovalRequest) (security.Scope, error) {
 	mdv2, plain := buildApprovalPrompt(req, it.ApprovalTimeout)
 	// Set the flags before the prompt is in pending, so that a concurrent /approve applies them.
 	p := it.add(approvalPrefix, chatID, threadID, func(p *prompt) {
+		p.userID = userID
 		p.noAlways, p.noSession = req.NoAlways, req.NoSession
 	})
 	kb := approvalKeyboard(p.id, req.NoAlways, req.NoSession)
@@ -147,13 +158,13 @@ func (it *Interactions) promptApproval(ctx context.Context, chatID int64, thread
 // ask shows the question with one button for each choice. A multi-select question toggles
 // a ✓ mark on each pressed choice and has a Done button. With no choices, the next text in
 // the chat is the answer. A Question.Timeout above zero limits the wait.
-func (it *Interactions) ask(ctx context.Context, chatID int64, threadID string, q tools.Question) (tools.Answer, error) {
+func (it *Interactions) ask(ctx context.Context, chatID int64, threadID, userID string, q tools.Question) (tools.Answer, error) {
 	if q.Timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, q.Timeout)
 		defer cancel()
 	}
-	p := it.add(askPrefix, chatID, threadID)
+	p := it.add(askPrefix, chatID, threadID, func(p *prompt) { p.userID = userID })
 	text := "❓ " + q.Text
 	it.mu.Lock()
 	p.choices, p.multi, p.free = slices.Clone(q.Choices), q.Multi && len(q.Choices) > 0, len(q.Choices) == 0
@@ -213,7 +224,18 @@ func (it *Interactions) HandleCallback(ctx context.Context, cq CallbackQuery) bo
 		answerCB(notAuthorized)
 		return true
 	}
+	isOwner := func() bool {
+		if it.Owner != nil && it.Owner(ctx, cq) {
+			return true
+		}
+		it.logger().Warn("telegram: a button press from a user that is not an owner was refused", "user", cq.From.ID)
+		answerCB(notAuthorized)
+		return false
+	}
 	if kind == approvalPrefix {
+		if !isOwner() {
+			return true
+		}
 		scope, ok := map[string]security.Scope{
 			"once": security.ScopeOnce, "session": security.ScopeSession,
 			"always": security.ScopeAlways, "deny": security.ScopeDeny,
@@ -231,6 +253,14 @@ func (it *Interactions) HandleCallback(ctx context.Context, cq CallbackQuery) bo
 		if !it.deliver(id, promptReply{scope: scope}) {
 			it.logger().Info("telegram: the approval was answered already", "prompt", id)
 		}
+		return true
+	}
+	if p.userID != "" {
+		if strconv.FormatInt(cq.From.ID, 10) != p.userID {
+			answerCB(otherUserQuestion)
+			return true
+		}
+	} else if !isOwner() {
 		return true
 	}
 	it.askCallback(ctx, p, arg, answerCB)
@@ -279,23 +309,23 @@ func (it *Interactions) askCallback(ctx context.Context, p *prompt, arg string, 
 	}
 }
 
-// ResolveApprovals answers the pending approvals of a chat with scope, for the /approve and
+// ResolveApprovals answers the pending approvals of a chat and a topic with scope, for the /approve and
 // /deny text fallbacks. It answers the oldest one, or all of them with all. It returns the
 // number of answered approvals.
-func (it *Interactions) ResolveApprovals(chatID int64, scope security.Scope, all bool) int {
-	n, _ := it.resolveApprovals(chatID, scope, all)
+func (it *Interactions) ResolveApprovals(chatID int64, threadID string, scope security.Scope, all bool) int {
+	n, _ := it.resolveApprovals(chatID, threadID, scope, all)
 	return n
 }
 
 // resolveApprovals does the work of ResolveApprovals. It also returns the scope that the
 // last answered approval got after fitScope. With no pending approval, applied is scope.
-func (it *Interactions) resolveApprovals(chatID int64, scope security.Scope, all bool) (n int, applied security.Scope) {
+func (it *Interactions) resolveApprovals(chatID int64, threadID string, scope security.Scope, all bool) (n int, applied security.Scope) {
 	applied = scope
 	it.mu.Lock()
 	defer it.mu.Unlock()
 	var list []*prompt
 	for _, p := range it.pending {
-		if p.kind == approvalPrefix && p.chatID == chatID {
+		if p.kind == approvalPrefix && p.chatID == chatID && p.threadID == threadID {
 			list = append(list, p)
 		}
 	}
@@ -325,8 +355,10 @@ func fitScope(s security.Scope, noAlways, noSession bool) security.Scope {
 }
 
 // TakeText gives text to the oldest open question with no choices in the chat and the
-// topic. It returns false when no such question waits, so the text goes to the agent.
-func (it *Interactions) TakeText(chatID int64, threadID, text string) bool {
+// topic. The question must belong to userID, or have no user while owner is true. An empty
+// userID matches no user. It returns false when no such question waits, so the text goes on
+// as a normal message.
+func (it *Interactions) TakeText(chatID int64, threadID, userID string, owner bool, text string) bool {
 	if strings.TrimSpace(text) == "" {
 		return false
 	}
@@ -335,6 +367,7 @@ func (it *Interactions) TakeText(chatID int64, threadID, text string) bool {
 	var oldest *prompt
 	for _, p := range it.pending {
 		if p.kind == askPrefix && p.free && p.chatID == chatID && p.threadID == threadID &&
+			((userID != "" && p.userID == userID) || (p.userID == "" && owner)) &&
 			(oldest == nil || p.seq < oldest.seq) {
 			oldest = p
 		}

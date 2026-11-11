@@ -205,6 +205,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if err := a.openLog(opts); err != nil {
 		return nil, err
 	}
+	a.tightenDataModes(dir)
 	if a.WorkDir, err = os.Getwd(); err != nil {
 		a.WorkDir = dir
 	}
@@ -222,6 +223,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if a.DB, err = db.Open(filepath.Join(dir, "state.db")); err != nil {
 		return nil, err
 	}
+	a.tightenDBModes(dir, false)
 	a.Store = sessions.New(a.DB)
 	a.Store.Redactor = a.Redactor
 
@@ -332,6 +334,9 @@ func (a *App) goalDeps() goals.Deps {
 		Alive:       goals.PIDAlive,
 		Now:         time.Now,
 		Log:         a.Log,
+
+		InGateway:       a.Gate.InGateway,
+		SudoPasswordSet: a.Gate.SudoPasswordSet,
 	}
 	if a.gatewayRole {
 		d.RunningBatches = a.Batches.Running
@@ -711,23 +716,58 @@ func (a *App) openLog(opts Options) error {
 	return nil
 }
 
+// tightenDataModes removes the group and other bits from the data folder and from the
+// state.db files. A folder that MkdirAll made before with 0755 keeps its mode, and the
+// database holds every message. A chmod error is a warning, because some file systems
+// have no Unix modes.
+func (a *App) tightenDataModes(dir string) {
+	if fi, err := os.Stat(dir); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		old := fmt.Sprintf("%04o", fi.Mode().Perm())
+		if err := os.Chmod(dir, 0o700); err != nil {
+			a.Log.Warn("data folder: cannot change the mode to 0700; run chmod 700 on the folder", "dir", dir, "old_mode", old, "err", err.Error())
+		} else {
+			a.Log.Warn("data folder: mode changed to 0700", "dir", dir, "old_mode", old)
+		}
+	}
+	a.tightenDBModes(dir, true)
+}
+
+// tightenDBModes removes the group and other bits from the state.db files. It runs
+// before and after db.Open, because SQLite creates the files with the umask mode at the
+// first start. A file that SQLite made in this run is not a user mistake, so the second
+// call (report is false) logs no mode change. It checks only the known names and walks no folder.
+func (a *App) tightenDBModes(dir string, report bool) {
+	for _, name := range []string{"state.db", "state.db-wal", "state.db-shm"} {
+		path := filepath.Join(dir, name)
+		fi, err := os.Stat(path)
+		if err != nil || fi.Mode().Perm()&0o077 == 0 {
+			continue
+		}
+		old := fmt.Sprintf("%04o", fi.Mode().Perm())
+		if err := os.Chmod(path, 0o600); err != nil {
+			a.Log.Warn("database file: cannot change the mode to 0600; run chmod 600 on the file", "file", path, "old_mode", old, "err", err.Error())
+		} else if report {
+			a.Log.Warn("database file: mode changed to 0600", "file", path, "old_mode", old)
+		}
+	}
+}
+
 // registerTools registers the built-in tools that need no channel. registerDelegation
 // adds delegate_task.
 func (a *App) registerTools(gatewayRole bool) {
 	cfg := a.Cfg
 	spill := filepath.Join(a.DataDir, "cache", "spill")
+	home, _ := os.UserHomeDir()
+	protected := security.ProtectedPaths(a.DataDir, home)
 	a.WebClient = tools.GuardedClient(cfg.Web.BlockPrivateNetworks, 30*time.Second, 3)
 	a.terminal = &tools.TerminalTool{
 		DefaultTimeout: time.Duration(cfg.Terminal.DefaultTimeoutS) * time.Second,
 		DotEnv:         a.DotEnv,
-		// The skill RequiredEnv names of the session reach the child too, except
-		// the secrets of Tether Agent itself.
-		Passthrough: func(env *tools.Env) []string {
-			return skillPassthrough(cfg, a.DotEnv, env)
-		},
-		SpillDir:  spill,
-		InGateway: gatewayRole,
-		Procs:     a.Procs,
+		// A child keeps only the secret names of terminal.env_passthrough.
+		Passthrough: func(*tools.Env) []string { return skillPassthrough(cfg) },
+		SpillDir:    spill,
+		InGateway:   gatewayRole,
+		Procs:       a.Procs,
 	}
 	a.RegisterTool(a.terminal)
 	a.RegisterTool(tools.ReadFileTool{})
@@ -741,7 +781,7 @@ func (a *App) registerTools(gatewayRole bool) {
 	a.RegisterTool(tools.SessionSearchTool{Store: a.Store, Cron: a.Cron, MaxChars: cfg.Context.ToolOutputMaxChars})
 	// Sessions lets the first call after a restart restore the list from the history.
 	a.RegisterTool(tools.TodoTool{Sessions: a.Store})
-	a.RegisterTool(tools.SkillViewTool{Catalog: a.Skills})
+	a.RegisterTool(tools.SkillViewTool{Catalog: a.Skills, EnvStatus: func(names []string) []string { return envStatus(cfg, a.DotEnv, names) }})
 	a.RegisterTool(tools.SkillsListTool{Catalog: a.Skills})
 	a.RegisterTool(tools.SkillManageTool{Mgr: &skills.Manager{Dir: a.Skills.Dir, Guard: cfg.Skills.Guard}, Catalog: a.Skills})
 	cfgBrowser := cfg.Browser
@@ -769,9 +809,10 @@ func (a *App) registerTools(gatewayRole bool) {
 		Dir:       filepath.Join(a.DataDir, "cache", "media"),
 		HC:        a.HTTP,
 		// An image URL in an endpoint response comes from the network, so the client is guarded.
-		Download: tools.GuardedClient(true, 60*time.Second, 3),
-		Env:      security.ChildEnv(os.Environ(), a.DotEnv, cfg.Terminal.EnvPassthrough),
-		Log:      a.Log,
+		Download:  tools.GuardedClient(true, 60*time.Second, 3),
+		Env:       security.ChildEnv(os.Environ(), a.DotEnv, cfg.Terminal.EnvPassthrough),
+		Log:       a.Log,
+		Protected: protected,
 	}
 	for _, t := range a.Media.Tools() {
 		a.RegisterTool(t)
@@ -791,7 +832,7 @@ func (a *App) registerTools(gatewayRole bool) {
 	})
 	// view_image exists only when a vision provider exists.
 	if vp, ok := tools.VisionProvider(cfg, a.Providers); ok {
-		a.RegisterTool(tools.VisionTool{Prov: vp, Client: a.WebClient, MaxBytes: 10 << 20, Record: a.recordUsage})
+		a.RegisterTool(tools.VisionTool{Prov: vp, Client: a.WebClient, MaxBytes: 10 << 20, Record: a.recordUsage, Protected: protected})
 	}
 	// execute_code needs python3. Without it, the tool is hidden and doctor reports it.
 	if python, err := exec.LookPath("python3"); err == nil {
@@ -803,10 +844,8 @@ func (a *App) registerTools(gatewayRole bool) {
 			MaxStdout:   cfg.CodeExecution.MaxStdoutBytes,
 			Python:      python,
 			DotEnv:      a.DotEnv,
-			Passthrough: func(env *tools.Env) []string {
-				return skillPassthrough(cfg, a.DotEnv, env)
-			},
-			InGateway: gatewayRole,
+			Passthrough: func(*tools.Env) []string { return skillPassthrough(cfg) },
+			InGateway:   gatewayRole,
 		})
 	}
 }
@@ -838,6 +877,13 @@ func (a *App) currentProvider(env *tools.Env) string {
 // session. Other channels, for example cron, have no prompt, so the gate blocks each
 // dangerous command that needs a question.
 func (a *App) NewEnv(sess *sessions.Session, channel string) *tools.Env {
+	return a.NewTurnEnv(sess, channel, "")
+}
+
+// NewTurnEnv returns the tool context of a session on a channel for a turn of userID. On
+// Telegram, the clarify prompt of the turn binds to userID. userID is "" for a turn with
+// no user.
+func (a *App) NewTurnEnv(sess *sessions.Session, channel, userID string) *tools.Env {
 	env := &tools.Env{
 		Channel: channel,
 		WorkDir: a.WorkDir,
@@ -856,7 +902,7 @@ func (a *App) NewEnv(sess *sessions.Session, channel string) *tools.Env {
 	case channel == "telegram" && sess != nil && a.Telegram != nil:
 		ch := a.Telegram
 		if chat, err := strconv.ParseInt(sess.ChatID, 10, 64); err == nil && ch.UI != nil {
-			ui := ch.UI.For(chat, sess.ThreadID)
+			ui := ch.UI.For(chat, sess.ThreadID, userID)
 			gate.Prompter = ui
 			env.Ask = ui
 		}
@@ -891,14 +937,15 @@ func (a *App) sessionValues(sessionID string) map[string]any {
 // Deps returns the parts that the channels and the slash commands use.
 func (a *App) Deps() *gateway.Deps {
 	d := &gateway.Deps{
-		Cfg:       a.Cfg,
-		Store:     a.Store,
-		Agent:     a.Agent,
-		Providers: a.Providers,
-		Models:    a.Models,
-		Log:       a.Log,
-		NewEnv:    a.NewEnv,
-		CLIAsk:    a.CLIAsk,
+		Cfg:        a.Cfg,
+		Store:      a.Store,
+		Agent:      a.Agent,
+		Providers:  a.Providers,
+		Models:     a.Models,
+		Log:        a.Log,
+		NewEnv:     a.NewEnv,
+		NewTurnEnv: a.NewTurnEnv,
+		CLIAsk:     a.CLIAsk,
 		// /new and /reset start a review of the session that they replace, and
 		// then free the state of that session.
 		BeforeNew: a.beforeNew,
@@ -910,6 +957,8 @@ func (a *App) Deps() *gateway.Deps {
 		Goals:     a.Goals,
 		// The skill commands read the skill folders at the start of a turn, never in New.
 		Skills: a.Skills.Load,
+		// The skill commands show the status of each env name of a skill.
+		EnvStatus: func(names []string) []string { return envStatus(a.Cfg, a.DotEnv, names) },
 	}
 	// A goal notice with no turn goes to Telegram with its buttons. AddTelegram sets
 	// a.Telegram before its first call of Gateway, so the gateway gets this path.
@@ -1073,12 +1122,14 @@ func (a *App) WriteAliveAt(ctx context.Context) {
 }
 
 // Housekeeping removes the spill files that are older than context.spill_retention_days,
-// and the automatic sessions that are older than sessions.retention_days. It runs at once,
+// the media files that are older than media.cache_retention_days, and the automatic
+// sessions that are older than sessions.retention_days. It runs at once,
 // and then each day in a goroutine until ctx ends. At once, it also resumes the turns that
 // a restart cut and reports the lost background delegations. Then it writes the gateway
 // heartbeat, and again each heartbeatEvery until ctx ends.
 func (a *App) Housekeeping(ctx context.Context) {
 	a.cleanSpill()
+	a.cleanMedia()
 	a.pruneSessions(ctx)
 	// Read the heartbeat of the last gateway before this process writes its first one.
 	cut, _ := a.AliveAt(ctx)
@@ -1125,6 +1176,7 @@ func (a *App) Housekeeping(ctx context.Context) {
 				return
 			case <-t.C:
 				a.cleanSpill()
+				a.cleanMedia()
 				a.pruneSessions(ctx)
 			}
 		}
@@ -1167,6 +1219,33 @@ func (a *App) cleanSpill() {
 	}
 	if n > 0 {
 		a.Log.Info("housekeeping: old spill files removed", "count", n)
+	}
+}
+
+// cleanMedia removes the files in cache/media and cache/screenshots that are older than
+// media.cache_retention_days, and logs the result. 0 keeps all files.
+func (a *App) cleanMedia() {
+	days := a.Cfg.Media.CacheRetentionDays
+	if days <= 0 {
+		return
+	}
+	now := time.Now
+	if a.clock != nil {
+		now = a.clock
+	}
+	total := 0
+	for _, dir := range []string{
+		filepath.Join(a.DataDir, "cache", "media"),
+		filepath.Join(a.DataDir, "cache", "screenshots"),
+	} {
+		n, err := ctxmgr.CleanupSpill(dir, time.Duration(days)*24*time.Hour, now())
+		if err != nil {
+			a.Log.Warn("housekeeping: cannot remove all old media files", "dir", dir, "err", err.Error())
+		}
+		total += n
+	}
+	if total > 0 {
+		a.Log.Info("housekeeping: old media files removed", "count", total, "retention_days", days)
 	}
 }
 

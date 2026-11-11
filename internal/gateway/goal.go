@@ -16,8 +16,8 @@ import (
 // goalRunningReply refuses a new goal on a busy key, the Hermes text.
 const goalRunningReply = "Agent is running — use /goal status / pause / clear / wait mid-run, or /stop before setting a new goal."
 
-// reasonOwnerPaused is the pause reason of /goal pause.
-const reasonOwnerPaused = "paused by the owner"
+// reasonUserPaused is the pause reason of /goal pause.
+const reasonUserPaused = "paused by the user"
 
 // errNoGoalRow stops an Update when the verb finds no goal to change, so nothing is
 // written. The command does not return it.
@@ -250,7 +250,7 @@ func goalPause(ctx context.Context, c *CommandCtx, sess *sessions.Session, _ goa
 		if !exists || st.Status == goals.StatusCleared {
 			return errNoGoalRow
 		}
-		st.SetStatus(goals.StatusPaused, reasonOwnerPaused)
+		st.SetStatus(goals.StatusPaused, reasonUserPaused)
 		st.ClearWait()
 		return nil
 	})

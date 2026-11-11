@@ -113,6 +113,9 @@ func (ch *Channel) Run(ctx context.Context, gw *gateway.Gateway) error {
 	if ch.UI != nil && ch.UI.Authorized == nil {
 		ch.UI.Authorized = ch.callbackAuthorized
 	}
+	if ch.UI != nil && ch.UI.Owner == nil {
+		ch.UI.Owner = ch.callbackOwner
+	}
 	p := ch.poller()
 	go ch.registerMenu(ctx, p, gw)
 	ch.logger().Info("telegram channel started", "bot", ch.Bot.Username)
@@ -240,11 +243,11 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		return
 	}
 	// A free-text answer to the clarify tool. It comes before the gate, because the answer in a
-	// group does not mention the bot. Only an authorized user can answer.
+	// group does not mention the bot. The user of the turn answers, or any owner when the turn has no user.
 	if ch.UI != nil {
 		if answer := ch.answerText(m); answer != "" &&
 			Authorize(ch.Cfg, n, ch.pairApproved(ctx)) == AuthAllow &&
-			ch.UI.TakeText(m.Chat.ID, n.ThreadID, answer) {
+			ch.UI.TakeText(m.Chat.ID, n.ThreadID, n.UserID, IsOwner(ch.Cfg, n, ch.pairApproved(ctx)), answer) {
 			return
 		}
 	}
@@ -426,13 +429,16 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 		ChatID:   n.ChatID,
 		ThreadID: n.ThreadID,
 		UserID:   n.UserID,
+		SenderID: n.UserID,
 		UserName: n.UserName,
 		Text:     text,
 		IsText:   true,
 		Target:   gateway.Target{Source: "telegram", ChatID: n.ChatID, ThreadID: n.ThreadID},
 	}
+	in.Owner, in.Shared = ch.ownerShared(ctx, n)
 	if ch.observeShared(n) {
-		// The shared session of an observed chat holds the messages of all users.
+		// The shared session of an observed chat holds the messages of all users. SenderID
+		// keeps the sender, so a prompt of the turn binds to the sender.
 		in.UserID = ""
 	}
 	media := hasMedia(msgs)
@@ -555,8 +561,12 @@ func (ch *Channel) pair(ctx context.Context, m Message, n Normalized) {
 	}
 }
 
+// memberSetHomeReply refuses /sethome to a member, because the home channel gets the cron
+// output.
+const memberSetHomeReply = "⛔ Only the owner can use /sethome."
+
 // localCommand runs the commands that only Telegram has: /start, /sethome, /approve, and
-// /deny. It returns false for other text. These commands skip the gateway, so they also
+// /deny. /sethome, /approve, and /deny need an owner. It returns false for other text. These commands skip the gateway, so they also
 // work while a run waits for an approval.
 func (ch *Channel) localCommand(ctx context.Context, m Message, n Normalized, text string) bool {
 	name, args, ok := gateway.IsCommand(text)
@@ -570,10 +580,15 @@ func (ch *Channel) localCommand(ctx context.Context, m Message, n Normalized, te
 		}
 	}
 	reply := func(s string) { send(s, sendOpts{}) }
+	owner := IsOwner(ch.Cfg, n, ch.pairApproved(ctx))
 	switch name {
 	case "start":
 		send(StartHelp, sendOpts{keyboard: cmdKeyboard(n.UserID, startButtons)})
 	case "sethome":
+		if !owner {
+			reply(memberSetHomeReply)
+			return true
+		}
 		if err := SetHome(ctx, ch.DB, n.ChatID, n.ThreadID); err != nil {
 			ch.logger().Error("telegram: cannot save the home channel", "err", err.Error())
 			reply("⚠️ **Cannot save the home channel**\n" + gateway.EscapeMarkdown(err.Error()) + ". Try again later.")
@@ -589,7 +604,11 @@ func (ch *Channel) localCommand(ctx context.Context, m Message, n Normalized, te
 		reply("🏠 **Home channel: " + gateway.EscapeMarkdown(title) + "**\n" +
 			"Cron results and messages from other channels come to this chat.")
 	case "approve", "deny":
-		reply(ch.resolveText(m.Chat.ID, name, args))
+		if !owner {
+			reply(notAuthorized)
+			return true
+		}
+		reply(ch.resolveText(m.Chat.ID, n.ThreadID, name, args))
 	default:
 		return false
 	}
@@ -598,7 +617,7 @@ func (ch *Channel) localCommand(ctx context.Context, m Message, n Normalized, te
 
 // resolveText runs the /approve or /deny text fallback for the pending approvals of the
 // chat, and returns the reply (Hermes).
-func (ch *Channel) resolveText(chatID int64, name, args string) string {
+func (ch *Channel) resolveText(chatID int64, threadID, name, args string) string {
 	fields := strings.Fields(strings.ToLower(args))
 	all := false
 	scope := security.ScopeOnce
@@ -617,7 +636,7 @@ func (ch *Channel) resolveText(chatID int64, name, args string) string {
 	}
 	n, applied := 0, scope
 	if ch.UI != nil {
-		n, applied = ch.UI.resolveApprovals(chatID, scope, all)
+		n, applied = ch.UI.resolveApprovals(chatID, threadID, scope, all)
 	}
 	return resolveReply(name, applied, n)
 }
@@ -631,6 +650,15 @@ func (ch *Channel) sessionKey(n Normalized) string {
 	return SessionKey(string(n.Kind), n.ChatID, n.ThreadID, n.UserID, ch.Cfg.GroupSessionsPerUser, ch.Cfg.ThreadSessionsPerUser)
 }
 
+// ownerShared computes the owner flag and the shared flag of an inbound message from n. Call it
+// before the user ID of an observed chat is cleared, so an owner stays an owner there.
+func (ch *Channel) ownerShared(ctx context.Context, n Normalized) (owner, shared bool) {
+	owner = IsOwner(ch.Cfg, n, ch.pairApproved(ctx))
+	shared = ch.observeShared(n) ||
+		IsSharedKey(string(n.Kind), n.ThreadID, n.UserID, ch.Cfg.GroupSessionsPerUser, ch.Cfg.ThreadSessionsPerUser)
+	return owner, shared
+}
+
 // observeShared reports whether the group chat of n keeps observed context. Such a chat
 // uses one shared session, so a later trigger from another user sees the context (Hermes
 // _apply_telegram_group_observe_attribution).
@@ -640,15 +668,7 @@ func (ch *Channel) observeShared(n Normalized) bool {
 
 // attributed returns text with the "[name|id]" line of the sender, like an observed message.
 func attributed(n Normalized, text string) string {
-	user := n.UserID
-	if user == "" {
-		user = "unknown"
-	}
-	name := n.UserName
-	if name == "" {
-		name = user
-	}
-	return "[" + name + "|" + user + "]\n" + text
+	return attribution(n.UserName, n.UserID, text)
 }
 
 func (ch *Channel) pairApproved(ctx context.Context) func(string) bool {
@@ -699,7 +719,7 @@ func (ch *Channel) commandCallback(ctx context.Context, gw *gateway.Gateway, cq 
 		newRenderer().AckReply(gateway.Reply{Text: "Not deleted.", Edit: true})
 		return
 	}
-	in := ch.callbackInbound(n, action, msg.MessageID)
+	in := ch.callbackInbound(ctx, n, action, msg.MessageID)
 	gw.Submit(ctx, in, func() gateway.Renderer { return newRenderer() }, func(err error) {
 		if err != nil && ctx.Err() == nil {
 			ch.logger().Warn("telegram: the button command failed", "key", in.Key, "err", err.Error())
@@ -708,20 +728,22 @@ func (ch *Channel) commandCallback(ctx context.Context, gw *gateway.Gateway, cq 
 }
 
 // callbackInbound builds the inbound message of a command button. msgID is the message of
-// the pressed button.
-func (ch *Channel) callbackInbound(n Normalized, action string, msgID int) gateway.Inbound {
+// the pressed button. The owner flag comes from the user who tapped.
+func (ch *Channel) callbackInbound(ctx context.Context, n Normalized, action string, msgID int) gateway.Inbound {
 	in := gateway.Inbound{
 		Key:         ch.sessionKey(n),
 		Source:      "telegram",
 		ChatID:      n.ChatID,
 		ThreadID:    n.ThreadID,
 		UserID:      n.UserID,
+		SenderID:    n.UserID,
 		UserName:    n.UserName,
 		Text:        CanonicalCommand(action),
 		IsText:      true,
 		Target:      gateway.Target{Source: "telegram", ChatID: n.ChatID, ThreadID: n.ThreadID},
 		ButtonMsgID: msgID,
 	}
+	in.Owner, in.Shared = ch.ownerShared(ctx, n)
 	if ch.observeShared(n) {
 		in.UserID = ""
 	}
@@ -732,12 +754,22 @@ func (ch *Channel) callbackInbound(n Normalized, action string, msgID int) gatew
 // button press has no gate, so only the authorization applies (Hermes
 // _is_callback_user_authorized).
 func (ch *Channel) callbackAuthorized(ctx context.Context, cq CallbackQuery) bool {
+	return Authorize(ch.Cfg, callbackNormalized(cq), ch.pairApproved(ctx)) == AuthAllow
+}
+
+// callbackOwner reports whether the user who pressed a button is an owner.
+func (ch *Channel) callbackOwner(ctx context.Context, cq CallbackQuery) bool {
+	return IsOwner(ch.Cfg, callbackNormalized(cq), ch.pairApproved(ctx))
+}
+
+// callbackNormalized builds the Normalized form of a button press.
+func callbackNormalized(cq CallbackQuery) Normalized {
 	n := Normalized{Kind: KindDM, UserID: strconv.FormatInt(cq.From.ID, 10)}
 	if cq.Message != nil {
 		n = Normalize(Message{Chat: cq.Message.Chat, MessageThreadID: cq.Message.MessageThreadID,
 			IsTopicMessage: cq.Message.IsTopicMessage, From: &cq.From})
 	}
-	return Authorize(ch.Cfg, n, ch.pairApproved(ctx)) == AuthAllow
+	return n
 }
 
 func hasMedia(msgs []Message) bool {
