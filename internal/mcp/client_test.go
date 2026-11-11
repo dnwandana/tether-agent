@@ -1,11 +1,16 @@
 package mcp
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -399,5 +404,186 @@ func TestDialErrorShowsStderrRedacted(t *testing.T) {
 	_, err := Dial(ctx, "sh", s, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "boom") || strings.Contains(err.Error(), "plainsecretvalue123") {
 		t.Fatal(err)
+	}
+}
+
+// recordServer starts a server that records the headers of its last request. A non-empty
+// redirect sends each request on to redirect with the same path.
+func recordServer(t *testing.T, redirect string) (*httptest.Server, func() http.Header) {
+	t.Helper()
+	var (
+		mu  sync.Mutex
+		hdr http.Header
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hdr = r.Header.Clone()
+		mu.Unlock()
+		if redirect != "" {
+			http.Redirect(w, r, redirect+r.URL.Path, http.StatusTemporaryRedirect)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() http.Header { mu.Lock(); defer mu.Unlock(); return hdr }
+}
+
+func TestOriginOf(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://A":            "https://a:443",
+		"https://a:443/x?y=1":  "https://a:443",
+		"http://Example.COM/p": "http://example.com:80",
+		"http://a:8080":        "http://a:8080",
+		"http://[::1]:9/":      "http://[::1]:9",
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := originOf(u); got != want {
+			t.Errorf("originOf(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
+func TestHeaderTransportRedirect(t *testing.T) {
+	b, hdrB := recordServer(t, "")
+	a, hdrA := recordServer(t, b.URL)
+	var buf bytes.Buffer
+	ht, err := newHeaderTransport(a.URL, map[string]string{"X-Test": "hello", "Authorization": "Bearer s3cret"},
+		false, http.DefaultTransport, slog.New(slog.NewTextHandler(&buf, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Transport: ht}
+	for range 2 {
+		resp, err := hc.Get(a.URL + "/mcp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	if h := hdrA(); h.Get("X-Test") != "hello" || h.Get("Authorization") != "Bearer s3cret" {
+		t.Fatal("server A must get all configured headers", h)
+	}
+	if h := hdrB(); h.Get("X-Test") != "" || h.Get("Authorization") != "" {
+		t.Fatal("server B must get no configured header", h)
+	}
+	bURL, _ := url.Parse(b.URL)
+	if n := strings.Count(buf.String(), "origin="+originOf(bURL)); n != 1 {
+		t.Fatalf("want one warning that names %s, got %d: %s", originOf(bURL), n, buf.String())
+	}
+}
+
+func TestHeaderTransportSSEEndpoint(t *testing.T) {
+	a, _ := recordServer(t, "")
+	b, hdrB := recordServer(t, "")
+	c, hdrC := recordServer(t, "")
+	hdrs := map[string]string{"X-Test": "sse"}
+	do := func(hc *http.Client, method, u string) {
+		t.Helper()
+		req, err := http.NewRequest(method, u, strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	ht, err := newHeaderTransport(a.URL, hdrs, true, http.DefaultTransport, slog.New(slog.DiscardHandler), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Transport: ht}
+	do(hc, http.MethodGet, a.URL)
+	// The first POST of the SSE session goes to the URL of the endpoint event.
+	do(hc, http.MethodPost, b.URL+"/?sessionid=1")
+	if hdrB().Get("X-Test") != "sse" {
+		t.Fatal("the endpoint origin must get the headers")
+	}
+	do(hc, http.MethodPost, c.URL)
+	if hdrC().Get("X-Test") != "" {
+		t.Fatal("only the first POST names the endpoint")
+	}
+	do(hc, http.MethodPost, b.URL+"/?sessionid=1")
+	if hdrB().Get("X-Test") != "sse" {
+		t.Fatal("the endpoint origin must stay trusted")
+	}
+	// The Streamable HTTP transport learns no endpoint.
+	plain, err := newHeaderTransport(a.URL, hdrs, false, http.DefaultTransport, slog.New(slog.DiscardHandler), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, hdrD := recordServer(t, "")
+	do(&http.Client{Transport: plain}, http.MethodPost, d.URL)
+	if hdrD().Get("X-Test") != "" {
+		t.Fatal("a POST to another origin must get no configured header")
+	}
+}
+
+// TestSSEEndpointOtherOrigin runs the real SDK. Server A serves only the stream: it copies the
+// stream of server B and gives an absolute endpoint URL on B, so the POSTs go to another origin.
+func TestSSEEndpointOtherOrigin(t *testing.T) {
+	srvB, hdrB := httpServer(t, true)
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, srvB.URL, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Accept", "text/event-stream")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		br := bufio.NewReader(resp.Body)
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if rest, ok := strings.CutPrefix(line, "data: /"); ok {
+				line = "data: " + srvB.URL + "/" + rest
+			}
+			io.WriteString(w, line)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	t.Cleanup(srvA.Close)
+	s := config.DefaultMCPServer()
+	s.URL, s.Transport = srvA.URL, "sse"
+	s.TimeoutS, s.ConnectTimeoutS = 10, 10
+	s.Headers = map[string]string{"X-Test": "sse"}
+	c := dial(t, s, nil)
+	out, err := c.Call(ctx, "echo", json.RawMessage(`{"text":"via endpoint"}`))
+	if err != nil || out != "via endpoint" {
+		t.Fatal(out, err)
+	}
+	if hdrB() != "sse" {
+		t.Fatal("the endpoint origin must get the headers", hdrB())
+	}
+}
+
+func TestHeaderTransportNoHeadersNoWarning(t *testing.T) {
+	b, _ := recordServer(t, "")
+	a, _ := recordServer(t, b.URL)
+	var buf bytes.Buffer
+	ht, err := newHeaderTransport(a.URL, nil, false, http.DefaultTransport,
+		slog.New(slog.NewTextHandler(&buf, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&http.Client{Transport: ht}).Get(a.URL + "/mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if buf.Len() != 0 {
+		t.Fatalf("want no log for a server without headers, got: %s", buf.String())
 	}
 }

@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"slices"
@@ -52,6 +55,7 @@ type Client struct {
 	stop    context.CancelFunc // ends the life of the transport
 	cmd     *exec.Cmd          // stdio only
 	stderr  *tailBuffer        // stdio only
+	log     *slog.Logger
 
 	closeOnce sync.Once
 	closeErr  error
@@ -62,7 +66,16 @@ type Client struct {
 // nil) plus its own s.Env. The values of dotenv, s.Env, and s.Headers are
 // masked in all error text.
 func Dial(ctx context.Context, name string, s config.MCPServer, baseEnv []string, dotenv map[string]string) (*Client, error) {
-	c := &Client{name: name, srv: s, red: security.NewRedactor(secretValues(s, dotenv))}
+	return dialWithLog(ctx, name, s, baseEnv, dotenv, nil)
+}
+
+// dialWithLog is Dial with a logger for the warnings of the HTTP transport. A
+// nil log uses slog.Default.
+func dialWithLog(ctx context.Context, name string, s config.MCPServer, baseEnv []string, dotenv map[string]string, log *slog.Logger) (*Client, error) {
+	if log == nil {
+		log = slog.Default()
+	}
+	c := &Client{name: name, srv: s, red: security.NewRedactor(secretValues(s, dotenv)), log: log}
 	t, err := c.transport(baseEnv, dotenv)
 	if err != nil {
 		return nil, fmt.Errorf("mcp %s: %w", name, err)
@@ -120,7 +133,11 @@ func (c *Client) transport(baseEnv []string, dotenv map[string]string) (sdk.Tran
 	case s.URL == "":
 		return nil, errors.New("set command (stdio) or url (HTTP)")
 	}
-	hc := &http.Client{Transport: headerTransport{headers: s.Headers, base: http.DefaultTransport}}
+	ht, err := newHeaderTransport(s.URL, s.Headers, strings.ToLower(s.Transport) == "sse", http.DefaultTransport, c.log, c.name)
+	if err != nil {
+		return nil, err
+	}
+	hc := &http.Client{Transport: ht}
 	switch strings.ToLower(s.Transport) {
 	case "", "http", "streamable", "streamable_http", "streamable-http":
 		return &sdk.StreamableClientTransport{Endpoint: s.URL, HTTPClient: hc}, nil
@@ -315,18 +332,81 @@ func (t lifeTransport) Connect(context.Context) (sdk.Connection, error) {
 	return t.Transport.Connect(t.life)
 }
 
-// headerTransport adds the configured headers to each request.
+// headerTransport adds the configured headers only to a request to a trusted
+// origin. The origin of the server URL is trusted. In SSE mode, the origin of
+// the endpoint event is also trusted. go-sdk v1.8.0 keeps the endpoint URL
+// unexported, so the transport learns it from the first POST that the SDK
+// starts: a request with no Response, which is not a redirect. net/http sets
+// Response only on a request that a redirect made.
 type headerTransport struct {
 	headers map[string]string
 	base    http.RoundTripper
+	sse     bool
+	log     *slog.Logger
+	name    string
+
+	mu       sync.Mutex
+	trusted  map[string]bool
+	endpoint bool // an SSE endpoint origin is known
+	warned   bool
 }
 
-func (t headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if len(t.headers) > 0 {
-		r = r.Clone(r.Context())
-		for k, v := range t.headers {
-			r.Header.Set(k, v)
+// originOf returns the scheme, the host in lower case, and the port of u, as
+// "scheme://host:port". A missing port is 80 for http and 443 for https.
+func originOf(u *url.URL) string {
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
 		}
+	}
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
+}
+
+// newHeaderTransport returns a transport that adds headers only to a request to a trusted
+// origin. The origin of serverURL is trusted. When sse is true, the origin of the first POST
+// that is not a redirect is also trusted. log gets one warning for the first request to an
+// origin that is not trusted. name is the server name in that warning.
+func newHeaderTransport(serverURL string, headers map[string]string, sse bool, base http.RoundTripper, log *slog.Logger, name string) (*headerTransport, error) {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return nil, err
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return &headerTransport{
+		headers: headers, base: base, sse: sse, log: log, name: name,
+		trusted: map[string]bool{originOf(u): true},
+	}, nil
+}
+
+func (t *headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	origin := originOf(r.URL)
+	t.mu.Lock()
+	if t.sse && !t.endpoint && r.Method == http.MethodPost && r.Response == nil {
+		t.trusted[origin] = true
+		t.endpoint = true
+	}
+	ok := t.trusted[origin]
+	warn := !ok && !t.warned && len(t.headers) > 0
+	if warn {
+		t.warned = true
+	}
+	t.mu.Unlock()
+	if ok {
+		if len(t.headers) > 0 {
+			r = r.Clone(r.Context())
+			for k, v := range t.headers {
+				r.Header.Set(k, v)
+			}
+		}
+	} else if warn {
+		t.log.Warn("mcp: the request goes to another origin without the configured headers",
+			"server", t.name, "origin", origin)
 	}
 	return t.base.RoundTrip(r)
 }

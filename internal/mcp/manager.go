@@ -620,7 +620,7 @@ func (m *Manager) dialer() func(ctx context.Context, name string, s config.MCPSe
 		if env == nil {
 			env = os.Environ()
 		}
-		c, err := Dial(ctx, name, s, env, m.DotEnv)
+		c, err := dialWithLog(ctx, name, s, env, m.DotEnv, m.logger())
 		if err != nil {
 			return nil, err
 		}
