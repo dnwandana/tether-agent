@@ -418,3 +418,21 @@ func TestMCPServerNameValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMediaCacheRetentionDays(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Media.CacheRetentionDays, 7)
+	c, err = Load(writeTemp(t, minimal+"media:\n  cache_retention_days: 0\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatalf("0 keeps all files and is valid: %v", err)
+	}
+	eq(t, c.Media.CacheRetentionDays, 0)
+	eq(t, c.Media.TTS.Backend, "command") // the other media defaults stay
+	_, err = Load(writeTemp(t, minimal+"media:\n  cache_retention_days: -1\n"), mapEnv(nil))
+	if err == nil || !strings.Contains(err.Error(), "media.cache_retention_days") {
+		t.Fatalf("a negative value must name the key, got %v", err)
+	}
+}

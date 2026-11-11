@@ -276,6 +276,9 @@ func (c *Config) Validate() error {
 	if c.Sessions.RetentionDays < 0 {
 		errs = append(errs, fmt.Errorf("config: sessions.retention_days is %d, which is negative. Use 0 to keep all sessions, or a number of days", c.Sessions.RetentionDays))
 	}
+	if c.Media.CacheRetentionDays < 0 {
+		errs = append(errs, fmt.Errorf("config: media.cache_retention_days is %d, which is negative. Use 0 to keep all media files, or a number of days", c.Media.CacheRetentionDays))
+	}
 	if c.Agent.RestartDrainTimeoutS < 0 {
 		errs = append(errs, fmt.Errorf("config: agent.restart_drain_timeout_s is %d, which is negative. Use 0 to cancel the running turns at once, or a number of seconds", c.Agent.RestartDrainTimeoutS))
 	}

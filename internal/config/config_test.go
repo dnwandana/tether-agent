@@ -23,6 +23,7 @@ func TestDefaultsMatchSpec(t *testing.T) {
 	eq(t, c.Context.SummaryTargetRatio, 0.20)
 	eq(t, c.Context.ToolOutputMaxChars, 50000)
 	eq(t, c.Context.SpillRetentionDays, 7)
+	eq(t, c.Media.CacheRetentionDays, 7)
 	eq(t, c.Memory.MemoryCharLimit, 2200)
 	eq(t, c.Memory.UserCharLimit, 1375)
 	eq(t, c.Memory.ReviewIntervalTurns, 10)

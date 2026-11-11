@@ -254,6 +254,8 @@ type MediaConfig struct {
 	TTS   MediaBackend `yaml:"tts"`
 	STT   MediaBackend `yaml:"stt"`
 	Image MediaBackend `yaml:"image"`
+	// CacheRetentionDays is the age, by modification time, after which the gateway deletes a file in cache/media and cache/screenshots. 0 keeps all files.
+	CacheRetentionDays int `yaml:"cache_retention_days"`
 }
 
 // MediaBackend selects a command template or an OpenAI-format provider.
@@ -402,6 +404,7 @@ func Default() Config {
 			Agents:           map[string]ACPAgent{},
 		},
 		Media: MediaConfig{
+			CacheRetentionDays: 7,
 			TTS: MediaBackend{
 				Backend: "command",
 				Command: "edge-tts --voice en-US-AriaNeural --text {text} --write-media {out}",
