@@ -11,27 +11,31 @@ limits. Read the limits before you give the agent access to a machine that holds
   sandbox.
 - The approval gate checks shell commands and the permission requests of a coding agent
   (`acp_delegate`). It does not check the tools of MCP servers.
-- The approval gate checks the full text of each `execute_code` script before the script runs. It
-  finds a dangerous command that is written in the script as literal text. It cannot find a
+- In manual mode, each `execute_code` script needs one approval for each session. A script with
+  a literal dangerous command or a protected path asks each time. The gate cannot find a
   command that the script builds while it runs.
 - A cron script job runs with no approval. Only files in `~/.tether/scripts/` can run as
   cron scripts. The file tools cannot write in that folder, and a shell write to it needs an
   approval.
-- A goal gate runs before each judge call with no approval prompt. The owner writes the gate,
-  and the gate is checked once when the owner adds it.
+- A goal gate runs before each judge call with no approval prompt. Tether Agent checks the
+  gate against the hardline list, the gateway self-stop check, and the sudo guard before
+  each run.
 - In the default mode, the bot can send any local file that is not protected and not in a denied
   folder (see "Files that the bot sends"). Use strict mode for a bot that other people use.
 - The browser tools have no check for private addresses. All sessions share one Chrome profile.
   `browser_cookies` does not return the cookie values.
+- In a chat of `telegram.group_allowed_chats`, each member can talk to the bot. Only an owner
+  can answer an approval and run the owner commands. See
+  [Owners and members](#owners-and-members).
 - A coding agent of `acp_delegate` runs on the host as the same user. Its permission
   preset sets which actions it asks for. Tether Agent does not stop a write outside the
-  work folder.
+  work folder. A hardline command of the coding agent is refused with no prompt.
 
 ## Approval gate for commands
 
-The approval gate checks every `terminal` call. It also checks the full text of each
-`execute_code` script, and each tool call of the script goes through the same checks as a model
-call. The gate is a port of the Hermes approval flow.
+The approval gate checks every `terminal` call. It also checks each `execute_code` script (see
+[execute_code](#execute_code)), and each tool call of the script goes through the same checks as a
+model call. The gate is a port of the Hermes approval flow.
 
 ### The order of the checks
 
@@ -55,9 +59,15 @@ call. The gate is a port of the Hermes approval flow.
    gateway process itself. Examples are `systemctl restart tether`, `tether gateway stop`,
    `pkill tether`, and `tether update --restart`. The stop would cut the turn that runs the
    command. A cron run does not get this check.
-5. **Dangerous rules.** A command that matches one of the 56 Hermes dangerous rules needs an
-   approval. Examples are `rm -r`, `chmod 777`, `curl … | sh`, and `git push --force`. A shell
-   write to a protected path is also dangerous.
+5. **Dangerous rules.** The `state.db` rules come first. Then come the other protected path
+   rules, then the 56 Hermes dangerous rules. A command that matches one of
+   them needs an approval. Examples are `rm -r`, `chmod 777`, `curl … | sh`, and
+   `git push --force`. A shell write to a protected path and each command that names
+   `state.db` are also dangerous. See [Shell commands](#shell-commands). The gate looks at all
+   the rules that match. The command runs with no question only when each matched protected rule
+   has a grant and the first general rule has a grant. Else the gate asks with the first rule
+   that has no grant. A grant for a protected path does not cover another dangerous rule in
+   the same command.
 6. **No match.** The command runs.
 
 ### Approval modes
@@ -72,6 +82,10 @@ call. The gate is a port of the Hermes approval flow.
   [the fallback chain](https://github.com/dnwandana/tether-agent/wiki/Providers#the-fallback-chain).
   The gate permits a low-risk command with no question. For other commands, the gate asks the
   user. When the judge call fails, the gate also asks the user.
+  This approval covers this one command only. The next command of the same rule goes to the
+  judge again. A command that names `state.db` never goes to the judge. For an
+  `execute_code` script, the judge gets a script prompt and at most the first 8000
+  characters. A longer script goes to the user.
 - `off`: the command runs with no question. The hardline list and the sudo guard still apply.
 
 ### Cron runs
@@ -85,7 +99,13 @@ in a cron run:
 Two cases apply before `approvals.cron_mode`:
 
 - When `approvals.mode` is `off`, the command runs.
-- When the user gave the `always` answer for the rule, the command runs.
+- When each matched rule has a grant, the command runs. See
+  [The question and the scopes](#the-question-and-the-scopes). A command that names `state.db`
+  never has a grant.
+
+In a cron run, an `execute_code` script with no literal dangerous command runs. A script with
+a literal match follows `approvals.cron_mode`. Remove `code_execution` from `toolsets.cron`
+for full control.
 
 A child run of a cron job (`delegate_task`) also has no user. It follows
 `approvals.cron_mode` like the cron run. A cron run and its children cannot start a
@@ -107,7 +127,20 @@ The user answers with one of these scopes:
 - `session`: permits the same rule for the rest of the session.
 - `always`: permits the same rule from now on. The program saves the rule id in the
   `approvals_always` table of `state.db`. The running agent never writes its own `config.yaml`.
+  A protected path rule has no `always` answer.
 - `deny`: refuses the command. The model gets the result `BLOCKED by user: <pattern name>`.
+
+These rules limit the scopes:
+
+- A protected path rule has no `always` answer. A typed `/approve always` gives `session`.
+  A protected path rule reads only the `session` grants. It never reads `approvals_always`, so
+  an `always` row that an older version saved does not permit it.
+- A grant covers one rule. When a command matches more than one rule, the gate asks for the
+  first rule that has no grant.
+- A command that names `state.db` has no `session` and no `always` answer. It asks each time.
+  A saved `always` answer does not apply to it.
+- An `execute_code` script has no `always` answer.
+- Only an owner can answer an approval. See [Owners and members](#owners-and-members).
 
 A permission request of a coding agent has no `always` answer. Some requests also have
 no `session` answer. See [Coding agents (ACP)](#coding-agents-acp).
@@ -115,8 +148,8 @@ no `session` answer. See [Coding agents (ACP)](#coding-agents-acp).
 ### Goal gates
 
 A goal gate is a shell command that must pass before the goal judge runs. The owner adds a
-gate with `/goal gate add <command>`. Tether Agent checks the command one time, when the
-owner adds it. The checks are in this order:
+gate with `/goal gate add <command>`. Tether Agent checks the command when the owner adds it.
+The checks are in this order:
 
 1. **Hardline list and gateway self-stop.** A command of the hardline list is refused. In the
    gateway, a command that stops or restarts the gateway itself is also refused. The reply
@@ -134,13 +167,18 @@ owner adds it. The checks are in this order:
 After the add check, these rules apply:
 
 - The gate runs before each judge call, with no approval prompt.
+- Before each run, Tether Agent checks the gate again with the hardline list, the gateway
+  self-stop check, and the sudo guard. A refused gate does not run. The goal pauses at once
+  with the reason, with no retries and no continuation turns.
+- A gate that matches a dangerous rule still runs. `state.db` keeps the gates, and no shell
+  command can change `state.db` with no prompt. See [Shell commands](#shell-commands).
 - The gate gets the child environment, with no secrets. See
   [The child environment](#the-child-environment). In the gateway, it also gets
   `TETHER_GATEWAY=1`.
 - The gate runs in the folder where the Tether Agent process started, like a `terminal`
   call with no `workdir`. Write `cd /path && <command>` for another folder.
 - The timeout is 300 seconds. A timeout and a cancel count as exit -1.
-- Only the owner can add a gate. Each paired user is an owner.
+- Only an owner can add a gate. See [Owners and members](#owners-and-members).
 
 ## Coding agents (ACP)
 
@@ -151,9 +189,20 @@ cron job and a `delegate_task` child cannot call it.
 
 ### Approvals
 
-Each permission request of the coding agent comes to you as an approval message. The
-danger rules, `approvals.mode`, smart mode, and `approvals.cron_mode` do not apply. Also
-with `approvals.mode: off`, Tether Agent asks you.
+Each permission request of the coding agent comes to you as an approval message.
+`approvals.mode`, smart mode, and `approvals.cron_mode` do not apply. Also with
+`approvals.mode: off`, Tether Agent asks you. Two rules of the approval gate apply to a
+request of any kind that has a command, not only to an `execute` request:
+
+- **Hardline floor.** A command of the hardline list is refused with no prompt. Tether Agent
+  selects a reject option of the agent. The progress line shows `hardline: <description>`,
+  and the log gets a warning. An earlier `session` answer cannot permit the command.
+- **Dangerous rules.** A command that matches a dangerous rule asks each time and has no
+  `session` answer. The message names the rule, for example
+  `claude wants to run a command (dangerous: recursive delete)`.
+
+The command text is the `command` field of the request. Tether Agent joins a list of words
+with spaces.
 
 - The answers are `once`, `session`, and `deny`. There is no `always` answer. Tether Agent
   never selects an "always" option of the agent, so the agent does not write a durable
@@ -161,7 +210,8 @@ with `approvals.mode: off`, Tether Agent asks you.
 - `session` permits the same kind of action in the same ACP session of the coding agent.
   For an edit, a read, a fetch, or another kind that is not a command, it permits all
   requests of that kind. For a command, the rule also holds the program name. So `session`
-  on `go test ./...` also permits `go build`, but not `rm`.
+  on `go test ./...` also permits `go build`, but not `rm`. `session` on `rm notes.txt` also
+  permits `rm old.txt`. A later `rm -r build` asks, and `rm -rf ~` is refused.
 - These requests have no `session` answer. They ask each time.
   - A compound command: a command with `&`, `|`, `;`, `$(`, a backtick, `<`, `>`, or a new
     line. This includes `&&`, `||`, redirects, and process substitutions.
@@ -177,6 +227,8 @@ with `approvals.mode: off`, Tether Agent asks you.
     `PATH=...`. Such a word can change what the program runs.
   - A command request with no command text.
   - A request to leave plan mode.
+  - A command that matches a dangerous rule, for example `rm -r build`. This holds for a
+    request of any kind that has a command.
 - No answer in `approvals.timeout_s` refuses the action. `/stop` cancels the open requests.
 - `/new`, `/reset`, and `/delete` remove the `session` answers.
 
@@ -250,6 +302,19 @@ active after `/new`, after a restart, and after a model change.
   does not follow a symbolic link, and it does not open a FIFO or a device. All reads and writes of
   notes stay in the `notes/` folder that the store examined, also when a link replaces the folder
   after the check.
+- `<data>/memory/memory.md` and `<data>/memory/user_profile.md` are protected paths.
+  `write_file` and `patch` refuse them, and a shell write to them needs an approval. So the
+  `memory` tool, with its scan and its notice, is the only normal writer.
+  `<data>/memory/notes/` stays writable.
+- When Tether Agent builds the system prompt, it scans each entry of the two files again. An
+  entry with a finding, or an entry over 4000 characters, does not go into the prompt. The
+  prompt gets this line in its place:
+  `[BLOCKED m-<id>: this entry matched the memory threat scan (<ids>). Remove it with the memory tool: remove m-<id>.]`
+- `<id>` is the first 8 hex characters of the SHA-256 hash of the entry. A long entry gets the
+  finding ID `too_long`. The file keeps the entry. The agent logs a warning for each blocked
+  entry.
+- The `search` results of the `memory` tool show the same line, not the entry.
+  `remove m-<id>` removes the entry. `tether doctor` lists the blocked entries.
 
 ## Sessions and cron jobs of other chats
 
@@ -295,14 +360,23 @@ that contains `PASSWORD` is also a secret. The check ignores case.
 These names pass through to the child:
 
 - the names in `terminal.env_passthrough`
-- the `required_environment_variables` of a skill that the session loaded, except the secrets of
-  Tether Agent itself: `TELEGRAM_BOT_TOKEN`, the key variable of each provider preset (for
-  example `OPENAI_API_KEY`), and each variable whose value is the bot token or the API key of a
-  configured provider. The author of a skill is not the owner. To give one of these names to a
-  child, put it in `terminal.env_passthrough`.
 - the `env` block of an MCP server entry, for that server only
 - the `env` block of an ACP agent entry, for that adapter only. A secret name in this block is a
   config error.
+
+A skill cannot pass a name. The `required_environment_variables` of a skill give only a
+status line in the `skill_view` result and in the text of a skill slash command, for example
+`Required environment variables: GITHUB_TOKEN (passed), AWS_SECRET_ACCESS_KEY (not passed: add it to terminal.env_passthrough in config.yaml).`
+Each name has one of these statuses:
+
+- `passed`: the name is in `terminal.env_passthrough` and has a value, or the name is not a
+  secret and the process has it.
+- `not passed: add it to terminal.env_passthrough in config.yaml`: the name is a secret with a
+  value, and the list does not have it.
+- `not set`: the process and `.env` have no value.
+
+The model can write a skill with `skill_manage`, and the author of a skill is not the owner.
+To give a secret to a child, put its name in `terminal.env_passthrough`.
 
 ### Redaction
 
@@ -392,6 +466,8 @@ default.
 - `<data>/.env`
 - `<data>/config.yaml`
 - `<data>/state.db`, and also `<data>/state.db-wal` and `<data>/state.db-shm`
+- `<data>/memory/memory.md` and `<data>/memory/user_profile.md` (only the `memory` tool writes
+  them)
 - `<data>/skills/` (only `skill_manage` can write there)
 - `<data>/scripts/` (only the user can put cron scripts there)
 - `<data>/backups/` (an archive in it can install skills and scripts on restore)
@@ -409,13 +485,18 @@ default.
   `~/.azure/`, `~/.config/gh/`, and `~/.config/gcloud/`. A file in them can also start a
   program, for example `credential_process` in `~/.aws/config`.
 
-`~/.local/bin/` and the `.git/` folder of a repository stay writable.
+`~/.local/bin/`, `<data>/memory/notes/`, and the `.git/` folder of a repository stay writable.
 
 A protected file also covers each name that starts with the file name and a `-`, for example
 `<data>/config.yaml-old`.
 
 The check ignores case. For example, `~/.SSH/authorized_keys` and `<data>/SCRIPTS/x.sh` are
 refused on every OS.
+
+The protected paths limit the writes. Two tools also refuse to read a protected path, because
+they send the bytes to a provider: `view_image` and `transcribe_audio`. The error is
+`<path> is a protected path. The tool does not send it to the provider.` `transcribe_audio`
+also refuses a text file. The `[image: <path>]` markers of inbound media do not get this check.
 
 ### File tools
 
@@ -432,8 +513,14 @@ The file tools resolve the path before the check:
 
 ### Shell commands
 
-A shell write is a `>` or `>>` redirection, or a `tee`, `cp`, `mv`, `install`, `ln`, `rm`,
-`truncate`, `chmod`, `chown`, `dd`, `rsync`, or `sed -i` command with the path as an argument.
+A shell write is a `>` or `>>` redirection, or one of these commands with the path as an
+argument:
+
+- `tee`, `cp`, `mv`, `install`, `ln`, `rm`, `truncate`, `chmod`, `chown`, `dd`, and `rsync`
+- `sed -i`, `gsed -i`, and `busybox sed -i`
+- `perl -i`, also `perl -pi` and `perl -i.bak`
+- `awk -i inplace` and `gawk -i inplace`
+- `ed`, `ex`, `sponge`, and `sqlite3`
 
 - The rules match the absolute path. For a path in the home folder, they also match the `~`,
   `$HOME`, and `${HOME}` forms.
@@ -441,6 +528,18 @@ A shell write is a `>` or `>>` redirection, or a `tee`, `cp`, `mv`, `install`, `
   example `<data>/.envrc` or `<data>/config.yaml.bak`.
 - The rules read the text of the command only. They do not resolve a relative path or a
   symbolic link.
+
+Each command that names `<data>/state.db` is dangerous, also a read. The rule matches the same
+path forms as a write rule, and also `state.db-wal`, `state.db-shm`, and `state.db.lock`. Its ID
+is `protected_path_use_<slug>`, and its description is `use of the Tether Agent database`. The
+rule `sqlite_client_state_db` matches `sqlite3`, `sqlite`, `litecli`, or `sqlite-utils` with the
+word `state.db` in the same simple command. It covers `cd ~/.tether && sqlite3 state.db`.
+
+A command that names `state.db` asks each time. It has no `session` or `always` answer, and
+the smart judge does not judge it. `state.db` holds the `always` answers and the goal gates,
+so one answer must not open it for later commands. Use `session_search` to read the
+transcripts. The protected path rules come before the other dangerous rules. So a `session`
+answer for `recursive_delete` does not permit `rm -rf build; sqlite3 ~/.tether/state.db x`.
 
 ## Network access
 
@@ -470,9 +569,10 @@ the Hermes behavior for a local browser.
   cookies and the logins. The profile stays after a restart.
 - `browser_cookies` with `get` does not return the cookie values. It returns the name, the
   domain, the path, the expiry, the flags, and the length of the value. A tool result goes to the
-  model provider and into the transcript, and a cookie value is often a login. A page script can
-  still read a cookie that is not `HttpOnly`.
-- Hide the `browser` toolset from a channel when you do not trust its users.
+  model provider and into the transcript, and a cookie value is often a login. A page script,
+  also `browser_run_js`, can still read a cookie that is not `HttpOnly`.
+- Hide the `browser` toolset from a channel with members, or with users that you do not
+  trust. See [Owners and members](#owners-and-members).
 
 ## Telegram access
 
@@ -487,6 +587,54 @@ The bot permits a message when the first of these checks passes:
 
 When no allowlist is set and `allow_all_users` is `false`, the bot permits nobody.
 `group_allowed_users` does not permit direct messages. Use `allow_all_users` only for a test bot.
+
+### Owners and members
+
+An owner is a sender that the allowlists admit by user ID:
+
+- a user that pairing approved
+- a user in `telegram.allowed_users`
+- in a group, a user in `telegram.group_allowed_users`
+- each user, when `telegram.allow_all_users` is `true`
+
+A `*` entry in a list counts, because the owner wrote it. A sender that only
+`telegram.group_allowed_chats` admits is a member. A message with no user ID is from a
+member. A DM sender that the bot admits is always an owner. The CLI is always the owner.
+
+A member can talk to the bot. A member can run only `/help`, `/new`, `/reset`, `/stop`,
+`/steer`, `/now`, `/todo`, `/sessions`, and `/usage`. Each other command, also a new command,
+is owner-only. A member gets `⛔ Only the owner can use /<word>.` `<word>` is the name of the
+command, for example `reload-mcp`.
+
+A shared session has no user part in its key: a forum topic with
+`thread_sessions_per_user: false`, an observed chat, or a group with
+`group_sessions_per_user: false`. In a shared session, `/new`, `/reset`, `/stop`, and `/now`
+are owner-only for a member. The reply is `⛔ Only the owner can use /<word> in a shared session.`
+A plain text of a member in a busy shared session still steers the turn.
+
+- `/usage` from a member shows the `session` form. A range form gets
+  `⛔ Only the owner can see the usage of all chats. Send /usage session.`
+- `/help` from a member lists the member commands and the skill commands. In a shared
+  session, it adds the line `In a shared session, only the owner can use /new, /stop, and /now.`
+- A busy reply to a member in a shared session has no **⚡ Do this now** button.
+- `/sethome` needs an owner. A member gets `⛔ Only the owner can use /sethome.`
+- `/approve` and `/deny` need an owner. They answer only the approvals of the same topic.
+- `/start` stays open. A skill slash command is a model turn, and a member can use it.
+
+These rules apply to the answer of a prompt:
+
+- An approval needs an owner. A member gets `⛔ Only the owner can answer this prompt.` Any
+  owner can answer each approval.
+- A clarify question belongs to the user whose turn asked it. A tap of another user gets
+  `⛔ This question is for another user.` A text of another user goes on as a normal message.
+- A clarify question from a turn with no user, for example a goal turn, goes to any owner.
+- In an observed chat, all users share the session, but the question binds to the sender of
+  the turn that asked it. A member answers the question of their own turn. Merged texts or
+  left-over texts of more than one sender have no user, so only an owner answers the
+  question of such a turn.
+
+A member cannot answer an approval.
+So add each trusted group member to `telegram.group_allowed_users`.
 
 ### Unknown users
 
@@ -505,6 +653,9 @@ When no allowlist is set and `allow_all_users` is `false`, the bot permits nobod
 - A tap with data that is not a command gets `⚠️ This button is too old. Send the command again.`
   Only the **Resume** button of a goal notice starts a model turn, the same as `/goal resume`.
   A notice with no command message encodes the user ID of the session.
+- A member tap on a button of an owner-only command gets `⛔ Only the owner can use /<word>.`
+  The reply to a member does not show such a button, for example the actions of `/sessions`.
+  The `/start` buttons stay.
 
 ### Pairing codes
 
@@ -551,6 +702,13 @@ The checks use the real path, after the symbolic links.
 
 A refused `MEDIA:` tag shows as `[blocked file: <path>]` in the answer. Use strict mode when users
 who are not the owner can talk to the bot. A prompt injection can make the model name any file.
+
+The bot does not send `memory.md` or `user_profile.md`, because they are protected paths.
+
+In the gateway, Tether Agent deletes the files in `<data>/cache/media/` and
+`<data>/cache/screenshots/` that are older than `media.cache_retention_days`. The default is
+7 days, and `0` keeps all files. The cleanup runs at start and then each 24 hours.
+`tether chat` alone deletes no files.
 
 ## Skill guard
 
@@ -627,8 +785,10 @@ Do not put an API call with a key in a skill. Use this pattern:
 
 1. Put the API call in a script under `~/.tether/scripts/`.
 2. Make the skill tell the agent to run that script with `terminal`.
-3. Give the key to the script through `required_environment_variables` or
-   `terminal.env_passthrough`.
+3. Add the name of the key to `terminal.env_passthrough`.
+
+The `required_environment_variables` of a skill do not pass a key. `tether skills install` and
+`tether skills update` list these names.
 
 The guard scans skill folders only. It does not scan `scripts/`.
 
@@ -654,6 +814,11 @@ runs. An MCP tool can do anything that its server can do.
 - Use the toolsets to hide MCP tools from a channel. Each server has the toolset
   `mcp_<server>`, and the toolset `mcp` has all MCP tools.
 - A stdio server gets the child environment with no secrets, plus its own `env` block.
+- A configured header goes only to a trusted origin: the origin of the server URL and, for an
+  SSE server, the origin of the `endpoint` URL that the server sends. An origin is the scheme,
+  the host in lower case, and the port. A missing port is 80 for `http` and 443 for `https`.
+  A redirect to another origin gets no configured header, and the first such request logs a
+  warning that names the origin.
 - The program removes credentials from MCP error text before the model sees it.
 - `/reload-mcp` reads the server list again, restarts the servers, and lists their tools again.
   It adds the tools of new servers, updates changed tools, and removes the tools of disabled or
@@ -676,15 +841,59 @@ with the permissions of that user.
 - Run Tether Agent as a user with only the permissions that the agent needs.
 - Do not run Tether Agent as root.
 - Keep the approval mode at `manual` or `smart` on a machine with important data.
+- At start, Tether Agent sets mode 0700 on a data folder with group or other permissions. It
+  sets mode 0600 on `state.db`, `state.db-wal`, and `state.db-shm` in the same case. Each
+  change logs a warning with the old mode. `tether doctor` warns about such a data folder.
+
+The systemd unit of `tether setup` has no containment settings. You can add a drop-in file:
+`/etc/systemd/system/tether.service.d/hardening.conf` for a system unit, or
+`~/.config/systemd/user/tether.service.d/hardening.conf` for a user unit.
+
+```ini
+[Service]
+UMask=0077
+ProtectHome=read-only
+ReadWritePaths=/home/<user>/.tether
+```
+
+Then run `systemctl daemon-reload` and `systemctl restart tether`. Add `--user` for a user
+unit. Know the cost before you add it:
+
+- `UMask=0077` gives mode 0600 to each file that the agent makes for you. Another user or a
+  web server cannot read such a file, for example a file in a web root.
+- `ProtectHome=read-only` stops each write in the home folders. The agent cannot edit a
+  repository or install a tool in your home folder. `ReadWritePaths` keeps the data folder
+  writable. Write the real path of your data folder.
 
 ### execute_code
 
-`execute_code` runs Python code on the host. Before the script runs, the approval gate checks the
-full text of the script, the same as a shell command. A dangerous command that is in the script
-as literal text, for example in a `subprocess` call, needs approval or is blocked. The gate
-cannot see a command that the script builds while it runs, for example from parts of a string or
-from decoded data. The tool stubs send their calls through the approval gate and the protected
-path checks. Hide the `code_execution` toolset from a channel when you do not trust its users.
+`execute_code` runs Python code on the host. Before the script runs, the approval gate does
+these checks:
+
+1. The hardline list, the sudo guard, and the gateway self-stop check run on the full text of
+   the script. A match blocks the script.
+2. With `approvals.mode: off`, the script runs.
+3. The dangerous rules run on the text. A literal match, for example `rm -rf` in a
+   `subprocess` string or a protected path, makes the script ask each time.
+4. A script with no literal match runs when the session has a `session` answer for
+   `execute_code`. The saved `always` answers do not apply.
+5. In smart mode, the judge gets a script prompt and at most the first 8000 characters. A
+   low-risk answer runs this script only. A longer script goes to the user.
+6. Else the gate asks the user.
+
+The prompt uses the rule `execute_code` with the description `run a Python script on the host`.
+A literal match adds its description, for example
+`run a Python script on the host (recursive delete)`. The answers are `once`, `session`, and
+`deny`. A `session` answer covers the later scripts of the session with no literal match.
+
+In a cron run, a script with no literal match runs. A script with a literal match follows
+`approvals.cron_mode`.
+
+The gate cannot see a command that the script builds while it runs, for example from parts of
+a string or from decoded data. A Python file that `terminal` runs gets only the shell rules.
+So `write_file x.py` and then `python3 x.py` pass the gate. This is a known limit. The tool
+stubs send their calls through the approval gate and the protected path checks. Hide the
+`code_execution` toolset from a channel when you do not trust its users.
 
 ## Self-update
 
