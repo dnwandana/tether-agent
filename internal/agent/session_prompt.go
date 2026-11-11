@@ -149,7 +149,16 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, channel st
 				a.logger().Warn("agent: cannot read a memory file; the prompt has no entries of it", "target", f.target, "err", err.Error())
 				continue
 			}
-			*f.text = strings.Join(entries, memory.Separator)
+			shown := make([]string, len(entries))
+			for i, e := range entries {
+				shown[i] = e
+				if line, blocked := tools.MemoryBlockedLine(e); blocked {
+					shown[i] = line
+					a.logger().Warn("agent: a memory entry matched the memory threat scan; the prompt has a BLOCKED line in its place",
+						"target", f.target, "id", tools.MemoryEntryID(e), "findings", strings.Join(tools.MemoryThreatIDs(e), ", "))
+				}
+			}
+			*f.text = strings.Join(shown, memory.Separator)
 		}
 	}
 	var visible map[string]bool

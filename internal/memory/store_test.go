@@ -160,6 +160,41 @@ func TestReplaceRemoveByOldText(t *testing.T) {
 	}
 }
 
+func TestRemoveExactMatchesWholeEntry(t *testing.T) {
+	s := open(t)
+	apply(t, s, Op{Action: "add", Target: "memory", Content: "deploy"})
+	apply(t, s, Op{Action: "add", Target: "memory", Content: "deploy via rsync"})
+	apply(t, s, Op{Action: "remove", Target: "memory", OldText: "deploy", Exact: true})
+	if got := s.Entries("memory"); !slices.Equal(got, []string{"deploy via rsync"}) {
+		t.Fatalf("%q", got)
+	}
+	// An exact match is not a substring match, and it does not look in the notes.
+	apply(t, s, Op{Action: "add", Target: "memory", Topic: "ops", Content: "deploy key"})
+	err := applyErr(t, s, Op{Action: "remove", Target: "memory", OldText: "deploy", Exact: true})
+	if !strings.Contains(err, "no entry in memory is equal to the given entry") || strings.Contains(err, `"deploy"`) {
+		t.Fatal(err)
+	}
+	if len(noteOf(t, s, "ops").Entries) != 1 || len(s.Entries("memory")) != 1 {
+		t.Fatal("an exact remove that has no match must not change an entry")
+	}
+}
+
+func TestAmbiguousTier1MasksPreviews(t *testing.T) {
+	s := open(t)
+	apply(t, s, Op{Action: "add", Target: "user", Content: "secret hostile text"})
+	apply(t, s, Op{Action: "add", Target: "user", Content: "secret clean text"})
+	mask := func(e string) (string, bool) {
+		if strings.Contains(e, "hostile") {
+			return "[BLOCKED]", true
+		}
+		return "", false
+	}
+	err := applyErr(t, s, Op{Action: "remove", Target: "user", OldText: "secret", Mask: mask})
+	if !strings.Contains(err, "1. [BLOCKED]\n2. secret clean text") || strings.Contains(err, "hostile") {
+		t.Fatal(err)
+	}
+}
+
 // Spec test 13.
 func TestReplaceOverLimitSpills(t *testing.T) {
 	s, err := Open(t.TempDir(), 10, 10)

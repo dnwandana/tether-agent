@@ -282,3 +282,31 @@ func TestSearchReportsUnreadableTierOneFile(t *testing.T) {
 		t.Fatalf("a missing file: %q %v", got, err)
 	}
 }
+
+func TestSearchMaskedTierOneOnly(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, 2200, 1375)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "memory.md"), []byte("secret plan alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(Op{Action: ActionAdd, Target: TargetMemory, Topic: "plans", Content: "secret alpha note"}); err != nil {
+		t.Fatal(err)
+	}
+	mask := func(e string) (string, bool) {
+		if strings.Contains(e, "secret") {
+			return "[BLOCKED x]", true
+		}
+		return "", false
+	}
+	out, err := s.SearchMasked("alpha", mask)
+	if err != nil || !strings.Contains(out, "memory.md\n   [BLOCKED x]") || strings.Contains(out, "secret plan") ||
+		!strings.Contains(out, "secret [alpha] note") {
+		t.Fatal(out, err)
+	}
+	if out, _ := s.Search("alpha"); !strings.Contains(out, "secret plan [alpha]") {
+		t.Fatal(out)
+	}
+}

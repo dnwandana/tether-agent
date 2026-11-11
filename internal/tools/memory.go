@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"regexp"
+	"strings"
 
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/provider"
@@ -65,7 +67,7 @@ func (MemoryTool) Schema() provider.ToolSchema {
 			"- 'user': who the user is: name, role, preferences, communication style, dislikes.\n" +
 			"- 'memory': your facts: environment facts, project conventions, tool quirks, lessons.\n\n" +
 			"ACTIONS: add (a new entry), replace (change the entry that old_text finds), " +
-			"remove (delete the entry that old_text finds), search (find entries by words), " +
+			"remove (delete the entry that old_text finds, or the blocked entry with the ID m-<id>), search (find entries by words), " +
 			"read (open a note by its topic).\n\n" +
 			"NOTES: memory and user have a character limit. When an add does not fit, the entry goes to " +
 			"a memory note (inbox-memory or inbox-user), and the add still succeeds. Give a topic to put " +
@@ -81,7 +83,7 @@ func (MemoryTool) Schema() provider.ToolSchema {
     "action": {"type": "string", "enum": ["add", "replace", "remove", "search", "read"], "description": "The action to do."},
     "target": {"type": "string", "enum": ["memory", "user"], "description": "The store: 'memory' for your facts, 'user' for the user profile. Required for add, replace, and remove."},
     "content": {"type": "string", "description": "The entry text. Required for add and replace."},
-    "old_text": {"type": "string", "description": "A short unique part of the entry to replace or remove."},
+    "old_text": {"type": "string", "description": "A short unique part of the entry to replace or remove. For remove, old_text can also be the m-<id> of a [BLOCKED m-<id>: …] line."},
     "topic": {"type": "string", "description": "The note topic: lowercase words joined by '-', for example 'rpc-providers'. For add, the entry goes to this note. For replace and remove, only this note is searched. For read, the note to open."},
     "query": {"type": "string", "description": "The words to find. Required for search."},
     "from": {"type": "integer", "description": "For read: the number of the first entry to show. The default is 1."}
@@ -89,6 +91,27 @@ func (MemoryTool) Schema() provider.ToolSchema {
   "required": ["action"]
 }`),
 	}
+}
+
+// memoryEntryIDRe matches the ID of a blocked entry.
+var memoryEntryIDRe = regexp.MustCompile(`^m-[0-9a-f]{8}$`)
+
+// entryByID returns the entry of the target file that has the ID id.
+func (t MemoryTool) entryByID(target, id string) (string, error) {
+	entries, err := t.Store.ReadEntries(target)
+	if err != nil {
+		return "", toolErr("%v", err)
+	}
+	for _, e := range entries {
+		if MemoryEntryID(e) == id {
+			return e, nil
+		}
+	}
+	file := "memory.md"
+	if target == memory.TargetUser {
+		file = "user_profile.md"
+	}
+	return "", toolErr("no entry in %s has the ID %s", file, id)
 }
 
 // Run searches, reads, or changes the memory.
@@ -102,7 +125,7 @@ func (t MemoryTool) Run(_ context.Context, raw json.RawMessage, _ *Env) (string,
 	}
 	switch a.Action {
 	case "search":
-		out, err := t.Store.Search(a.Query)
+		out, err := t.Store.SearchMasked(a.Query, MemoryBlockedLine)
 		if err != nil {
 			return "", toolErr("%v", err)
 		}
@@ -122,7 +145,20 @@ func (t MemoryTool) Run(_ context.Context, raw json.RawMessage, _ *Env) (string,
 				return "", toolErr("%s", msg)
 			}
 		}
-		res, err := t.Store.Apply(memory.Op{Action: a.Action, Target: a.Target, Topic: a.Topic, Content: a.Content, OldText: a.OldText})
+		// Mask keeps the raw text of a blocked entry out of an error text.
+		op := memory.Op{Action: a.Action, Target: a.Target, Topic: a.Topic, Content: a.Content, OldText: a.OldText, Mask: MemoryBlockedLine}
+		if a.Action == "remove" && a.Topic == "" {
+			if id := strings.TrimSpace(a.OldText); memoryEntryIDRe.MatchString(id) {
+				entry, err := t.entryByID(a.Target, id)
+				if err != nil {
+					return "", err
+				}
+				// A blocked entry can be a part of another entry, so the
+				// remove matches the whole entry.
+				op.OldText, op.Exact = entry, true
+			}
+		}
+		res, err := t.Store.Apply(op)
 		if err != nil {
 			return "", toolErr("%v", err)
 		}

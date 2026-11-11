@@ -23,8 +23,10 @@ const (
 
 // searchSource is a tier-1 file or a note that a search reads.
 type searchSource struct {
-	name     string // "memory.md", "user_profile.md", or the topic
-	isNote   bool
+	name   string // "memory.md", "user_profile.md", or the topic
+	isNote bool
+	// tier1 is true for memory.md and user_profile.md, the files that a mask applies to.
+	tier1    bool
 	typ      string
 	modified time.Time
 	entries  []string
@@ -38,6 +40,12 @@ type searchSource struct {
 // Search returns the entries of tier 1 and of the notes that match the words
 // of query, best first. It takes no lock.
 func (s *Store) Search(query string) (string, error) {
+	return s.SearchMasked(query, nil)
+}
+
+// SearchMasked is Search with mask applied to the entries of memory.md and
+// user_profile.md. A nil mask shows each entry as it is.
+func (s *Store) SearchMasked(query string, mask func(entry string) (string, bool)) (string, error) {
 	words := queryWords(query)
 	if len(words) == 0 {
 		return "", errors.New("query is required for search; give one or more words")
@@ -61,7 +69,7 @@ func (s *Store) Search(query string) (string, error) {
 			}
 			unread = append(unread, fmt.Sprintf("%s was not searched: %v.", t.file, cause))
 		}
-		src := searchSource{name: t.file, entries: entries}
+		src := searchSource{name: t.file, tier1: true, entries: entries}
 		if fi, err := os.Lstat(filepath.Join(s.dir, t.file)); err == nil && fi.Mode().IsRegular() {
 			src.modified = fi.ModTime()
 		}
@@ -109,6 +117,13 @@ func (s *Store) Search(query string) (string, error) {
 	case len(hits) > 0:
 		lines = append(lines, fmt.Sprintf("%d matches for %q:", len(hits), q))
 		for i, h := range hits {
+			body, masked := "", false
+			if h.tier1 && mask != nil {
+				body, masked = mask(h.best)
+			}
+			if !masked {
+				body = snippet(h.best, words)
+			}
 			head := h.name
 			if h.isNote {
 				typ := ""
@@ -120,7 +135,7 @@ func (s *Store) Search(query string) (string, error) {
 			}
 			lines = append(lines,
 				fmt.Sprintf("%d. %s", i+1, head),
-				"   "+snippet(h.best, words))
+				"   "+body)
 		}
 	case len(names) > 0:
 		lines = append(lines, fmt.Sprintf("No entry matches %q. The notes are: %s.", q, joinCapped(names, 40)))

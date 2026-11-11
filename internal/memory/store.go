@@ -68,6 +68,13 @@ type Op struct {
 	// Topic is the note for add, replace, and remove. A blank topic means
 	// no topic.
 	Topic string
+	// Exact makes OldText match only a tier-1 entry that is equal to it.
+	// A remove by entry ID sets it, so a blocked entry that is a part of
+	// another entry does not give two matches.
+	Exact bool
+	// Mask, when set, returns the line that replaces a blocked tier-1 entry
+	// in an error text, so the error does not show the raw entry.
+	Mask func(entry string) (line string, blocked bool)
 }
 
 // Result is the outcome of Apply.
@@ -211,7 +218,7 @@ func (s *Store) change(op Op, path string, limit int, entries []string, content,
 		if n, err = s.openNote(topic); err != nil {
 			return Result{}, err
 		}
-		if i, err = find(n.Entries, oldText); err != nil {
+		if i, err = find(n.Entries, oldText, false, nil); err != nil {
 			return Result{}, err
 		}
 		if i < 0 {
@@ -220,8 +227,12 @@ func (s *Store) change(op Op, path string, limit int, entries []string, content,
 		return s.changeNote(op, n, i, content)
 	}
 	// An ambiguous tier-1 match returns its error before any note is read.
-	if i, err = find(entries, oldText); err != nil {
+	if i, err = find(entries, oldText, op.Exact, op.Mask); err != nil {
 		return Result{}, err
+	}
+	if i < 0 && op.Exact {
+		// The error does not quote oldText, because it can be a blocked entry.
+		return Result{}, fmt.Errorf("no entry in %s is equal to the given entry; read the memory again", op.Target)
 	}
 	if i < 0 {
 		var (
@@ -578,12 +589,13 @@ func (s *Store) summary(target string, entries []string, limit int, msg string) 
 
 // find returns the index of the one entry that contains oldText, or -1
 // when no entry matches. Two entries with the same text count as one match
-// (Hermes).
-func find(entries []string, oldText string) (int, error) {
+// (Hermes). With exact, an entry matches only when it is equal to oldText.
+// A non-nil mask replaces each blocked entry in the list of matches.
+func find(entries []string, oldText string, exact bool, mask func(string) (string, bool)) (int, error) {
 	idx := -1
 	var hits []string
 	for i, e := range entries {
-		if !strings.Contains(e, oldText) {
+		if exact && e != oldText || !exact && !strings.Contains(e, oldText) {
 			continue
 		}
 		if idx < 0 {
@@ -596,8 +608,16 @@ func find(entries []string, oldText string) (int, error) {
 	}
 	for _, h := range hits[1:] {
 		if h != hits[0] {
+			shown := previews(hits)
+			if mask != nil {
+				for j, e := range hits {
+					if line, blocked := mask(e); blocked {
+						shown[j] = line
+					}
+				}
+			}
 			return 0, fmt.Errorf("%q matches %d entries; use a longer, unique part of the entry. The matches are:\n%s",
-				oldText, len(hits), numbered(previews(hits)))
+				oldText, len(hits), numbered(shown))
 		}
 	}
 	return idx, nil
