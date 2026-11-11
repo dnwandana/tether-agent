@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/dnwandana/tether-agent/internal/memory"
 )
 
 // writeLines writes a file with n lines "line 1" to "line n" and returns its path.
@@ -247,5 +250,30 @@ func TestWriteFileRefusesSymlinkIntoSkills(t *testing.T) {
 	out := runToolEnvErr(t, WriteFileTool{}, `{"path":"s/x/SKILL.md","content":"x"}`, env)
 	if !strings.Contains(out, "protected path") {
 		t.Fatal(out)
+	}
+}
+
+func TestWriteRefusesMemoryFiles(t *testing.T) {
+	env := newEnv(t)
+	env.DataDir = t.TempDir()
+	mem := filepath.Join(env.DataDir, "memory")
+	store, err := memory.Open(mem, 2200, 1375)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"memory.md", "user_profile.md"} {
+		p := filepath.Join(mem, name)
+		out := runToolEnvErr(t, WriteFileTool{}, fmt.Sprintf(`{"path":%q,"content":"x"}`, p), env)
+		if !strings.Contains(out, "is a protected path") {
+			t.Fatal(name, out)
+		}
+		if _, err := os.Stat(p); err == nil {
+			t.Fatalf("%s must not be written", name)
+		}
+	}
+	// The memory tool writes through the store, so it still works.
+	runToolEnv(t, MemoryTool{Store: store}, `{"action":"add","target":"memory","content":"VPS = hetzner"}`, env)
+	if got := store.Entries(memory.TargetMemory); !slices.Equal(got, []string{"VPS = hetzner"}) {
+		t.Fatal(got)
 	}
 }

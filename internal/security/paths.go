@@ -27,6 +27,10 @@ const scriptsDir = "scripts"
 // scripts, so an agent must not plant a crafted archive there.
 const backupsDir = "backups"
 
+// memoryDir is the memory folder in the data dir. Its two tier-1 files go into
+// the system prompt, so only the memory tool, with its threat scan, writes them.
+const memoryDir = "memory"
+
 // maxLinkHops limits the symlinks that realPath follows for one path.
 const maxLinkHops = 40
 
@@ -88,6 +92,8 @@ func ProtectedPaths(dataDir, home string) []string {
 			filepath.Join(dataDir, "config.yaml"),
 			filepath.Join(dataDir, "state.db"),
 			filepath.Join(dataDir, "state.db.lock"),
+			filepath.Join(dataDir, memoryDir, "memory.md"),
+			filepath.Join(dataDir, memoryDir, "user_profile.md"),
 			filepath.Join(dataDir, skillsDir)+"/",
 			filepath.Join(dataDir, scriptsDir)+"/",
 			filepath.Join(dataDir, backupsDir)+"/",
