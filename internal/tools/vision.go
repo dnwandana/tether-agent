@@ -14,6 +14,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 // defaultVisionMaxBytes is the size limit of one image (10 MB).
@@ -72,6 +73,8 @@ type VisionTool struct {
 	MaxBytes int64
 	// Record records the usage of each completed vision call. Nil records nothing.
 	Record provider.RecordUsage
+	// Protected lists the paths that the tool does not send to the provider. Nil checks nothing.
+	Protected []string
 }
 
 type visionArgs struct {
@@ -130,7 +133,11 @@ func (t VisionTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (str
 	)
 	switch {
 	case a.Path != "":
-		img, err = t.loadFile(resolvePath(env, a.Path))
+		p := resolvePath(env, a.Path)
+		if security.CheckWritable(p, t.Protected, false) != nil {
+			return "", toolErr("%s is a protected path. The tool does not send it to the provider.", p)
+		}
+		img, err = t.loadFile(p)
 	case a.URL != "":
 		img, err = t.loadURL(ctx, a.URL)
 	default:

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,7 +200,7 @@ func TestTTSEndpointSendsVoice(t *testing.T) {
 func TestSTTEndpoint(t *testing.T) {
 	m := endpointSet(t, "stt", mediaServer(t, nil))
 	env := newEnv(t)
-	if err := os.WriteFile(filepath.Join(env.WorkDir, "a.ogg"), []byte("OggS fake"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(env.WorkDir, "a.ogg"), audioBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// A relative path is read from the work folder.
@@ -216,7 +217,7 @@ func TestSTTEndpoint(t *testing.T) {
 
 func TestSTTCommandReadsOutBaseTxt(t *testing.T) {
 	m := &MediaSet{Cfg: mediaCfg("stt", "command", `sh -c 'printf "hi there\n" > "$1.txt"' {in} {out_base}`), Dir: t.TempDir(), lookPath: noFFmpeg}
-	in := writeFile(t, "audio")
+	in := audioFile(t)
 	if out := runTool(t, tool(m, "transcribe_audio"), fmt.Sprintf(`{"path":%q}`, in)); out != "hi there" {
 		t.Fatal(out)
 	}
@@ -247,7 +248,7 @@ func TestSTTCommandConvertsWithFFmpeg(t *testing.T) {
 			return fake, nil
 		},
 	}
-	in := writeFile(t, "audio")
+	in := audioFile(t)
 	out := runTool(t, tool(m, "transcribe_audio"), fmt.Sprintf(`{"path":%q}`, in))
 	if asked != "ffmpeg" || out != "wav:"+in {
 		t.Fatal(asked, out)
@@ -328,11 +329,84 @@ func TestTranscribeFunc(t *testing.T) {
 	if f == nil {
 		t.Fatal("STT is set up")
 	}
-	text, err := f(ctx, writeFile(t, "audio"))
+	text, err := f(ctx, audioFile(t))
 	if err != nil || text != "hello" {
 		t.Fatal(text, err)
 	}
 	if _, err := f(ctx, filepath.Join(t.TempDir(), "gone.ogg")); err == nil || errors.Is(err, ErrToolError) {
 		t.Fatal("a missing file must give a plain error:", err)
+	}
+}
+
+// audioBytes starts with the Ogg signature, so http.DetectContentType gives application/ogg.
+var audioBytes = []byte("OggS\x00fake audio")
+
+// audioFile writes audioBytes to a new file and returns its path.
+func audioFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "a.ogg")
+	if err := os.WriteFile(p, audioBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// countedMediaServer wraps mediaServer and counts the requests.
+func countedMediaServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	inner := mediaServer(t, nil)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		inner.Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+func TestSTTRefusesProtectedPath(t *testing.T) {
+	srv, hits := countedMediaServer(t)
+	m := endpointSet(t, "stt", srv)
+	env := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(env, audioBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.Protected = []string{env}
+	out := runToolErr(t, tool(m, "transcribe_audio"), fmt.Sprintf(`{"path":%q}`, env))
+	if !strings.Contains(out, env+" is a protected path. The tool does not send it to the provider.") {
+		t.Fatal(out)
+	}
+	link := filepath.Join(t.TempDir(), "voice.ogg")
+	if err := os.Symlink(env, link); err != nil {
+		t.Fatal(err)
+	}
+	if out := runToolErr(t, tool(m, "transcribe_audio"), fmt.Sprintf(`{"path":%q}`, link)); !strings.Contains(out, "is a protected path. The tool does not send it to the provider.") {
+		t.Fatal(out)
+	}
+	if hits.Load() != 0 {
+		t.Fatal("no upload for a protected path")
+	}
+}
+
+func TestSTTRefusesTextFile(t *testing.T) {
+	srv, hits := countedMediaServer(t)
+	m := endpointSet(t, "stt", srv)
+	p := filepath.Join(t.TempDir(), "a.ogg")
+	if err := os.WriteFile(p, []byte("OPENAI_API_KEY=sk-test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := runToolErr(t, tool(m, "transcribe_audio"), fmt.Sprintf(`{"path":%q}`, p)); !strings.Contains(out, p+" is a text file, not an audio file.") {
+		t.Fatal(out)
+	}
+	if hits.Load() != 0 {
+		t.Fatal("no upload for a text file")
+	}
+	// An unknown binary format gives application/octet-stream and passes.
+	q := filepath.Join(t.TempDir(), "b.amr")
+	if err := os.WriteFile(q, []byte{0x00, 0x01, 0x02, 0xfe, 0xff}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out := runTool(t, tool(m, "transcribe_audio"), fmt.Sprintf(`{"path":%q}`, q)); out != "hello" {
+		t.Fatal(out)
 	}
 }

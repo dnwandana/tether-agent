@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/media"
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 // The media backend names of media.*.backend.
@@ -50,6 +52,8 @@ type MediaSet struct {
 	Download  *http.Client
 	Env       []string
 	Log       *slog.Logger
+	// Protected lists the paths that the tools do not send to the provider. Nil checks nothing.
+	Protected []string
 
 	// lookPath finds ffmpeg. Tests replace it; nil uses exec.LookPath.
 	lookPath func(string) (string, error)
@@ -220,12 +224,28 @@ func (m *MediaSet) sttTool(r *mediaRunner) Tool {
 // backend converts the file to 16 kHz mono WAV with ffmpeg first when ffmpeg
 // is installed, and then reads {out_base}.txt. It removes its work files.
 func (m *MediaSet) transcribe(ctx context.Context, r *mediaRunner, path string) (string, error) {
+	if security.CheckWritable(path, m.Protected, false) != nil {
+		return "", toolErr("%s is a protected path. The tool does not send it to the provider.", path)
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return "", fmt.Errorf("cannot read the audio file %s: %w", path, err)
 	}
 	if st.IsDir() {
 		return "", fmt.Errorf("%s is a folder, not an audio file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot read the audio file %s: %w", path, err)
+	}
+	head := make([]byte, 512)
+	n, err := io.ReadFull(f, head)
+	f.Close()
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return "", fmt.Errorf("cannot read the audio file %s: %w", path, err)
+	}
+	if strings.HasPrefix(http.DetectContentType(head[:n]), "text/") {
+		return "", toolErr("%s is a text file, not an audio file.", path)
 	}
 	if r.ep != nil {
 		text, err := r.ep.Transcribe(ctx, path)

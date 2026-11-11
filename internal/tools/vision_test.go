@@ -309,3 +309,29 @@ func TestDescribeImageRecordsSticker(t *testing.T) {
 		t.Fatal(err, calls)
 	}
 }
+
+func TestViewImageRefusesProtectedPath(t *testing.T) {
+	const want = "is a protected path. The tool does not send it to the provider."
+	fp := recording("no")
+	p := pngFile(t)
+	if out := runToolErr(t, VisionTool{Prov: fp, Protected: []string{p}}, fmt.Sprintf(`{"path":%q}`, p)); !strings.Contains(out, p+" "+want) {
+		t.Fatal(out)
+	}
+	link := filepath.Join(t.TempDir(), "link.png")
+	if err := os.Symlink(p, link); err != nil {
+		t.Fatal(err)
+	}
+	if out := runToolErr(t, VisionTool{Prov: fp, Protected: []string{p}}, fmt.Sprintf(`{"path":%q}`, link)); !strings.Contains(out, want) {
+		t.Fatal(out)
+	}
+	if out := runToolErr(t, VisionTool{Prov: fp, Protected: []string{filepath.Dir(p) + "/"}}, fmt.Sprintf(`{"path":%q}`, p)); !strings.Contains(out, want) {
+		t.Fatal(out)
+	}
+	if len(fp.requests) != 0 {
+		t.Fatal("no model call for a protected path")
+	}
+	// A nil Protected checks nothing.
+	if out := runTool(t, VisionTool{Prov: recording("ok")}, fmt.Sprintf(`{"path":%q}`, p)); out != "ok" {
+		t.Fatal(out)
+	}
+}
