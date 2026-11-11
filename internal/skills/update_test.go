@@ -468,3 +468,18 @@ func TestDiffDirs(t *testing.T) {
 		t.Fatalf("formatChanges(nil) = %q", got)
 	}
 }
+
+func TestUpdateReportsRequiredEnv(t *testing.T) {
+	url, _, _ := makeRemote(t, "main")
+	in := gitInstaller(t, &fakePrompt{}, url)
+	out := in.Out.(interface{ String() string })
+	pushFiles(t, url, "main", map[string]string{
+		"SKILL.md": "---\nname: pdf\ndescription: Read PDF files.\nrequired_environment_variables:\n  - PDF_API_KEY\n---\n# PDF\n",
+	})
+	if err := in.Update(context.Background(), UpdateRequest{Yes: true}); err != nil {
+		t.Fatalf("Update: %v\n%s", err, out)
+	}
+	if !strings.Contains(out.String(), "Required environment variables: PDF_API_KEY\n") {
+		t.Fatalf("output:\n%s", out)
+	}
+}

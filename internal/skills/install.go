@@ -355,8 +355,8 @@ func searchRoot(repo, sub string) (string, error) {
 	return realRoot, nil
 }
 
-// report prints the skill, its files, its source, and the scan findings.
-// Each string from the skill or the remote goes through Sanitize.
+// report prints the skill, its files, its source, the required environment
+// variable names, and the scan findings. Each string from the skill or the remote goes through Sanitize.
 func (in *Installer) report(s *staged) {
 	in.printf("Skill: %s — %s\n", Sanitize(s.skill.Name), Sanitize(s.skill.Description))
 	var size int64
@@ -374,6 +374,10 @@ func (in *Installer) report(s *staged) {
 		in.printf("Source: %s (commit %s)\n", Sanitize(s.src.Identifier), Sanitize(ShortCommit(s.commit)))
 	} else {
 		in.printf("Source: %s\n", Sanitize(s.src.Identifier))
+	}
+	if len(s.skill.RequiredEnv) > 0 {
+		in.printf("Required environment variables: %s\n", Sanitize(strings.Join(s.skill.RequiredEnv, ", ")))
+		in.printf("A secret reaches the terminal tool only when its name is in terminal.env_passthrough in config.yaml.\n")
 	}
 	in.printf("%s\n", Sanitize(FormatFindings(s.scan)))
 }

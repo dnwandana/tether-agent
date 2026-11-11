@@ -55,7 +55,9 @@ line that contains a key variable is refused. A declaration in
    `~/.tether/scripts/helius.sh`. The script reads the key from its environment.
 2. `write_file` and `patch` cannot write in `scripts/`. Ask the user to put the script there,
    or write it with `terminal`. The approval gate then asks the user.
-3. List the key name in `required_environment_variables` in the frontmatter.
+3. Ask the user to add the key name to `terminal.env_passthrough` in config.yaml. Only that
+   setting passes the key to the script. Also list the name in `required_environment_variables`
+   in the frontmatter, so `skill_view` shows its status.
 4. In the skill body, tell the agent to run the script with `terminal`:
 
        Run `bash ~/.tether/scripts/helius.sh <wallet>`.

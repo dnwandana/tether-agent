@@ -155,6 +155,9 @@ func TestInstallLocalSafe(t *testing.T) {
 			t.Errorf("output has no %q:\n%s", want, text)
 		}
 	}
+	if strings.Contains(text, "Required environment variables") {
+		t.Errorf("output lists env names for a skill with none:\n%s", text)
+	}
 	if len(p.confirms) != 1 || p.confirms[0] != `Install "pdf"?` {
 		t.Fatalf("confirms = %q", p.confirms)
 	}
@@ -668,5 +671,25 @@ func TestSwapIn(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(newDir, "f")); string(b) != "new" {
 		t.Fatalf("new/f after undo = %q", b)
+	}
+}
+
+func TestInstallReportsRequiredEnv(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"gh/SKILL.md": "---\nname: gh\ndescription: Use GitHub.\nrequired_environment_variables:\n  - GITHUB_TOKEN\n  - GH_HOST\n---\nbody\n",
+	})
+	in, out := newInstaller(t, &fakePrompt{})
+	in.FindGit = noGit
+	if _, err := in.Install(context.Background(), InstallRequest{Source: filepath.Join(root, "gh"), Yes: true, Force: true}); err != nil {
+		t.Fatalf("Install: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"Required environment variables: GITHUB_TOKEN, GH_HOST\n",
+		"A secret reaches the terminal tool only when its name is in terminal.env_passthrough in config.yaml.\n",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output has no %q:\n%s", want, out)
+		}
 	}
 }

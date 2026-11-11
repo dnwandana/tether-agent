@@ -72,7 +72,9 @@ const (
 // variable out. The API call belongs in a script, where the guard does not
 // see the key.
 const scriptsHint = "Put the API call in a script under ~/.tether/scripts/ and make the skill run that script. " +
-	"List the key in required_environment_variables. The guard does not scan ~/.tether/scripts/."
+	"The user must add the key name to terminal.env_passthrough in config.yaml. " +
+	"Also list the name in required_environment_variables, so skill_view shows its status. " +
+	"The guard does not scan ~/.tether/scripts/."
 
 // scannableExt holds the text file types that the guard reads. Hermes skips
 // other files, except SKILL.md.
