@@ -586,7 +586,8 @@ func (e errTooLarge) Error() string {
 }
 
 // fetch downloads a file to MediaDir as <unix-ms>-<file_unique_id><ext>,
-// with mode 0600. It checks the getFile size before the download.
+// with mode 0600. It checks the getFile size before the download. It reuses a
+// cached file with the same ID and size instead of a new download.
 func (in *Inbox) fetch(ctx context.Context, fileID, uniqueID string, ext func(filePath string) string) (string, error) {
 	f, err := in.C.GetFile(ctx, fileID)
 	if err != nil {
@@ -598,7 +599,12 @@ func (in *Inbox) fetch(ctx context.Context, fileID, uniqueID string, ext func(fi
 	if uniqueID == "" {
 		uniqueID = fileID
 	}
-	name := fmt.Sprintf("%d-%s%s", time.Now().UnixMilli(), unsafeNameChars.ReplaceAllString(uniqueID, "_"), ext(f.FilePath))
+	id := unsafeNameChars.ReplaceAllString(uniqueID, "_")
+	x := ext(f.FilePath)
+	if p := in.cachedFile(id, x, f.FileSize); p != "" {
+		return p, nil
+	}
+	name := fmt.Sprintf("%d-%s%s", time.Now().UnixMilli(), id, x)
 	path := filepath.Join(in.MediaDir, name)
 	if err := in.C.DownloadFile(ctx, f.FilePath, path); err != nil {
 		return "", err
@@ -607,6 +613,40 @@ func (in *Inbox) fetch(ctx context.Context, fileID, uniqueID string, ext func(fi
 		return "", err
 	}
 	return path, nil
+}
+
+// cachedFile returns the path of a file in MediaDir that an earlier fetch saved for the same
+// Telegram file, or "". The name must be exactly <digits>-<id><ext>, the file must be a
+// regular file, and its size must be size. The size check also catches a file that a tool
+// changed. A reused file gets the modification time now, so the media retention keeps it.
+func (in *Inbox) cachedFile(id, ext string, size int64) string {
+	if size <= 0 {
+		return ""
+	}
+	entries, err := os.ReadDir(in.MediaDir)
+	if err != nil {
+		return ""
+	}
+	re, err := regexp.Compile(`^\d+-` + regexp.QuoteMeta(id+ext) + `$`)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !re.MatchString(e.Name()) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || info.Size() != size {
+			continue
+		}
+		path := filepath.Join(in.MediaDir, e.Name())
+		now := time.Now()
+		if err := os.Chtimes(path, now, now); err != nil {
+			return ""
+		}
+		return path
+	}
+	return ""
 }
 
 var (

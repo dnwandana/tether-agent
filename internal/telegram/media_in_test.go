@@ -897,3 +897,77 @@ func TestRichMediaCallerContextEnds(t *testing.T) {
 		t.Fatal(txt, imgs, files, err)
 	}
 }
+
+func TestFetchReusesCachedFile(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("p320", "photos/file_1.jpg", []byte("JPEG"))
+	_, first, _, err := in.Build(ctx, []Message{photoMsg("", sizes(320))})
+	if err != nil || len(first) != 1 {
+		t.Fatal(first, err)
+	}
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(first[0].Path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	_, second, _, err := in.Build(ctx, []Message{photoMsg("", sizes(320))})
+	if err != nil || len(second) != 1 || second[0].Path != first[0].Path || string(second[0].Data) != "JPEG" {
+		t.Fatal(second, err)
+	}
+	// Count the downloads, not the getFile calls: fetch needs getFile for the size.
+	if api.count("download") != 1 || api.count("getFile") != 2 {
+		t.Fatal(api.methods())
+	}
+	st, err := os.Stat(second[0].Path)
+	if err != nil || time.Since(st.ModTime()) > time.Minute {
+		t.Fatal("a reused file must get a new modification time", st, err)
+	}
+}
+
+func TestFetchDownloadsChangedFile(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("p320", "photos/file_1.jpg", []byte("JPEG"))
+	_, first, _, err := in.Build(ctx, []Message{photoMsg("", sizes(320))})
+	if err != nil || len(first) != 1 {
+		t.Fatal(first, err)
+	}
+	// A tool changed the cached file, so its size is not the getFile size.
+	if err := os.WriteFile(first[0].Path, []byte("JPEG changed by a tool"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, second, _, err := in.Build(ctx, []Message{photoMsg("", sizes(320))})
+	if err != nil || len(second) != 1 || string(second[0].Data) != "JPEG" || api.count("download") != 2 {
+		t.Fatal(second, err, api.methods())
+	}
+}
+
+func TestFetchIgnoresOtherNames(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("p320", "photos/file_1.jpg", []byte("JPEG"))
+	if err := os.MkdirAll(in.MediaDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	planted := []string{"1-x-u320.jpg", "abc-u320.jpg", "1-u320.jpg.bak", "1-u320.png"}
+	for _, name := range planted {
+		if err := os.WriteFile(filepath.Join(in.MediaDir, name), []byte("JPEG"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A symbolic link with the right name and the right size is not a regular file.
+	target := filepath.Join(t.TempDir(), "x.jpg")
+	if err := os.WriteFile(target, []byte("JPEG"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(in.MediaDir, "3-u320.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	planted = append(planted, "3-u320.jpg")
+	_, imgs, _, err := in.Build(ctx, []Message{photoMsg("", sizes(320))})
+	if err != nil || len(imgs) != 1 || api.count("download") != 1 {
+		t.Fatal(imgs, err, api.methods())
+	}
+	for _, name := range planted {
+		if filepath.Base(imgs[0].Path) == name {
+			t.Fatal("fetch reused a file that does not match:", name)
+		}
+	}
+}
