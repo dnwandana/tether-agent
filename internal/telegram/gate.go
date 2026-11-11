@@ -202,17 +202,38 @@ func Gate(cfg config.TelegramConfig, botUser string, botID int64, m Message, n N
 	// 10) Drop, or keep the message as context only. Hermes observes only
 	// in chats that group_allowed_chats names, and never a command.
 	if cfg.ObserveUnmentionedGroupMessages && observeAllowed(cfg, n.ChatID) && !isCommand(m) {
-		user := n.UserID
-		if user == "" {
-			user = "unknown"
-		}
-		name := n.UserName
-		if name == "" {
-			name = user
-		}
-		return Decision{Observe: true, Text: "[" + name + "|" + user + "]\n" + n.Text, Reason: "observe"}
+		return Decision{Observe: true, Text: attribution(n.UserName, n.UserID, n.Text), Reason: "observe"}
 	}
 	return drop("drop")
+}
+
+// labelLine matches a body line that looks like a "[name|user]" label.
+var labelLine = regexp.MustCompile(`^\[[^\[\]|\n]*\|[^\[\]\n]*\]$`)
+
+// labelCleaner replaces the characters that can break a label.
+var labelCleaner = strings.NewReplacer("[", " ", "]", " ", "|", " ", "\r", " ", "\n", " ")
+
+// attribution returns the "[name|user]" label line and then body. A sender controls the name
+// and the body, so the name loses the label characters, and a body line that looks like a
+// label or a gateway header gets a leading "\".
+func attribution(name, user, body string) string {
+	if user == "" {
+		user = "unknown"
+	}
+	name = strings.TrimSpace(labelCleaner.Replace(name))
+	if name == "" {
+		name = user
+	}
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if labelLine.MatchString(t) ||
+			strings.HasPrefix(t, "[Observed Telegram group context") ||
+			strings.HasPrefix(t, "[Current addressed message") {
+			lines[i] = "\\" + line
+		}
+	}
+	return "[" + name + "|" + user + "]\n" + strings.Join(lines, "\n")
 }
 
 // observeAllowed reports whether observed context is allowed in the chat.

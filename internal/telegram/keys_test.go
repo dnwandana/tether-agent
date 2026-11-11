@@ -1,6 +1,9 @@
 package telegram
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSessionKeys(t *testing.T) {
 	cases := []struct {
@@ -24,6 +27,30 @@ func TestSessionKeys(t *testing.T) {
 	for _, c := range cases {
 		if got := SessionKey(c.kind, c.chat, c.thread, c.user, c.gpu, c.tpu); got != c.want {
 			t.Fatal(c, got)
+		}
+	}
+}
+
+func TestIsSharedKey(t *testing.T) {
+	for _, tc := range []struct {
+		kind, thread, user          string
+		groupPerUser, threadPerUser bool
+		want                        bool
+	}{
+		{"dm", "", "5", true, true, false},
+		{"dm", "3", "5", false, false, false},
+		{"group", "", "5", true, false, false},
+		{"group", "", "5", false, false, true},
+		{"group", "", "", true, false, true},
+		{"group", "17", "5", true, false, true},
+		{"group", "17", "5", true, true, false},
+		{"group", "17", "5", false, true, true},
+	} {
+		got := IsSharedKey(tc.kind, tc.thread, tc.user, tc.groupPerUser, tc.threadPerUser)
+		key := SessionKey(tc.kind, "-100", tc.thread, tc.user, tc.groupPerUser, tc.threadPerUser)
+		hasUser := tc.user != "" && strings.HasSuffix(key, ":"+tc.user)
+		if got != tc.want || tc.kind != "dm" && got == hasUser {
+			t.Errorf("%+v: got %v, key %s", tc, got, key)
 		}
 	}
 }

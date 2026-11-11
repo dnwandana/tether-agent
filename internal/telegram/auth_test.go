@@ -131,3 +131,44 @@ func TestGroupAllowedUsers(t *testing.T) {
 		t.Fatal("ids are trimmed")
 	}
 }
+
+func TestIsOwner(t *testing.T) {
+	paired := func(id string) bool { return id == "9" }
+	type mut = func(*config.TelegramConfig)
+	for _, tc := range []struct {
+		name string
+		mut  mut
+		n    Normalized
+		want bool
+	}{
+		{"pair-approved user in a DM", nil, dmFrom("9"), true},
+		{"pair-approved user in a group", func(c *config.TelegramConfig) { c.GroupAllowedChats = []string{"-100"} }, groupFrom("-100", "9"), true},
+		{"allowed_users ID in a DM", func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} }, dmFrom("5"), true},
+		{"allowed_users ID in a group", func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} }, groupFrom("-100", "5"), true},
+		{"allowed_users with another ID", func(c *config.TelegramConfig) { c.AllowedUsers = []string{"5"} }, dmFrom("6"), false},
+		{"allowed_users star", func(c *config.TelegramConfig) { c.AllowedUsers = []string{"*"} }, dmFrom("6"), true},
+		{"group_allowed_users in a group", func(c *config.TelegramConfig) { c.GroupAllowedUsers = []string{"5"} }, groupFrom("-100", "5"), true},
+		{"group_allowed_users in a DM", func(c *config.TelegramConfig) { c.GroupAllowedUsers = []string{"5"} }, dmFrom("5"), false},
+		{"group_allowed_users star in a group", func(c *config.TelegramConfig) { c.GroupAllowedUsers = []string{"*"} }, groupFrom("-100", "6"), true},
+		{"member that only group_allowed_chats admits", func(c *config.TelegramConfig) { c.GroupAllowedChats = []string{"-100"} }, groupFrom("-100", "6"), false},
+		{"member of a star group_allowed_chats", func(c *config.TelegramConfig) { c.GroupAllowedChats = []string{"*"} }, groupFrom("-100", "6"), false},
+		{"post with no user ID", func(c *config.TelegramConfig) {
+			c.AllowAllUsers = true
+			c.GroupAllowedChats = []string{"-100"}
+		}, groupFrom("-100", ""), false},
+		{"allow_all_users in a DM", func(c *config.TelegramConfig) { c.AllowAllUsers = true }, dmFrom("6"), true},
+		{"allow_all_users in a group", func(c *config.TelegramConfig) { c.AllowAllUsers = true }, groupFrom("-100", "6"), true},
+	} {
+		c := config.Default().Telegram
+		if tc.mut != nil {
+			tc.mut(&c)
+		}
+		if got := IsOwner(c, tc.n, paired); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+	// A nil pairing lookup approves nobody.
+	if IsOwner(config.Default().Telegram, dmFrom("9"), nil) {
+		t.Fatal("a nil lookup must not make an owner")
+	}
+}

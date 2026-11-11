@@ -58,6 +58,20 @@ func authorized(cfg config.TelegramConfig, n Normalized, isPairApproved func(str
 			return true
 		}
 	}
+	return ownerByUser(cfg, n, isPairApproved)
+}
+
+// IsOwner reports whether the sender of n is an owner. An owner is a sender that the
+// allowlists admit by user ID: allow_all_users, pairing, allowed_users, and
+// group_allowed_users in a group. A sender that only group_allowed_chats admits is a
+// member. A message with no user ID is never from an owner. isPairApproved can be nil.
+func IsOwner(cfg config.TelegramConfig, n Normalized, isPairApproved func(userID string) bool) bool {
+	return ownerByUser(cfg, n, isPairApproved)
+}
+
+// ownerByUser applies the allowlist rules that match a user ID. Both authorized and
+// IsOwner call it, so the two stay the same.
+func ownerByUser(cfg config.TelegramConfig, n Normalized, isPairApproved func(string) bool) bool {
 	if n.UserID == "" {
 		return false
 	}
@@ -69,7 +83,7 @@ func authorized(cfg config.TelegramConfig, n Normalized, isPairApproved func(str
 	}
 	// group_allowed_users applies only in groups. It does not open DMs.
 	ids := trimmed(cfg.AllowedUsers)
-	if isGroup {
+	if n.Kind == KindGroup {
 		ids = append(ids, trimmed(cfg.GroupAllowedUsers)...)
 	}
 	return slices.Contains(ids, "*") || slices.Contains(ids, n.UserID)
