@@ -37,7 +37,10 @@ var plainProgramRe = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 // does not tell exactly what runs, so the user must answer each time. This is the case for
 // a compound command, a wrapper program, a program word with a path, and a command that
 // starts with NAME=value words. A path can point to any file, so "./ls" is not always ls.
-// A NAME=value word such as LD_PRELOAD or PATH can change what the program runs.
+// A NAME=value word such as LD_PRELOAD or PATH can change what the program runs. A command
+// that matches a dangerous rule also sets noSession, so a grant never covers it. This holds
+// for a request of any kind that has such a command, so one "this session" answer to an
+// "other" request does not cover a later dangerous command.
 func patternID(agentID, acpSessionID, kind, command string) (id string, noSession bool) {
 	if kind == "" {
 		kind = "other"
@@ -48,6 +51,9 @@ func patternID(agentID, acpSessionID, kind, command string) (id string, noSessio
 		return id, true
 	case "execute":
 	default:
+		if _, ok := security.MatchDangerous(command); ok && command != "" {
+			return id, true
+		}
 		return id, false
 	}
 	for _, m := range compoundMarks {
@@ -55,6 +61,9 @@ func patternID(agentID, acpSessionID, kind, command string) (id string, noSessio
 			noSession = true
 			break
 		}
+	}
+	if _, ok := security.MatchDangerous(command); ok {
+		noSession = true
 	}
 	program, indirect := commandProgram(command)
 	if program == "" {
@@ -114,9 +123,15 @@ func buildApproval(agentID, acpSessionID string, in permissionInput) (req securi
 		return security.ApprovalRequest{}, "", "", false
 	}
 	id, noSession := patternID(agentID, acpSessionID, in.Kind, in.Command)
+	desc := agentID + " wants to " + verbFor(in.Kind)
+	if in.Command != "" {
+		if p, hit := security.MatchDangerous(in.Command); hit {
+			desc += " (dangerous: " + p.Description + ")"
+		}
+	}
 	req = security.ApprovalRequest{
 		Summary:     security.CleanSummary(in.Title),
-		Description: agentID + " wants to " + verbFor(in.Kind),
+		Description: desc,
 		Command:     bodyFor(in),
 		PatternID:   id,
 		NoAlways:    true,

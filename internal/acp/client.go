@@ -496,6 +496,26 @@ func (s sdkClient) SessionUpdate(_ context.Context, n acpsdk.SessionNotification
 	return nil
 }
 
+// commandText returns the command text of a rawInput "command" value. A string gives itself.
+// A list of strings gives the items joined with one space. Each other value gives "".
+func commandText(v any) string {
+	switch c := v.(type) {
+	case string:
+		return c
+	case []any:
+		parts := make([]string, 0, len(c))
+		for _, it := range c {
+			s, ok := it.(string)
+			if !ok {
+				return ""
+			}
+			parts = append(parts, s)
+		}
+		return strings.Join(parts, " ")
+	}
+	return ""
+}
+
 // RequestPermission gives a permission request to the handler of the running turn. With no
 // handler, or after a panic, the answer is cancelled.
 func (s sdkClient) RequestPermission(ctx context.Context, p acpsdk.RequestPermissionRequest) (resp acpsdk.RequestPermissionResponse, err error) {
@@ -512,9 +532,7 @@ func (s sdkClient) RequestPermission(ctx context.Context, p acpsdk.RequestPermis
 		in.Title = *tc.Title
 	}
 	if m, ok := tc.RawInput.(map[string]any); ok {
-		if v, ok := m["command"].(string); ok {
-			in.Command = v
-		}
+		in.Command = commandText(m["command"])
 		if v, ok := m["plan"].(string); ok {
 			in.Plan = v
 		}

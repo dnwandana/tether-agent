@@ -22,6 +22,8 @@ func TestPatternID(t *testing.T) {
 		id            string
 		noSession     bool
 	}{
+		{"execute", "rm -r x", base + "execute:rm", true},
+		{"execute", "rm notes.txt", base + "execute:rm", false},
 		{"execute", "go test ./...", base + "execute:go", false},
 		// A path or a leading NAME=value word can change what runs, so the id is not exact.
 		{"execute", "/usr/bin/go build ./cmd/tether", base + "execute:go", true},
@@ -81,6 +83,10 @@ func TestPatternID(t *testing.T) {
 		{"execute", "go-task build", base + "execute:go-task", false},
 		{"execute", "g++ -o x x.cc", base + "execute:g++", false},
 		{"", "", base + "other", false},
+		// A dangerous command of any kind gets no session grant.
+		{"other", "rm -r x", base + "other", true},
+		{"", "rm -r x", base + "other", true},
+		{"other", "echo hi", base + "other", false},
 		{"edit", "", base + "edit", false},
 		{"read", "go test", base + "read", false},
 		{"switch_mode", "", base + "switch_mode", true},
@@ -206,5 +212,27 @@ func TestBuildApprovalCleansHostileTitle(t *testing.T) {
 	}
 	if req.Description != "claude-code wants to edit a file" {
 		t.Fatalf("the title changed the Flagged line: %q", req.Description)
+	}
+}
+
+func TestBuildApprovalDangerousCommand(t *testing.T) {
+	in := permissionInput{Kind: "execute", Title: "Clean", Command: "rm -r build", Options: claudeOptions}
+	req, _, _, ok := buildApproval("claude", "s1", in)
+	if !ok || !req.NoSession || req.Description != "claude wants to run a command (dangerous: recursive delete)" {
+		t.Fatalf("%+v", req)
+	}
+	in.Command = "rm notes.txt"
+	if req, _, _, _ = buildApproval("claude", "s1", in); req.NoSession || req.Description != "claude wants to run a command" {
+		t.Fatalf("%+v", req)
+	}
+}
+
+func TestBuildApprovalDangerousAnyKind(t *testing.T) {
+	for _, kind := range []string{"other", ""} {
+		in := permissionInput{Kind: kind, Title: "Clean", Command: "rm -r build", Options: claudeOptions}
+		req, _, _, ok := buildApproval("claude", "s1", in)
+		if !ok || !req.NoSession || !strings.Contains(req.Description, " (dangerous: recursive delete)") {
+			t.Errorf("kind %q: %+v", kind, req)
+		}
 	}
 }

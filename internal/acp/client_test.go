@@ -364,3 +364,39 @@ func TestTailBufferKeepsLastBytesAndLines(t *testing.T) {
 		t.Fatalf("lines = %d, first %q", len(lines), lines[:min(3, len(lines))])
 	}
 }
+
+func TestCommandText(t *testing.T) {
+	for _, c := range []struct {
+		in   any
+		want string
+	}{
+		{"go test ./...", "go test ./..."},
+		{[]any{"rm", "-rf", "/"}, "rm -rf /"},
+		{[]any{"ls", 1}, ""},
+		{[]any{}, ""},
+		{nil, ""},
+		{42, ""},
+	} {
+		if got := commandText(c.in); got != c.want {
+			t.Errorf("commandText(%#v) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestRequestPermissionJoinsArgv(t *testing.T) {
+	c := &Client{agentID: "test-agent", log: slog.New(slog.DiscardHandler)}
+	s := sdkClient{c: c}
+	h := &recordHandler{sid: "s1", outcome: permissionOutcome{OptionID: "reject"}}
+	c.attach(h)
+	req := acpsdk.RequestPermissionRequest{SessionId: "s1", Options: []acpsdk.PermissionOption{
+		{OptionId: "allow-once", Name: "Allow", Kind: acpsdk.PermissionOptionKindAllowOnce},
+		{OptionId: "reject", Name: "Reject", Kind: acpsdk.PermissionOptionKindRejectOnce},
+	}, ToolCall: acpsdk.ToolCallUpdate{ToolCallId: "t1", Kind: acpsdk.Ptr(acpsdk.ToolKindExecute),
+		RawInput: map[string]any{"command": []any{"rm", "-rf", "/"}}}}
+	if _, err := s.RequestPermission(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if _, perms := h.got(); len(perms) != 1 || perms[0].Command != "rm -rf /" {
+		t.Fatalf("%+v", perms)
+	}
+}

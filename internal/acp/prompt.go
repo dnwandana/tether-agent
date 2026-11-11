@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -49,13 +50,27 @@ type turnState struct {
 	mode      string
 }
 
-func newTurnState(ctx context.Context, agentID, sessionID string, h Hooks) *turnState {
-	return &turnState{
+func newTurnState(ctx context.Context, agentID, sessionID string, h Hooks, log *slog.Logger) *turnState {
+	t := &turnState{
 		sid:    sessionID,
-		bridge: newBridge(ctx, agentID, h),
+		bridge: newBridge(ctx, agentID, h, log),
 		queue:  make(chan progressItem, progressQueueSize),
 		done:   make(chan struct{}),
 	}
+	// The bridge sends its events through the queue, so runProgress stays the only caller of
+	// Hooks.Progress and the events keep their order.
+	t.bridge.progress = func(kind, title string) {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if t.closed {
+			return
+		}
+		select {
+		case t.queue <- progressItem{kind: kind, title: title}:
+		default: // The queue is full. Drop the item.
+		}
+	}
+	return t
 }
 
 func (t *turnState) sessionID() string { return t.sid }
@@ -167,7 +182,7 @@ func (c *Client) Prompt(ctx context.Context, sessionID, text string, h Hooks) (r
 		c.busy.Store(false)
 	}()
 
-	ts := newTurnState(ctx, c.AgentID(), sessionID, h)
+	ts := newTurnState(ctx, c.AgentID(), sessionID, h, c.log)
 	go ts.runProgress(h.Progress)
 	c.attach(ts)
 	c.turn.Store(ts)

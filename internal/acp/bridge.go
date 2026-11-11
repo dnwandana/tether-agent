@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -36,11 +37,19 @@ type bridge struct {
 	sem     chan struct{}   // size 1: the open approval
 	stopCtx context.Context // ends at cancelAll
 	stop    context.CancelFunc
+	log     *slog.Logger
+	// progress shows one event of the bridge. A nil progress shows nothing.
+	progress func(kind, title string)
 }
 
-func newBridge(turnCtx context.Context, agentID string, h Hooks) *bridge {
+// newBridge returns the bridge of one turn. A nil log discards the log lines.
+func newBridge(turnCtx context.Context, agentID string, h Hooks, log *slog.Logger) *bridge {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
 	stopCtx, stop := context.WithCancel(context.Background())
-	return &bridge{turnCtx: turnCtx, agentID: agentID, h: h, sem: make(chan struct{}, 1), stopCtx: stopCtx, stop: stop}
+	return &bridge{turnCtx: turnCtx, agentID: agentID, h: h, sem: make(chan struct{}, 1),
+		stopCtx: stopCtx, stop: stop, log: log, progress: h.Progress}
 }
 
 // cancelAll makes the open request and each waiting request return cancelled. Later
@@ -83,7 +92,19 @@ func (b *bridge) decide(ctx context.Context, acpSessionID string, in permissionI
 
 // ask maps one request to an Approve call, or to an Ask call when the
 // request has no allow_once or no reject_once option.
+//
+// A request of any kind with a command that matches a hardline rule is refused first. No
+// session grant and no hook call can permit it.
 func (b *bridge) ask(ctx context.Context, acpSessionID string, in permissionInput) permissionOutcome {
+	if in.Command != "" {
+		if p, hit := security.MatchHardline(in.Command); hit {
+			b.log.Warn("acp: refused a hardline command", "agent", b.agentID, "pattern", p.ID)
+			if b.progress != nil {
+				b.progress("blocked", "hardline: "+p.Description)
+			}
+			return rejectOutcome(in.Options)
+		}
+	}
 	req, allowID, rejectID, ok := buildApproval(b.agentID, acpSessionID, in)
 	if !ok {
 		return b.askChoice(ctx, in)
@@ -106,6 +127,22 @@ func (b *bridge) ask(ctx context.Context, acpSessionID string, in permissionInpu
 	default:
 		return reject
 	}
+}
+
+// rejectOutcome selects the first reject_once option, else the first option whose kind
+// starts with reject_, else the cancelled outcome.
+func rejectOutcome(opts []option) permissionOutcome {
+	for _, o := range opts {
+		if o.Kind == "reject_once" {
+			return permissionOutcome{OptionID: o.ID}
+		}
+	}
+	for _, o := range opts {
+		if strings.HasPrefix(o.Kind, "reject_") {
+			return permissionOutcome{OptionID: o.ID}
+		}
+	}
+	return permissionOutcome{Cancelled: true}
 }
 
 // askChoice asks with Hooks.Ask and the option names of the agent.
