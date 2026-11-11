@@ -140,6 +140,22 @@ func Expand(argv []string, vals map[string]string) []string {
 	return out
 }
 
+// expandArgs returns Expand(argv, vals), with one space before a value that starts with "-"
+// when its template word is exactly {text} or {prompt}. The model writes those values, so a
+// leading space stops the program from reading the value as an option.
+func expandArgs(argv []string, vals map[string]string) []string {
+	out := Expand(argv, vals)
+	for i, w := range argv {
+		if w != "{text}" && w != "{prompt}" {
+			continue
+		}
+		if strings.HasPrefix(out[i], "-") {
+			out[i] = " " + out[i]
+		}
+	}
+	return out
+}
+
 // CommandBackend runs a media command template. WorkDir is cache/media/.
 // A zero Timeout uses DefaultCommandTimeout. Env is the environment of the
 // program. The caller filters it with security.ChildEnv, so Run uses it as
@@ -168,13 +184,14 @@ func missingHint(prog string) string {
 }
 
 // Run expands the template with vals and runs the program directly, with no
-// shell. It returns an error with the tail of stderr when the program fails.
+// shell. A bare {text} or {prompt} value that starts with "-" gets one leading space.
+// It returns an error with the tail of stderr when the program fails.
 func (b *CommandBackend) Run(ctx context.Context, vals map[string]string) error {
 	argv, err := SplitTemplate(b.Template)
 	if err != nil {
 		return err
 	}
-	argv = Expand(argv, vals)
+	argv = expandArgs(argv, vals)
 	prog := filepath.Base(argv[0])
 	path, err := exec.LookPath(argv[0])
 	if err != nil {

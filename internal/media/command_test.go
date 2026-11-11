@@ -227,3 +227,45 @@ func TestDefaultTimeout(t *testing.T) {
 		t.Fatal()
 	}
 }
+
+func TestExpandArgsBareDashValue(t *testing.T) {
+	argv, err := SplitTemplate("edge-tts --voice en-US-AriaNeural --text {text} --write-media {out}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := expandArgs(argv, map[string]string{"text": "- item", "out": "/tmp/o.mp3"})
+	want := []string{"edge-tts", "--voice", "en-US-AriaNeural", "--text", " - item", "--write-media", "/tmp/o.mp3"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%q, want %q", got, want)
+	}
+	for _, c := range []struct {
+		argv []string
+		vals map[string]string
+		want []string
+	}{
+		{[]string{"p", "{text}"}, map[string]string{"text": "--proxy=http://x"}, []string{"p", " --proxy=http://x"}},
+		{[]string{"p", "{prompt}"}, map[string]string{"prompt": "-x"}, []string{"p", " -x"}},
+		// A placeholder inside a word, another placeholder, and other values do not change.
+		{[]string{"p", "--text={text}"}, map[string]string{"text": "-x"}, []string{"p", "--text=-x"}},
+		{[]string{"p", "{in}"}, map[string]string{"in": "-x"}, []string{"p", "-x"}},
+		{[]string{"p", "{text}"}, map[string]string{"text": "a-b"}, []string{"p", "a-b"}},
+		{[]string{"p", "{text}"}, map[string]string{"text": ""}, []string{"p", ""}},
+		{[]string{"p", "{text}"}, nil, []string{"p", "{text}"}},
+	} {
+		if got := expandArgs(c.argv, c.vals); !slices.Equal(got, c.want) {
+			t.Errorf("expandArgs(%q, %v) = %q, want %q", c.argv, c.vals, got, c.want)
+		}
+	}
+}
+
+func TestRunBareDashValue(t *testing.T) {
+	needSh(t)
+	b := &CommandBackend{Template: "sh -c 'printf %s \"$0\" > \"$1\"' {text} {out}", WorkDir: t.TempDir(), Timeout: 5 * time.Second}
+	out := filepath.Join(b.WorkDir, "o.txt")
+	if err := b.Run(ctx, map[string]string{"text": "- item", "out": out}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(out); string(got) != " - item" {
+		t.Fatalf("%q, want %q", got, " - item")
+	}
+}
