@@ -27,10 +27,12 @@ import (
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/hostos"
 	"github.com/dnwandana/tether-agent/internal/mcp"
+	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/telegram"
+	"github.com/dnwandana/tether-agent/internal/tools"
 	"github.com/dnwandana/tether-agent/internal/update"
 	"gopkg.in/yaml.v3"
 )
@@ -62,7 +64,8 @@ type Check struct {
 }
 
 // Doctor checks the install: the config, .env, the providers, Telegram, state.db, the host
-// programs, the MCP servers, the disk, and the newest release. It needs no user input, and
+// programs, the MCP servers, the disk, the data folder mode, the blocked memory entries, and the
+// newest release. It needs no user input, and
 // it does not take the gateway lock, so it can run next to a running gateway.
 type Doctor struct {
 	DataDir    string
@@ -85,6 +88,9 @@ type Doctor struct {
 
 	// freeBytes returns the free disk space of a folder. Tests replace it.
 	freeBytes func(dir string) (uint64, error)
+	// modesKept reports whether the file system of dir keeps Unix modes. Tests replace it.
+	// Nil uses probeModes.
+	modesKept func(dir string) bool
 	// probeACP starts one coding agent. Tests replace it. Nil uses acp.Probe.
 	probeACP func(ctx context.Context, agentID string, a config.ACPAgent, dotenv map[string]string) (acp.ProbeResult, error)
 }
@@ -105,6 +111,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 		out = append(out, d.checkTelegram(ctx, cfg))
 	}
 	out = append(out, d.checkStateDB(ctx)...)
+	out = append(out, d.checkDataDir(), d.checkMemory())
 	hostCfg := cfg
 	if hostCfg == nil {
 		def := config.Default()
@@ -702,6 +709,110 @@ func (d *Doctor) checkDisk() Check {
 		c.Next = "free some disk space; the logs, the cache, and state.db need room"
 	}
 	return c
+}
+
+// checkMemory lists the entries of memory.md and user_profile.md that the memory threat scan
+// blocks. The prompt shows a BLOCKED line in place of such an entry.
+func (d *Doctor) checkMemory() Check {
+	c := Check{Name: "memory", Status: StatusOK}
+	dir := filepath.Join(d.DataDir, "memory")
+	// Open makes the folder, so look first.
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		c.Detail = "no memory yet"
+		return c
+	}
+	st, err := memory.Open(dir, 0, 0)
+	if err != nil {
+		c.Status, c.Detail, c.Next = StatusWarn, "cannot open the memory store: "+err.Error(), "check the folder "+dir
+		return c
+	}
+	var items []string
+	var firstID string
+	for _, t := range []struct{ target, file string }{
+		{memory.TargetMemory, "memory.md"},
+		{memory.TargetUser, "user_profile.md"},
+	} {
+		entries, err := st.ReadEntries(t.target)
+		if err != nil {
+			c.Status, c.Detail, c.Next = StatusWarn, "cannot read "+t.file+": "+err.Error(), "check the file "+filepath.Join(dir, t.file)
+			return c
+		}
+		for _, e := range entries {
+			if _, blocked := tools.MemoryBlockedLine(e); !blocked {
+				continue
+			}
+			id := tools.MemoryEntryID(e)
+			if firstID == "" {
+				firstID = id
+			}
+			items = append(items, t.file+" "+id+" ("+strings.Join(tools.MemoryThreatIDs(e), ", ")+")")
+		}
+	}
+	if len(items) == 0 {
+		c.Detail = "no blocked entries"
+		return c
+	}
+	c.Status = StatusWarn
+	noun := "entries"
+	if len(items) == 1 {
+		noun = "entry"
+	}
+	c.Detail = fmt.Sprintf("%d blocked %s: %s", len(items), noun, strings.Join(items, "; "))
+	c.Next = "ask the agent to remove each entry with the memory tool, for example: remove " + firstID
+	return c
+}
+
+// checkDataDir warns when other users can read the data folder. app.New also tightens the
+// mode. The check gives a warning, not a failure, because some file systems have no Unix modes.
+func (d *Doctor) checkDataDir() Check {
+	c := Check{Name: "data folder", Status: StatusOK}
+	info, err := os.Stat(d.DataDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		c.Detail = "not created yet"
+		return c
+	}
+	if err != nil {
+		c.Status, c.Detail, c.Next = StatusWarn, "cannot read the data folder: "+err.Error(), "check the permissions of "+filepath.Dir(d.DataDir)
+		return c
+	}
+	perm := info.Mode().Perm()
+	if perm&0o077 == 0 {
+		c.Detail = fmt.Sprintf("mode %04o", perm)
+		return c
+	}
+	c.Status = StatusWarn
+	kept := d.modesKept
+	if kept == nil {
+		kept = probeModes
+	}
+	if kept(d.DataDir) {
+		c.Detail = fmt.Sprintf("mode %04o: other users can read the data folder", perm)
+		c.Next = "chmod 700 " + d.DataDir
+		return c
+	}
+	c.Detail = fmt.Sprintf("mode %04o; the file system does not keep Unix modes", perm)
+	c.Next = "move the data folder to a Linux file system and set TETHER_HOME to it"
+	return c
+}
+
+// probeModes reports whether the file system of dir keeps Unix modes. It returns false only
+// when a file keeps no mode of 0600 after a chmod.
+func probeModes(dir string) bool {
+	f, err := os.CreateTemp(dir, ".doctor-mode-*")
+	if err != nil {
+		return true
+	}
+	name := f.Name()
+	_ = f.Close()
+	defer os.Remove(name)
+	if err := os.Chmod(name, 0o600); err != nil {
+		return true
+	}
+	info, err := os.Stat(name)
+	if err != nil {
+		return true
+	}
+	return info.Mode().Perm() == 0o600
 }
 
 // checkRelease compares Version with the newest release on GitHub. A dev build sends no
