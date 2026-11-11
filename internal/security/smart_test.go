@@ -126,12 +126,16 @@ func TestGateSmartUsesJudge(t *testing.T) {
 	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "rm -rf /tmp/x"}, p); err != nil || p.n != 0 || calls != 1 {
 		t.Fatal("approving judge", err, p.n, calls)
 	}
-	// Hermes: a smart approval holds for the session, so no second judge call.
-	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "rm -rf /tmp/y"}, p); err != nil || calls != 1 {
-		t.Fatal("smart approval not kept for the session", err, calls)
+	// Hermes: a smart approval covers that one command. The next command of the
+	// same pattern goes to the judge again, with no prompt.
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "rm -rf /tmp/y"}, p); err != nil || p.n != 0 || calls != 2 {
+		t.Fatal("a smart approval must not hold for the session", err, p.n, calls)
+	}
+	if g.sessionApproved("s", "delete_in_root_path") {
+		t.Fatal("a smart approval saved a session grant")
 	}
 	// A safe command does not reach the judge.
-	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "ls"}, p); err != nil || calls != 1 {
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "ls"}, p); err != nil || calls != 2 {
 		t.Fatal("judge called for a safe command", calls)
 	}
 
@@ -241,4 +245,99 @@ func TestGateSmartPassesSessionID(t *testing.T) {
 	if got != "s-42" {
 		t.Fatalf("the judge got session %q", got)
 	}
+}
+
+// scriptJudge is a Judge and a ScriptJudge. JudgeScript gives a fixed verdict, counts
+// the calls in n, and keeps the last script, description, and session ID in got.
+type scriptJudge struct {
+	risky bool
+	n     *int
+	got   *[3]string
+}
+
+func (scriptJudge) Judge(context.Context, string, string, string) (bool, error) { return true, nil }
+
+func (j scriptJudge) JudgeScript(_ context.Context, script, description, sessionID string) (bool, error) {
+	*j.n++
+	if j.got != nil {
+		*j.got = [3]string{script, description, sessionID}
+	}
+	return j.risky, nil
+}
+
+func TestGateSmartJudgesEachScript(t *testing.T) {
+	g := newGate(t, "smart", "deny")
+	var calls int
+	var got [3]string
+	g.Judge = scriptJudge{n: &calls, got: &got}
+	p := &countingPrompter{answer: ScopeDeny}
+	// APPROVE runs this script only. The next script goes to the judge again.
+	for want := 1; want <= 2; want++ {
+		if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: "print(1)"}, p); err != nil || p.n != 0 || calls != want {
+			t.Fatal(err, p.n, calls)
+		}
+	}
+	if got != [3]string{"print(1)", "run a Python script on the host", "s"} {
+		t.Fatalf("%q", got)
+	}
+	g.Judge = scriptJudge{risky: true, n: &calls}
+	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: "print(1)"}, p); err == nil || p.n != 1 {
+		t.Fatal("an escalating judge must ask", err, p.n)
+	}
+}
+
+func TestGateSmartLongScriptGoesToTheUser(t *testing.T) {
+	if SmartScriptMaxChars != 8000 {
+		t.Fatal(SmartScriptMaxChars)
+	}
+	g := newGate(t, "smart", "deny")
+	var calls int
+	g.Judge = scriptJudge{n: &calls}
+	p := &countingPrompter{answer: ScopeOnce}
+	long := strings.Repeat("x", SmartScriptMaxChars+1)
+	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: long}, p); err != nil || p.n != 1 || calls != 0 {
+		t.Fatal("a script over 8000 characters must go to the user", err, p.n, calls)
+	}
+	// The limit counts characters, not bytes.
+	wide := strings.Repeat("é", SmartScriptMaxChars)
+	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: wide}, p); err != nil || p.n != 1 || calls != 1 {
+		t.Fatal(err, p.n, calls)
+	}
+}
+
+func TestGateSmartScriptNeedsScriptJudge(t *testing.T) {
+	g := newGate(t, "smart", "deny")
+	var calls int
+	g.Judge = fixedJudge{risky: false, n: &calls}
+	p := &countingPrompter{answer: ScopeOnce}
+	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: "print(1)"}, p); err != nil || p.n != 1 || calls != 0 {
+		t.Fatal(err, p.n, calls)
+	}
+}
+
+func TestJudgeScriptPrompt(t *testing.T) {
+	prov := replyProvider("APPROVE: prints a number")
+	var rec []usageCall
+	risky, err := ProviderJudge{Prov: prov, Record: recorder(&rec)}.JudgeScript(ctx, "print(1)", "run a Python script on the host", "s1")
+	if err != nil || risky {
+		t.Fatal(risky, err)
+	}
+	if len(prov.last.Tools) != 0 || len(prov.last.Messages) != 1 || prov.last.Messages[0].Role != provider.RoleUser || !prov.dl {
+		t.Fatalf("%+v", prov.last)
+	}
+	msg := prov.last.Messages[0].Content
+	if !strings.Contains(msg, "A Python script will run on the host") || !strings.Contains(msg, "print(1)") ||
+		!strings.Contains(msg, "Flagged reason: run a Python script on the host") || strings.Contains(msg, "A terminal command was flagged") {
+		t.Fatal(msg)
+	}
+	if len(rec) != 1 || rec[0].task != "approval" || rec[0].sessionID != "s1" {
+		t.Fatalf("%+v", rec)
+	}
+	if r, _ := (ProviderJudge{Prov: replyProvider("ESCALATE: deletes files")}).JudgeScript(ctx, "x", "y", "s1"); !r {
+		t.Fatal("ESCALATE must be risky")
+	}
+	if r, err := (ProviderJudge{}).JudgeScript(ctx, "x", "y", "s1"); !r || err == nil {
+		t.Fatal("no provider must be risky", r, err)
+	}
+	var _ ScriptJudge = ProviderJudge{}
 }

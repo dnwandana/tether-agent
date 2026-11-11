@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
@@ -36,6 +37,12 @@ const (
 // DefaultApprovalTimeout is the time that the gate waits for an answer when
 // Gate.Timeout is zero. The config key is approvals.timeout_s.
 const DefaultApprovalTimeout = 600 * time.Second
+
+// ScriptPatternID is the synthetic rule ID of a script that execute_code runs.
+const ScriptPatternID = "execute_code"
+
+// scriptDescription is the description of a script that matches no literal rule.
+const scriptDescription = "run a Python script on the host"
 
 // ApprovalRequest is one command that the gate checks. Kind is the kind of
 // run, for example "chat", "cron", or "subagent". RootKind is the kind of the
@@ -73,6 +80,12 @@ type Prompter interface {
 // that makes a model call records the usage in that session.
 type Judge interface {
 	Judge(ctx context.Context, command, description, sessionID string) (risky bool, err error)
+}
+
+// ScriptJudge is an optional interface of Gate.Judge. It decides if a script
+// is risky. Without it, smart mode sends a script to the user.
+type ScriptJudge interface {
+	JudgeScript(ctx context.Context, script, description, sessionID string) (risky bool, err error)
 }
 
 // BlockedError tells the model why the gate did not let a command run.
@@ -133,8 +146,67 @@ func NewGate(cfg config.ApprovalsConfig, d *db.DB) *Gate {
 // Check returns nil when the command may run. Otherwise it returns a
 // *BlockedError with the text for the model. The order is the hardline
 // list, the sudo guard, the gateway self-kill rules, then the dangerous rules. No mode and no
-// earlier answer can skip the first two steps.
+// earlier answer can skip the first two steps. A state.db rule asks each time,
+// with no grant, no saved answer, and no judge. Else the gate checks the grant
+// of each protected rule that matches and of the first general rule. Thus a
+// grant for a protected path in one part of a compound command cannot cover a
+// different danger in another part. The gate asks about the first rule that
+// has no grant. A protected rule never saves an "Always" answer and never
+// reads one, because an older version saved such rows.
 func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error {
+	if err := g.floor(req); err != nil {
+		return err
+	}
+	pats := MatchAllDangerous(req.Command)
+	if len(pats) == 0 {
+		return nil
+	}
+	// Hermes: approvals.mode=off runs every dangerous command, also in cron.
+	if g.Mode == "off" {
+		return nil
+	}
+	pat := pats[0]
+	stateDB := IsStateDBPatternID(pat.ID)
+	if !stateDB {
+		var ok bool
+		if pat, ok = g.firstUngranted(ctx, sessionOf(req), pats); !ok {
+			return nil
+		}
+	}
+	req.PatternID, req.Description = pat.ID, pat.Description
+	if IsProtectedPatternID(pat.ID) {
+		req.NoAlways = true
+	}
+	if stateDB {
+		req.NoSession = true
+	}
+
+	if isCron(req) {
+		if cronApproves(g.CronMode) {
+			return nil
+		}
+		return blocked("BLOCKED: Command flagged as dangerous (%s) but cron jobs run without a user "+
+			"present to approve it. Find an alternative approach that avoids this command. "+
+			"To allow dangerous commands in cron jobs, set approvals.cron_mode: approve in config.yaml.",
+			pat.Description)
+	}
+	if g.Mode == "smart" && g.Judge != nil && !stateDB {
+		risky, err := g.Judge.Judge(ctx, req.Command, pat.Description, req.SessionID)
+		if err != nil {
+			g.logf("approval: the smart judge failed, so the gate asks the user", "pattern", pat.ID, "err", err)
+		}
+		if err == nil && !risky {
+			// A smart approval covers this command only, as in Hermes. A pattern
+			// grant would let one safe command skip the review of later commands.
+			return nil
+		}
+	}
+	return g.ask(ctx, req, p)
+}
+
+// floor runs the checks that no mode and no earlier answer can skip: the
+// hardline list, the sudo guard, and the gateway self-stop rules.
+func (g *Gate) floor(req ApprovalRequest) error {
 	if pat, ok := MatchHardline(req.Command); ok {
 		return blocked("BLOCKED (hardline): %s. This command is on the unconditional blocklist. "+
 			"No approval mode, cron setting, or earlier answer can allow it. "+
@@ -150,21 +222,30 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 			return blocked("%s", GatewaySelfBlocked)
 		}
 	}
-	pat, ok := MatchDangerous(req.Command)
-	if !ok {
-		return nil
-	}
-	req.PatternID, req.Description = pat.ID, pat.Description
+	return nil
+}
 
-	// Hermes: approvals.mode=off runs every dangerous command, also in cron.
+// CheckScript returns nil when the script in req.Command may run. It asks one
+// time for each script with the rule ScriptPatternID. A literal match of a
+// danger rule makes the gate ask each time. A script never reads or writes
+// approvals_always.
+func (g *Gate) CheckScript(ctx context.Context, req ApprovalRequest, p Prompter) error {
+	if err := g.floor(req); err != nil {
+		return err
+	}
 	if g.Mode == "off" {
 		return nil
 	}
-	if g.approved(ctx, sessionOf(req), pat.ID) {
+	req.PatternID, req.Description, req.NoAlways = ScriptPatternID, scriptDescription, true
+	pat, literal := MatchDangerous(req.Command)
+	if literal {
+		req.NoSession = true
+		req.Description = scriptDescription + " (" + pat.Description + ")"
+	} else if g.sessionApproved(sessionOf(req), ScriptPatternID) {
 		return nil
 	}
 	if isCron(req) {
-		if cronApproves(g.CronMode) {
+		if !literal || cronApproves(g.CronMode) {
 			return nil
 		}
 		return blocked("BLOCKED: Command flagged as dangerous (%s) but cron jobs run without a user "+
@@ -172,14 +253,15 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 			"To allow dangerous commands in cron jobs, set approvals.cron_mode: approve in config.yaml.",
 			pat.Description)
 	}
-	if g.Mode == "smart" && g.Judge != nil {
-		risky, err := g.Judge.Judge(ctx, req.Command, pat.Description, req.SessionID)
+	// A script that uses state.db never goes to the judge, the same as a command.
+	stateDB := literal && IsStateDBPatternID(pat.ID)
+	if sj, ok := g.Judge.(ScriptJudge); ok && g.Mode == "smart" && !stateDB &&
+		utf8.RuneCountInString(req.Command) <= SmartScriptMaxChars {
+		risky, err := sj.JudgeScript(ctx, req.Command, req.Description, req.SessionID)
 		if err != nil {
-			g.logf("approval: the smart judge failed, so the gate asks the user", "pattern", pat.ID, "err", err)
+			g.logf("approval: the smart judge failed, so the gate asks the user", "pattern", ScriptPatternID, "err", err)
 		}
 		if err == nil && !risky {
-			// Hermes gives a smart approval the session scope.
-			g.approveSession(sessionOf(req), pat.ID)
 			return nil
 		}
 	}
@@ -206,10 +288,18 @@ func (g *Gate) ask(ctx context.Context, req ApprovalRequest, p Prompter) error {
 	case ScopeOnce:
 		return nil
 	case ScopeSession:
-		g.approveSession(sessionOf(req), req.PatternID)
+		if !req.NoSession {
+			g.approveSession(sessionOf(req), req.PatternID)
+		}
 		return nil
 	case ScopeAlways:
+		if req.NoSession {
+			return nil
+		}
 		g.approveSession(sessionOf(req), req.PatternID)
+		if req.NoAlways {
+			return nil
+		}
 		if err := g.saveAlways(ctx, req.PatternID); err != nil {
 			g.logf("approval: cannot save the Always answer, so it holds for this session only",
 				"pattern", req.PatternID, "err", err)
@@ -337,6 +427,36 @@ func (g *Gate) approveSession(session, patternID string) {
 		g.sessions[session] = map[string]bool{}
 	}
 	g.sessions[session][patternID] = true
+}
+
+// firstUngranted returns the first rule in pats that has no grant. It checks
+// each protected rule and the first general rule. Like Hermes, it ignores the
+// general rules after the first, so that a grant for "rm -rf /tmp/x" covers
+// the next "rm -rf /tmp/y". It returns false when each checked rule has a
+// grant. pats must be in the order of MatchAllDangerous.
+func (g *Gate) firstUngranted(ctx context.Context, session string, pats []Pattern) (Pattern, bool) {
+	for _, pat := range pats {
+		if !g.granted(ctx, session, pat.ID) {
+			return pat, true
+		}
+		if !IsProtectedPatternID(pat.ID) {
+			break
+		}
+	}
+	return Pattern{}, false
+}
+
+// granted reports whether an earlier answer allows the rule. A state.db rule
+// never has a grant. A protected rule reads only the session answers.
+func (g *Gate) granted(ctx context.Context, session, patternID string) bool {
+	switch {
+	case IsStateDBPatternID(patternID):
+		return false
+	case IsProtectedPatternID(patternID):
+		return g.sessionApproved(session, patternID)
+	default:
+		return g.approved(ctx, session, patternID)
+	}
 }
 
 // approved reports whether the session or an "Always" answer allows the

@@ -34,6 +34,28 @@ Rules:
 
 Respond with exactly one line: "APPROVE: <short reason>" or "ESCALATE: <short reason>"`
 
+// SmartScriptMaxChars is the most characters of a script that the judge gets.
+// A longer script can exceed the context of the judge.
+const SmartScriptMaxChars = 8000
+
+// smartScriptPrompt is the prompt for a Python script of execute_code. It has
+// the form of smartPrompt.
+const smartScriptPrompt = `You are a security reviewer for an AI coding agent. A Python script will run on the host with the permissions of the user.
+
+Script:
+%s
+
+Flagged reason: %s
+
+Assess the ACTUAL risk of this script.
+
+Rules:
+- APPROVE if the script is clearly safe (computation, text and data handling, reads, writes in the working folder)
+- ESCALATE if the script could genuinely damage the system: it deletes or overwrites user or system files, kills processes, changes permissions, or sends local files or secrets to the network
+- ESCALATE if you're uncertain
+
+Respond with exactly one line: "APPROVE: <short reason>" or "ESCALATE: <short reason>"`
+
 // ProviderJudge is the smart-mode Judge. It asks the model of Prov, the default
 // chain, if a flagged command is risky. Each failure counts as risky, so the
 // gate then asks the user.
@@ -47,13 +69,24 @@ type ProviderJudge struct {
 // example "APPROVE: <reason>". An error also returns risky=true. After a
 // completed call, it records the usage with Record, also for an empty answer.
 func (j ProviderJudge) Judge(ctx context.Context, command, description, sessionID string) (bool, error) {
+	return j.ask(ctx, fmt.Sprintf(smartPrompt, command, description), sessionID)
+}
+
+// JudgeScript works like Judge for the text of a Python script. It returns
+// risky=true on each failure.
+func (j ProviderJudge) JudgeScript(ctx context.Context, script, description, sessionID string) (bool, error) {
+	return j.ask(ctx, fmt.Sprintf(smartScriptPrompt, script, description), sessionID)
+}
+
+// ask sends the prompt to the model and reads the verdict.
+func (j ProviderJudge) ask(ctx context.Context, prompt, sessionID string) (bool, error) {
 	if j.Prov == nil {
 		return true, errors.New("smart approval: no provider is set")
 	}
 	ctx, cancel := context.WithTimeout(ctx, smartTimeout)
 	defer cancel()
 	ch, err := j.Prov.Stream(ctx, provider.Request{
-		Messages:  []provider.Message{{Role: provider.RoleUser, Content: fmt.Sprintf(smartPrompt, command, description)}},
+		Messages:  []provider.Message{{Role: provider.RoleUser, Content: prompt}},
 		MaxTokens: smartMaxTokens,
 	})
 	if err != nil {

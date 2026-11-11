@@ -2,6 +2,7 @@ package security
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -70,6 +71,24 @@ var HardlinePatterns = []Pattern{
 	// The CLI accepts flags before the command word, so flag tokens and their
 	// values can come between "tether", "skills", and the command.
 	newPattern("tether_skills_change_hardline", "tether skills install/update/uninstall (only the owner runs these, in a terminal)", `\btether(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+skills(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+(install|update|uninstall)\b`),
+}
+
+// TetherDangerousPatterns are dangerous rules that only Tether Agent has. They
+// are not in DangerousPatterns, so that list stays the Hermes list.
+var TetherDangerousPatterns = []Pattern{
+	newPattern("sqlite_client_state_db", "SQLite client on state.db", `\b(?:sqlite3?|litecli|sqlite-utils)\b[^\n;&|]*\bstate\.db\b`),
+}
+
+// IsProtectedPatternID reports whether id is the ID of a protected path rule
+// or of the SQLite client rule for state.db.
+func IsProtectedPatternID(id string) bool {
+	return strings.HasPrefix(id, "protected_path_") || id == "sqlite_client_state_db"
+}
+
+// IsStateDBPatternID reports whether id is the ID of a rule that guards
+// state.db: a protected path use rule or the SQLite client rule.
+func IsStateDBPatternID(id string) bool {
+	return strings.HasPrefix(id, "protected_path_use_") || id == "sqlite_client_state_db"
 }
 
 // DangerousPatterns need an approval before they run. This is Hermes
@@ -189,16 +208,48 @@ func MatchSudoStdin(cmd string, sudoPasswordSet bool) bool {
 }
 
 // MatchDangerous returns the first dangerous rule that matches cmd. It checks
-// DangerousPatterns first, then the protected path rules.
+// the state.db rules first, then the other protected path rules, then
+// TetherDangerousPatterns, then DangerousPatterns. The protected rules come
+// first, so that an earlier grant for a general rule cannot cover a protected
+// path in a compound command. The state.db rules come before all of them, so
+// that a grant for another protected path cannot cover a state.db command.
 func MatchDangerous(cmd string) (Pattern, bool) {
-	s := prepare(cmd)
-	if p, ok := matchFirst(DangerousPatterns, s); ok {
-		return p, true
+	all := MatchAllDangerous(cmd)
+	if len(all) == 0 {
+		return Pattern{}, false
 	}
+	return all[0], true
+}
+
+// MatchAllDangerous returns each dangerous rule that matches cmd, one time
+// for each ID, in the order of MatchDangerous. A compound command can match
+// more than one rule, and the gate must check the grant of each one.
+func MatchAllDangerous(cmd string) []Pattern {
+	s := prepare(cmd)
 	protectedMu.RLock()
 	extra := protectedPatterns
 	protectedMu.RUnlock()
-	return matchFirst(extra, s)
+	var out []Pattern
+	seen := map[string]bool{}
+	add := func(p Pattern) {
+		if !seen[p.ID] && p.matches(s) {
+			seen[p.ID] = true
+			out = append(out, p)
+		}
+	}
+	for _, list := range [][]Pattern{extra, TetherDangerousPatterns} {
+		for _, p := range list {
+			if IsStateDBPatternID(p.ID) {
+				add(p)
+			}
+		}
+	}
+	for _, list := range [][]Pattern{extra, TetherDangerousPatterns, DangerousPatterns} {
+		for _, p := range list {
+			add(p)
+		}
+	}
+	return out
 }
 
 func matchFirst(list []Pattern, s string) (Pattern, bool) {
@@ -222,9 +273,16 @@ var (
 
 // protectedOps finds a shell write to the path that follows it: a ">" or
 // ">>" redirection, or tee, cp, mv, install, ln, rm, truncate, chmod, chown,
-// dd, rsync, or "sed -i" with the path as an argument. The argument must be in
-// the same simple command.
-const protectedOps = `(?:>>?\s*["']?|\b(?:tee|cp|mv|install|ln|rm|truncate|chmod|chown|dd|rsync)\b[^\n;&|]*?[\s="']|\bsed\s+(?:-[^\s]*i|--in-place)[^\n;&|]*?[\s"'])`
+// dd, rsync, sqlite3, or sponge, or "sed -i" (also gsed and busybox sed), or
+// "perl -i", or "awk -i inplace" (also gawk), or ed or ex as the first word of
+// a simple command, with the path as an argument. The argument must be in the
+// same simple command.
+const protectedOps = `(?:>>?\s*["']?` +
+	`|\b(?:tee|cp|mv|install|ln|rm|truncate|chmod|chown|dd|rsync|sqlite3|sponge)\b[^\n;&|]*?[\s="']` +
+	`|\bg?sed\s+(?:-[^\s]*i|--in-place)[^\n;&|]*?[\s"']` +
+	`|\bperl\s+(?:-\S+\s+)*-[a-z]*i\S*[^\n;&|]*?[\s"']` +
+	"|\\bg?awk\\b[^\\n;&|]*?-i\\s+inplace\\b[^\\n;&|]*?[\\s\"']" +
+	"|(?:^|[;&|\\n(`]|\\$\\()\\s*(?:sudo\\s+)?(?:ed|ex)\\b[^\\n;&|]*?[\\s\"'])"
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -232,7 +290,8 @@ var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 // protected paths. A path that ends in "/" is a folder and covers all files
 // in it. A file path also covers the names that start with it, for example
 // state.db-wal. Each call replaces the rules of the call before it. A path in
-// the home folder also matches the "~", "$HOME", and "${HOME}" forms.
+// the home folder also matches the "~", "$HOME", and "${HOME}" forms. A
+// state.db path also gets a use rule that matches each command that names it.
 func AddProtectedPathPatterns(paths []string) {
 	home, _ := os.UserHomeDir()
 	out := make([]Pattern, 0, len(paths))
@@ -256,6 +315,9 @@ func AddProtectedPathPatterns(paths []string) {
 			src += "(?:/|[\\s\"'`;&|)]|$)"
 		}
 		slug := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(base), "_"), "_")
+		if filepath.Base(base) == "state.db" {
+			out = append(out, newPattern("protected_path_use_"+slug, "use of the Tether Agent database", "(?:"+strings.Join(alts, "|")+")"))
+		}
 		out = append(out, newPattern("protected_path_write_"+slug, "write to protected path "+p, src))
 	}
 	protectedMu.Lock()
