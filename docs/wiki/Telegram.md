@@ -112,7 +112,7 @@ restart it.
 
 The bot checks a sender in this order:
 
-1. `telegram.group_allowed_chats`: every member of these groups. `*` permits all groups.
+1. `telegram.group_allowed_chats`: each user in these groups, as a member. `*` permits all groups.
 2. `telegram.allow_all_users`: every user. Use it only for a test bot.
 3. Users that you approved with pairing.
 4. `telegram.allowed_users`, and in groups also `telegram.group_allowed_users`. `*` permits
@@ -130,6 +130,32 @@ sender in a group. `telegram.group_allowed_users` does not permit direct message
 > **Note:** The setup wizard adds your id to `telegram.allowed_users`. After that, the default
 > is `ignore`, so the bot does not reply to new users. To let new users ask for a pairing code,
 > set `telegram.unauthorized_dm_behavior: pair`.
+
+### Owners and members
+
+The bot has owners and members. An owner is a user that one of these admits:
+
+- pairing
+- `telegram.allowed_users`
+- `telegram.group_allowed_users`, in a group
+- `telegram.allow_all_users: true`
+
+A `*` entry counts. A user that only `telegram.group_allowed_chats` admits is a member. A
+message with no user ID is from a member. The CLI is always the owner.
+
+A member can talk to the bot and run `/help`, `/new`, `/reset`, `/stop`, `/steer`, `/now`,
+`/todo`, `/sessions`, and `/usage`. Another command gets `⛔ Only the owner can use /<word>.`
+In a shared session, `/new`, `/reset`, `/stop`, and `/now` get
+`⛔ Only the owner can use /<word> in a shared session.` A shared session is a forum topic with
+`thread_sessions_per_user: false`, an observed chat, or a group with
+`group_sessions_per_user: false`.
+
+In a shared session, a busy reply to a member has no **⚡ Do this now** button, because `/now`
+is owner-only there. `/help` for a member in a shared session adds the line
+`In a shared session, only the owner can use /new, /stop, and /now.`
+
+Only an owner can answer an approval and send `/sethome`, `/approve`, or `/deny`.
+Add each trusted group member to `telegram.group_allowed_users`.
 
 ## Groups and topics
 
@@ -185,6 +211,7 @@ Two keys add the user to the key:
 
 Cron jobs that you create from the CLI send their results to the home channel. To set it, send
 `/sethome` in the chat or topic that you want. The command saves the chat in `state.db`.
+Only an owner can send `/sethome`. A member gets `⛔ Only the owner can use /sethome.`
 
 You can also set a first value in the config:
 
@@ -396,6 +423,10 @@ session answer.
 These commands do not go through the gateway queue, so they work also while a task waits for
 the approval. See [Security](Security) for the approval rules.
 
+Only an owner can answer an approval, with a button or with a command. A member gets
+`⛔ Only the owner can answer this prompt.` Any owner can answer each approval. `/approve` and
+`/deny` answer only the approvals of the same topic.
+
 ### While the agent is busy
 
 The gateway runs one turn at a time for each session. A message that you send during a turn
@@ -431,6 +462,15 @@ For `/stop`, `/stop keep`, `/now`, and `/steer`, see
 
 The agent can ask you a question with the `clarify` tool. The bot shows the choices as buttons.
 You can also type the answer as the next message.
+
+Only the user whose turn asked the question can answer it. A tap of another user gets
+`⛔ This question is for another user.` A text of another user goes on as a normal message. A
+question from a turn with no user, for example a goal turn, goes to any owner.
+
+In an observed chat, all users share the session. The question still binds to the sender of
+the turn that asked it, so a member answers the question of their own turn. Merged texts or
+left-over texts of more than one sender have no user. Only an owner answers the question of
+such a turn.
 
 ### The model list
 
@@ -474,6 +514,9 @@ say that the message runs after the restart.
 
 A tap on a command button runs the action of the button as a typed command. Thus the busy rule
 applies to a button too. The **Resume** button of a goal notice starts the next goal turn.
+
+A member tap on a button of an owner-only command gets `⛔ Only the owner can use /<word>.`
+The bot does not show such buttons to a member.
 
 ## Media that you send
 

@@ -44,8 +44,9 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   4. When the session has an active goal, `goals.Manager` runs the after-turn step: the wait
      check, the gates, and the judge. On `continue`, the gateway adds a continuation turn to
      the end of the queue. The CLI runs it at once.
-  5. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool and the script text
-     of `execute_code` go through `security.Gate.Check` (the approval gate). The permission
+  5. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool goes through
+     `security.Gate.Check` (the approval gate). The script text of `execute_code` goes through
+     `security.Gate.CheckScript` (through `tools.ScriptApprover`). The permission
      requests of the coding agent of `acp_delegate` go through `security.Gate.AskACP`.
   6. `provider` streams the answer (`openai`, `anthropic`, or `responses` wire format). Each
      model call goes through a `provider.Chain` from `provider.Set.ChainFor`. The chain order

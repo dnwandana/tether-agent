@@ -159,6 +159,7 @@ These keys are the ones that most users change. The full list is in
 | `telegram.enabled` | `false` | When `true`, the gateway runs the Telegram channel. |
 | `telegram.allowed_users` | `[]` | The Telegram user ids that can use the bot. |
 | `sessions.retention_days` | `90` | The gateway deletes cron, subagent, review, and goal judge sessions after this number of days. Chat sessions always stay. |
+| `media.cache_retention_days` | `7` | The gateway deletes the files in `cache/media/` and `cache/screenshots/` after this number of days. `0` keeps all files. |
 | `log.level` | `info` | The log level: `debug`, `info`, `warn`, or `error`. |
 
 ## Toolsets per channel

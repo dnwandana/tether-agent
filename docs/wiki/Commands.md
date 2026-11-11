@@ -38,7 +38,7 @@ You can put flags after the positional arguments.
 | Command | Purpose | Flags | Example |
 |---|---|---|---|
 | `setup` | Runs the setup wizard in five steps: the primary provider (a preset or Custom), the fallback chain, Telegram, the host programs, and the systemd unit. See [Providers](Providers). | `--system` writes a system unit instead of a user unit. Under `sudo`, the data dir and its files belong to the user who called `sudo`. | `tether setup` |
-| `doctor` | Checks the config, `.env`, each provider entry, Telegram, `state.db`, the last answer, the host programs, the systemd unit, MCP, the coding agents of `acp` (when `acp.enabled` is `true`), the disk, and the release. Exits with 1 if a check fails. | | `tether doctor` |
+| `doctor` | Checks the config, `.env`, each provider entry, Telegram, `state.db`, the last answer, the data folder, the memory, the host programs, the systemd unit, MCP, the coding agents of `acp` (when `acp.enabled` is `true`), the disk, and the release. Exits with 1 if a check fails. | | `tether doctor` |
 | `chat` | Starts a chat in the terminal. | `--log-stderr`, `--log-level` | `tether chat` |
 | `gateway` | Runs Telegram and cron until it gets SIGINT or SIGTERM. | `--log-stderr`, `--log-level` | `tether gateway` |
 | `sessions list` | Shows the 50 newest sessions. | | `tether sessions list` |
@@ -75,8 +75,8 @@ task runs.
 | `/fork` | `[title]` | Copies the session and changes to the copy. An active goal of the current session pauses. | `↩️ Back to "<title>"` | no |
 | `/compact` | | Summarizes the older messages now. | | no |
 | `/reload-mcp` | | Reloads the MCP servers. The next request does not use the prompt cache. | | no |
-| `/usage` | `[today\|7d\|30d\|all\|session]` | Shows the tokens, the cached input tokens, the cache hit rate, and the cost for each model. The default range is `today`. A range counts all chats and all groups, and the header says "all chats". `all` shows all stored usage. `session` counts the current session and its subagents, reviews, goal judge calls, and side calls (compaction, `view_image`, and smart approval). A fork counts only the calls after the fork. `session` also shows the number of compactions. In the terminal, the last line shows the ranges. | Today, 7 days, and 30 days in the first row. All and Session in the second row. | yes |
-| `/help` | `[skills]` | Shows the main commands and the first 10 skill commands. `/help skills` shows all skill commands. | | yes |
+| `/usage` | `[today\|7d\|30d\|all\|session]` | Shows the tokens, the cached input tokens, the cache hit rate, and the cost for each model. The default range is `today`. A range counts all chats and all groups, and the header says "all chats". `all` shows all stored usage. `session` counts the current session and its subagents, reviews, goal judge calls, and side calls (compaction, `view_image`, and smart approval). A fork counts only the calls after the fork. `session` also shows the number of compactions. In the terminal, the last line shows the ranges. A member gets the `session` form. See [Owners and members](#owners-and-members). | Today, 7 days, and 30 days in the first row. All and Session in the second row. | yes |
+| `/help` | `[skills]` | Shows the main commands and the first 10 skill commands. `/help skills` shows all skill commands. For a member, it lists only the member commands and the skill commands. | | yes |
 | `/stop` | `[keep]` | Stops the task. `keep` keeps the waiting messages. It also pauses an active goal. | | yes |
 | `/steer` | `<text>` | Adds guidance to the running task. | ⚡ Do this now | yes |
 | `/now` | | Stops the task and runs your waiting message now. | | yes |
@@ -88,6 +88,28 @@ task runs.
 In the Telegram command menu, `/reload-mcp` is `/reload_mcp`, because Telegram does not permit
 `-` in a command name. The two names do the same thing. The menu does not show `/start`,
 `/reset`, `/resume`, and `/subgoal`, but they work.
+
+### Owners and members
+
+In Telegram, the bot has owners and members. A user that only
+`telegram.group_allowed_chats` admits is a member. The CLI is always the owner. See
+[Telegram](Telegram#owners-and-members).
+
+A member can run `/help`, `/new`, `/reset`, `/stop`, `/steer`, `/now`, `/todo`, `/sessions`,
+and `/usage`. Each other command is owner-only, also a new command. A member gets
+`⛔ Only the owner can use /<word>.` `<word>` is the name of the command, for example
+`reload-mcp`.
+
+- In a shared session, `/new`, `/reset`, `/stop`, and `/now` are owner-only for a member. The
+  reply is `⛔ Only the owner can use /<word> in a shared session.`
+- `/help` from a member in a shared session adds the line
+  `In a shared session, only the owner can use /new, /stop, and /now.` A busy reply to such a
+  member has no **⚡ Do this now** button.
+- `/usage` from a member shows the `session` form, with no range buttons. A range gets
+  `⛔ Only the owner can see the usage of all chats. Send /usage session.`
+- The reply to a member does not show the buttons of owner-only commands, for example the
+  actions of `/sessions`.
+- A skill command is a model turn, and a member can use it.
 
 ### Skill commands
 
@@ -187,9 +209,9 @@ restarted. Your session continues." The reply also names each running coding tas
 | Command | Where | Effect |
 |---|---|---|
 | `/start` | Telegram only | Shows a welcome message with 📋 Sessions, 🧠 Model, and 📊 Usage buttons. |
-| `/sethome` | Telegram only | Makes this chat or topic the home channel for cron results. |
-| `/approve` | Telegram only | `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. On a coding agent request, `always` gives `session`, or `once` when the request has no session answer. |
-| `/deny` | Telegram only | `[all]`. Denies the oldest waiting command, or all of them. |
+| `/sethome` | Telegram only | Owner only. Makes this chat or topic the home channel for cron results. |
+| `/approve` | Telegram only | Owner only. Answers only the approvals of the same topic. `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. On a coding agent request, `always` gives `session`, or `once` when the request has no session answer. |
+| `/deny` | Telegram only | Owner only. Answers only the approvals of the same topic. `[all]`. Denies the oldest waiting command, or all of them. |
 | `/restart` | Gateway only | `tether chat` does not have it. |
 | `/exit`, `/quit` | CLI only | Ends the chat. |
 

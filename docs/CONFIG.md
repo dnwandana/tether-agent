@@ -186,7 +186,7 @@ stays with no parent.
 | Key | Default | Effect |
 |---|---|---|
 | `terminal.default_timeout_s` | `120` | The default timeout of the `terminal` tool, in seconds. |
-| `terminal.env_passthrough` | `[]` | Names of secret environment variables that child processes can see. |
+| `terminal.env_passthrough` | `[]` | Names of secret environment variables that child processes can see. A secret that a skill needs passes only through this list. |
 
 ## code_execution
 
@@ -256,8 +256,8 @@ The gateway applies `cron.missed_runs` when it starts. The rules are:
 | `telegram.bot_token` | `""` | The bot token. When the file does not set it, the program uses `${TELEGRAM_BOT_TOKEN}`. |
 | `telegram.allowed_users` | `[]` | User ids that can use the bot. `*` permits all users. |
 | `telegram.allow_all_users` | `false` | When `true`, every user can use the bot. Use it only for a test bot. |
-| `telegram.group_allowed_users` | `[]` | User ids that can use the bot in groups. This list does not permit direct messages. |
-| `telegram.group_allowed_chats` | `[]` | Group chat ids where every member can use the bot. `*` permits all groups. |
+| `telegram.group_allowed_users` | `[]` | User ids that can use the bot in groups. This list does not permit direct messages. A user in this list is an owner in a group. |
+| `telegram.group_allowed_chats` | `[]` | Group chat ids where each member can talk to the bot. `*` permits all groups. Only an owner can answer an approval and run the owner commands. Add a trusted member to `group_allowed_users`. |
 | `telegram.allowed_chats` | `[]` | When set, the bot answers only in these group chats. `[]` sets no chat limit. |
 | `telegram.free_response_chats` | `[]` | Group chats where the bot answers every message, with no mention. |
 | `telegram.require_mention` | `false` | When `true`, the bot answers in a group only to a mention, a reply, or a mention pattern. |
@@ -353,6 +353,8 @@ the request to an OpenAI-format endpoint. `""` hides the tool.
 
 The command templates can use the placeholders `{text}`, `{in}`, `{out}`, `{out_base}`,
 `{prompt}`, and `{size}`. The program never runs a template through a shell.
+When a template word is only `{text}` or `{prompt}` and the value starts with `-`,
+the program puts one space before the value. Thus the program does not read the value as an option.
 
 | Key | Default | Effect |
 |---|---|---|
@@ -365,6 +367,7 @@ The command templates can use the placeholders `{text}`, `{in}`, `{out}`, `{out_
 | `media.image.backend` | `""` | The backend of `generate_image`. `""` hides the tool. |
 | `media.image.command` | `""` | The command template of `generate_image`. |
 | `media.image.provider` | `""` | The provider entry for the `endpoint` backend of `generate_image`. `""` uses `primary`. |
+| `media.cache_retention_days` | `7` | The gateway deletes a file in `cache/media/` and `cache/screenshots/` when its last change is older than this number of days. The check runs at start and each 24 hours. `0` keeps all files. A negative value is a config error. `tether chat` alone deletes no files. |
 
 ## pricing
 

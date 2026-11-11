@@ -39,14 +39,20 @@ The doctor runs the checks in this order:
 5. **state.db**: the database opens, and the migrations are current.
 6. **last answer**: the provider entry and the model of the newest answer. A warning tells
    you that an entry other than the first entry of the turn gave that answer.
-7. **host programs**: Chrome, `python3`, `pdftotext`, `git`, `ffmpeg`, and the programs of the
+7. **data folder**: the mode of the data folder `~/.tether`. A warning tells you when other
+   users can read it. Run `chmod 700` on the folder. On a file system with no Unix modes, the
+   warning tells you to move the data folder to a Linux file system and to set `TETHER_HOME`.
+8. **memory**: the entries of `memory.md` and `user_profile.md` that the memory threat scan
+   blocks. A warning lists each blocked entry. Ask the agent to remove each entry with the
+   memory tool.
+9. **host programs**: Chrome, `python3`, `pdftotext`, `git`, `ffmpeg`, and the programs of the
    text to speech and speech to text commands. A missing program is a warning, and the line
    names the feature that is lost. A missing `ffmpeg` is OK when no feature needs it, for
    example when Telegram voice is off.
-8. **systemd unit**: a warning when the unit file is from an older release. The doctor
+10. **systemd unit**: a warning when the unit file is from an older release. The doctor
    shows this line only when a unit file exists.
-9. **mcp** (one line for each server): the server starts and lists its tools.
-10. **acp** (only when `acp.enabled` is `true`): the doctor starts each enabled coding agent
+11. **mcp** (one line for each server): the server starts and lists its tools.
+12. **acp** (only when `acp.enabled` is `true`): the doctor starts each enabled coding agent
     and stops it again. These lines show for each agent, for example `acp claude-code command`:
     - **command**: the adapter program exists.
     - **path**: a warning when the program comes from the `PATH` of your shell. The service does
@@ -59,8 +65,8 @@ The doctor runs the checks in this order:
     The lines of an agent stop at the first failure. The **acp allowlist** line gives a warning
     when `acp.workdir_allowlist` is empty. The **acp agents** line gives a warning when no agent
     is enabled.
-11. **disk**: a warning when less than 1 GiB is free.
-12. **release**: a warning when a newer release exists or when the check cannot go online.
+13. **disk**: a warning when less than 1 GiB is free.
+14. **release**: a warning when a newer release exists or when the check cannot go online.
 
 When the config does not load, the doctor skips the provider, telegram, mcp, and acp checks.
 

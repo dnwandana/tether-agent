@@ -107,8 +107,8 @@ The bot replies:
 ⚿ Gate added: $ go test ./internal/cron/ -count=20 (3 retries, 300s timeout). It must pass before the goal can complete.
 ```
 
-- Tether Agent checks the gate one time, when you add it. It refuses a command of the
-  hardline list.
+- Tether Agent checks the gate when you add it. It checks the gate again before each run.
+  It refuses a command of the hardline list.
 - On Telegram, it also refuses a command that stops the gateway.
 - It refuses a `sudo -S` command when `SUDO_PASSWORD` is not set. When `SUDO_PASSWORD` is
   set, it does not refuse such a command. The command then gets the same check as each other
@@ -116,6 +116,8 @@ The bot replies:
   "sudo with privilege flag". Else Tether Agent adds the gate at once.
 - A dangerous command needs a confirmation: **Add gate** and **Cancel** on Telegram, `[y/N]`
   in the CLI.
+- A gate that is refused at run time does not run. The goal pauses at once, and you get a
+  notice.
 - The gate then runs before each judge call, with no approval prompt.
 - It runs in the folder where Tether Agent started, with no secrets in its environment.
   Write `cd /path && <command>` for another folder.

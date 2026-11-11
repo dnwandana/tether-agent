@@ -25,7 +25,7 @@ The frontmatter has these fields:
 |---|---|---|
 | `name` | Yes | The name of the skill. A skill that the agent writes must have the same name as its folder. |
 | `description` | Yes | The text that the agent sees in its skill list. Write when to use the skill. The list shows a maximum of 1024 characters. |
-| `required_environment_variables` | No | The names of secret variables that the skill needs. When a session loads the skill, these variables go to the `terminal` and `execute_code` tools. The secrets of Tether Agent itself (the bot token and the provider keys) never pass this way; put such a name in `terminal.env_passthrough`. |
+| `required_environment_variables` | No | The names of the variables that the skill needs. A skill passes no variable. Only `terminal.env_passthrough` passes a variable to the `terminal` and `execute_code` tools. `skill_view` shows one status for each name: `passed`, `not passed: add it to terminal.env_passthrough in config.yaml`, or `not set`. |
 
 A skill folder can also have two subfolders:
 
@@ -285,7 +285,7 @@ Do not put an API call with a key in a skill. Use this pattern:
 
 1. Put the API call in a script in `~/.tether/scripts/`.
 2. Tell the agent in the skill to run that script with `terminal`.
-3. Give the key to the script through `required_environment_variables`.
+3. Add the name of the key to `terminal.env_passthrough` in `config.yaml`.
 
 The [security model](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#skill-guard)
 gives the full rules.

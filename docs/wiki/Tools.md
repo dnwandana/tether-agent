@@ -373,7 +373,9 @@ A script can call only these tools: `web_search`, `web_fetch`, `read_file`, `wri
 | `code_execution.max_stdout_bytes` | `50000` | The maximum output that goes back to the model. |
 
 - The script runs in a scratch folder.
-- The script gets an environment with no secrets. The exceptions are the names in
-  `terminal.env_passthrough` and the `required_environment_variables` of a loaded skill.
-- The approval gate checks the full text of the script before it runs. Refer to
-  [Security](Security#the-approval-gate).
+- The script gets an environment with no secrets. The only exception is the names in
+  `terminal.env_passthrough`.
+- Each script needs an approval for the rule `execute_code` (`run a Python script on the
+  host`). A clean script needs one approval for each session. A script with a literal
+  dangerous command asks each time. Refer to
+  [Security](Security#scripts-of-execute_code).
