@@ -150,6 +150,8 @@ type allowAll struct{}
 
 func (allowAll) CheckCommand(context.Context, *Env, string, string) error { return nil }
 
+func (allowAll) CheckScript(context.Context, *Env, string, string) error { return nil }
+
 // denyAll is an Approver that blocks each command with reason and records the commands.
 type denyAll struct {
 	reason string
@@ -161,6 +163,10 @@ func (d denyAll) CheckCommand(_ context.Context, _ *Env, command, _ string) erro
 		*d.seen = append(*d.seen, command)
 	}
 	return &security.BlockedError{Reason: d.reason}
+}
+
+func (d denyAll) CheckScript(ctx context.Context, env *Env, code, summary string) error {
+	return d.CheckCommand(ctx, env, code, summary)
 }
 
 // runExec runs tool with a new Env that lets each command run.
@@ -437,6 +443,33 @@ type recApprover struct{ summaries *[]string }
 func (r recApprover) CheckCommand(_ context.Context, _ *Env, _, summary string) error {
 	*r.summaries = append(*r.summaries, summary)
 	return &security.BlockedError{Reason: "BLOCKED"}
+}
+
+func (r recApprover) CheckScript(ctx context.Context, env *Env, code, summary string) error {
+	return r.CheckCommand(ctx, env, code, summary)
+}
+
+func TestGateApproverCheckScriptBuildsRequest(t *testing.T) {
+	var _ ScriptApprover = GateApprover{}
+	p := &recPrompter{scope: security.ScopeDeny}
+	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
+	env := &Env{SessionID: "s1", SessionKey: "cli:ana", Kind: "subagent", Values: map[string]any{"child_name": "2/3"}}
+	err := g.CheckScript(ctx, env, "print(1)", "Print one.")
+	var be *security.BlockedError
+	if !errors.As(err, &be) || !strings.Contains(be.Reason, "BLOCKED by user") {
+		t.Fatal(err)
+	}
+	if len(p.reqs) != 1 {
+		t.Fatal(p.reqs)
+	}
+	r := p.reqs[0]
+	if r.SessionID != "s1" || r.SessionKey != "cli:ana" || r.Kind != "subagent" || r.ChildName != "2/3" ||
+		r.Command != "print(1)" || r.Summary != "Print one." || r.PatternID != security.ScriptPatternID || !r.NoAlways {
+		t.Fatalf("%+v", r)
+	}
+	if err := (GateApprover{}).CheckScript(ctx, env, "print(1)", ""); err == nil || !strings.Contains(err.Error(), "approval gate missing") {
+		t.Fatal(err)
+	}
 }
 
 func TestTerminalPassesCleanSummary(t *testing.T) {

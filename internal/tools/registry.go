@@ -96,6 +96,12 @@ type Approver interface {
 	CheckCommand(ctx context.Context, env *Env, command, summary string) error
 }
 
+// ScriptApprover is an optional interface of Env.Gate. It checks the full text of an
+// execute_code script. execute_code refuses a script when the gate does not implement it.
+type ScriptApprover interface {
+	CheckScript(ctx context.Context, env *Env, code, summary string) error
+}
+
 // PermissionAsker asks the user about one permission request of a coding agent. The
 // acp_delegate tool reads it from env.Gate with a type assertion.
 type PermissionAsker interface {

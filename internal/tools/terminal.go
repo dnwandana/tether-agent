@@ -290,6 +290,20 @@ func (g GateApprover) CheckCommand(ctx context.Context, env *Env, command, summa
 	return g.Gate.Check(ctx, req, g.Prompter)
 }
 
+// CheckScript builds the approval request from env and returns nil when the script code may
+// run. Otherwise it returns the reason for the model.
+func (g GateApprover) CheckScript(ctx context.Context, env *Env, code, summary string) error {
+	if g.Gate == nil {
+		return errors.New("approval gate missing: the script cannot run without the approval gate")
+	}
+	req := security.ApprovalRequest{Command: code, Summary: summary}
+	if env != nil {
+		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
+		req.ChildName = childName(env)
+	}
+	return g.Gate.CheckScript(ctx, req, g.Prompter)
+}
+
 // AskPermission asks the user about one permission request of a coding agent through
 // Gate.AskACP. It sets the session fields of req from env. It does not set ChildName,
 // because a coding agent is not a delegate_task child.

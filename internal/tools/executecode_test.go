@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 // py returns the path of python3, or skips the test.
@@ -242,6 +243,48 @@ except ToolError as e:
 type gateFunc func(cmd string) error
 
 func (g gateFunc) CheckCommand(_ context.Context, _ *Env, cmd, _ string) error { return g(cmd) }
+
+func (g gateFunc) CheckScript(_ context.Context, _ *Env, code, _ string) error { return g(code) }
+
+// commandOnly is an Approver with no CheckScript.
+type commandOnly struct{}
+
+func (commandOnly) CheckCommand(context.Context, *Env, string, string) error { return nil }
+
+// splitGate fails the test when execute_code uses CheckCommand for the script.
+type splitGate struct{ t *testing.T }
+
+func (g splitGate) CheckCommand(context.Context, *Env, string, string) error {
+	g.t.Error("execute_code checked the script with CheckCommand")
+	return nil
+}
+
+func (splitGate) CheckScript(context.Context, *Env, string, string) error {
+	return &security.BlockedError{Reason: "BLOCKED by the script gate"}
+}
+
+func TestExecuteCodeUsesScriptApprover(t *testing.T) {
+	env := visEnv()
+	env.Gate = splitGate{t: t}
+	tool := ExecuteCodeTool{Python: py(t), ScratchRoot: t.TempDir()}
+	if out := runToolEnvErr(t, tool, `{"code":"print(1)"}`, env); !strings.Contains(out, "BLOCKED by the script gate") {
+		t.Fatal(out)
+	}
+}
+
+func TestExecuteCodeNeedsScriptApprover(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	env := visEnv()
+	env.Gate = commandOnly{}
+	tool := ExecuteCodeTool{Python: py(t), ScratchRoot: t.TempDir()}
+	src := fmt.Sprintf("open(%q, 'w').write('x')", marker)
+	if out := runToolEnvErr(t, tool, code(src), env); !strings.Contains(out, "approval gate missing") {
+		t.Fatal(out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("a script ran with a gate that cannot check scripts")
+	}
+}
 
 func TestLongScratchRootKeepsTheSocketShort(t *testing.T) {
 	pythonOrSkip(t)

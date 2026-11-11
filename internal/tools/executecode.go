@@ -128,11 +128,16 @@ func (t ExecuteCodeTool) Run(ctx context.Context, raw json.RawMessage, env *Env)
 		return "", toolErr("python3 is not installed, so execute_code cannot run. Use the tools directly")
 	}
 	// A script can start processes without the terminal tool, so the gate checks the whole
-	// script text first. With no gate, the script does not run (fail closed).
+	// script text with one approval for each script. With no gate, or with a gate that cannot
+	// check scripts, the script does not run (fail closed).
 	if env == nil || env.Gate == nil {
 		return "", toolErr("approval gate missing: execute_code cannot run a script without the approval gate")
 	}
-	if err := env.Gate.CheckCommand(ctx, env, a.Code, security.CleanSummary(a.Description)); err != nil {
+	sa, ok := env.Gate.(ScriptApprover)
+	if !ok {
+		return "", toolErr("approval gate missing: execute_code cannot run a script without a gate that checks scripts")
+	}
+	if err := sa.CheckScript(ctx, env, a.Code, security.CleanSummary(a.Description)); err != nil {
 		return "", toolErr("%s", err.Error())
 	}
 
