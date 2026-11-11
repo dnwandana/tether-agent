@@ -46,7 +46,10 @@ func FormatNotice(n goals.Notice) Reply {
 		text = fmt.Sprintf("✗ Quality gate failed (%d/%d turns, attempt %d/%d): $ ", n.Used, n.Max, n.Attempt, n.MaxRetries) + EscapeMarkdown(n.Command)
 	case goals.NoticeGateExhausted:
 		text = fmt.Sprintf("⏸ Goal paused — quality gate still failing after %d retries: $ ", n.MaxRetries) + EscapeMarkdown(n.Command) +
-			fmt.Sprintf(" (exit %d). Fix it manually or /goal gate remove it, then /goal resume.", n.ExitCode)
+			fmt.Sprintf(" (exit %d). Fix it manually or /goal gate remove <N>, then /goal resume.", n.ExitCode)
+	case goals.NoticeGateRefused:
+		text = "⏸ Goal paused — a quality gate cannot run: $ " + EscapeMarkdown(n.Command) + ". " + reason +
+			" Remove it with /goal gate remove <N>, then /goal resume."
 	case goals.NoticeTurnFailed:
 		text = "⏸ Goal paused — the last turn failed: " + EscapeMarkdown(n.Err) + "." + goOnText
 	case goals.NoticeRestartPause:

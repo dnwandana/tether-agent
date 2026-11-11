@@ -66,6 +66,8 @@ const (
 	NoticeGateFailed = "gate_failed"
 	// NoticeGateExhausted tells that a gate failed more times than its retries.
 	NoticeGateExhausted = "gate_exhausted"
+	// NoticeGateRefused tells that a gate command failed the check before its run.
+	NoticeGateRefused = "gate_refused"
 	// NoticeTurnFailed tells that a goal turn failed.
 	NoticeTurnFailed = "turn_failed"
 	// NoticeRestartPause tells that a restart paused the goal.
@@ -201,7 +203,9 @@ func (m *Manager) runChecks(ctx context.Context, out TurnOutcome, work State, en
 	work.TurnsUsed++
 	var run stepRun
 	if len(work.Gates) > 0 {
-		run.gates = RunGates(ctx, &work, m.execFor(out.Session))
+		run.gates = RunGates(ctx, &work, m.execFor(out.Session), func(c string) GateCheck {
+			return CheckGateCommand(c, m.d.InGateway, m.d.SudoPasswordSet)
+		})
 		run.gateRuns = work.Gates
 		if run.gates.Failed {
 			return run // a failed gate skips the judge
@@ -296,6 +300,10 @@ func (m *Manager) applyRun(s *State, sid string, run stepRun, env WaitEnv, now t
 	if run.gates.Failed {
 		f := run.gates.Failure
 		switch {
+		case run.gates.Refused:
+			s.SetStatus(StatusPaused, run.gates.Reason)
+			return StepResult{Ran: true, Notices: []Notice{{Kind: NoticeGateRefused, Command: f.Command,
+				Reason: run.gates.Reason, StopButtons: true}}}
 		case run.gates.Exhausted:
 			s.SetStatus(StatusPaused, fmt.Sprintf("quality gate exhausted %d retries: $ %s", f.Attempt-1, f.Command))
 			return StepResult{Ran: true, Notices: []Notice{{Kind: NoticeGateExhausted, Command: f.Command,

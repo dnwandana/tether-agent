@@ -3,6 +3,7 @@ package goals
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestRunGatesStopsAtTheFirstFailure(t *testing.T) {
 		}
 		return "ok", 0, nil
 	}
-	out := RunGates(context.Background(), &st, exec)
+	out := RunGates(context.Background(), &st, exec, nil)
 	want := GateOutcome{Failed: true, Index: 1, Failure: GateFailure{Command: "go test ./...", Attempt: 1, MaxRetries: 3, ExitCode: 1, Output: "FAIL: TestCron"}}
 	if out != want {
 		t.Fatalf("got %+v, want %+v", out, want)
@@ -57,19 +58,19 @@ func TestRunGatesFourthFailurePauses(t *testing.T) {
 	st := gateGoal("exit 1")
 	fail := func(context.Context, string, time.Duration) (string, int, error) { return "", 1, nil }
 	for i := 1; i <= 3; i++ {
-		if out := RunGates(context.Background(), &st, fail); !out.Failed || out.Exhausted || out.Failure.Attempt != i {
+		if out := RunGates(context.Background(), &st, fail, nil); !out.Failed || out.Exhausted || out.Failure.Attempt != i {
 			t.Fatalf("failure %d: %+v", i, out)
 		}
 	}
-	if out := RunGates(context.Background(), &st, fail); !out.Exhausted || out.Failure.Attempt != 4 || out.Failure.MaxRetries != 3 {
+	if out := RunGates(context.Background(), &st, fail, nil); !out.Exhausted || out.Failure.Attempt != 4 || out.Failure.MaxRetries != 3 {
 		t.Fatalf("the fourth failure uses the 3 retries: %+v", out)
 	}
 	pass := func(context.Context, string, time.Duration) (string, int, error) { return "ok", 0, nil }
-	if out := RunGates(context.Background(), &st, pass); out != (GateOutcome{}) || st.Gates[0].Attempts != 0 {
+	if out := RunGates(context.Background(), &st, pass, nil); out != (GateOutcome{}) || st.Gates[0].Attempts != 0 {
 		t.Fatalf("a pass sets the attempts to 0: %+v %+v", out, st.Gates[0])
 	}
 	empty := State{}
-	if out := RunGates(context.Background(), &empty, fail); out != (GateOutcome{}) {
+	if out := RunGates(context.Background(), &empty, fail, nil); out != (GateOutcome{}) {
 		t.Fatal("no gates give no failure")
 	}
 }
@@ -82,20 +83,20 @@ func TestRunGatesErrorsAndTail(t *testing.T) {
 		got = timeout
 		return "", 0, errors.New("cannot start bash: no such file")
 	}
-	out := RunGates(context.Background(), &st, exec)
+	out := RunGates(context.Background(), &st, exec, nil)
 	if got != 42*time.Second || !out.Failed || out.Failure.ExitCode != -1 || out.Failure.Output != "cannot start bash: no such file" {
 		t.Fatalf("a start failure is exit -1 with the error as the output: %+v", out)
 	}
 	exec = func(context.Context, string, time.Duration) (string, int, error) {
 		return "partial", -1, errors.New("command stopped: context canceled")
 	}
-	if out := RunGates(context.Background(), &st, exec); out.Failure.Output != "partial\ncommand stopped: context canceled" {
+	if out := RunGates(context.Background(), &st, exec, nil); out.Failure.Output != "partial\ncommand stopped: context canceled" {
 		t.Fatalf("%q", out.Failure.Output)
 	}
 	exec = func(context.Context, string, time.Duration) (string, int, error) {
 		return strings.Repeat("é", 5000) + "END", 2, nil
 	}
-	out = RunGates(context.Background(), &st, exec)
+	out = RunGates(context.Background(), &st, exec, nil)
 	if n := utf8.RuneCountInString(out.Failure.Output); n != 3000 || !strings.HasSuffix(out.Failure.Output, "END") || !utf8.ValidString(out.Failure.Output) {
 		t.Fatalf("the tail is the last 3000 chars, got %d", n)
 	}
@@ -112,18 +113,52 @@ func TestRunGatesThroughTheTerminalTool(t *testing.T) {
 		return tt.Exec(ctx, env, cmd, "", timeout)
 	}
 	st := gateGoal(`test -z "$GATE_SECRET"`)
-	if out := RunGates(context.Background(), &st, exec); out.Failed {
+	if out := RunGates(context.Background(), &st, exec, nil); out.Failed {
 		t.Fatalf("a gate does not see a .env name: %+v", out)
 	}
 	st = gateGoal("sleep 5")
 	st.Gates[0].TimeoutSeconds = 1
-	if out := RunGates(context.Background(), &st, exec); out.Failure.ExitCode != -1 || !strings.Contains(out.Failure.Output, "timed out after 1s") {
+	if out := RunGates(context.Background(), &st, exec, nil); out.Failure.ExitCode != -1 || !strings.Contains(out.Failure.Output, "timed out after 1s") {
 		t.Fatalf("a timeout is exit -1: %+v", out)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	st = gateGoal("sleep 5")
-	if out := RunGates(ctx, &st, exec); out.Failure.ExitCode != -1 || !strings.Contains(out.Failure.Output, "command stopped") {
+	if out := RunGates(ctx, &st, exec, nil); out.Failure.ExitCode != -1 || !strings.Contains(out.Failure.Output, "command stopped") {
 		t.Fatalf("a cancel is exit -1: %+v", out)
+	}
+}
+
+func TestRunGatesChecksEachGateFirst(t *testing.T) {
+	st := gateGoal("go test ./...", "rm -rf /", "make lint")
+	var ran, checked []string
+	exec := func(_ context.Context, cmd string, _ time.Duration) (string, int, error) {
+		ran = append(ran, cmd)
+		return "ok", 0, nil
+	}
+	check := func(cmd string) GateCheck {
+		checked = append(checked, cmd)
+		return CheckGateCommand(cmd, false, false)
+	}
+	out := RunGates(context.Background(), &st, exec, check)
+	if !out.Failed || !out.Refused || out.Exhausted || out.Index != 1 || out.Failure.Command != "rm -rf /" ||
+		out.Reason != "BLOCKED (hardline): recursive delete of root filesystem. This command cannot be a gate." {
+		t.Fatalf("%+v", out)
+	}
+	if !slices.Equal(ran, []string{"go test ./..."}) || !slices.Equal(checked, []string{"go test ./...", "rm -rf /"}) {
+		t.Fatal(ran, checked)
+	}
+	if g := st.Gates[1]; g.Attempts != 0 || g.LastExitCode != nil {
+		t.Fatalf("a refused gate does not count as a run: %+v", g)
+	}
+	// A dangerous gate still runs.
+	st, ran = gateGoal("rm -rf build"), nil
+	if out := RunGates(context.Background(), &st, exec, check); out.Failed || !slices.Equal(ran, []string{"rm -rf build"}) {
+		t.Fatal(out, ran)
+	}
+	// A nil check skips the check.
+	st, ran = gateGoal("rm -rf /"), nil
+	if out := RunGates(context.Background(), &st, exec, nil); out.Refused || len(ran) != 1 {
+		t.Fatal(out, ran)
 	}
 }

@@ -542,3 +542,51 @@ func TestStepParkedGoalIgnoresAFailedTurn(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestStepRefusedGatePausesAtOnce(t *testing.T) {
+	const reason = "BLOCKED (hardline): recursive delete of root filesystem. This command cannot be a gate."
+	st := stepState("ship it", 20)
+	st.AddGate("rm -rf /")
+	f := newStepFix(t, st, `{"verdict":"done","reason":"x"}`)
+	var ran int
+	f.m.d.Exec = func(context.Context, *sessions.Session, string, time.Duration) (string, int, error) {
+		ran++
+		return "", 0, nil
+	}
+	res := f.step("done")
+	want := Notice{Kind: NoticeGateRefused, Command: "rm -rf /", Reason: reason, StopButtons: true}
+	if ran != 0 || f.prov.calls() != 0 || res.Continuation != nil || res.RetryAfter != 0 || len(res.Notices) != 1 || res.Notices[0] != want {
+		t.Fatalf("ran %d, judge calls %d, %+v", ran, f.prov.calls(), res)
+	}
+	got := f.state(t)
+	if got.Status != StatusPaused || stepStr(got.PausedReason) != reason || got.Gates[0].Attempts != 0 || got.Gates[0].LastExitCode != nil {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestStepGateCheckUsesTheDeps(t *testing.T) {
+	for _, c := range []struct {
+		cmd                string
+		inGateway, sudoSet bool
+		refused            bool
+	}{
+		{"systemctl --user restart tether", true, false, true},
+		{"systemctl --user restart tether", false, false, false},
+		{"echo pw | sudo -S ls", false, false, true},
+		{"echo pw | sudo -S ls", false, true, false},
+	} {
+		st := stepState("ship it", 20)
+		st.AddGate(c.cmd)
+		f := newStepFix(t, st, `{"verdict":"continue","reason":"x"}`)
+		f.m.d.InGateway, f.m.d.SudoPasswordSet = c.inGateway, c.sudoSet
+		var ran int
+		f.m.d.Exec = func(context.Context, *sessions.Session, string, time.Duration) (string, int, error) {
+			ran++
+			return "", 0, nil
+		}
+		f.step("done")
+		if paused := f.state(t).Status == StatusPaused; paused != c.refused || (ran == 0) != c.refused {
+			t.Errorf("%+v: paused %v, ran %d", c, paused, ran)
+		}
+	}
+}

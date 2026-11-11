@@ -45,6 +45,10 @@ type Deps struct {
 	Now func() time.Time
 	// Log receives the warnings. Nil uses slog.Default.
 	Log *slog.Logger
+	// InGateway and SudoPasswordSet feed the gate check before each run, as they feed the
+	// approval gate.
+	InGateway       bool
+	SudoPasswordSet bool
 }
 
 // cacheEntry is the last known revision, epoch, and status of the goal of a session.
