@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"golang.org/x/text/cases"
@@ -31,7 +32,7 @@ const backupsDir = "backups"
 // the system prompt, so only the memory tool, with its threat scan, writes them.
 const memoryDir = "memory"
 
-// maxLinkHops limits the symlinks that realPath follows for one path.
+// maxLinkHops limits the symlinks that RealPath follows for one path.
 const maxLinkHops = 40
 
 // ProtectedError is the error of CheckWritable. Its text is the text that
@@ -103,15 +104,20 @@ func ProtectedPaths(dataDir, home string) []string {
 }
 
 // CheckWritable returns a *ProtectedError when a write to path touches a
-// protected path. It checks the clean absolute path and the real path, after
-// it resolves ".." and the symlinks of each existing part. A dangling link
+// protected path. It checks the clean absolute path and the real path. The
+// real path resolves the symlinks of each existing part, and a ".." applies to
+// the real folder before it. A dangling link
 // counts as its target. When allowSkills is true, the skills folder of the
 // data dir is writable (skill_manage).
 func CheckWritable(path string, protected []string, allowSkills bool) error {
 	clean := absClean(path)
 	cands := []string{clean}
-	if real := realPath(clean); real != clean {
-		cands = append(cands, real)
+	// The real path of the raw path is the file that the kernel opens. The real path of
+	// the clean path is also checked, because it costs little.
+	for _, real := range []string{RealPath(rawAbs(path)), RealPath(clean)} {
+		if !slices.Contains(cands, real) {
+			cands = append(cands, real)
+		}
 	}
 	for _, p := range protected {
 		if p == "" {
@@ -123,7 +129,7 @@ func CheckWritable(path string, protected []string, allowSkills bool) error {
 			continue
 		}
 		bases := []string{base}
-		if real := realPath(base); real != base {
+		if real := RealPath(base); real != base {
 			bases = append(bases, real)
 		}
 		for _, c := range cands {
@@ -161,6 +167,37 @@ func covered(path, base string, dir bool) bool {
 	return strings.HasPrefix(path, base+"-")
 }
 
+// splitLast splits p at its last separator. Unlike filepath.Dir, it does not clean the
+// folder part, because a ".." in it must apply after the symlinks before it. The folder of
+// the root is the root.
+func splitLast(p string) (dir, base string) {
+	sep := string(filepath.Separator)
+	trimmed := strings.TrimRight(p, sep)
+	if trimmed == "" {
+		return p, ""
+	}
+	i := strings.LastIndex(trimmed, sep)
+	switch {
+	case i < 0:
+		return ".", trimmed
+	case i == 0:
+		return sep, trimmed[1:]
+	}
+	return trimmed[:i], trimmed[i+1:]
+}
+
+// rawAbs returns path as an absolute path that is not cleaned. A relative path gets the
+// working folder in front.
+func rawAbs(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	if wd, err := os.Getwd(); err == nil {
+		return wd + string(filepath.Separator) + path
+	}
+	return path
+}
+
 // absClean returns path as a clean absolute path.
 func absClean(path string) string {
 	if abs, err := filepath.Abs(path); err == nil {
@@ -169,9 +206,11 @@ func absClean(path string) string {
 	return filepath.Clean(path)
 }
 
-// realPath returns the real path of the clean absolute path p. The parts
-// that do not exist stay as they are. A dangling link resolves to its target.
-func realPath(p string) string {
+// RealPath returns the real path of the absolute path p. It resolves the symlinks of each
+// existing part. A ".." part applies to the real folder before it, as in the kernel, so do
+// not clean p before the call. The parts that do not exist stay as they are. A dangling
+// link resolves to its target.
+func RealPath(p string) string {
 	hops := maxLinkHops
 	return resolveLinks(p, &hops)
 }
@@ -187,13 +226,14 @@ func resolveLinks(p string, hops *int) string {
 				return p
 			}
 			if !filepath.IsAbs(target) {
-				target = filepath.Join(filepath.Dir(p), target)
+				dir, _ := splitLast(p)
+				target = resolveLinks(dir, hops) + string(filepath.Separator) + target
 			}
-			p = filepath.Clean(target)
+			p = target
 			*hops--
 			continue
 		}
-		dir, base := filepath.Dir(p), filepath.Base(p)
+		dir, base := splitLast(p)
 		if dir == p {
 			return p
 		}

@@ -91,6 +91,19 @@ func IsStateDBPatternID(id string) bool {
 	return strings.HasPrefix(id, "protected_path_use_") || id == "sqlite_client_state_db"
 }
 
+// PatternByID returns the dangerous command rule with the given ID. It does
+// not return a hardline rule or a protected path rule.
+func PatternByID(id string) (Pattern, bool) {
+	for _, list := range [][]Pattern{DangerousPatterns, TetherDangerousPatterns} {
+		for _, p := range list {
+			if p.ID == id {
+				return p, true
+			}
+		}
+	}
+	return Pattern{}, false
+}
+
 // DangerousPatterns need an approval before they run. This is Hermes
 // DANGEROUS_PATTERNS.
 var DangerousPatterns = []Pattern{
@@ -223,16 +236,20 @@ func MatchDangerous(cmd string) (Pattern, bool) {
 
 // MatchAllDangerous returns each dangerous rule that matches cmd, one time
 // for each ID, in the order of MatchDangerous. A compound command can match
-// more than one rule, and the gate must check the grant of each one.
+// more than one rule, and the gate must check the grant of each one. The
+// protected rules also match the second form of the command: no quotes, no
+// escapes, and the protected paths in place of each glob word that matches
+// them. A second form that is the same as the first form is not matched again.
 func MatchAllDangerous(cmd string) []Pattern {
 	s := prepare(cmd)
 	protectedMu.RLock()
-	extra := protectedPatterns
+	extra, paths := protectedPatterns, protectedPaths
 	protectedMu.RUnlock()
+	s2 := secondForm(s, paths)
 	var out []Pattern
 	seen := map[string]bool{}
 	add := func(p Pattern) {
-		if !seen[p.ID] && p.matches(s) {
+		if !seen[p.ID] && (p.matches(s) || (s2 != s && IsProtectedPatternID(p.ID) && p.matches(s2))) {
 			seen[p.ID] = true
 			out = append(out, p)
 		}
@@ -269,20 +286,33 @@ func prepare(cmd string) string {
 var (
 	protectedMu       sync.RWMutex
 	protectedPatterns []Pattern
+	protectedPaths    []string
 )
+
+// launcherWords matches the words that start another program before ed or
+// ex.
+const launcherWords = `(?:(?:sudo(?:\s+-\S+)*|setsid(?:\s+-\S+)*|stdbuf(?:\s+-\S+)*|busybox|env(?:\s+-\S+|\s+[a-z_][a-z0-9_]*=\S*)*|nohup|command|exec|time|nice(?:\s+-n\s*-?\d+|\s+-\d+)?|timeout\s+\S+)\s+)*`
 
 // protectedOps finds a shell write to the path that follows it: a ">" or
 // ">>" redirection, or tee, cp, mv, install, ln, rm, truncate, chmod, chown,
 // dd, rsync, sqlite3, or sponge, or "sed -i" (also gsed and busybox sed), or
 // "perl -i", or "awk -i inplace" (also gawk), or ed or ex as the first word of
-// a simple command, with the path as an argument. The argument must be in the
-// same simple command.
+// a simple command, with the path as an argument. Launcher words such as sudo,
+// busybox, and env can come before ed and ex. The argument must be in the
+// same simple command. The last arm is the inline code of an interpreter
+// (python, perl, ruby, node, and others, with -c, -e, --eval, -r, "-", a flag
+// group that ends in c or e, or a here-document) that names the path anywhere
+// after it, also on a later line. The interpreter can have a folder before its
+// name or another program before it, for example "uv run". A script file run
+// does not match, so a skill script and a cron script do not ask.
 const protectedOps = `(?:>>?\s*["']?` +
 	`|\b(?:tee|cp|mv|install|ln|rm|truncate|chmod|chown|dd|rsync|sqlite3|sponge)\b[^\n;&|]*?[\s="']` +
 	`|\bg?sed\s+(?:-[^\s]*i|--in-place)[^\n;&|]*?[\s"']` +
 	`|\bperl\s+(?:-\S+\s+)*-[a-z]*i\S*[^\n;&|]*?[\s"']` +
 	"|\\bg?awk\\b[^\\n;&|]*?-i\\s+inplace\\b[^\\n;&|]*?[\\s\"']" +
-	"|(?:^|[;&|\\n(`]|\\$\\()\\s*(?:sudo\\s+)?(?:ed|ex)\\b[^\\n;&|]*?[\\s\"'])"
+	"|(?:^|[;&|\\n(`]|\\$\\()\\s*" + launcherWords + "(?:ed|ex)\\b[^\\n;&|]*?[\\s\"']" +
+	`|\b(?:python(?:[23](?:\.\d+)?)?|perl|ruby|node|deno|bun|php|lua)\s+` +
+	`(?:-[xw]\s+\S+\s+|-\S+\s+)*?(?:(?:-[a-z0-9]*[ce]|-r|--eval|-)(?:\s|$|["'])|<<)[\s\S]*?` + ")"
 
 var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -292,9 +322,12 @@ var nonSlug = regexp.MustCompile(`[^a-z0-9]+`)
 // state.db-wal. Each call replaces the rules of the call before it. A path in
 // the home folder also matches the "~", "$HOME", and "${HOME}" forms. A
 // state.db path also gets a use rule that matches each command that names it.
+// The rules also match the quote-free second form of a command, see
+// MatchAllDangerous.
 func AddProtectedPathPatterns(paths []string) {
 	home, _ := os.UserHomeDir()
 	out := make([]Pattern, 0, len(paths))
+	var lower []string
 	for _, p := range paths {
 		if p == "" {
 			continue
@@ -309,6 +342,11 @@ func AddProtectedPathPatterns(paths []string) {
 		alts := make([]string, len(forms))
 		for i, f := range forms {
 			alts[i] = regexp.QuoteMeta(strings.ToLower(f))
+			if dir {
+				lower = append(lower, strings.ToLower(f)+"/")
+			} else {
+				lower = append(lower, strings.ToLower(f))
+			}
 		}
 		src := protectedOps + `(?:` + strings.Join(alts, "|") + `)`
 		if dir {
@@ -322,6 +360,7 @@ func AddProtectedPathPatterns(paths []string) {
 	}
 	protectedMu.Lock()
 	protectedPatterns = out
+	protectedPaths = lower
 	protectedMu.Unlock()
 }
 
@@ -378,6 +417,18 @@ var lookalike = map[rune]rune{
 	'\u2044': '/', '\u2215': '/', '\u29f8': '/', '\u01c0': '|', '\u2223': '|',
 }
 
+// FoldLookalikes returns s with each lookalike letter, dash, slash, and bar of
+// the command gate folded to its ASCII form. It keeps the case and does not
+// apply NFKC.
+func FoldLookalikes(s string) string {
+	return strings.Map(func(r rune) rune {
+		if f, ok := lookalike[r]; ok {
+			return f
+		}
+		return r
+	}, s)
+}
+
 // NormalizeCommand prepares a command for the rules, so that hidden
 // characters cannot get past them. It removes ANSI escape sequences, NUL
 // bytes, and zero-width characters. It applies Unicode NFKC and folds the
@@ -395,12 +446,7 @@ func NormalizeCommand(cmd string) string {
 		return r
 	}, s)
 	s = norm.NFKC.String(s)
-	s = strings.Map(func(r rune) rune {
-		if f, ok := lookalike[r]; ok {
-			return f
-		}
-		return r
-	}, s)
+	s = FoldLookalikes(s)
 	s = strings.ReplaceAll(s, "\\\r\n", "")
 	s = strings.ReplaceAll(s, "\\\n", "")
 

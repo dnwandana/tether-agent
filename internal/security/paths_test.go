@@ -282,3 +282,65 @@ func TestNewHomePathsProtected(t *testing.T) {
 		t.Errorf("a git hook must be writable: %v", err)
 	}
 }
+
+func TestRealPathDanglingLeaf(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "missing.txt")
+	if err := os.Symlink(target, filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out")
+	if err := os.Mkdir(out, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(out, filepath.Join(dir, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	for in, want := range map[string]string{
+		filepath.Join(dir, "link"):               target,                          // a dangling leaf
+		filepath.Join(dir, "dirlink", "new.txt"): filepath.Join(out, "new.txt"),   // a link in the prefix
+		filepath.Join(dir, "none", "x"):          filepath.Join(dir, "none", "x"), // no part exists
+	} {
+		if got := RealPath(in); got != want {
+			t.Errorf("RealPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestDotDotAfterLinkRefused checks that ".." applies to the target of the link before it,
+// as the kernel does, and not to the text of the path.
+func TestDotDotAfterLinkRefused(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, work := filepath.Join(dir, "data"), filepath.Join(dir, "work")
+	for _, d := range []string{filepath.Join(data, "sub"), work} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(data, "config.yaml"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(data, "sub"), filepath.Join(work, "l")); err != nil {
+		t.Fatal(err)
+	}
+	raw := work + "/l/../config.yaml"
+	if got, want := RealPath(raw), filepath.Join(data, "config.yaml"); got != want {
+		t.Errorf("RealPath(%q) = %q, want %q", raw, got, want)
+	}
+	if got, want := RealPath(work+"/l/../new.txt"), filepath.Join(data, "new.txt"); got != want {
+		t.Errorf("RealPath of a new file = %q, want %q", got, want)
+	}
+	if err := CheckWritable(raw, []string{filepath.Join(data, "config.yaml")}, false); !errors.Is(err, ErrProtected) {
+		t.Errorf("CheckWritable(%q) = %v, want ErrProtected", raw, err)
+	}
+	t.Chdir(work)
+	if err := CheckWritable("l/../config.yaml", []string{filepath.Join(data, "config.yaml")}, false); !errors.Is(err, ErrProtected) {
+		t.Errorf("a relative path: %v, want ErrProtected", err)
+	}
+}

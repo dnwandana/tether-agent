@@ -626,6 +626,44 @@ func TestStateDBRules(t *testing.T) {
 	}
 }
 
+func TestProtectedQuoteAndGlobForms(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { AddProtectedPathPatterns(nil) })
+	data := filepath.Join(home, ".tether")
+	AddProtectedPathPatterns(ProtectedPaths(data, home))
+	slug := strings.Trim(nonSlug.ReplaceAllString(strings.ToLower(filepath.Join(data, "state.db")), "_"), "_")
+	useID := "protected_path_use_" + slug
+	for c, want := range map[string]string{
+		`sqlite3 ~/.tether/state* .tables`:    useID,
+		`sqlite3 ~/.tether/state\.db .tables`: useID,
+		`sqlite3 ~/.tether/"state".db`:        useID,
+		`cp /tmp/x ~/.tether/stat?.db`:        useID,
+		`cd ~/.tether && sqlite3 "state".db`:  "sqlite_client_state_db",
+		`cd ~/.tether && sqlite3 state*`:      "sqlite_client_state_db",
+	} {
+		if p, ok := MatchDangerous(c); !ok || p.ID != want {
+			t.Errorf("%q: got %q, %v; want %q", c, p.ID, ok, want)
+		}
+	}
+	for c, suffix := range map[string]string{
+		`rm -rf ~/.ss*`:         "_ssh",
+		`rm ~/.*`:               "_ssh",
+		`mv ~/.tether/sk* /tmp`: "_skills",
+	} {
+		if p, ok := MatchDangerous(c); !ok || !strings.HasPrefix(p.ID, "protected_path_write_") || !strings.HasSuffix(p.ID, suffix) {
+			t.Errorf("%q: got %q, %v; want a protected write rule that ends in %s", c, p.ID, ok, suffix)
+		}
+	}
+	// Shell words that are not valid globs must not panic and must not match.
+	for _, c := range []string{"ls ~/projects/*", "rm ~/*", "grep python ~/.bashrc", `echo "state"`,
+		"[ -f x ]", "[", "a[", `\[`} {
+		if all := MatchAllDangerous(c); len(all) != 0 {
+			t.Errorf("%q matched %s", c, all[0].ID)
+		}
+	}
+}
+
 func TestProtectedPathMoreWriters(t *testing.T) {
 	t.Cleanup(func() { AddProtectedPathPatterns(nil) })
 	AddProtectedPathPatterns([]string{"/home/d/.tether/.env", "/home/d/.tether/config.yaml"})
@@ -642,6 +680,38 @@ func TestProtectedPathMoreWriters(t *testing.T) {
 			"cat x | sponge " + path,
 			"gsed -i s/a/b/ " + path,
 			"busybox sed -i s/a/b/ " + path,
+			"busybox ed " + path,
+			"env ed " + path,
+			"env -i lang=c ed " + path,
+			"sudo -n ed " + path,
+			"sudo env ed " + path,
+			"nohup ex -s " + path,
+			"command ed " + path,
+			"exec ed " + path,
+			"nice -n 5 ed " + path,
+			"time ed " + path,
+			"timeout 5 ed " + path,
+			`python3 -c "import os; open('` + path + `','w')"`,
+			`python -c "open('` + path + `','w').write('x')"`,
+			`python3.12 -u -c "open('` + path + `','w')"`,
+			`perl -e 'open(F,">` + path + `")'`,
+			`ruby -e "File.write('` + path + `','x')"`,
+			`node -e "require('fs').writeFileSync('` + path + `','x')"`,
+			`bun --eval "await Bun.write('` + path + `','x')"`,
+			`php -r "file_put_contents('` + path + `','x');"`,
+			`lua -e "io.open('` + path + `','w')"`,
+			`cd /tmp && python3 - <<< "open('` + path + `','w')"`,
+			`env python3 -c "open('` + path + `','w')"`,
+			"python3 - <<'EOF'\nimport os\nopen('" + path + "','w')\nEOF",
+			"python3 -c \"\nimport os\nopen('" + path + "','w')\n\"",
+			`/usr/bin/python3 -c "open('` + path + `','w')"`,
+			`uv run python3 -c "open('` + path + `','w')"`,
+			`setsid python3 -c "open('` + path + `','w')"`,
+			`stdbuf -oL ed ` + path,
+			`perl -we 'open(F,">` + path + `")'`,
+			`python3 -Ic "open('` + path + `','w')"`,
+			`python3 -X utf8 -c "open('` + path + `','w')"`,
+			`perl -e'open(F,">` + path + `")'`,
 		} {
 			if p, ok := MatchDangerous(c); !ok || !strings.HasPrefix(p.ID, "protected_path_write_") {
 				t.Errorf("%q: got %q, %v; want a protected write rule", c, p.ID, ok)
@@ -656,6 +726,28 @@ func TestProtectedPathMoreWriters(t *testing.T) {
 	} {
 		if p, ok := MatchDangerous(c); ok {
 			t.Errorf("%q matched %s", c, p.ID)
+		}
+	}
+}
+
+func TestProtectedInterpreterArmSkipsScriptFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { AddProtectedPathPatterns(nil) })
+	data := filepath.Join(home, ".tether")
+	AddProtectedPathPatterns(ProtectedPaths(data, home))
+	for _, c := range []string{
+		"python3 -c print(1)",
+		"python3 " + filepath.Join(data, "skills", "x", "scripts", "a.py"),
+		"node " + filepath.Join(data, "scripts", "job.js"),
+		"grep python ~/.bashrc",
+		"cat ~/.tether/config.yaml | python3 -m json.tool",
+		"perl -ne print x",
+	} {
+		for _, p := range MatchAllDangerous(c) {
+			if IsProtectedPatternID(p.ID) {
+				t.Errorf("%q matched %s", c, p.ID)
+			}
 		}
 	}
 }
@@ -720,6 +812,39 @@ func TestProtectedPatternIDs(t *testing.T) {
 	} {
 		if got := [2]bool{IsProtectedPatternID(id), IsStateDBPatternID(id)}; got != want {
 			t.Errorf("%q: got %v, want %v", id, got, want)
+		}
+	}
+}
+
+func TestPatternByID(t *testing.T) {
+	for id, desc := range map[string]string{
+		"recursive_delete":       "recursive delete",
+		"git_force_push":         "git force push (rewrites remote history)",
+		"sqlite_client_state_db": "SQLite client on state.db",
+	} {
+		if p, ok := PatternByID(id); !ok || p.ID != id || p.Description != desc {
+			t.Errorf("%s: %+v %v", id, p, ok)
+		}
+	}
+	// An unknown ID and a hardline rule give no rule.
+	for _, id := range []string{"no_such_rule", "recursive_delete_root_filesystem", ""} {
+		if _, ok := PatternByID(id); ok {
+			t.Errorf("%q must not be found", id)
+		}
+	}
+}
+
+func TestFoldLookalikes(t *testing.T) {
+	for in, want := range map[string]string{
+		"Іgnore":           "Ignore",  // Cyrillic І
+		"prеtend":          "pretend", // Cyrillic е
+		"ορ ΑΒ":            "op AB",   // Greek ο ρ Α Β
+		"rm —rf":           "rm -rf",  // em dash
+		"plain ASCII text": "plain ASCII text",
+		"ｒｍ":               "ｒｍ", // fullwidth stays: no NFKC here
+	} {
+		if got := FoldLookalikes(in); got != want {
+			t.Errorf("FoldLookalikes(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
