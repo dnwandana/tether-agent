@@ -32,9 +32,11 @@ type Release struct {
 
 // Client reads releases from the GitHub API.
 type Client struct {
-	HC        *http.Client // nil uses a client with a 30 s timeout
+	HC        *http.Client // nil uses a client with the APITimeout limit
 	APIBase   string       // "" uses DefaultAPIBase
 	UserAgent string       // "" uses "tether-agent"
+	// APITimeout is the total time limit of one API call when HC is nil. Zero means 30 s.
+	APITimeout time.Duration
 }
 
 // Latest returns the newest release that is not a draft or a pre-release.
@@ -47,12 +49,16 @@ func (c *Client) Tag(ctx context.Context, tag string) (Release, error) {
 	return c.get(ctx, "/releases/tags/"+url.PathEscape(tag))
 }
 
-// httpClient returns HC, or a client with a 30 s timeout when HC is nil.
+// httpClient returns HC, or a client with the APITimeout limit (30 s when it is 0) when HC is nil.
 func (c *Client) httpClient() *http.Client {
 	if c.HC != nil {
 		return c.HC
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	t := c.APITimeout
+	if t <= 0 {
+		t = 30 * time.Second
+	}
+	return &http.Client{Timeout: t}
 }
 
 // downloadClient returns HC, or a client with no total timeout when HC is nil. The archive

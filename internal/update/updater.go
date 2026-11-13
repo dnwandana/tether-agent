@@ -41,6 +41,8 @@ type Updater struct {
 	BinPath string    // "" uses ExecutablePath()
 	Client  *Client   // nil uses &Client{}
 	Out     io.Writer // progress lines; nil discards
+	// DownloadTimeout is the longest time of one download. Zero means downloadTimeout.
+	DownloadTimeout time.Duration
 	// runVersion runs "<candidate> version" and returns its stdout. Tests replace it.
 	runVersion func(ctx context.Context, candidate string) (string, error)
 }
@@ -222,11 +224,19 @@ func (u *Updater) versionRunner() func(ctx context.Context, candidate string) (s
 	return runVersion
 }
 
+// downloadLimit returns DownloadTimeout, or downloadTimeout when the field is 0.
+func (u *Updater) downloadLimit() time.Duration {
+	if u.DownloadTimeout > 0 {
+		return u.DownloadTimeout
+	}
+	return downloadTimeout
+}
+
 // download returns the body of url and fails when the body is larger than limit bytes.
 // It calls start, when start is not nil, with resp.ContentLength before it reads the body.
 func (u *Updater) download(ctx context.Context, name, url string, limit int64, start func(size int64)) ([]byte, error) {
 	c := u.client()
-	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	ctx, cancel := context.WithTimeout(ctx, u.downloadLimit())
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

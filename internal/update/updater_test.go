@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // fakeRelease serves one release with the linux/amd64 archive and checksums.txt under /dl/.
@@ -516,5 +517,32 @@ func TestRunTagWithoutV(t *testing.T) {
 	}
 	if p := paths(); len(p) != 1 || p[0] != "/releases/tags/v0.5.0" {
 		t.Fatalf("requests %v, want [/releases/tags/v0.5.0]", p)
+	}
+}
+
+func TestRunDownloadTimeout(t *testing.T) {
+	srv, _ := fakeRelease(t, "0.5.0", []byte("newbin"), false)
+	next := srv.Config.Handler
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/dl/") {
+			<-r.Context().Done()
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+	bin := writeFakeBinary(t, "old")
+	u := newTestUpdater(srv, bin, "0.4.0", nil)
+	u.DownloadTimeout = 50 * time.Millisecond
+	start := time.Now()
+	_, err := u.Run(context.Background(), Options{})
+	if el := time.Since(start); el > 5*time.Second {
+		t.Fatalf("the download waited %s", el)
+	}
+	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatal(err)
+	}
+	binIs(t, bin, "old")
+	if got := (&Updater{}).downloadLimit(); got != 15*time.Minute {
+		t.Fatalf("zero field: %s", got)
 	}
 }

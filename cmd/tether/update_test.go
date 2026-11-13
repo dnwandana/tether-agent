@@ -99,7 +99,8 @@ func writeFakeBinary(t *testing.T) string {
 // also points systemUnitPath to a file that does not exist.
 func useUpdater(t *testing.T, srv *httptest.Server, bin, cur string) {
 	t.Helper()
-	newUpdater = func(stdout io.Writer) *update.Updater {
+	t.Setenv("TETHER_HOME", t.TempDir())
+	newUpdater = func(stdout io.Writer, _, _ time.Duration) *update.Updater {
 		return &update.Updater{
 			Current: cur,
 			GOOS:    "linux",
@@ -319,12 +320,77 @@ func TestSudoDataDir(t *testing.T) {
 
 func TestDefaultUpdater(t *testing.T) {
 	var out bytes.Buffer
-	u := defaultUpdater(&out)
-	if u.Current != version || u.Out != &out {
+	u := defaultUpdater(&out, 20*time.Minute, 45*time.Second)
+	if u.Current != version || u.Out != &out || u.DownloadTimeout != 20*time.Minute || u.Client.APITimeout != 45*time.Second {
 		t.Fatalf("%+v", u)
 	}
 	if u.Client == nil || u.Client.UserAgent != "tether-agent/"+version || u.Client.APIBase != "" {
 		t.Fatalf("client %+v", u.Client)
+	}
+}
+
+// captureLimits makes runUpdate record the two time limits that it gives to newUpdater.
+func captureLimits(t *testing.T) (download, api *time.Duration) {
+	t.Helper()
+	srv, _ := fakeReleaseServer(t, "0.9.0")
+	useUpdater(t, srv, writeFakeBinary(t), "0.4.0")
+	inner := newUpdater
+	download, api = new(time.Duration), new(time.Duration)
+	newUpdater = func(stdout io.Writer, d, a time.Duration) *update.Updater {
+		*download, *api = d, a
+		return inner(stdout, d, a)
+	}
+	return download, api
+}
+
+func TestUpdateReadsUpdateKeys(t *testing.T) {
+	download, api := captureLimits(t)
+	dir := t.TempDir()
+	cfg := "providers:\n  primary:\n    format: openai\n    base_url: http://127.0.0.1:1\n    api_key: x\n    model: m\n" +
+		"update:\n  download_timeout_s: 60\n  api_timeout_s: 5\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"update", "--check", "--data-dir", dir}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if *download != time.Minute || *api != 5*time.Second || errb.Len() != 0 {
+		t.Fatalf("download %s, api %s, stderr %q", *download, *api, errb.String())
+	}
+}
+
+func TestUpdateWarnsOnBadConfig(t *testing.T) {
+	download, api := captureLimits(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("update: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"update", "--check", "--data-dir", dir}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	e := errb.String()
+	if !strings.HasPrefix(e, "Warning: cannot read config.yaml (") ||
+		!strings.HasSuffix(e, "). The update uses the default time limits.\n") || strings.Count(e, "\n") != 1 {
+		t.Fatalf("stderr %q", e)
+	}
+	if *download != 15*time.Minute || *api != 30*time.Second {
+		t.Fatalf("download %s, api %s", *download, *api)
+	}
+	if out.String() != "tether 0.9.0 is available; you run 0.4.0. Run tether update to install it.\n" {
+		t.Fatal(out.String())
+	}
+}
+
+func TestUpdateNoConfigNoWarning(t *testing.T) {
+	download, api := captureLimits(t)
+	var out, errb bytes.Buffer
+	if code := run([]string{"update", "--check", "--data-dir", t.TempDir()}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if errb.Len() != 0 || *download != 15*time.Minute || *api != 30*time.Second {
+		t.Fatalf("stderr %q, download %s, api %s", errb.String(), *download, *api)
 	}
 }
 

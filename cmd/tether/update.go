@@ -16,13 +16,15 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/update"
 )
 
 // newUpdater builds the Updater of the update command. Tests replace it.
-var newUpdater = defaultUpdater
+var newUpdater func(stdout io.Writer, download, api time.Duration) *update.Updater = defaultUpdater
 
 // systemUnitPath is the system-wide unit of the gateway. When it exists, the restart hint
 // gives the sudo command. Tests replace it.
@@ -59,16 +61,19 @@ var runSystemctl = func(ctx context.Context, stdout, stderr io.Writer, args ...s
 
 // defaultUpdater returns the Updater for this binary and the GitHub releases of the
 // repository. Progress lines go to stdout.
-func defaultUpdater(stdout io.Writer) *update.Updater {
+func defaultUpdater(stdout io.Writer, download, api time.Duration) *update.Updater {
 	return &update.Updater{
 		Current: version,
-		Client:  &update.Client{UserAgent: "tether-agent/" + version},
+		Client:  &update.Client{UserAgent: "tether-agent/" + version, APITimeout: api},
 		Out:     stdout,
+
+		DownloadTimeout: download,
 	}
 }
 
-// runUpdate replaces this binary with a GitHub release. It never reads or writes the data
-// folder. It only probes gateway.lock to find a running gateway.
+// runUpdate replaces this binary with a GitHub release. It reads config.yaml and .env of the
+// data folder only for the update time limits. A file that does not load gives a warning and
+// the default limits. It never reads state.db. It probes gateway.lock to find a running gateway.
 func runUpdate(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("update", flag.ContinueOnError)
 	check := fl.Bool("check", false, "")
@@ -90,10 +95,22 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	// Updater.Run adds the v prefix to a tag without one.
 	opts := update.Options{Tag: *tag, Check: *check, Force: *force}
 
+	data := sudoDataDir(*dir)
+	cfg := config.Default()
+	if _, err := os.Stat(filepath.Join(data, "config.yaml")); err == nil {
+		if loaded, err := skillsConfig(data); err != nil {
+			cause := strings.ReplaceAll(err.Error(), "\n", "; ")
+			fmt.Fprintf(stderr, "Warning: cannot read config.yaml (%s). The update uses the default time limits.\n", cause)
+		} else {
+			cfg = loaded
+		}
+	}
+
 	// An interrupt cancels the download, so the install does not start with a part file.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	res, err := newUpdater(stdout).Run(ctx, opts)
+	res, err := newUpdater(stdout, time.Duration(cfg.Update.DownloadTimeoutS)*time.Second,
+		time.Duration(cfg.Update.APITimeoutS)*time.Second).Run(ctx, opts)
 	if err != nil {
 		fmt.Fprintf(stderr, "update: %v\n", err)
 		return 1
@@ -112,7 +129,7 @@ func runUpdate(args []string, stdout, stderr io.Writer) int {
 	case update.StateUpdated:
 		fmt.Fprintf(stdout, "updated tether %s → %s at %s\n", res.Current, res.Available, res.BinPath)
 		// gatewaylock.Held opens the file read-only and never creates it. An error gives no hint.
-		held, err := gatewaylock.Held(filepath.Join(sudoDataDir(*dir), "gateway.lock"))
+		held, err := gatewaylock.Held(filepath.Join(data, "gateway.lock"))
 		if err == nil && held {
 			return restartGateway(ctx, stdout, stderr, res.Available, *restart, *noRestart)
 		}

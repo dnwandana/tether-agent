@@ -188,3 +188,12 @@ func TestAssetName(t *testing.T) {
 		t.Fatal("windows is not a release platform")
 	}
 }
+
+func TestAPITimeoutField(t *testing.T) {
+	if got := (&Client{APITimeout: 5 * time.Second}).httpClient().Timeout; got != 5*time.Second {
+		t.Fatalf("timeout %v", got)
+	}
+	if got := (&Client{}).httpClient().Timeout; got != 30*time.Second {
+		t.Fatalf("zero field: timeout %v", got)
+	}
+}
