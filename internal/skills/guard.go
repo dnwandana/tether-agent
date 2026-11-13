@@ -54,7 +54,8 @@ type ScanResult struct {
 	Verdict  Verdict
 	Findings []Finding
 	// Unscanned holds the sorted relative paths of the files that ScanDir
-	// did not pattern-scan, because their content is not text.
+	// did not pattern-scan, because their content is not text. It also holds
+	// a file that has an unscanned_file finding.
 	Unscanned []string
 }
 
@@ -90,17 +91,63 @@ var binaryExt = map[string]bool{
 	".msi": true, ".dmg": true, ".app": true, ".deb": true, ".rpm": true,
 }
 
-// mediaExt holds the file types that the guard skips when they hold a NUL
-// byte: images, fonts, documents, archives, audio, video, and other
-// compressed or model files that can start with no NUL byte.
-var mediaExt = map[string]bool{
-	".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".webp": true, ".bmp": true, ".ico": true,
-	".tif": true, ".tiff": true, ".avif": true, ".heic": true,
-	".ttf": true, ".otf": true, ".woff": true, ".woff2": true, ".eot": true,
-	".pdf": true, ".docx": true, ".xlsx": true, ".pptx": true, ".odt": true,
-	".zip": true, ".gz": true, ".tgz": true, ".tar": true, ".bz2": true, ".xz": true, ".7z": true,
-	".mp3": true, ".wav": true, ".ogg": true, ".flac": true, ".m4a": true, ".mp4": true, ".webm": true, ".mov": true,
-	".zst": true, ".br": true, ".lz4": true, ".lzma": true, ".onnx": true,
+// mediaMagic holds the first bytes of each media file type that the guard skips when the file
+// holds a NUL byte: images, fonts, documents, audio, and video. A file keeps the exemption
+// only when its content starts with one of the signatures of its type, because the extension
+// alone is a name that the author of the skill picks. An archive is not in this table: a
+// program such as python3 runs a zip file whatever its name is. Each signature has an offset.
+var mediaMagic = map[string][]magicSig{
+	".png":   {{0, "\x89PNG\r\n\x1a\n"}},
+	".jpg":   {{0, "\xff\xd8\xff"}},
+	".jpeg":  {{0, "\xff\xd8\xff"}},
+	".gif":   {{0, "GIF87a"}, {0, "GIF89a"}},
+	".webp":  {{0, "RIFF"}},
+	".bmp":   {{0, "BM"}},
+	".ico":   {{0, "\x00\x00\x01\x00"}},
+	".tif":   {{0, "II*\x00"}, {0, "MM\x00*"}},
+	".tiff":  {{0, "II*\x00"}, {0, "MM\x00*"}},
+	".avif":  {{4, "ftyp"}},
+	".heic":  {{4, "ftyp"}},
+	".ttf":   {{0, "\x00\x01\x00\x00"}, {0, "true"}},
+	".otf":   {{0, "OTTO"}},
+	".woff":  {{0, "wOFF"}},
+	".woff2": {{0, "wOF2"}},
+	".eot":   {{34, "LP"}},
+	".pdf":   {{0, "%PDF-"}},
+	".mp3":   {{0, "ID3"}, {0, "\xff\xfb"}, {0, "\xff\xf3"}, {0, "\xff\xf2"}},
+	".wav":   {{0, "RIFF"}},
+	".ogg":   {{0, "OggS"}},
+	".flac":  {{0, "fLaC"}},
+	".m4a":   {{4, "ftyp"}},
+	".mp4":   {{4, "ftyp"}},
+	".mov":   {{4, "ftyp"}},
+	".webm":  {{0, "\x1a\x45\xdf\xa3"}},
+}
+
+// magicSig is a signature of a file type: the bytes sig at the byte offset off.
+type magicSig struct {
+	off int
+	sig string
+}
+
+// isMedia reports whether the file at the relative path is a media file that the guard
+// can skip: its extension is in mediaMagic and its head has a signature of that type.
+// A RIFF file must also name the type at byte 8, because WebP and WAV share the signature.
+func isMedia(rel string, head []byte) bool {
+	ext := strings.ToLower(path.Ext(rel))
+	for _, m := range mediaMagic[ext] {
+		if len(head) < m.off+len(m.sig) || string(head[m.off:m.off+len(m.sig)]) != m.sig {
+			continue
+		}
+		switch ext {
+		case ".webp":
+			return len(head) >= 12 && string(head[8:12]) == "WEBP"
+		case ".wav":
+			return len(head) >= 12 && string(head[8:12]) == "WAVE"
+		}
+		return true
+	}
+	return false
 }
 
 // scriptExt holds the file types that can have the executable bit.
@@ -169,14 +216,14 @@ const bashSampleBytes = 80
 // its content has a NUL byte. head is the start of the content. SKILL.md, the
 // scannableExt types, each file under scripts/, and each file that starts
 // with "#!" are always read. Another file is read when bash can run it: its
-// type is not in mediaExt, it is not under .git/, and its first line in the
+// is not a media file with the right signature (isMedia), it is not under .git/, and its first line in the
 // first 80 bytes has no NUL byte. Bash 3.2 and later refuse a file only when
 // this test fails, and bash deletes a NUL byte after the test.
 func mustScan(rel string, head []byte) bool {
 	if isScannable(rel) || strings.HasPrefix(rel, "scripts/") || bytes.HasPrefix(head, []byte("#!")) {
 		return true
 	}
-	if mediaExt[strings.ToLower(path.Ext(rel))] || strings.HasPrefix(rel, ".git/") || strings.Contains(rel, "/.git/") {
+	if isMedia(rel, head) || inGitDir(rel) {
 		return false
 	}
 	first := head[:min(len(head), bashSampleBytes)]
@@ -184,6 +231,11 @@ func mustScan(rel string, head []byte) bool {
 		first = first[:i]
 	}
 	return bytes.IndexByte(first, 0) < 0
+}
+
+// inGitDir reports whether the relative path is in a .git folder.
+func inGitDir(rel string) bool {
+	return strings.HasPrefix(rel, ".git/") || strings.Contains(rel, "/.git/")
 }
 
 // Scan applies the threat patterns and the invisible-rune check to each file.
@@ -440,22 +492,33 @@ var shellVarRe = regexp.MustCompile(`\$\{?[A-Za-z_]`)
 // FormatFindings writes the verdict and the findings, critical first. When an
 // exfiltration finding involves an environment variable, the text ends with
 // the hint to put the API call in a script. When the scan did not read a
-// file, a "not scanned (binary)" line follows the findings.
+// file and the file has no unscanned_file or binary_file finding, a "not scanned (binary)"
+// line follows the findings.
 func FormatFindings(r ScanResult) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Skill guard verdict: %s (%d findings)\n", strings.ToUpper(string(r.Verdict)), len(r.Findings))
 	sorted := append([]Finding(nil), r.Findings...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sevRank(sorted[i].Severity) < sevRank(sorted[j].Severity) })
 	hint := false
+	flagged := map[string]bool{}
 	for _, f := range sorted {
+		if f.PatternID == "unscanned_file" || f.PatternID == "binary_file" {
+			flagged[f.File] = true
+		}
 		fmt.Fprintf(&b, "  %-8s %-20s %s:%d %s: %s: %q\n",
 			strings.ToUpper(string(f.Severity)), f.Category, f.File, f.Line, f.PatternID, f.Description, f.Match)
 		if f.Category == "exfiltration" && (envExfilIDs[f.PatternID] || shellVarRe.MatchString(f.Match)) {
 			hint = true
 		}
 	}
-	if len(r.Unscanned) > 0 {
-		fmt.Fprintf(&b, "not scanned (binary): %s\n", strings.Join(r.Unscanned, ", "))
+	var left []string
+	for _, f := range r.Unscanned {
+		if !flagged[f] {
+			left = append(left, f)
+		}
+	}
+	if len(left) > 0 {
+		fmt.Fprintf(&b, "not scanned (binary): %s\n", strings.Join(left, ", "))
 	}
 	if hint {
 		b.WriteString(scriptsHint)
@@ -489,7 +552,9 @@ var errTooLargeToScan = fmt.Errorf("skill has more than %d KB of files to scan; 
 // It pattern-scans SKILL.md, every scannableExt file, every file under
 // scripts/, every file that starts with "#!", every other file with no NUL
 // byte, and each file with a NUL byte that bash can run (mustScan). It lists
-// the other files in Unscanned, stops at a file that it cannot read, and adds
+// the other files in Unscanned. An unscanned file that is not media and is
+// not in a .git folder gives a high unscanned_file finding. A media file gives none only when its content
+// has the signature of its type. A file with a binary_file finding gives none, because it is flagged already. It stops at a file that it cannot read, and adds
 // a binary_file finding for each file that starts with an executable magic
 // number. More than 1 MB to scan gives errTooLargeToScan, so no file that the
 // guard must read is left unscanned.
@@ -500,6 +565,7 @@ func ScanDir(dir string) (ScanResult, error) {
 	}
 	var structural []Finding
 	var unscanned []string
+	heads := map[string][]byte{}
 	files := map[string]string{}
 	count, total, scanned := 0, int64(0), 0
 	add := func(f Finding) { structural = append(structural, f) }
@@ -572,6 +638,7 @@ func ScanDir(dir string) (ScanResult, error) {
 		}
 		if !mustScan(rel, data) && !looksText(data) {
 			unscanned = append(unscanned, rel)
+			heads[rel] = data[:min(len(data), 64)]
 			return nil
 		}
 		if !complete {
@@ -598,6 +665,19 @@ func ScanDir(dir string) (ScanResult, error) {
 	}
 	r := scanFiles(files, nil)
 	sort.Strings(unscanned)
+	binaryFlagged := map[string]bool{}
+	for _, f := range structural {
+		if f.PatternID == "binary_file" {
+			binaryFlagged[f.File] = true
+		}
+	}
+	for _, rel := range unscanned {
+		if isMedia(rel, heads[rel]) || inGitDir(rel) || binaryFlagged[rel] {
+			continue
+		}
+		structural = append(structural, Finding{PatternID: "unscanned_file", Severity: SevHigh, Category: "structural",
+			Description: "a file that the guard cannot scan, and that a program can run", File: rel, Line: 1, Match: ""})
+	}
 	all := append(structural, r.Findings...)
 	return ScanResult{Verdict: verdictOf(all), Findings: all, Unscanned: unscanned}, nil
 }

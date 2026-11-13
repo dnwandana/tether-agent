@@ -483,3 +483,20 @@ func TestUpdateReportsRequiredEnv(t *testing.T) {
 		t.Fatalf("output:\n%s", out)
 	}
 }
+
+func TestUpdateUnscannedFileNeedsForce(t *testing.T) {
+	url, _, _ := makeRemote(t, "main")
+	in := gitInstaller(t, &fakePrompt{}, url)
+	out := in.Out.(interface{ String() string })
+	pushFiles(t, url, "main", map[string]string{"payload": "//\x00\n"})
+
+	if err := in.Update(context.Background(), UpdateRequest{Yes: true}); err == nil {
+		t.Fatalf("Update returned no error\n%s", out)
+	}
+	if !strings.Contains(out.String(), "pdf: blocked (community source, caution verdict).") {
+		t.Fatalf("output:\n%s", out)
+	}
+	if err := in.Update(context.Background(), UpdateRequest{Yes: true, Force: true}); err != nil {
+		t.Fatalf("Update --force: %v\n%s", err, out)
+	}
+}

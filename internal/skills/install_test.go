@@ -693,3 +693,20 @@ func TestInstallReportsRequiredEnv(t *testing.T) {
 		}
 	}
 }
+
+func TestInstallUnscannedFileCommunity(t *testing.T) {
+	src := localSkill(t, t.TempDir(), "pdf", safeBody)
+	writeFile(t, filepath.Join(src, "payload"), "//\x00\n")
+	in, _ := newInstaller(t, &fakePrompt{term: true, confirm: true})
+	_, err := in.Install(context.Background(), InstallRequest{Source: src, Yes: true})
+	if err == nil || !strings.HasPrefix(err.Error(), "blocked (community source, caution verdict).") {
+		t.Fatalf("err = %v", err)
+	}
+	in, _ = newInstaller(t, &fakePrompt{})
+	if _, err := in.Install(context.Background(), InstallRequest{Source: src, Yes: true, Force: true}); err != nil {
+		t.Fatal(err)
+	}
+	if e := lockEntry(t, in.SkillsDir, "pdf"); e.ScanVerdict != VerdictCaution {
+		t.Fatal(e.ScanVerdict)
+	}
+}
