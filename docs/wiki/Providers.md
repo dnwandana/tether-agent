@@ -19,7 +19,7 @@ session uses it when no other rule applies.
 | `api_key` | `""` | The API key. Use `${NAME}` and keep the value in `.env`. |
 | `model` | `""` | The model name that the agent sends. Each entry must set it. |
 | `vision` | `false` | When `true`, images go inline to this model. |
-| `context_window` | `0` | The context window in tokens. `0` takes the value from the price data, else 128000. |
+| `context_window` | `0` | The context window in tokens. `0` takes the value from the price data, else `provider.default_context_window` (128000). |
 | `price_key` | `""` | The LiteLLM price key, for example `zai/glm-5.3`. Set it when the automatic price match fails. |
 | `effort` | `""` | The reasoning effort of this entry. `""` sends no effort field. See [Reasoning effort](#reasoning-effort). |
 
@@ -179,7 +179,8 @@ These details apply to each wire format:
   in the last chunk of the stream.
 - **`anthropic`** adds only `/messages` when `base_url` already ends in `/v1`. It sends the
   `x-api-key` header and `anthropic-version: 2023-06-01`. It marks the last 3 messages for the
-  Anthropic prompt cache. When the request sets no output limit, it sends `max_tokens: 8192`.
+  Anthropic prompt cache. When the request sets no output limit, it sends `max_tokens: 8192`
+  (`provider.anthropic_max_tokens`).
 - **`responses`** sends `Authorization: Bearer <key>`. It sends `store: false`, so the provider
   keeps no copy of the conversation. It asks for the encrypted reasoning, so that the next call
   can send it back.
@@ -381,13 +382,13 @@ These failures do not go to the next entry:
 - Another HTTP 4xx, for example a 400 for a bad request. A bad request fails on each provider,
   so the error goes to you.
 - A failure after the first byte. The agent saves the partial text, and the error goes to you.
-- A stream that sends no data for 300 seconds.
+- A stream that sends no data for 300 seconds (`agent.stream_idle_timeout_s`).
 - A cancel, for example `/stop`.
 
 ### Wait times and turns
 
-- An entry that fails gets a wait time of 60 seconds for its model. In that time, the chain skips
-  it.
+- An entry that fails gets a wait time of 60 seconds (`provider.failure_skip_s`) for its model. In
+  that time, the chain skips it.
 - When all entries wait, the chain tries all of them.
 - All sessions share the wait times. They are in memory, so a restart clears them.
 - One turn stays on one entry. The next call of the turn starts at the entry that answered.
@@ -586,7 +587,7 @@ above `context.compact_threshold` of the window. The agent gets the window in th
 
 1. `context_window` of the entry, when it is more than `0`.
 2. The price data of the model.
-3. 128000.
+3. `provider.default_context_window` (128000).
 
 The size of the context is the prompt tokens of the last answer, as the provider gave them,
 plus the cache read tokens. The agent adds an estimate for each newer message: 4 characters for
@@ -613,8 +614,9 @@ providers:
 - An entry with no preset and no `api_key` sends no auth header. Most local servers need no key.
 - The provider calls do not use the private network block of the web tools, so a local address
   works.
-- Set `context_window` to the context size of the server. The price data does not know most
-  local models, so the agent otherwise uses 128000, and compaction starts too late.
+- Set `context_window` to the context size of the server. The price data does not know most local
+  models, so the agent otherwise uses 128000 (`provider.default_context_window`), and compaction
+  starts too late.
 
 Ollama uses a context of 4K tokens by default on a GPU with less than 24 GiB of VRAM. An agent
 needs at least 64000 tokens. The `openai` wire format cannot send `num_ctx`, so start the server

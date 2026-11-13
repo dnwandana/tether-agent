@@ -38,6 +38,9 @@ The agent tools cannot write `config.yaml` or `.env`. See [Security](Security#pr
   process environment first, then from `.env`.
 - A `${NAME}` that is not set stops the load. The error names the variable and the key.
 - An enum key with an unknown value stops the load. The error gives the permitted values.
+- A number below its minimum, or above its maximum, stops the load. A time in seconds has a
+  maximum of 2592000 (30 days). Some pairs must be in order, for example `cron.grace_min_s` and
+  `cron.grace_max_s`. The error names the key.
 - A value of the wrong type stops the load.
 - An unknown key does not stop the load. The program ignores it, so check the spelling of each key.
 - `telegram.bot_token` is a special case. When the file does not set it, the program uses
@@ -60,24 +63,32 @@ To restart the gateway, send `/restart` in a chat, or run `systemctl --user relo
 | Section | What it controls |
 |---|---|
 | `providers` | The model endpoints: the primary provider and other named entries. See [Providers](Providers). |
-| `agent` | The turn loop: the tool round limit, parallel tools, the vision and delegation providers, the fallback list, the restart drain, and the resume of cut turns. |
-| `context` | Compaction and the size limit of tool output. |
-| `sessions` | How long the automatic sessions stay in the database. |
-| `memory` | The size limits of the two memory files and the memory review interval. |
-| `skills` | More skill folders, the skill review interval, and the skill guard. |
-| `web` | `web_search` and `web_fetch`: the backend, the URL limits, and the private network block. |
-| `browser` | The Chrome path and the idle stop time. |
+| `provider` | Rules for all provider entries: the skip time of a failed entry, the Anthropic output limit, the model list cache and timeout, and the default context window. |
+| `agent` | The turn loop: the tool round limit, parallel tools, the vision and delegation providers, the fallback list, the restart drain, the resume of cut turns, the stream idle limit, the limit of same tool failures, and the length of a tool preview. |
+| `context` | Compaction, the size limit of tool output, and the limits of the compaction summary. |
+| `sessions` | How long the automatic sessions stay in the database, and the result and window limits of `session_search`. |
+| `memory` | The size limits of the two memory files, the memory review interval, and the limits of one entry, the lock wait, a read, a search, and the topic list of the prompt. |
+| `review` | The background memory and skill review: the rounds, the parallel reviews, and the minimum number of user turns. |
+| `skills` | More skill folders, the skill review interval, the skill guard, the git timeout, and the size limits of `skill_manage` and `skill_view`. |
+| `web` | `web_search` and `web_fetch`: the backend, the URL limits, the private network block, the HTTP timeout, and the result counts. |
+| `browser` | The Chrome path, the idle stop time, the action timeout, the length of the page excerpt, and the settle wait. |
 | `terminal` | The command timeout and the secrets that child processes can see. |
 | `code_execution` | The limits of `execute_code`. |
+| `files` | The line limits of `read_file` and the context lines of `patch`. |
+| `todo` | The item count and the item length of the todo list. |
 | `delegation` | The limits of `delegate_task` child runs. |
 | `approvals` | The approval mode for dangerous commands, in chats and in cron runs. |
+| `goals` | The `/goal` loop: the turn budget, the judge, the gates, and the waits. |
 | `toolsets` | The toolsets that each channel can use. |
-| `cron` | Parallel cron jobs and the rule for missed runs. |
-| `telegram` | The bot: who can use it, group rules, home chat, streaming, and status lines. |
-| `mcp` | The MCP servers. |
-| `acp` | Coding agents for the `acp_delegate` tool: the adapter programs, the permission presets, and the folders where they can work. |
-| `media` | The backends of text to speech, speech to text, and image generation. |
+| `cron` | Parallel cron jobs, the time limits of a run, and the rule for missed runs. |
+| `gateway` | The message queue, the debounce wait, the page sizes of `/model` and `/sessions`, the skill count of `/help`, the cleanup interval, and the files that an answer can send. |
+| `telegram` | The bot: who can use it, group rules, home chat, streaming, status lines, the Bot API timeouts, the media limits, the menu size, and the pairing code time. |
+| `mcp` | The MCP servers and the dial tries of each server. |
+| `acp` | Coding agents for the `acp_delegate` tool: the adapter programs, the permission presets, the folders where they can work, and the result size limit. |
+| `media` | The backends of text to speech, speech to text, and image generation, their timeouts, the image size, and the limits of `view_image`. |
 | `pricing` | The price data sources and manual prices. |
+| `update` | The download timeout and the API timeout of `tether update`. |
+| `doctor` | The check timeouts and the free disk limit of `tether doctor`. |
 | `log` | The log level and the log file rotation. |
 
 ## Providers
@@ -96,7 +107,7 @@ Each entry has these keys:
 | `api_key` | `""` | The API key. Use `${NAME}` and keep the value in `.env`. |
 | `model` | `""` | The model name that the agent sends. Each entry must set it. |
 | `vision` | `false` | When `true`, images go inline to this model. |
-| `context_window` | `0` | The context window in tokens. `0` takes the value from the price data, else 128000. |
+| `context_window` | `0` | The context window in tokens. `0` takes the value from the price data, else `provider.default_context_window` (128000). |
 | `price_key` | `""` | The LiteLLM price key. Set it when the automatic price match fails. |
 | `effort` | `""` | The reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. `""` sends no effort field. The `/effort` level of a session wins. |
 
@@ -152,6 +163,8 @@ These keys are the ones that most users change. The full list is in
 | `memory.review_interval_turns` | `10` | A background memory review starts after this number of user turns. `0` stops the reviews. |
 | `approvals.mode` | `manual` | The approval mode for dangerous commands: `manual`, `smart`, or `off`. |
 | `approvals.cron_mode` | `deny` | The result for a dangerous command in a cron run: `deny` or `approve`. |
+| `cron.script_timeout_s` | `120` | The time limit of one cron script run, in seconds. It applies to a script job and to the data script of an agent job. At the limit, the program stops the script. A script job sends an alert. In an agent job, the failure goes into the prompt, and the model reports it. The minimum is 1. |
+| `cron.agent_timeout_s` | `0` | The time limit of the agent turn of one cron job, in seconds. `0` means no limit. At the limit, the program stops the turn and sends an alert. A partial answer follows the alert. The script of the job does not count. The maximum is 2592000. |
 | `goals.max_turns` | `20` | The turn budget of a new goal. |
 | `goals.judge_provider` | `""` | The provider entry of the goal judge and of `/goal draft`. `""` uses the chain of the session. |
 | `goals.judge_timeout_s` | `30` | The timeout of one judge call or draft call, in seconds. |

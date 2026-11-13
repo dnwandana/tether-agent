@@ -25,6 +25,7 @@ The doctor runs the checks in this order:
    - A preset is not known, or it is removed.
    - An enum key has an unknown value, for example `format` or `effort`.
    - The `agent.fallback` list is not valid.
+   - A number is below its minimum or above its maximum, or a pair is out of order.
 
    A second **config** line gives a warning for each provider entry with the removed key
    `flat_rate`.
@@ -65,7 +66,7 @@ The doctor runs the checks in this order:
     The lines of an agent stop at the first failure. The **acp allowlist** line gives a warning
     when `acp.workdir_allowlist` is empty. The **acp agents** line gives a warning when no agent
     is enabled.
-13. **disk**: a warning when less than 1 GiB is free.
+13. **disk**: a warning when less than 1 GiB is free (`doctor.min_free_bytes`).
 14. **release**: a warning when a newer release exists or when the check cannot go online.
 
 When the config does not load, the doctor skips the provider, telegram, mcp, and acp checks.
@@ -392,7 +393,7 @@ The wizard shows `The model list is not available: <cause>.` `/model <provider>`
 - `no connection`: the host cannot be reached, for example because of a wrong base URL or a
   network error.
 - `no chat models`: the list has only models that cannot chat.
-- `error`: the provider did not answer in 10 seconds, or the response is not a model list.
+- `error`: the provider did not answer in 10 seconds (`provider.model_list_timeout_s`), or the response is not a model list.
 
 **Fix:**
 
@@ -424,7 +425,7 @@ These errors stop the load of the config:
 ### The answers come from a fallback provider
 
 **Cause:** an entry of the fallback chain failed before the first byte of an answer. The chain
-then skips that entry for 60 seconds. After that time, the next call tries the entry again.
+then skips that entry for 60 seconds (`provider.failure_skip_s`). After that time, the next call tries the entry again.
 Possible reasons are a network error, a bad key, an HTTP 429, or an HTTP 5xx from the entry.
 
 The signs are these:
@@ -433,7 +434,7 @@ The signs are these:
   `the primary failed at that time; see "provider fallback" in the gateway log`.
 - The reply to `/new` shows `Model: <model> (fallback)`.
 - The reply to `/new` or `/model` shows a warning line. The line shows only in the 60 seconds
-  after the failure, so the time is always `less than 1 min ago`.
+  after the failure, so the time is less than `provider.failure_skip_s` ago (default 1 min).
 
 The warning line has one of two forms. `<entry>` is the entry that answers now:
 

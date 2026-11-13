@@ -117,7 +117,7 @@ These rules apply:
 
 To see the skill commands:
 
-- `/help` shows the first 10 skill commands after the built-in commands.
+- `/help` shows the first 10 skill commands (`gateway.help_max_skills`) after the built-in commands.
 - `/help skills` shows all skill commands.
 - The Telegram command menu shows the skill commands after the built-in commands. See
   [Telegram](Telegram#the-command-menu).

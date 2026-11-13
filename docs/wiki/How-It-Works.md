@@ -108,8 +108,9 @@ the queue, so your waiting messages run first. See [Goals](Goals).
    is empty two times, the answer is "I used all 90 tool rounds of this turn, and I could not
    write a summary." The text also tells you how to continue. If the summary call fails, the
    answer shows the error, as for each other failed call.
-7. **Stop on repeated failures.** Three failures of the same kind in a row end the turn, for
-   example a call to an unknown tool or arguments that are not valid JSON.
+7. **Stop on repeated failures.** Three failures of the same kind in a row
+   (`agent.max_same_tool_failures`) end the turn, for example a call to an unknown tool or arguments
+   that are not valid JSON.
 8. **Start reviews.** After the turn, a background memory or skill review can start. See
    [Background reviews](#background-reviews).
 9. **Check the goal.** When the session has an active goal, the judge checks the answer.
@@ -178,7 +179,8 @@ because each event has the stamp.
 These rules apply to each stream:
 
 - A stream that ends before its finish event is an error.
-- The agent stops a call when the stream sends no event for 300 seconds.
+- The agent stops a call when the stream sends no event for 300 seconds
+  (`agent.stream_idle_timeout_s`).
 - After an error, the agent saves the partial text. It does not save the tool calls of a failed
   stream, because they have no result.
 - An HTTP error keeps the first 512 bytes of the body, on one line. The adapter removes the API
@@ -211,9 +213,9 @@ Another error goes to you, because a bad request fails on each provider. A cance
 at once. After the first byte, no other entry gets the call. The log shows each change of entry
 as `provider fallback`. When all entries fail, the error holds the error of each entry.
 
-**Wait time.** An entry that fails gets a wait time of 60 seconds for its model. In that time,
-the chain skips it. When all entries wait, the chain tries all of them. The state is in
-`provider.Health`:
+**Wait time.** An entry that fails gets a wait time of 60 seconds (`provider.failure_skip_s`) for
+its model. In that time, the chain skips it. When all entries wait, the chain tries all of them. The
+state is in `provider.Health`:
 
 - The key of the state is the entry and the model. A failure of a pinned model does not mark the
   other models of the entry.
@@ -221,8 +223,9 @@ the chain skips it. When all entries wait, the chain tries all of them. The stat
 - The state is in memory, so a restart clears it.
 - A call that works clears the failure of its entry.
 
-`/new` and `/model` read this state. In the 60 seconds after the first entry of the chain
-failed, they show the entry that serves the calls now. They also show a ⚠️ line with the cause.
+`/new` and `/model` read this state. In the 60 seconds (`provider.failure_skip_s`) after the first
+entry of the chain failed, they show the entry that serves the calls now. They also show a ⚠️ line
+with the cause.
 After the wait time, they show the first entry again. See [Commands](Commands#model-and-effort).
 
 **One turn stays on one entry.** The next call of the turn starts at the entry that served the
@@ -424,8 +427,9 @@ QuickNode free plan: 10M credits/month, 15 req/s
 Helius RPC: 1M credits/day; mainnet URL in .env
 ```
 
-A line that holds only `§` separates two entries, in a memory file and in a note. One
-entry has at most 4000 characters. You can read and edit the files with any text editor.
+A line that holds only `§` separates two entries, in a memory file and in a note. One entry has at
+most 4000 characters (`memory.entry_max_chars`). You can read and edit the files with any text
+editor.
 
 The agent changes memory with the `memory` tool. The tool has five actions:
 
@@ -469,9 +473,9 @@ After some turns, a background review looks at the conversation and saves what i
 - A **skill review** starts after each `skills.review_interval_tool_rounds` tool rounds
   (default 10). It can write a new skill or fix a skill.
 - When both are due, they run as one review.
-- A review also runs after a compaction and on `/new`, when the session has 6 or more user
-  turns. The review of a compaction looks at the messages that the saved summary replaces. A
-  failed summary starts no review.
+- A review also runs after a compaction and on `/new`, when the session has 6 or more user turns
+  (`review.min_user_turns`). The review of a compaction looks at the messages that the saved summary
+  replaces. A failed summary starts no review.
 
 A review is a copy of the conversation in a separate `review` session. It sends the same tool
 schemas as its parent and the session id of its parent as the cache key, so the prompt cache
@@ -550,11 +554,11 @@ smaller.
   `todo_list` goes at the end of the summary.
 - **Storage:** the stored messages never change. A row in the `compactions` table replaces a
   range of messages with the summary in the view that goes to the model.
-- **Failures:** after 3 failures in a row, you see a warning.
+- **Failures:** after 3 failures in a row (`context.compact_max_failures`), you see a warning.
 - **No loop:** compaction cannot make the system prompt and the tool schemas smaller. When two
-  compactions in a row leave the request over the threshold, automatic compaction stops, and
-  the log gets a warning. It starts again when the request is under the threshold. `/compact`
-  still runs.
+  compactions in a row (`context.compact_max_ineffective`) leave the request over the threshold,
+  automatic compaction stops, and the log gets a warning. It starts again when the request is under
+  the threshold. `/compact` still runs.
 
 ### Long tool output
 

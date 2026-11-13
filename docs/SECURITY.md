@@ -85,7 +85,7 @@ model call. The gate is a port of the Hermes approval flow.
   This approval covers this one command only. The next command of the same rule goes to the
   judge again. A command that names `state.db` never goes to the judge. For an
   `execute_code` script, the judge gets a script prompt and at most the first 8000
-  characters. A longer script goes to the user.
+  characters (`approvals.smart_script_max_chars`). A longer script goes to the user.
 - `off`: the command runs with no question. The hardline list and the sudo guard still apply.
 
 ### Cron runs
@@ -177,7 +177,7 @@ After the add check, these rules apply:
   `TETHER_GATEWAY=1`.
 - The gate runs in the folder where the Tether Agent process started, like a `terminal`
   call with no `workdir`. Write `cd /path && <command>` for another folder.
-- The timeout is 300 seconds. A timeout and a cancel count as exit -1.
+- The timeout is 300 seconds (`goals.gate_timeout_s`). A timeout and a cancel count as exit -1.
 - Only an owner can add a gate. See [Owners and members](#owners-and-members).
 
 ## Coding agents (ACP)
@@ -293,7 +293,7 @@ active after `/new`, after a restart, and after a model change.
   The table has 25 rules of Hermes `tools/threat_patterns.py`, 4 credential rules of the skill
   guard, and a check for invisible characters and Unicode tag characters. Any finding refuses
   the write. A `remove` is never refused. A text over the limit of 4000 characters for one entry
-  gets the length error, with no scan.
+  (`memory.entry_max_chars`) gets the length error, with no scan.
 - The notice of a review write to `memory.md` or `user_profile.md` shows the full saved text,
   for example ``💾 Memory updated: `VPS = ovh` ``. A hidden character shows as a mark, for
   example `<U+200B>`. So the user sees each character that goes into the system prompt. The
@@ -417,14 +417,14 @@ A model list call is a GET with the API key of the entry. These rules apply:
 - The key goes only to the base URL of the entry.
 - The `openrouter` preset on the preset URL gets two list calls.
 - In the wizard, a search text goes to OpenRouter as `/models?q=<text>`.
-- Each call stops after 10 seconds.
+- Each call stops after 10 seconds (`provider.model_list_timeout_s`).
 - A failed call shows only a short cause, for example `HTTP 401` or `no connection`. The reply
   never shows the response body or the URL.
 
 The gateway and the CLI chat keep the model lists in a cache:
 
 - The cache is in memory only. No list goes to disk.
-- A list stays in the cache for 1 hour.
+- A list stays in the cache for 1 hour (`provider.model_cache_ttl_s`).
 - Only a list from a successful call goes into the cache.
 - The cache key holds the first 16 hex characters of the SHA-256 hash of the API key, not the
   key.
@@ -670,7 +670,7 @@ The default platform is `telegram`.
 - A code has 8 characters. The alphabet has no `0`, `O`, `1`, or `I`.
 - `state.db` keeps a salted SHA-256 hash of each code, not the code. `pairing list` cannot show
   a code.
-- A code expires after 1 hour.
+- A code expires after 1 hour (`telegram.pairing_code_ttl_s`).
 - A user can request one code in 10 minutes.
 - Each platform has a maximum of 3 pending codes.
 - The lockout applies to the full platform, not to one user. After 5 failed approvals (a wrong
@@ -687,18 +687,19 @@ The model can send a local file with a `MEDIA:<path>` tag or a bare absolute pat
 Cron delivery uses the same rule. The rule is a port of Hermes `validate_media_delivery_path`.
 The checks use the real path, after the symbolic links.
 
-1. A protected path (see "Protected paths") is always refused. `TETHER_MEDIA_ALLOW_DIRS`
-   cannot open it. This rule covers the credential folders `~/.ssh/`, `~/.aws/`, `~/.gnupg/`,
+1. A protected path (see "Protected paths") is always refused. A folder of
+   `gateway.media_allow_dirs` or `TETHER_MEDIA_ALLOW_DIRS` cannot open it. This rule covers the credential folders `~/.ssh/`, `~/.aws/`, `~/.gnupg/`,
    `~/.kube/`, `~/.docker/`, `~/.azure/`, `~/.config/gh/`, and `~/.config/gcloud/`.
 2. A file in `<data>/cache/media/`, `<data>/cache/screenshots/`, or a folder of
-   `TETHER_MEDIA_ALLOW_DIRS` is sent.
+   `gateway.media_allow_dirs` (or `TETHER_MEDIA_ALLOW_DIRS`) is sent.
 3. A file in a denied folder is refused: `/etc`, `/proc`, `/sys`, `/dev`, `/root`, `/boot`,
    `/var/log`, `/var/lib`, `/var/run`, and `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
    `~/.docker`, `~/.config`, `~/.azure`, `~/.gcloud`, `~/Library/Keychains`.
 4. In the default mode, all other files are sent.
-5. In strict mode (`TETHER_MEDIA_DELIVERY_STRICT=1`), another file is sent only when it changed in
-   the last 600 seconds. `TETHER_MEDIA_TRUST_RECENT_SECONDS` changes the time.
-   `TETHER_MEDIA_TRUST_RECENT_FILES=0` turns this off.
+5. In strict mode (`gateway.media_delivery_strict: true`), another file is sent only when it
+   changed in the last 600 seconds. `gateway.media_trust_recent_s` changes the time.
+   `gateway.media_trust_recent_files: false` turns this off. A `TETHER_MEDIA_*` variable that is
+   set wins over its key.
 
 A refused `MEDIA:` tag shows as `[blocked file: <path>]` in the answer. Use strict mode when users
 who are not the owner can talk to the bot. A prompt injection can make the model name any file.
@@ -707,8 +708,8 @@ The bot does not send `memory.md` or `user_profile.md`, because they are protect
 
 In the gateway, Tether Agent deletes the files in `<data>/cache/media/` and
 `<data>/cache/screenshots/` that are older than `media.cache_retention_days`. The default is
-7 days, and `0` keeps all files. The cleanup runs at start and then each 24 hours.
-`tether chat` alone deletes no files.
+7 days, and `0` keeps all files. The cleanup runs at start and then each 24 hours
+(`gateway.housekeeping_interval_s`). `tether chat` alone deletes no files.
 
 ## Skill guard
 
@@ -802,7 +803,7 @@ A cron script job runs a script with no model call and with no approval. These l
   dangerous, so the approval gate asks the user. In a cron run, `approvals.cron_mode` sets
   the result.
 - The script gets the child environment with no secrets.
-- The script stops after 120 seconds. The program then stops the full process group.
+- The script stops after `cron.script_timeout_s` seconds (default 120). The program then stops the full process group.
 - A failure or a timeout always sends an alert with the tail of stderr.
 
 ## MCP servers
@@ -877,8 +878,8 @@ these checks:
    `subprocess` string or a protected path, makes the script ask each time.
 4. A script with no literal match runs when the session has a `session` answer for
    `execute_code`. The saved `always` answers do not apply.
-5. In smart mode, the judge gets a script prompt and at most the first 8000 characters. A
-   low-risk answer runs this script only. A longer script goes to the user.
+5. In smart mode, the judge gets a script prompt and at most the first 8000 characters
+   (`approvals.smart_script_max_chars`). A low-risk answer runs this script only. A longer script goes to the user.
 6. Else the gate asks the user.
 
 The prompt uses the rule `execute_code` with the description `run a Python script on the host`.
@@ -903,7 +904,8 @@ stubs send their calls through the approval gate and the protected path checks. 
 - It checks the SHA-256 of the archive against `checksums.txt` from the same release.
 - It runs the new binary one time with `version` and compares the output.
 - It replaces the file with one rename in the folder of the binary.
-- It never reads `config.yaml`, `.env`, or `state.db`.
+- It reads `config.yaml` and `.env` only for the `update.*` time limits. A file that does not load
+  gives a warning and the defaults. It never reads `state.db`.
 - It needs write permission on the folder of the binary. A binary in `/usr/local/bin` needs
   `sudo tether update`.
 - A running gateway keeps the old code until a restart. In a terminal, the command asks

@@ -96,7 +96,11 @@ An agent run has these rules:
 - Each run is a fresh session with the key `cron:<job id>`.
 - The run cannot use the `cronjob` tool or the `clarify` tool. No user is present to answer.
 - The final answer always goes to the target.
-- A failure sends "⚠ Cron job X failed: …".
+- A failure sends "⚠ Cron job X failed: …". A time-out sends "⚠ Cron job X failed (timed out
+  after Ns)". When the model wrote a part of its answer before the time-out, the part follows
+  the alert.
+- An agent run has no time limit by default. Set `cron.agent_timeout_s` to stop a run that takes
+  too long. The data script does not count.
 - The toolsets come from `toolsets.cron`. The `toolsets` field of a job can only make that list
   smaller.
 
@@ -138,8 +142,8 @@ The script has these rules:
 - The script must be in the `scripts/` folder of the data dir. A relative path starts in that
   folder. A path outside that folder is refused, because a script job runs with no approval.
 - `.sh` and `.bash` files run with `bash`. Other files run with `python3`.
-- The timeout is 120 seconds.
-- The bot sends stdout word for word, up to 50,000 characters. A longer output is cut, and
+- The timeout is 120 seconds. `cron.script_timeout_s` changes it.
+- The bot sends stdout word for word, up to 50,000 characters (`cron.script_output_max_chars`). A longer output is cut, and
   the full text goes to a spill file.
 - Empty stdout sends nothing. Make the script quiet when there is nothing to report.
 - A failure always sends an alert. A failure is a non-zero exit code or a timeout.
@@ -167,7 +171,7 @@ In an agent job, a `script` runs first, and its stdout goes into the prompt as d
 
 ## The scheduler
 
-- The scheduler checks for due jobs every 30 seconds.
+- The scheduler checks for due jobs every 30 seconds (`cron.tick_s`).
 - `cron.max_parallel_jobs` (default `2`) limits the jobs that run at the same time. Other due jobs
   wait for the next check.
 - Only one job with a `workdir` runs at a time.
@@ -189,7 +193,7 @@ In an agent job, a `script` runs first, and its stdout goes into the prompt as d
 `cron.missed_runs` sets what happens to a run that the gateway missed while it was stopped:
 
 - `skip` (the default): a job that is late by less than its grace window runs one time. The grace
-  window is half the period, from 2 minutes to 2 hours. A later job moves to its next time.
+  window is half the period, from 2 minutes to 2 hours (`cron.grace_min_s` and `cron.grace_max_s`). A later job moves to its next time.
 - `catchup`: each due job runs one time, also when it missed more than one run.
 
 A one-shot job that is late always runs one time.

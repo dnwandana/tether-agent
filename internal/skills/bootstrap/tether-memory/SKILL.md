@@ -46,7 +46,7 @@ files. Use `skill_manage` for skills.
   action `search` to find a fact. Use the action `read` to open a note.
 - Before you add a fact, `search` the notes for the same subject. When a note has an
   older version of the fact, use `replace`.
-- One entry has a limit of 4,000 characters. Write a longer text as several entries.
+- One entry has a limit of 4,000 characters by default (`memory.entry_max_chars`). Write a longer text as several entries.
 - Move a long procedure from memory.md into a skill.
 
 ## When the agent reads them

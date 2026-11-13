@@ -90,7 +90,7 @@ The pairing codes have these rules:
 
 - A code has 8 characters from `A-Z` and `2-9`. The characters `0`, `O`, `1`, and `I` are not
   used, because they look the same.
-- A code expires after 1 hour.
+- A code expires after 1 hour (`telegram.pairing_code_ttl_s`).
 - A user can get one new code every 10 minutes.
 - A platform can have a maximum of 3 codes that wait for approval.
 - After 5 failed approvals, the platform locks for 1 hour.
@@ -241,7 +241,7 @@ menu, but they work. See [Commands](Commands) for each command.
 After the built-in commands, the menu shows the skill commands in name order, with `_` in place
 of `-`. See [Skills](Skills#run-a-skill-with-a-slash-command). These rules apply:
 
-- The menu has a maximum of 60 entries. Send `/help skills` to see all skill commands.
+- The menu has a maximum of 60 entries (`telegram.menu_max_commands`, with the 22 built-in commands). Send `/help skills` to see all skill commands.
 - A skill command with a name of more than 32 characters is not in the menu.
 - The gateway sets the menu only when it starts. A new skill shows in the menu after the next
   start.
@@ -270,14 +270,14 @@ a short preview of its main argument, for example the command or the search quer
 
 The status lines have these rules:
 
-- A preview has a maximum of 40 characters.
+- A preview has a maximum of 40 characters (`agent.tool_preview_chars`).
 - In the default mode, each tool has one line. A new call of the same tool replaces the
   preview with its own preview and adds the count `(×N)`.
 - A line that starts with `🔀 [i/n]` comes from a subagent. Each subagent has its own lines.
 - A line that starts with `🔀 [<agent>]`, for example `🔀 [claude-code]`, comes from a coding
   agent of `acp_delegate`. The line shows the kind and the title of one tool call of the coding
   agent. See [Coding agents](Tools#coding-agents).
-- The bot edits the status message a maximum of one time every 1.5 seconds.
+- The bot edits the status message a maximum of one time every 1.5 seconds (`telegram.status_interval_s`).
 - After a streamed answer, the next tool line starts a new status message below the answer.
 - A status message that gets too long continues in a new message.
 
@@ -487,7 +487,7 @@ Most used this week (1 to 10), then best for agents (11 to 15). Only models with
 [↩ Providers] [↻ Refresh]
 ```
 
-- A page has 8 models, 2 in a row. The row with ◀ Prev, `n / N`, and Next ▶ is the same as in
+- A page has 8 models (`gateway.model_page_size`), 2 in a row. The row with ◀ Prev, `n / N`, and Next ▶ is the same as in
   the `/sessions` list. A list with one page has no such row.
 - A button shows the part of the model ID after the last `/`. A label longer than 32
   characters ends in `…`.
@@ -524,8 +524,8 @@ The bot does not show such buttons to a member.
 |---|---|
 | Photo | The model gets the largest size as an image. |
 | Voice note | The bot transcribes it when speech-to-text is set up. Else the agent gets a note that transcription is not set up. |
-| Document | The bot saves documents of up to 20 MB of these types: pdf, md, txt, csv, log, json, xml, yaml, yml, toml, ini, cfg, zip, docx, xlsx, pptx, ts, py, sh. A `.md` or `.txt` file of 100 KB or less goes into the message as text. |
-| Album | The bot waits 800 ms and joins the parts into one message. |
+| Document | The bot saves documents of up to 20 MB of these types: pdf, md, txt, csv, log, json, xml, yaml, yml, toml, ini, cfg, zip, docx, xlsx, pptx, ts, py, sh. A `.md` or `.txt` file of 100 KB (`telegram.inline_text_max_bytes`) or less goes into the message as text. |
+| Album | The bot waits 800 ms (`telegram.album_wait_s`) and joins the parts into one message. |
 | Sticker | The vision model describes a static sticker. |
 | Video, audio, location, venue | The bot handles these types too. |
 | Rich message | The agent gets the text as Markdown, with its headings, lists, tables, and code blocks. The bot reads the first 10 media files of one message or one album. The media of one rich message has a time limit of 2 minutes. The agent gets a note for each media file that the bot did not read. |
@@ -543,8 +543,8 @@ The agent can send local files after its text:
 Text-to-speech audio becomes a voice note when `ffmpeg` is installed. Without `ffmpeg`, the bot
 sends the audio as a file.
 
-The bot never sends a protected path. Four `TETHER_MEDIA_*` environment variables control the
-other files that it can send. See
+The bot never sends a protected path. The four `gateway.media_*` keys control the
+other files that it can send. A `TETHER_MEDIA_*` variable that is set wins over its key. See
 [docs/SECURITY.md](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md) for the
 full rule.
 

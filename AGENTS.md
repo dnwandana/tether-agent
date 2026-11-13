@@ -52,7 +52,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
      model call goes through a `provider.Chain` from `provider.Set.ChainFor`. The chain order
      is the pinned entry, `primary`, and then `agent.fallback`. The chain goes to the next
      entry only on an error that wraps `provider.ErrBeforeFirstByte`. `provider.Health` keeps
-     the failures and skips a failed entry for 60 s. All chains share one `Health`.
+     the failures and skips a failed entry for `provider.failure_skip_s` (default 60 s). All chains
+     share one `Health`.
 - State: the data dir is `--data-dir`, else `TETHER_HOME`, else `~/.tether`. `state.db` is
   pure-Go SQLite (`modernc.org/sqlite`) with one connection. Do not run a second query while
   rows are open, because it deadlocks. Migrations are `internal/db/migrations/NNN_*.sql`

@@ -188,7 +188,9 @@ The command does these steps:
 
 The command checks that it can write the binary before the download. A binary in a system
 folder, for example `/usr/local/bin`, needs `sudo tether update`. With `sudo`, the command
-finds the gateway of the user who ran `sudo`.
+finds the gateway of the user who ran `sudo`. It also reads the `update` keys from the
+`config.yaml` of that user. When the file does not load, the command prints a warning and uses
+the default time limits.
 
 When a gateway runs, the new binary is not active until the gateway restarts:
 

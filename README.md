@@ -108,9 +108,9 @@ one of these failures before the first byte of the answer:
 - An HTTP 400 with a billing or quota text.
 
 Other errors stop the call. The chain skips an entry that is not usable, for example an entry
-with no API key. The chain skips a failed entry for 60 seconds. A turn stays on the
-entry that answered. `agent.fallback: []` turns off the fallback. If the config has no
-`agent.fallback` key, an entry with the name `fallback` is the list. See
+with no API key. The chain skips a failed entry for 60 seconds (`provider.failure_skip_s`).
+A turn stays on the entry that answered. `agent.fallback: []` turns off the fallback.
+If the config has no `agent.fallback` key, an entry with the name `fallback` is the list. See
 [The fallback chain](https://github.com/dnwandana/tether-agent/wiki/Providers#the-fallback-chain) in the wiki.
 
 Send `/model` to change the model of a session. It shows the providers. `/model <provider>`

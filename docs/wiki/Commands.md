@@ -64,19 +64,19 @@ task runs.
 | Command | Arguments | Effect | Telegram buttons | Busy |
 |---|---|---|---|---|
 | `/new`, `/reset` | | Stops the task, clears the queue, and starts a new session. The new session has no `/model` pin, no `/effort` level, and no `/prompt` text. Only `/fork` copies them. The reply shows the model and the context size. An active goal of the old session pauses. The coding agent sessions of the old session close. | | yes |
-| `/sessions` | `[page] [search]` or `archived` | Lists the sessions of this chat, 8 for each page. | A number button for each session. ◀ Prev and Next ▶. | yes |
+| `/sessions` | `[page] [search]` or `archived` | Lists the sessions of this chat, 8 for each page (`gateway.session_page_size`). | A number button for each session. ◀ Prev and Next ▶. | yes |
 | `/resume` | `[<id>]` or `[page] [search]` | Changes to another session. With no ID, it shows the list. It also takes a session out of the archive. An active goal of the current session pauses. An active goal of the session that you change to continues. | Number buttons | no |
 | `/rename` | `<title>` | Changes the title of the session. With no argument, it shows the title. | | no |
 | `/archive` | | Hides the session from `/sessions`. An active goal of the current session pauses. | ↩️ Undo, 🆕 New session | no |
 | `/delete` | `[<id>] [confirm]` | Deletes a session after a confirmation. With no ID, it shows the list. It also deletes the goal of the session and closes its coding agent sessions. | 🗑 Delete, Cancel | no |
-| `/model` | `[<provider>[:<model>]]`, `<provider> config`, `providers`, or `clear` | With no argument or with `providers`, it shows the provider entries and the model that answers now. `/model <provider>` shows the model list of the entry. A model from the list, `config`, or `<provider>:<model>` sets the model for this session. `clear` uses the primary provider again. | One button for each provider entry. The list has 8 model buttons for each page, ◀ Prev and Next ▶, ↩ Providers, and ↻ Refresh. After a change, ↺ Use the default. | no |
+| `/model` | `[<provider>[:<model>]]`, `<provider> config`, `providers`, or `clear` | With no argument or with `providers`, it shows the provider entries and the model that answers now. `/model <provider>` shows the model list of the entry. A model from the list, `config`, or `<provider>:<model>` sets the model for this session. `clear` uses the primary provider again. | One button for each provider entry. The list has 8 model buttons for each page (`gateway.model_page_size`), ◀ Prev and Next ▶, ↩ Providers, and ↻ Refresh. After a change, ↺ Use the default. | no |
 | `/effort` | `[<level>]` or `default` | Sets the reasoning effort for this session. See [/model and /effort](#model-and-effort). | `default` and the seven levels. After a change, ↺ Use the default. | no |
 | `/prompt` | `set <text>`, `show`, or `clear` | Replaces the base prompt for this session only. | 🧹 Use the base prompt | no |
 | `/fork` | `[title]` | Copies the session and changes to the copy. An active goal of the current session pauses. | `↩️ Back to "<title>"` | no |
 | `/compact` | | Summarizes the older messages now. | | no |
 | `/reload-mcp` | | Reloads the MCP servers. The next request does not use the prompt cache. | | no |
 | `/usage` | `[today\|7d\|30d\|all\|session]` | Shows the tokens, the cached input tokens, the cache hit rate, and the cost for each model. The default range is `today`. A range counts all chats and all groups, and the header says "all chats". `all` shows all stored usage. `session` counts the current session and its subagents, reviews, goal judge calls, and side calls (compaction, `view_image`, and smart approval). A fork counts only the calls after the fork. `session` also shows the number of compactions. In the terminal, the last line shows the ranges. A member gets the `session` form. See [Owners and members](#owners-and-members). | Today, 7 days, and 30 days in the first row. All and Session in the second row. | yes |
-| `/help` | `[skills]` | Shows the main commands and the first 10 skill commands. `/help skills` shows all skill commands. For a member, it lists only the member commands and the skill commands. | | yes |
+| `/help` | `[skills]` | Shows the main commands and the first 10 skill commands (`gateway.help_max_skills`). `/help skills` shows all skill commands. For a member, it lists only the member commands and the skill commands. | | yes |
 | `/stop` | `[keep]` | Stops the task. `keep` keeps the waiting messages. It also pauses an active goal. | | yes |
 | `/steer` | `<text>` | Adds guidance to the running task. | ⚡ Do this now | yes |
 | `/now` | | Stops the task and runs your waiting message now. | | yes |
@@ -149,8 +149,8 @@ message. `/model` does not change `config.yaml`.
   the 5 best models for agents. It shows only models with tool support.
 - The ✓ marks the model that this session uses with the entry: the model of the session, else
   the model in `config.yaml`.
-- `/model` keeps a list for 1 hour. `/model <provider> refresh` and ↻ Refresh get a new list.
-- A list call can take up to 10 seconds. The chat waits for the call.
+- `/model` keeps a list for 1 hour (`provider.model_cache_ttl_s`). `/model <provider> refresh` and ↻ Refresh get a new list.
+- A list call can take up to 10 seconds (`provider.model_list_timeout_s`). The chat waits for the call.
 - When the list call fails, the reply shows the cause. Send `/model <provider>:<model>`. When
   the entry has a model in `config.yaml`, tap `Use <model>` to use that model.
 - An unknown provider entry gets a reply with the list of provider entries.
@@ -170,7 +170,7 @@ message. `/model` does not change `config.yaml`.
   button, the model does not change. The reply is page 1 of the new list with the line
   `The list changed. Select the model again.`
 
-The first entry of the fallback chain gets a wait time of 60 seconds after it fails. In that
+The first entry of the fallback chain gets a wait time of 60 seconds (`provider.failure_skip_s`) after it fails. In that
 time, the replies of `/model` and `/new` change:
 
 - `/model` names the entry that answers now and its model.
@@ -246,7 +246,7 @@ you send a message while a turn runs. It applies to Telegram.
 
 A plain text message goes into the running task as guidance.
 
-1. The gateway joins the texts that arrive within 350 ms. It waits a maximum of 1 second.
+1. The gateway joins the texts that arrive within 350 ms. It waits a maximum of 1 second (`gateway.debounce_s` and `gateway.debounce_max_s`).
 2. The agent gets the text after the current tool step, as "User guidance: …".
 3. The bot replies "↪️ Got it. I'll do this after the current step." with a **⚡ Do this now**
    button.

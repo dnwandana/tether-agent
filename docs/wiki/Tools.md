@@ -59,7 +59,7 @@ toolsets:
 ## Web
 
 `web_search` searches with DuckDuckGo. It returns a numbered list of titles, URLs, and snippets.
-The default is 5 results, and the maximum is 10.
+The default is 5 results, and the maximum is 10 (`web.search_default_results` and `web.search_max_results`).
 
 `web_fetch` downloads pages with a plain HTTP GET. It returns the main text of each page as
 Markdown.
@@ -76,7 +76,7 @@ link-local, and CGNAT addresses. The check runs on the IP address after DNS reso
 
 `view_image` sends one image and a question to a vision model. It returns the answer text.
 
-- The image is a local file or an `http` or `https` URL. The maximum size is 10 MB.
+- The image is a local file or an `http` or `https` URL. The maximum size is 10 MB (`media.vision_max_bytes`).
 - A URL download follows `web.block_private_networks`.
 - The local path can come from an `[image: <path>]` marker or from a browser screenshot.
 
@@ -200,7 +200,7 @@ The media tools make images, speech, and transcripts. Each tool has a backend:
 - `""`: no backend. The tool is hidden.
 
 A command template can use these placeholders: `{text}`, `{in}`, `{out}`, `{out_base}`,
-`{prompt}`, and `{size}`. A media command stops after 120 seconds.
+`{prompt}`, and `{size}`. A media command stops after 120 seconds (`media.<backend>.timeout_s`).
 
 ### The defaults
 
@@ -371,6 +371,7 @@ A script can call only these tools: `web_search`, `web_fetch`, `read_file`, `wri
 | `code_execution.timeout_s` | `300` | The timeout of one script, in seconds. |
 | `code_execution.max_tool_calls` | `50` | The maximum number of tool calls from one script. |
 | `code_execution.max_stdout_bytes` | `50000` | The maximum output that goes back to the model. |
+| `code_execution.max_stderr_chars` | `10000` | The maximum length of the stderr text that a failed script returns, in characters. |
 
 - The script runs in a scratch folder.
 - The script gets an environment with no secrets. The only exception is the names in

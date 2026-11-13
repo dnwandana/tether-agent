@@ -49,7 +49,7 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 - `terminal.default_timeout_s`: 120. `terminal.env_passthrough`: env names that commands see.
 - `delegation.max_concurrent_children`: 5. `delegation.child_timeout_s`: 600.
 - `approvals.mode`: `manual`. `approvals.timeout_s`: 600. `approvals.cron_mode`: `deny`.
-- `cron.max_parallel_jobs`: 2.
+- `cron.max_parallel_jobs`: 2. `cron.script_timeout_s`: 120. `cron.agent_timeout_s`: 0 (no limit).
 
 ## Compaction
 
@@ -70,6 +70,7 @@ Use the `cronjob` tool. Always list the jobs first. Never guess a job ID.
 - A script job has `no_agent: true`. It runs only the script and uses no model.
 - A script job sends its stdout word for word. Empty script output sends nothing.
 - A script job with a non-zero exit sends an error alert.
+- A script has a time limit of `cron.script_timeout_s` (120 s by default). At the limit, a script job sends an alert. In an agent job, the failure goes into the prompt. An agent turn has no limit unless `cron.agent_timeout_s` is set.
 - A relative script path is under `~/.tether/scripts/`.
 - An agent job always delivers its final answer. With `deliver: local`, it saves the answer only.
 - A cron run cannot use `clarify` and cannot make cron jobs.

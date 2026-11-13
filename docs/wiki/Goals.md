@@ -121,9 +121,10 @@ The bot replies:
 - The gate then runs before each judge call, with no approval prompt.
 - It runs in the folder where Tether Agent started, with no secrets in its environment.
   Write `cd /path && <command>` for another folder.
-- The timeout is 300 seconds. A timeout counts as a failure.
+- The timeout is 300 seconds (`goals.gate_timeout_s`). A timeout counts as a failure.
 - When a gate fails, the judge does not run. The next turn gets the output of the gate.
-- When a gate fails a fourth time before it passes, the goal pauses.
+- When a gate fails a fourth time before it passes, the goal pauses
+  (`goals.gate_max_retries`, default 3 retries).
 
 See [Security](Security) for the limits of the gates.
 
@@ -133,7 +134,8 @@ See [Security](Security) for the limits of the gates.
 this host. A parked goal uses no turn and no judge call. The judge can also park the goal, for
 example on a background command or for some seconds.
 
-- A wait on a process ends when the process ends, or after 30 minutes.
+- A wait on a process ends when the process ends, or after 30 minutes
+  (`goals.max_barrier_wait_s`).
 - A wait for some seconds ends when the time ends. When `delegate_task` batches run, it also
   ends when one batch returns.
 - `/goal unwait` removes the wait at once.
@@ -157,8 +159,9 @@ verdict:
 - The judge uses the chain of the session, or `goals.judge_provider` when you set it. See
   [Providers](Providers).
 - The judge always sends the reasoning effort `low`.
-- A judge reply that is not valid counts as `continue`. After 3 such replies in a row, the
-  goal pauses. After 5 failed judge calls in a row, the goal pauses.
+- A judge reply that is not valid counts as `continue`. After 3 such replies in a row
+  (`goals.judge_max_parse_failures`), the goal pauses. After 5 failed judge calls in a row
+  (`goals.judge_max_transport_failures`), the goal pauses.
 - A `wait` on a pid that does not run counts as `continue`.
 - `/usage` counts the cost of each judge call. `/usage session` also counts the judge calls of
   the session.
@@ -175,9 +178,9 @@ After the last turn, the goal pauses:
 
 `/goal resume` gives the goal a new budget.
 
-When a turn fails or gives no answer, it uses no turn. The next goal turn starts after 60
-seconds. The status line is "↻ Goal n/max: retry after a failed turn." A second failure in a
-row pauses the goal.
+When a turn fails or gives no answer, it uses no turn. The next goal turn starts after 60 seconds
+(`provider.failure_skip_s`), when the failed provider entry can answer again. The status line is
+"↻ Goal n/max: retry after a failed turn." A second failure in a row pauses the goal.
 
 ## The notices
 
@@ -248,6 +251,9 @@ When the gateway starts again, it continues each active goal:
 | `goals.max_turns` | `20` | The turn budget of a new goal. |
 | `goals.judge_provider` | `""` | The provider entry of the judge and of `/goal draft`. `""` uses the chain of the session. |
 | `goals.judge_timeout_s` | `30` | The timeout of one judge call or draft call, in seconds. |
+
+The other goal keys, for example the judge limits and the gate defaults, are in the `goals`
+section of [docs/CONFIG.md](https://github.com/dnwandana/tether-agent/blob/main/docs/CONFIG.md#goals).
 
 ## The task list
 

@@ -66,7 +66,7 @@ approval flow.
 | Mode | Result |
 |---|---|
 | `manual` (default) | The gate asks you. |
-| `smart` | The default fallback chain, which starts at the primary provider, judges the command first. It has 30 seconds. On `APPROVE`, this one command runs. The next command of the same rule goes to the judge again. On `ESCALATE` or on an error, the gate asks you. A command that names `state.db` never goes to the judge. |
+| `smart` | The default fallback chain, which starts at the primary provider, judges the command first. It has 30 seconds (`approvals.smart_timeout_s`). On `APPROVE`, this one command runs. The next command of the same rule goes to the judge again. On `ESCALATE` or on an error, the gate asks you. A command that names `state.db` never goes to the judge. |
 | `off` | The command runs with no question. The hardline rules and the sudo guard still apply. In the gateway, the block on a stop or a restart of the gateway also still applies. |
 
 ### Cron runs
@@ -90,7 +90,7 @@ Each `execute_code` script needs an approval for the rule `execute_code`, with t
 - A script with a literal dangerous command or a protected path asks each time. The question
   names the rule, for example `run a Python script on the host (recursive delete)`.
 - A script has no `always` answer.
-- In smart mode, the judge gets at most the first 8000 characters. A longer script goes to you.
+- In smart mode, the judge gets at most the first 8000 characters (`approvals.smart_script_max_chars`). A longer script goes to you.
 - In a cron run, a script with no literal match runs. A script with a literal match follows
   `approvals.cron_mode`.
 
@@ -388,10 +388,11 @@ gets `⛔ Only the owner can answer this prompt.` Refer to
 
 Add each trusted group member to `telegram.group_allowed_users`.
 
-When other people can talk to the bot, set `TETHER_MEDIA_DELIVERY_STRICT=1` in `.env`. In the
+When other people can talk to the bot, set `gateway.media_delivery_strict: true` in `config.yaml`.
+A `TETHER_MEDIA_DELIVERY_STRICT` line in `.env` wins over the key, so remove an old line. In the
 default mode, the bot can send any local file that is not protected and not in a denied folder.
 A prompt injection can make the model name any file.
-A protected path is never sent, also from a folder of `TETHER_MEDIA_ALLOW_DIRS`. This rule
+A protected path is never sent, also from a folder of `gateway.media_allow_dirs`. This rule
 covers the credential folders, for example `~/.aws/` and `~/.gnupg/`.
 
 In the gateway, Tether Agent deletes the files in `~/.tether/cache/media/` and
@@ -439,7 +440,8 @@ itself. Refer to [Skills](Skills#the-skill-guard).
 7. Set `telegram.allowed_users` to your own user id only.
 8. Add each trusted group member to `telegram.group_allowed_users`, not only to
    `telegram.group_allowed_chats`.
-9. Set `TETHER_MEDIA_DELIVERY_STRICT=1` in `.env` when other users can talk to the bot.
+9. Set `gateway.media_delivery_strict: true` in `config.yaml` when other users can talk to the bot.
+   Make sure that `.env` has no `TETHER_MEDIA_DELIVERY_STRICT=0` line.
 10. Enable only the MCP servers that you trust.
 
 ```yaml
