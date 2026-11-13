@@ -696,7 +696,11 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		rows, err := skills.Check(ctx, skillsDir, skills.FindGit, name)
+		cfg, cfgErr := skillsConfig(dir)
+		if cfgErr != nil {
+			fmt.Fprintf(stderr, "warning: the config did not load, so the check uses the default git time limit: %v\n", cfgErr)
+		}
+		rows, err := skills.Check(ctx, skillsDir, findGitWithin(cfg), name)
 		if err != nil {
 			// A bad lockfile or an unknown name means that no skill was
 			// checked. Exit code 1 means "an update is available", so a
@@ -970,6 +974,21 @@ func (p *termPrompter) readLine() (string, error) {
 	}
 }
 
+// findGitWithin returns a function that gives the git program with the
+// skills.git_timeout_s limit for each git call of a tether skills command.
+func findGitWithin(cfg config.Config) func() (skills.Git, error) {
+	return func() (skills.Git, error) {
+		g, err := skills.FindGit()
+		if err != nil {
+			return g, err
+		}
+		if cfg.Skills.GitTimeoutS > 0 {
+			g.Timeout = time.Duration(cfg.Skills.GitTimeoutS) * time.Second
+		}
+		return g, nil
+	}
+}
+
 // newInstaller returns an installer for the data folder dir. It asks its
 // questions on stdin and stdout, and a question stops when ctx ends. A config
 // error is a warning on stderr, because the install needs the config only for
@@ -982,6 +1001,7 @@ func newInstaller(ctx context.Context, dir string, stdout, stderr io.Writer) *sk
 	return &skills.Installer{
 		SkillsDir: filepath.Join(dir, "skills"),
 		External:  cfg.Skills.ExternalDirs,
+		FindGit:   findGitWithin(cfg),
 		Prompt:    &termPrompter{ctx: ctx, r: bufio.NewReader(stdin), out: stdout},
 		Out:       stdout,
 		Err:       stderr,

@@ -1730,3 +1730,67 @@ func TestChatSignalsKeepIgnoredSIGHUP(t *testing.T) {
 		t.Fatal("SIGTERM must always stop the chat")
 	}
 }
+
+// fakeGitOnPath puts an executable file named git first on PATH and returns its path.
+func fakeGitOnPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	p := filepath.Join(dir, "git")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	return p
+}
+
+func TestFindGitWithinConfig(t *testing.T) {
+	path := fakeGitOnPath(t)
+	cfg := config.Default()
+	cfg.Skills.GitTimeoutS = 45
+	g, err := findGitWithin(cfg)()
+	if err != nil || g.Path != path || g.Timeout != 45*time.Second || len(g.Protocols) == 0 {
+		t.Fatalf("%+v %v", g, err)
+	}
+	if g, _ := findGitWithin(config.Default())(); g.Timeout != 120*time.Second {
+		t.Fatalf("default: %s", g.Timeout)
+	}
+	cfg.Skills.GitTimeoutS = 0
+	if g, _ := findGitWithin(cfg)(); g.Timeout != 120*time.Second {
+		t.Fatalf("zero key: %s", g.Timeout)
+	}
+}
+
+func TestNewInstallerGitTimeoutFromConfig(t *testing.T) {
+	fakeGitOnPath(t)
+	home := skillsHome(t)
+	path := filepath.Join(home, "config.yaml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, "skills:\n  git_timeout_s: 45\n"...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := newInstaller(context.Background(), home, io.Discard, io.Discard)
+	if in.FindGit == nil {
+		t.Fatal("the installer must get a FindGit function")
+	}
+	if g, err := in.FindGit(); err != nil || g.Timeout != 45*time.Second {
+		t.Fatalf("%+v %v", g, err)
+	}
+}
+
+func TestSkillsCheckWarnsOnBadConfig(t *testing.T) {
+	home := skillsHome(t)
+	withTerminal(t, false, "")
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("skills: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "check"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if !strings.HasPrefix(errb.String(), "warning: the config did not load, so the check uses the default git time limit: ") {
+		t.Fatalf("stderr %q", errb.String())
+	}
+}
