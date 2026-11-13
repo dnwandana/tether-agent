@@ -35,10 +35,12 @@ func StripTodoSnapshot(summary string) string {
 }
 
 // maxFailures is the number of failed compactions in a row after which the user is told.
+// It is the fallback when context.compact_max_failures is 0.
 const maxFailures = 3
 
 // The limits of the summary size in tokens (Hermes _MIN_SUMMARY_TOKENS and
-// _SUMMARY_TOKENS_CEILING).
+// _SUMMARY_TOKENS_CEILING). They are the fallback when context.summary_min_tokens or
+// context.summary_max_tokens is 0.
 const (
 	minSummaryTokens = 2000
 	maxSummaryTokens = 12000
@@ -54,10 +56,12 @@ const (
 	argsHead    = 1200
 )
 
-// summaryTimeout ends a summary call that takes too long.
+// summaryTimeout ends a summary call that takes too long. It is the fallback when
+// context.summary_timeout_s is 0.
 const summaryTimeout = 5 * time.Minute
 
-// ErrCompactionFailed is the error of Maybe after maxFailures failed compactions in a row.
+// ErrCompactionFailed is the error of Maybe after context.compact_max_failures failed
+// compactions in a row (maxFailures when the key is 0).
 var ErrCompactionFailed = errors.New("compaction failed")
 
 // SummaryPrompt is the system prompt of the summary call. It follows the
@@ -136,7 +140,7 @@ type Compactor struct {
 
 // maxIneffective is the number of compactions in a row that leave the view over the
 // threshold before the automatic check stops. Hermes agent/context_compressor.py uses the
-// same limit.
+// same limit. It is the fallback when context.compact_max_ineffective is 0.
 const maxIneffective = 2
 
 // thrashState is the anti-thrash state of one session. The system prompt and the tool
@@ -161,16 +165,17 @@ func (c *Compactor) allowAuto(sessionID string, over bool) bool {
 	if st == nil {
 		return true
 	}
+	limit := c.ineffectiveLimit()
 	if st.verify {
 		st.verify = false
 		st.strikes++
-		if st.strikes == maxIneffective {
-			c.logger().Warn("compaction did not bring the view under the threshold two times in a row; "+
+		if st.strikes == limit {
+			c.logger().Warn(fmt.Sprintf("compaction did not bring the view under the threshold %s in a row; "+
 				"automatic compaction stops until the view is under the threshold again. The system prompt "+
-				"and the tool schemas can be too large for the context window", "session", sessionID)
+				"and the tool schemas can be too large for the context window", timesText(limit)), "session", sessionID)
 		}
 	}
-	return st.strikes < maxIneffective
+	return st.strikes < limit
 }
 
 // compactedNow marks that a compaction of the session ran, so the next check judges it. A
@@ -191,7 +196,8 @@ func (c *Compactor) compactedNow(sessionID string, force bool) {
 
 // Maybe compacts the session when its model view is above Cfg.CompactThreshold of window,
 // or when force is true. It uses prov for the summary. A failed summary call returns
-// false and a nil error, and the next call tries again. At the third failure in a row, the
+// false and a nil error, and the next call tries again. At the failure number
+// context.compact_max_failures in a row (3 when the key is 0), the
 // error wraps ErrCompactionFailed, so the caller can tell the user.
 func (c *Compactor) Maybe(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool) (compacted bool, err error) {
 	stored, err := c.Store.Messages(ctx, s.ID)
@@ -299,10 +305,11 @@ func (c *Compactor) View(ctx context.Context, sessionID string) ([]StoredView, e
 // summarize sends msgs to prov and returns the summary text. sessionID is the session
 // that the summary call records its usage to.
 func (c *Compactor) summarize(ctx context.Context, prov provider.Provider, sessionID string, msgs []provider.Message, trigger int) (string, error) {
-	target := min(max(int(c.Cfg.SummaryTargetRatio*float64(trigger)), minSummaryTokens), maxSummaryTokens)
+	lo, hi := c.summaryTokenLimits()
+	target := min(max(int(c.Cfg.SummaryTargetRatio*float64(trigger)), lo), hi)
 	body := fmt.Sprintf("Make the checkpoint summary of the conversation turns below. Target about %d tokens.\n\nTURNS TO SUMMARIZE:\n\n%s",
 		target, serialize(msgs))
-	cctx, cancel := context.WithTimeout(ctx, summaryTimeout)
+	cctx, cancel := context.WithTimeout(ctx, c.summaryTimeLimit())
 	defer cancel()
 	ch, err := prov.Stream(cctx, provider.Request{
 		System:    SummaryPrompt,
@@ -329,23 +336,73 @@ func (c *Compactor) summarize(ctx context.Context, prov provider.Provider, sessi
 }
 
 // fail counts one failure of the session. It returns an error that wraps
-// ErrCompactionFailed at each maxFailures-th failure in a row, else nil.
+// ErrCompactionFailed at each context.compact_max_failures-th failure in a row (maxFailures
+// when the key is 0), else nil.
 func (c *Compactor) fail(sessionID string, cause error) error {
+	limit := c.failureLimit()
 	c.mu.Lock()
 	if c.failures == nil {
 		c.failures = map[string]int{}
 	}
 	c.failures[sessionID]++
 	n := c.failures[sessionID]
-	if n >= maxFailures {
+	if n >= limit {
 		delete(c.failures, sessionID)
 	}
 	c.mu.Unlock()
 	c.logger().Warn("compaction failed; the turn continues without compaction", "session", sessionID, "failures", n, "err", cause.Error())
-	if n < maxFailures {
+	if n < limit {
 		return nil
 	}
 	return fmt.Errorf("%w %d times in a row; the conversation continues without compaction: %v", ErrCompactionFailed, n, cause)
+}
+
+// failureLimit returns the failures in a row after which the user is told.
+func (c *Compactor) failureLimit() int {
+	if c.Cfg.CompactMaxFailures > 0 {
+		return c.Cfg.CompactMaxFailures
+	}
+	return maxFailures
+}
+
+// ineffectiveLimit returns the ineffective compactions in a row that stop the automatic
+// compaction.
+func (c *Compactor) ineffectiveLimit() int {
+	if c.Cfg.CompactMaxIneffective > 0 {
+		return c.Cfg.CompactMaxIneffective
+	}
+	return maxIneffective
+}
+
+// summaryTokenLimits returns the lowest and the highest size of a summary in tokens.
+func (c *Compactor) summaryTokenLimits() (lo, hi int) {
+	lo, hi = minSummaryTokens, maxSummaryTokens
+	if c.Cfg.SummaryMinTokens > 0 {
+		lo = c.Cfg.SummaryMinTokens
+	}
+	if c.Cfg.SummaryMaxTokens > 0 {
+		hi = c.Cfg.SummaryMaxTokens
+	}
+	return lo, hi
+}
+
+// summaryTimeLimit returns the time limit of one summary call.
+func (c *Compactor) summaryTimeLimit() time.Duration {
+	if c.Cfg.SummaryTimeoutS > 0 {
+		return time.Duration(c.Cfg.SummaryTimeoutS) * time.Second
+	}
+	return summaryTimeout
+}
+
+// timesText returns n as the words of a count of times: "one time", "two times", "3 times".
+func timesText(n int) string {
+	switch n {
+	case 1:
+		return "one time"
+	case 2:
+		return "two times"
+	}
+	return fmt.Sprintf("%d times", n)
 }
 
 func (c *Compactor) logger() *slog.Logger {

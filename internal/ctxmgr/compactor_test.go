@@ -1,9 +1,11 @@
 package ctxmgr
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -668,5 +670,112 @@ func TestCompactionStopsAfterTwoIneffectiveCompactions(t *testing.T) {
 	more()
 	if !check(3000, false) {
 		t.Fatal("a view under the threshold must clear the strikes")
+	}
+}
+
+// deadlineSummarizer records the deadline of the summary call.
+type deadlineSummarizer struct {
+	*fakeSummarizer
+	deadline time.Time
+}
+
+func (d *deadlineSummarizer) Stream(ctx context.Context, req provider.Request) (<-chan provider.Event, error) {
+	d.deadline, _ = ctx.Deadline()
+	return d.fakeSummarizer.Stream(ctx, req)
+}
+
+func TestCompactionSummaryTimeoutFromConfig(t *testing.T) {
+	for _, tc := range []struct {
+		seconds int
+		want    time.Duration
+	}{{0, 5 * time.Minute}, {10, 10 * time.Second}} {
+		c, sess, fp := compactorWithSession(t, 80)
+		c.Cfg.SummaryTimeoutS = tc.seconds
+		dp := &deadlineSummarizer{fakeSummarizer: fp}
+		start := time.Now()
+		if did, err := c.Maybe(ctx, sess, dp, 2000, false); !did || err != nil {
+			t.Fatal(did, err)
+		}
+		if got := dp.deadline.Sub(start); got < tc.want-time.Second || got > tc.want+time.Second {
+			t.Fatalf("summary_timeout_s %d: the deadline is %v after the start, want %v", tc.seconds, got, tc.want)
+		}
+	}
+}
+
+func TestCompactionSummaryTokensFromConfig(t *testing.T) {
+	// Window 2000: the trigger is 1000 tokens, and the ratio 0.2 gives 200 tokens.
+	for _, tc := range []struct{ min, max, want int }{
+		{0, 0, 2000},
+		{100, 150, 150},
+		{500, 12000, 500},
+	} {
+		c, sess, fp := compactorWithSession(t, 80)
+		c.Cfg.SummaryMinTokens, c.Cfg.SummaryMaxTokens = tc.min, tc.max
+		if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+			t.Fatal(did, err)
+		}
+		req := fp.requests[0]
+		if req.MaxTokens != tc.want*13/10 || !strings.Contains(req.Messages[0].Content, fmt.Sprintf("Target about %d tokens.", tc.want)) {
+			t.Fatalf("min %d, max %d: max tokens %d", tc.min, tc.max, req.MaxTokens)
+		}
+	}
+}
+
+func TestCompactionMaxFailuresFromConfig(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	fp.err = errors.New("summary down")
+	c.Cfg.CompactMaxFailures = 2
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); did || err != nil {
+		t.Fatal(did, err)
+	}
+	did, err := c.Maybe(ctx, sess, fp, 2000, false)
+	if did || !errors.Is(err, ErrCompactionFailed) || !strings.Contains(err.Error(), "compaction failed 2 times") {
+		t.Fatal(did, err)
+	}
+	c.Cfg.CompactMaxFailures = 0 // the const: 3
+	for i := 1; i <= 2; i++ {
+		if did, err := c.Maybe(ctx, sess, fp, 2000, false); did || err != nil {
+			t.Fatal(i, did, err)
+		}
+	}
+	if _, err := c.Maybe(ctx, sess, fp, 2000, false); !strings.Contains(fmt.Sprint(err), "compaction failed 3 times") {
+		t.Fatal(err)
+	}
+}
+
+func TestCompactionMaxIneffectiveFromConfig(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	c.Cfg.CompactMaxIneffective = 1
+	var logs bytes.Buffer
+	c.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	check := func() bool {
+		t.Helper()
+		stored, err := c.Store.Messages(ctx, sess.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		did, err := c.MaybeStored(ctx, sess, fp, 4000, false, stored, 3000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return did
+	}
+	if !check() {
+		t.Fatal("the first compaction must run")
+	}
+	appendPlain(t, c.Store, sess.ID, 80, 40)
+	if check() {
+		t.Fatal("one strike must stop the automatic compaction with a limit of 1")
+	}
+	if !strings.Contains(logs.String(), "under the threshold one time in a row") {
+		t.Fatal(logs.String())
+	}
+}
+
+func TestTimesText(t *testing.T) {
+	for n, want := range map[int]string{1: "one time", 2: "two times", 3: "3 times", 10: "10 times"} {
+		if got := timesText(n); got != want {
+			t.Errorf("timesText(%d) = %q, want %q", n, got, want)
+		}
 	}
 }
