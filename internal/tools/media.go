@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -294,6 +295,10 @@ func quoteWord(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// imageSizeRe is the size form that the command backend accepts. The size goes to a program,
+// so a model value must not become an option of that program.
+var imageSizeRe = regexp.MustCompile(`^[0-9]{1,5}x[0-9]{1,5}$`)
+
 func (m *MediaSet) imageTool(r *mediaRunner) Tool {
 	return funcTool{
 		name: "generate_image",
@@ -324,6 +329,9 @@ func (m *MediaSet) imageTool(r *mediaRunner) Tool {
 				size := a.Size
 				if size == "" {
 					size = m.imageSize()
+				}
+				if !imageSizeRe.MatchString(size) {
+					return "", toolErr("size is %q. Use the form <W>x<H>, for example 1024x1024", size)
 				}
 				if err := r.cmd.Run(ctx, map[string]string{"prompt": a.Prompt, "size": size, "out": out}); err != nil {
 					return "", mediaErr(ctx, err)

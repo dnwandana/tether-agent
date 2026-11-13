@@ -141,12 +141,13 @@ func Expand(argv []string, vals map[string]string) []string {
 }
 
 // expandArgs returns Expand(argv, vals), with one space before a value that starts with "-"
-// when its template word is exactly {text} or {prompt}. The model writes those values, so a
-// leading space stops the program from reading the value as an option.
+// when its template word starts with {text}, {prompt}, or {size}. The model writes those
+// values, so a leading space stops the program from reading the value as an option. A word
+// such as --text={text} stays as it is, because the value is then an option value.
 func expandArgs(argv []string, vals map[string]string) []string {
 	out := Expand(argv, vals)
 	for i, w := range argv {
-		if w != "{text}" && w != "{prompt}" {
+		if !strings.HasPrefix(w, "{text}") && !strings.HasPrefix(w, "{prompt}") && !strings.HasPrefix(w, "{size}") {
 			continue
 		}
 		if strings.HasPrefix(out[i], "-") {

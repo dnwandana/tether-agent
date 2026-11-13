@@ -269,3 +269,24 @@ func TestRunBareDashValue(t *testing.T) {
 		t.Fatalf("%q, want %q", got, " - item")
 	}
 }
+
+func TestExpandArgsPlaceholderPrefix(t *testing.T) {
+	for _, c := range []struct {
+		argv []string
+		vals map[string]string
+		want []string
+	}{
+		{[]string{"p", "{prompt}.txt"}, map[string]string{"prompt": "-x"}, []string{"p", " -x.txt"}},
+		{[]string{"p", "{text}-a"}, map[string]string{"text": "--y"}, []string{"p", " --y-a"}},
+		{[]string{"p", "{size}"}, map[string]string{"size": "-x=1"}, []string{"p", " -x=1"}},
+		{[]string{"p", "{size}"}, map[string]string{"size": "512x512"}, []string{"p", "512x512"}},
+		// A placeholder inside a word and the other placeholders do not change.
+		{[]string{"p", "--text={text}"}, map[string]string{"text": "-x"}, []string{"p", "--text=-x"}},
+		{[]string{"p", "--size={size}"}, map[string]string{"size": "-x"}, []string{"p", "--size=-x"}},
+		{[]string{"p", "{out}"}, map[string]string{"out": "-x"}, []string{"p", "-x"}},
+	} {
+		if got := expandArgs(c.argv, c.vals); !slices.Equal(got, c.want) {
+			t.Errorf("expandArgs(%q, %v) = %q, want %q", c.argv, c.vals, got, c.want)
+		}
+	}
+}

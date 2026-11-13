@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/skills"
 )
 
@@ -123,7 +124,7 @@ func scanMemory(content string, maxRunes int) []memoryFinding {
 		}
 	}
 	// Hermes scan_for_threats applies each row to the whole text, not to one line.
-	text := skills.FoldPythonCase(norm.NFKC.String(content))
+	text := skills.FoldPythonCase(security.FoldLookalikes(norm.NFKC.String(content)))
 	for i, re := range memoryThreatPatterns() {
 		row := memoryThreatRows[i]
 		if row.id == "hardcoded_secret" {

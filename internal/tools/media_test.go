@@ -442,3 +442,26 @@ func TestImageCommandUsesConfiguredSize(t *testing.T) {
 		t.Fatal("the size of the call must win:", string(b))
 	}
 }
+
+func TestImageCommandRefusesBadSize(t *testing.T) {
+	m := &MediaSet{Cfg: mediaCfg("image", "command", `sh -c 'printf "%s|%s" "$1" "$2" > "$0"' {out} {prompt} {size}`), Dir: t.TempDir()}
+	for _, size := range []string{"-x=1", "auto", "1024", "1024x", "x1024", "123456x1", "1024x1024 "} {
+		args, _ := json.Marshal(map[string]string{"prompt": "a dog", "size": size})
+		out := runToolErr(t, tool(m, "generate_image"), string(args))
+		if want := fmt.Sprintf("size is %q. Use the form <W>x<H>, for example 1024x1024", size); !strings.Contains(out, want) {
+			t.Errorf("%q: %s", size, out)
+		}
+	}
+	if left, _ := os.ReadDir(m.Dir); len(left) != 0 {
+		t.Fatal("a refused size must not run the program:", left)
+	}
+}
+
+func TestImageEndpointKeepsOtherSize(t *testing.T) {
+	var got []map[string]any
+	m := endpointSet(t, "image", mediaServer(t, &got))
+	out := runTool(t, tool(m, "generate_image"), `{"prompt":"a cat","size":"auto"}`)
+	if !strings.HasPrefix(out, "MEDIA:") || len(got) != 1 || got[0]["size"] != "auto" {
+		t.Fatal(out, got)
+	}
+}
