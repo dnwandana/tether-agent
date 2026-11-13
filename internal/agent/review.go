@@ -609,6 +609,19 @@ func (c *ReviewCounters) Forget(id string) {
 	delete(c.m, id)
 }
 
+type noReviewKey struct{}
+
+// WithNoReview returns a copy of ctx that stops each background review that starts from it.
+func WithNoReview(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noReviewKey{}, true)
+}
+
+// NoReview reports whether ctx comes from WithNoReview.
+func NoReview(ctx context.Context) bool {
+	v, _ := ctx.Value(noReviewKey{}).(bool)
+	return v
+}
+
 // noReviews reports whether a session of the kind never gets a review.
 func noReviews(kind string) bool {
 	return kind == "cron" || kind == KindSubagent || kind == KindReview
@@ -697,9 +710,9 @@ func (a *Agent) MaybeStartReviews(ctx context.Context, sess *sessions.Session, l
 // ReviewOnCompaction starts one memory and skill review of the part of the view that a
 // compaction replaces: view[start:end]. It needs a session with review.min_user_turns or
 // more user turns. It returns at once, and the review runs in the background. It is the
-// Compactor.OnCompact hook.
+// Compactor.OnCompact hook. A context from WithNoReview starts no review.
 func (a *Agent) ReviewOnCompaction(ctx context.Context, sess *sessions.Session, view []provider.Message, start, end int) {
-	if sess == nil || noReviews(sess.Kind) {
+	if sess == nil || noReviews(sess.Kind) || NoReview(ctx) {
 		return
 	}
 	// Read the shape now: the turn rebuilds its prompt after the compaction.
@@ -720,9 +733,15 @@ func (a *Agent) ReviewOnCompaction(ctx context.Context, sess *sessions.Session, 
 
 // ReviewBeforeNew starts one memory and skill review of a session that /new replaces.
 // It needs a session with review.min_user_turns or more user turns. It returns at once,
-// and the review runs in the background. It is the gateway.Deps.BeforeNew hook.
+// and the review runs in the background. It is the gateway.Deps.BeforeNew hook. A context
+// from WithNoReview starts no review.
 func (a *Agent) ReviewBeforeNew(ctx context.Context, old *sessions.Session) {
 	if old == nil || noReviews(old.Kind) {
+		return
+	}
+	if NoReview(ctx) {
+		// The session ends here, so its counters go.
+		a.Reviews.Forget(old.ID)
 		return
 	}
 	r, ok := a.fullReview(ctx, old)
@@ -752,12 +771,18 @@ func (a *Agent) fullReview(ctx context.Context, sess *sessions.Session) (r Revie
 		System: st.system, Tools: st.schemas}
 	if !st.haveShape {
 		// No turn of this session ran in this process: use the frozen prompt and the
-		// tools of the channel.
+		// tools of the channel. A member session keeps its member prompt and tools.
+		member := a.Prompts != nil && a.Prompts.storedMember(sess.ID)
 		if a.Prompts != nil {
-			r.System, _ = a.Prompts.Get(ctx, sess, a.promptKey(ctx, sess), sess.Source)
+			r.System, _ = a.Prompts.Get(ctx, sess, a.promptKey(ctx, sess, member), sess.Source)
 		}
 		if a.Tools != nil {
-			_, r.Tools = a.Tools.Visible(tools.Resolve(a.config().Toolsets[sess.Source], nil, nil), nil)
+			cfg := a.config()
+			sets := tools.Resolve(cfg.Toolsets[sess.Source], nil, nil)
+			if member {
+				sets = tools.MemberToolsets(cfg.Toolsets[sess.Source], cfg.Toolsets["member"])
+			}
+			_, r.Tools = a.Tools.Visible(sets, nil)
 		}
 	}
 	return r, true

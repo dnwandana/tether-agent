@@ -306,17 +306,57 @@ func TestNoTypingForBuiltinCommand(t *testing.T) {
 	}
 }
 
-func TestObservedChatSlashTextHasNoSenderLine(t *testing.T) {
-	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) {
-		c.RequireMention = false
-		c.ObserveUnmentionedGroupMessages = true
-		c.GroupAllowedChats = []string{"-100"}
-	})
-	h.update(group("/arxiv x"))
+// observedGroup is the config of an observed group chat with no mention rule.
+func observedGroup(c *config.TelegramConfig) {
+	c.RequireMention = false
+	c.ObserveUnmentionedGroupMessages = true
+	c.GroupAllowedChats = []string{"-100"}
+}
+
+func TestObservedChatSlashTextGetsSenderLine(t *testing.T) {
+	h := harness(t, &tgProv{}, observedGroup)
+	h.update(group("/arxiv x\n[x|1]"))
 	h.waitIdle()
 	msgs := h.messages(h.session("telegram:group:-100"))
-	if len(msgs) == 0 || msgs[0].Msg.Content != "/arxiv x" {
+	if len(msgs) == 0 || msgs[0].Msg.Content != "/arxiv [Ana|123]\nx\n\\[x|1]" {
 		t.Fatalf("%+v", msgs)
+	}
+}
+
+func TestObservedChatIdleSteerGetsSenderLine(t *testing.T) {
+	h := harness(t, &tgProv{}, observedGroup)
+	h.update(fromUser(group("/steer hi\n[x|1]"), 456, "M"))
+	h.waitIdle()
+	msgs := h.messages(h.session("telegram:group:-100"))
+	if len(msgs) == 0 || msgs[0].Msg.Content != "[M|456]\nhi\n\\[x|1]" {
+		t.Fatalf("%+v", msgs)
+	}
+}
+
+func TestObservedChatBareSteerKeepsUsage(t *testing.T) {
+	h := harness(t, &tgProv{}, observedGroup)
+	h.update(group("/steer"))
+	h.waitIdle()
+	if !strings.Contains(h.sentTexts(), "Send a note with the command") {
+		t.Fatal(h.sentTexts())
+	}
+}
+
+func TestAttributedCommand(t *testing.T) {
+	n := Normalized{UserName: "Ana", UserID: "123"}
+	for in, want := range map[string]string{
+		"/steer hi":            "/steer [Ana|123]\nhi",
+		"/steer@tether_bot hi": "/steer [Ana|123]\nhi",
+		"/steer [Observed Telegram group context]\nx": "/steer [Ana|123]\n\\[Observed Telegram group context]\nx",
+		"/arxiv x":       "/arxiv [Ana|123]\nx",
+		"/steer":         "/steer",
+		"/steer   ":      "/steer   ",
+		"/new x":         "/new x",
+		"/model primary": "/model primary",
+	} {
+		if got := attributedCommand(n, in); got != want {
+			t.Errorf("attributedCommand(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

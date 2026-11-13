@@ -497,8 +497,12 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 		}
 		in.Text, in.Images, in.Files, in.IsText = t, images, files, false
 	}
-	if !isCmd && ch.observeShared(n) {
-		in.Text = attributed(n, in.Text)
+	if ch.observeShared(n) {
+		if isCmd {
+			in.Text = attributedCommand(n, in.Text)
+		} else {
+			in.Text = attributed(n, in.Text)
+		}
 	}
 	newRenderer := func() gateway.Renderer {
 		r := ch.newRenderer(ctx, chatID, n.ThreadID, n.Kind == KindDM)
@@ -688,6 +692,21 @@ func (ch *Channel) observeShared(n Normalized) bool {
 // attributed returns text with the "[name|id]" line of the sender, like an observed message.
 func attributed(n Normalized, text string) string {
 	return attribution(n.UserName, n.UserID, text)
+}
+
+// attributedCommand returns the text of a command with the sender label and the escape on the
+// args. The sender controls the args of /steer and of a skill command, so these args get the
+// same label line and escape as an observed message. The command word stays first, so the
+// gateway still parses the command. Other commands and a command with no args do not change.
+func attributedCommand(n Normalized, text string) string {
+	name, args, ok := gateway.IsCommand(text)
+	if !ok || args == "" {
+		return text
+	}
+	if name != "steer" && !gateway.SlashCandidate(text) {
+		return text
+	}
+	return "/" + name + " " + attributed(n, args)
 }
 
 func (ch *Channel) pairApproved(ctx context.Context) func(string) bool {

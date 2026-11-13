@@ -997,3 +997,72 @@ func TestReviewLimitsZeroKeepConsts(t *testing.T) {
 		t.Fatal(a.reviewRounds(), a.reviewConcurrency(), a.reviewMinTurns())
 	}
 }
+
+func TestMemberTurnStartsNoReview(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	for range 12 {
+		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "hi", Toolsets: all(), System: "SYS",
+			Sink: &recSink{}, Member: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	if n := len(reviews()); n != 0 {
+		t.Fatal("a member turn must start no review:", n)
+	}
+}
+
+func TestNoReviewContextStopsCompactionAndNewReviews(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	seedHistory(t, a, sess.ID, 12) // 6 user turns
+	view := reviewView(t, a, sess)
+	a.ReviewOnCompaction(WithNoReview(ctx), sess, view, 3, 8)
+	a.ReviewBeforeNew(WithNoReview(ctx), sess)
+	time.Sleep(20 * time.Millisecond)
+	if n := len(reviews()); n != 0 {
+		t.Fatal(n)
+	}
+	if NoReview(ctx) {
+		t.Fatal("a plain context has no flag")
+	}
+	a.ReviewOnCompaction(ctx, sess, view, 3, 8)
+	waitUntil(t, func() bool { return len(reviews()) == 1 })
+}
+
+func TestMemberTurnMarksTheCompactionHook(t *testing.T) {
+	for _, member := range []bool{true, false} {
+		fp := scripted(text("SUM"), text("ok"))
+		a, sess := compactingAgent(t, fp)
+		var got []bool
+		a.Compactor.OnCompact = func(c context.Context, _ *sessions.Session, _ []provider.Message, _, _ int) {
+			got = append(got, NoReview(c))
+		}
+		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Toolsets: all(), Sink: &recSink{}, Member: member}); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0] != member {
+			t.Fatal(member, got)
+		}
+	}
+}
+
+func TestFullReviewKeepsTheMemberPrompt(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	builds := 0
+	a.Prompts = NewPromptCache(func(_ context.Context, _ *sessions.Session, k PromptKey, _ string) (string, time.Time) {
+		builds++
+		if k.Member {
+			return "MEMBER", time.Time{}
+		}
+		return "OWNER", time.Time{}
+	})
+	member := keyFor(sess, 0)
+	member.Member = true
+	a.Prompts.Get(ctx, sess, member, sess.Source)
+	seedHistory(t, a, sess.ID, 12) // 6 user turns, and no turn ran in this process
+	a.ReviewBeforeNew(ctx, sess)
+	waitUntil(t, func() bool { return len(reviews()) == 1 })
+	if r := reviews()[0]; r.System != "MEMBER" || builds != 1 || len(r.Tools) != 0 {
+		t.Fatalf("the review must keep the member prompt and the member tools: %q %d %d", r.System, builds, len(r.Tools))
+	}
+}

@@ -68,15 +68,23 @@ func batchRow(t *testing.T, d *db.DB, id string) (status, results string) {
 
 // enqueued records the Enqueue calls of a Batches.
 type enqueued struct {
-	mu  sync.Mutex
-	got []string
+	mu     sync.Mutex
+	got    []string
+	owners []bool
 }
 
-func (e *enqueued) fn(_ context.Context, k, txt string) error {
+func (e *enqueued) fn(_ context.Context, k, txt string, owner bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.got = append(e.got, k+"|"+txt)
+	e.owners = append(e.owners, owner)
 	return nil
+}
+
+func (e *enqueued) ownerList() []bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]bool(nil), e.owners...)
 }
 
 func (e *enqueued) list() []string {
@@ -405,5 +413,56 @@ func TestBatchesWaitHasABound(t *testing.T) {
 	close(release)
 	if !b.Wait(5 * time.Second) {
 		t.Fatal("Wait must return true after the children end")
+	}
+}
+
+func TestBatchKeepsTheOwnerFlag(t *testing.T) {
+	d := openTestDB(t)
+	q := &enqueued{}
+	b := &Batches{DB: d, Enqueue: q.fn}
+	member := specs(1)
+	member[0].ParentEnv = &tools.Env{Member: true}
+	mid, err := b.Start(ctx, "telegram:group:-100:7", "s1", member, slowRun(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool { return len(q.list()) == 1 })
+	oid, err := b.Start(ctx, "telegram:dm:1", "s2", specs(1), slowRun(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, func() bool { return len(q.list()) == 2 })
+	if got := q.ownerList(); !slices.Equal(got, []bool{false, true}) {
+		t.Fatal("the result of a member batch is a member turn:", got)
+	}
+	for id, want := range map[string]int{mid: 0, oid: 1} {
+		var owner int
+		if err := d.QueryRowContext(ctx, `SELECT owner FROM delegation_batches WHERE id = ?`, id).Scan(&owner); err != nil || owner != want {
+			t.Fatal(id, owner, err)
+		}
+	}
+}
+
+func TestRecoverLostKeepsTheOwnerFlag(t *testing.T) {
+	d := openTestDB(t)
+	insertRunningBatch(t, d, "b1", "telegram:dm:1")
+	insertRunningBatch(t, d, "b2", "telegram:group:-100:7")
+	if _, err := d.ExecContext(ctx, `UPDATE delegation_batches SET owner = 0 WHERE id = 'b2'`); err != nil {
+		t.Fatal(err)
+	}
+	q := &enqueued{}
+	b := &Batches{DB: d, Enqueue: q.fn}
+	if err := b.RecoverLost(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The two rows have the same created_at, so the order is not fixed.
+	got := map[string]bool{}
+	owners := q.ownerList()
+	for i, s := range q.list() {
+		k, _, _ := strings.Cut(s, "|")
+		got[k] = owners[i]
+	}
+	if len(got) != 2 || !got["telegram:dm:1"] || got["telegram:group:-100:7"] {
+		t.Fatal("the lost note keeps the owner flag of the batch:", got)
 	}
 }

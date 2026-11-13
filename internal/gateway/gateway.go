@@ -131,6 +131,9 @@ type RunState struct {
 	// ended is true after the turn returned, and stopped is true after /stop. A run in
 	// either state takes no steer. Gateway.mu guards both.
 	ended, stopped bool
+	// owner is the owner flag of the turn. In a shared session, a member text does not
+	// steer an owner turn. It does not change while the run lives.
+	owner bool
 	// steerAcks holds the steer acks of the run that are not closed. Gateway.mu guards it.
 	steerAcks []*ackSlot
 	// steerSenders holds the senders of the steer texts that the agent did not read.
@@ -342,9 +345,11 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	if steerable(in) {
 		// Several texts in a short time become one steer (Hermes debounce). The text goes
 		// in under g.mu, so BeginStopping either takes it or refuses it.
-		// The merged text gets a sender only when all of its texts come from one sender.
-		g.debouncerLocked().AddFrom(in.Key, senderOf(in), in.Text, func(merged, sender string) {
+		// The merged text gets a sender only when all of its texts come from one sender. It
+		// is an owner text only when each text comes from an owner.
+		g.debouncerLocked().AddFrom(in.Key, senderOf(in), in.Text, in.Owner, func(merged, sender string, owner bool) {
 			m := withSender(in, sender)
+			m.Owner = owner
 			m.Text = merged
 			g.flushBusyText(ctx, m, newRenderer)
 		})
@@ -416,9 +421,15 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 // does not wait for the turn. The answer goes to the channel of the newest message of the
 // key, or else to the channel and the chat of the active session of the key. While the
 // gateway stops, it returns ErrStopping. The turn is not a message of the sender, so the
-// queue limit and /now do not count it.
+// queue limit and /now do not count it. The turn is an owner turn.
 func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
-	return g.enqueue(ctx, key, text, true)
+	return g.enqueue(ctx, key, text, true, true)
+}
+
+// EnqueueAs is Enqueue with the owner flag of the turn that asked for the text, for
+// example the turn that started a background batch.
+func (g *Gateway) EnqueueAs(ctx context.Context, key, text string, owner bool) error {
+	return g.enqueue(ctx, key, text, true, owner)
 }
 
 // enqueueGoal adds the continuation turn c of a goal at the end of the queue of key. It
@@ -428,6 +439,7 @@ func (g *Gateway) Enqueue(ctx context.Context, key, text string) error {
 func (g *Gateway) enqueueGoal(ctx context.Context, key string, c goals.Continuation) error {
 	p := &pendingTurn{system: true, goalTurn: true, goalSession: c.SessionID, goalEpoch: c.Epoch, goalLine: c.StatusLine()}
 	p.in.Text = c.Text
+	p.in.Owner = true
 	return g.enqueueTurn(ctx, key, p)
 }
 
@@ -478,10 +490,11 @@ func removeGoalTurnsLocked(ks *keyState, sessionID string, epoch int64) {
 }
 
 // enqueue is Enqueue. system is false for a message of the sender, for example a queued
-// text that a restart resumes.
-func (g *Gateway) enqueue(ctx context.Context, key, text string, system bool) error {
+// text that a restart resumes. owner is the owner flag of the turn.
+func (g *Gateway) enqueue(ctx context.Context, key, text string, system, owner bool) error {
 	p := &pendingTurn{system: system}
 	p.in.Text = text
+	p.in.Owner = owner
 	return g.enqueueTurn(ctx, key, p)
 }
 
@@ -489,7 +502,7 @@ func (g *Gateway) enqueue(ctx context.Context, key, text string, system bool) er
 // p.in.Text. enqueueTurn fills the other fields of p.in and p.newRenderer from the newest
 // message of the key, or else from the active session of the key.
 func (g *Gateway) enqueueTurn(ctx context.Context, key string, p *pendingTurn) error {
-	text := p.in.Text
+	text, owner := p.in.Text, p.in.Owner
 	if strings.TrimSpace(text) == "" {
 		return errors.New("gateway: enqueue: the text is empty")
 	}
@@ -507,6 +520,8 @@ func (g *Gateway) enqueueTurn(ctx context.Context, key string, p *pendingTurn) e
 		}
 	}
 	in.Key, in.Text, in.Images, in.Files, in.IsText = key, text, nil, nil, true
+	// The flag comes from the caller, never from the newest message of the key.
+	in.Owner = owner
 	// An enqueued turn has no sender, so its prompts go to any owner.
 	in.UserID, in.SenderID = "", ""
 	// in can be a copy of a skill command. Only a text of the sender can be a slash command,
@@ -672,6 +687,8 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 		// The steer that the turn did not deliver becomes the next turn, before the queue.
 		// It gets a sender only when all of its texts come from one sender.
 		in := withSender(p.in, sender.id())
+		// The flag comes from the steer texts, not from the running turn.
+		in.Owner = sender.owner()
 		in.Text, in.Images, in.Files, in.IsText = pending, nil, nil, true
 		// p can be a skill command. A steer text is never one.
 		in.Slash = false
@@ -781,6 +798,7 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 		Cancel:  cancel,
 		Steer:   agent.NewSteerQueue(),
 		Started: time.Now(),
+		owner:   p.in.Owner,
 	}
 	defer func() {
 		if v := recover(); v != nil {
@@ -835,7 +853,8 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 	}
 	res, err := g.Deps.Turn(tctx, sess, TurnInput{
 		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, UserID: turnUser, Sink: r, Steer: rs.Steer, Notify: notify,
-		Slash:       p.in.Slash,
+		Slash: p.in.Slash,
+		Owner: p.in.Owner, Shared: p.in.Shared,
 		OnSteerRead: func(seq uint64) { g.steerRead(rs, seq) },
 	})
 	end.res, end.err = res, err
@@ -1008,6 +1027,7 @@ func (g *Gateway) sendRenderer(ctx context.Context, key string) (Inbound, func()
 	}
 	to := Target{Source: sess.Source, ChatID: sess.ChatID, ThreadID: sess.ThreadID}
 	in := Inbound{Key: key, Source: sess.Source, ChatID: sess.ChatID, ThreadID: sess.ThreadID, UserID: sess.UserID, Target: to}
+	_, in.Shared = g.Deps.ownerOf(sess)
 	log := g.logger()
 	return in, func() Renderer { return &sendRenderer{ctx: ctx, ch: ch, to: to, log: log} }, nil
 }

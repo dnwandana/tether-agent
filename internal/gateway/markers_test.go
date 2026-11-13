@@ -98,7 +98,7 @@ func TestMarkerQueuedFollowsTheQueue(t *testing.T) {
 	gone.IsText = false
 	g.Submit(cctx, gone, f.new, nil)
 	flushMarkers(t, g)
-	want := []sessions.QueuedText{{Text: "look", Lost: 1}, {Text: "/nosuch"}, {Text: "gone"}}
+	want := []sessions.QueuedText{{Text: "look", Lost: 1, Owner: new(true)}, {Text: "/nosuch", Owner: new(true)}, {Text: "gone", Owner: new(true)}}
 	if m := markerOf(t, g.Deps.Store, "k"); m == nil || !reflect.DeepEqual(m.Queued, want) {
 		t.Fatalf("%+v", m)
 	}
@@ -128,7 +128,7 @@ func TestMarkerEnqueueFollowsTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	flushMarkers(t, g)
-	want := []sessions.QueuedText{{Text: "follow-up"}}
+	want := []sessions.QueuedText{{Text: "follow-up", Owner: new(true)}}
 	if m := markerOf(t, g.Deps.Store, "k"); m == nil || !reflect.DeepEqual(m.Queued, want) {
 		t.Fatalf("%+v", m)
 	}
@@ -341,7 +341,7 @@ func TestQueuedTexts(t *testing.T) {
 	photo := inb("k", "")
 	photo.Images = []provider.Image{{}}
 	q := []*pendingTurn{{in: inb("k", "/model x")}, {in: doc}, {in: photo}, {in: inb("k", "plain")}}
-	want := []sessions.QueuedText{{Text: "read this", Lost: 2}, {Text: "", Lost: 1}, {Text: "plain"}}
+	want := []sessions.QueuedText{{Text: "read this", Lost: 2, Owner: new(true)}, {Text: "", Lost: 1, Owner: new(true)}, {Text: "plain", Owner: new(true)}}
 	if got := queuedTexts(q); !reflect.DeepEqual(got, want) {
 		t.Fatalf("%+v", got)
 	}

@@ -690,3 +690,22 @@ func TestLoadRefusesNewKeyOutOfRange(t *testing.T) {
 	}
 	eq(t, c.Cron.ScriptTimeoutS, 900)
 }
+
+// A config that sets only one channel keeps the default member list.
+func TestToolsetsKeepDefaultMember(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal+"toolsets:\n  telegram: [file]\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.Join(c.Toolsets["telegram"], ","), "file")
+	eq(t, strings.Join(c.Toolsets["member"], ","), "web,ask,todo")
+}
+
+// An empty member list stays empty. It gives a member no tools.
+func TestToolsetsEmptyMember(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal+"toolsets:\n  member: []\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, len(c.Toolsets["member"]), 0)
+}

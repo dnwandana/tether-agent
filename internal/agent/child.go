@@ -127,6 +127,7 @@ func (a *Agent) RunChild(ctx context.Context, spec ChildSpec) (res ChildResult) 
 		Sink:        spec.Sink,
 		System:      system,
 		MaxTurns:    limits.MaxIterations,
+		Member:      env.Member,
 	})
 	partial, calls, lastTool := a.childActivity(context.WithoutCancel(ctx), sess.ID)
 	res.ToolCalls = calls
@@ -201,6 +202,7 @@ func childEnv(parent *tools.Env, sess *sessions.Session) *tools.Env {
 	if parent != nil {
 		env.WorkDir, env.DataDir, env.Gate, env.Log, env.Progress = parent.WorkDir, parent.DataDir, parent.Gate, parent.Log, parent.Progress
 		env.RootKind = parent.RunRootKind()
+		env.Member = parent.Member
 		if parent.Channel != "" {
 			env.Channel = parent.Channel
 		}

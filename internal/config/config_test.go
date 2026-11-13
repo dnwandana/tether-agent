@@ -72,7 +72,8 @@ func TestDefaultsMatchSpec(t *testing.T) {
 
 func TestDefaultExtraKeys(t *testing.T) {
 	c := Default()
-	eq(t, len(c.Toolsets), 3)
+	eq(t, len(c.Toolsets), 4)
+	eq(t, strings.Join(c.Toolsets["member"], ","), "web,ask,todo")
 	eq(t, c.Toolsets["cli"][0], "all")
 	eq(t, c.Toolsets["cron"][0], "all")
 	eq(t, c.Media.TTS.Backend, "command")

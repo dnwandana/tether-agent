@@ -4,6 +4,7 @@ import (
 	"slices"
 
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
 // AuthAction is the result of Authorize.
@@ -87,6 +88,30 @@ func ownerByUser(cfg config.TelegramConfig, n Normalized, isPairApproved func(st
 		ids = append(ids, trimmed(cfg.GroupAllowedUsers)...)
 	}
 	return slices.Contains(ids, "*") || slices.Contains(ids, n.UserID)
+}
+
+// OwnerOf returns a function that gives the owner flag and the shared flag of a session
+// that has no sender. It rebuilds the session key from the session row and the current
+// config, and it does not parse the key. A key that the config does not rebuild, a shared
+// group or topic, and an observed chat fail closed: not owner, shared. A DM, a CLI session,
+// and a cron session are owner, not shared. isPairApproved can be nil.
+func OwnerOf(cfg config.TelegramConfig, isPairApproved func(userID string) bool) func(sess *sessions.Session) (owner, shared bool) {
+	return func(sess *sessions.Session) (owner, shared bool) {
+		if sess == nil || sess.Source != "telegram" {
+			return true, false
+		}
+		if sess.Key == SessionKey("dm", sess.ChatID, sess.ThreadID, "", false, false) {
+			return true, false
+		}
+		observed := cfg.ObserveUnmentionedGroupMessages && observeAllowed(cfg, sess.ChatID)
+		if sess.UserID != "" && !observed &&
+			!IsSharedKey("group", sess.ThreadID, sess.UserID, cfg.GroupSessionsPerUser, cfg.ThreadSessionsPerUser) &&
+			sess.Key == SessionKey("group", sess.ChatID, sess.ThreadID, sess.UserID, cfg.GroupSessionsPerUser, cfg.ThreadSessionsPerUser) {
+			n := Normalized{Kind: KindGroup, ChatID: sess.ChatID, UserID: sess.UserID}
+			return ownerByUser(cfg, n, isPairApproved), false
+		}
+		return false, true
+	}
 }
 
 // anyAllowlist reports whether the config restricts access with a list.

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/skills"
@@ -44,7 +45,7 @@ func skillTurn(t *testing.T, d *Deps, text string, slash bool) *sessions.Session
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := TurnInput{Text: text, Channel: "cli", Sink: &CLISink{W: io.Discard}, Slash: slash}
+	in := TurnInput{Text: text, Channel: "cli", Sink: &CLISink{W: io.Discard}, Slash: slash, Owner: true}
 	if _, err := d.Turn(ctx, sess, in); err != nil {
 		t.Fatal(err)
 	}
@@ -176,5 +177,34 @@ func TestTurnUnknownSlashKeepsText(t *testing.T) {
 	skillTurn(t, d, "/nothing x", true)
 	if got := fp.lastUserTexts(); len(got) != 1 || got[0] != "/nothing x" {
 		t.Fatalf("%q", got)
+	}
+}
+
+// A member skill command does not load the skill body when the member toolsets have no
+// skill_view. The owner turn on the same channel loads it.
+func TestTurnMemberSkillCommandNeedsSkillView(t *testing.T) {
+	for _, tc := range []struct {
+		owner bool
+		want  bool
+	}{{true, true}, {false, false}} {
+		d := testDeps(t, &fakeProv{})
+		cfg := config.Default()
+		cfg.Toolsets["telegram"] = []string{tools.SetFile, tools.SetSkills}
+		cfg.Toolsets["member"] = []string{tools.SetFile}
+		d.Cfg = &cfg
+		addTurnSkill(t, d, "arxiv", "", "Secret skill body.\n")
+		ctx := context.Background()
+		sess, err := d.Store.Create(ctx, sessions.Session{Key: "tg:test", Source: "telegram"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		in := TurnInput{Text: "/arxiv x", Channel: "telegram", Sink: &CLISink{W: io.Discard}, Slash: true, Owner: tc.owner, Shared: true}
+		if _, err := d.Turn(ctx, sess, in); err != nil {
+			t.Fatal(err)
+		}
+		got := firstUserText(t, d, sess.ID)
+		if loaded := strings.Contains(got, "Secret skill body."); loaded != tc.want {
+			t.Fatalf("owner %v: loaded = %v, text %q", tc.owner, loaded, got)
+		}
 	}
 }

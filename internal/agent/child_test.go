@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -331,5 +332,37 @@ func TestChildBlocksACPDelegate(t *testing.T) {
 func TestKindAliases(t *testing.T) {
 	if KindSubagent != sessions.KindSubagent || KindReview != sessions.KindReview {
 		t.Fatal(KindSubagent, KindReview)
+	}
+}
+
+// memberPrompter records the approval requests and denies each one.
+type memberPrompter struct{ reqs []security.ApprovalRequest }
+
+func (p *memberPrompter) PromptApproval(_ context.Context, req security.ApprovalRequest) (security.Scope, error) {
+	p.reqs = append(p.reqs, req)
+	return security.ScopeDeny, nil
+}
+
+func TestChildOfMemberTurnIgnoresAlwaysRow(t *testing.T) {
+	d := openTestDB(t)
+	if _, err := d.ExecContext(ctx, "INSERT INTO approvals_always(pattern_id, created_at) VALUES ('recursive_delete', 1)"); err != nil {
+		t.Fatal(err)
+	}
+	p := &memberPrompter{}
+	gate := tools.GateApprover{Gate: &security.Gate{Mode: "manual", Timeout: 5 * time.Second, DB: d}, Prompter: p}
+	child := &sessions.Session{ID: "c", Kind: "child"}
+
+	member := childEnv(&tools.Env{SessionID: "p", Gate: gate, Member: true}, child)
+	if err := gate.CheckCommand(ctx, member, "rm -rf build", ""); err == nil {
+		t.Fatal("the denied member child command ran")
+	}
+	if len(p.reqs) != 1 || !p.reqs[0].Member {
+		t.Fatalf("%+v", p.reqs)
+	}
+
+	// An owner parent: the row covers the child, and the prompter is not called.
+	owner := childEnv(&tools.Env{SessionID: "p", Gate: gate}, child)
+	if err := gate.CheckCommand(ctx, owner, "rm -rf build", ""); err != nil || len(p.reqs) != 1 {
+		t.Fatal(err, len(p.reqs))
 	}
 }

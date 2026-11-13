@@ -340,15 +340,21 @@ func backReply(s *sessions.Session, msgs int, now time.Time) Reply {
 func cmdNew(ctx context.Context, c *CommandCtx, _ string) error {
 	old := c.Session
 	if old != nil {
+		// A member in a member session starts no review: a review can write the owner
+		// memory and the skills.
+		hookCtx := ctx
+		if !c.Owner && !c.Shared {
+			hookCtx = agent.WithNoReview(ctx)
+		}
 		switch {
 		case c.Hooks.BeforeNew != nil:
-			c.Hooks.BeforeNew(ctx, old)
+			c.Hooks.BeforeNew(hookCtx, old)
 		case c.Deps.BeforeNew != nil:
-			c.Deps.BeforeNew(ctx, old)
+			c.Deps.BeforeNew(hookCtx, old)
 		case c.Deps.Agent != nil:
 			// The review of the old session runs in the background, so the reply does
 			// not wait for it.
-			c.Deps.Agent.ReviewBeforeNew(ctx, old)
+			c.Deps.Agent.ReviewBeforeNew(hookCtx, old)
 		}
 	}
 	pauseOldGoal(ctx, c, old)
@@ -915,7 +921,7 @@ const helpTelegram = "📖 **Commands**\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n" +
 	"/approve · /deny · answer an approval\n\n" +
-	"**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
+	"**Setup**\n/sethome · send cron results to this chat\n/approvals · see and remove the Always answers\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 
 // helpCLI is the reply to /help on a text-only channel. It does not have the Telegram
 // commands, and it has /exit.
@@ -927,7 +933,7 @@ const helpCLI = "📖 **Commands**\n\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
-	"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
+	"**Setup**\n/approvals · see and remove the Always answers\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
 
 // helpMember is the reply to /help for a member. It lists only the commands that a member
 // can run.
@@ -966,7 +972,8 @@ func cmdHelp(_ context.Context, c *CommandCtx, args string) error {
 			text += "\nIn a shared session, only the owner can use /new, /stop, and /now."
 		}
 	}
-	cmds := c.Deps.SkillCommandsFor(channel)
+	// A member sees only the skill commands that a member turn can run.
+	cmds := c.Deps.SkillCommandsForSender(channel, c.Owner)
 	lines := skillHelpLines(cmds, c.interactive())
 	if strings.EqualFold(strings.TrimSpace(args), "skills") {
 		if len(cmds) == 0 {

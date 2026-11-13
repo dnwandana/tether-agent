@@ -202,7 +202,7 @@ func TestBeginStoppingKeepsTheCutWork(t *testing.T) {
 	rs.Steer.Push("steer me")
 	g.Submit(ctx, photoIn("k", "look"), f.new, nil)
 	g.BeginStopping(stopCtx(t))
-	want := []sessions.QueuedText{{Text: "steer me"}, {Text: "look", Lost: 1}}
+	want := []sessions.QueuedText{{Text: "steer me"}, {Text: "look", Lost: 1, Owner: new(true)}}
 	wantMarker(t, g, "k", want)
 	// stopWork cancels the turns.
 	cancel()
@@ -227,7 +227,7 @@ func TestBeginStoppingTakesTheDebouncedText(t *testing.T) {
 	g.Submit(ctx, inb("k", "late"), f.new, nil)
 	g.Submit(ctx, photoIn("k", "look"), f.new, nil)
 	g.BeginStopping(stopCtx(t))
-	wantMarker(t, g, "k", []sessions.QueuedText{{Text: "late"}, {Text: "look", Lost: 1}})
+	wantMarker(t, g, "k", []sessions.QueuedText{{Text: "late", Owner: new(true)}, {Text: "look", Lost: 1, Owner: new(true)}})
 	if got := g.debouncer().Take("k"); got != "" {
 		t.Fatal("the stop must take the text from the debouncer:", got)
 	}
@@ -250,7 +250,7 @@ func TestBeginStoppingPutsTheSteerBeforeTheDebouncedText(t *testing.T) {
 	rs.Steer.Push("early")
 	g.Submit(ctx, inb("k", "late"), f.new, nil)
 	g.BeginStopping(stopCtx(t))
-	wantMarker(t, g, "k", []sessions.QueuedText{{Text: "early"}, {Text: "late"}})
+	wantMarker(t, g, "k", []sessions.QueuedText{{Text: "early"}, {Text: "late", Owner: new(true)}})
 	cancel()
 	if !g.Wait(5 * time.Second) {
 		t.Fatal("the turns did not end")
@@ -336,7 +336,7 @@ func TestQueuedWaiterLeavingDoesNotEraseTheMarker(t *testing.T) {
 	left := make(chan error, 1)
 	g.Submit(wctx, photoIn("k", "look"), f.new, func(err error) { left <- err })
 	g.BeginStopping(stopCtx(t))
-	want := []sessions.QueuedText{{Text: "look", Lost: 1}}
+	want := []sessions.QueuedText{{Text: "look", Lost: 1, Owner: new(true)}}
 	wantMarker(t, g, "k", want)
 	waitFor(t, func() bool { return len(f.finals()) == 1 })
 	wcancel()
@@ -371,7 +371,7 @@ func TestBeginStoppingKeepsAHandedMessage(t *testing.T) {
 	g.Submit(context.Background(), photoIn("k", "look"), pf.new, nil)
 	<-pf.entered
 	g.BeginStopping(stopCtx(t))
-	want := []sessions.QueuedText{{Text: "look", Lost: 1}}
+	want := []sessions.QueuedText{{Text: "look", Lost: 1, Owner: new(true)}}
 	wantMarker(t, g, "k", want)
 	close(pf.release)
 	if !g.Wait(5 * time.Second) {
@@ -392,7 +392,7 @@ func TestBeginStoppingKeepsAFirstMessageWithNoSession(t *testing.T) {
 	g.Submit(context.Background(), inb("k", "hello"), pf.new, nil)
 	<-pf.entered
 	g.BeginStopping(stopCtx(t))
-	want := []sessions.QueuedText{{Text: "hello"}}
+	want := []sessions.QueuedText{{Text: "hello", Owner: new(true)}}
 	wantMarker(t, g, "k", want)
 	close(pf.release)
 	if !g.Wait(5 * time.Second) {

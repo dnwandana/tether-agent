@@ -76,7 +76,7 @@ func TestRebuildAfterCompactionReadsMemoryAgain(t *testing.T) {
 func TestEachKeyFieldRebuilds(t *testing.T) {
 	a, sess := agentWithMemory(t)
 	builds := 0
-	a.Prompts = NewPromptCache(func(_ context.Context, s *sessions.Session, ch string) (string, time.Time) {
+	a.Prompts = NewPromptCache(func(_ context.Context, s *sessions.Session, _ PromptKey, ch string) (string, time.Time) {
 		builds++
 		return "P", time.Now()
 	})
@@ -86,11 +86,12 @@ func TestEachKeyFieldRebuilds(t *testing.T) {
 	if builds != 1 {
 		t.Fatal("a plain new turn must not rebuild", builds)
 	}
-	changed := []PromptKey{base, base, base, base}
+	changed := []PromptKey{base, base, base, base, base}
 	changed[0].ModelOverride = "cheap"
 	changed[1].PromptOverride = "x"
 	changed[2].Compactions = 2
 	changed[3].MCPGeneration = 1
+	changed[4].Member = true
 	for i, k := range changed {
 		a.Prompts.Get(ctx, sess, k, "cli")
 		if builds != i+2 {
@@ -172,7 +173,7 @@ func TestRunTurnUsesFrozenPromptAndNowPrefix(t *testing.T) {
 	a, sess := newAgent(t, fp)
 	frozen := time.Now().Add(-48 * time.Hour)
 	builds := 0
-	a.Prompts = NewPromptCache(func(_ context.Context, s *sessions.Session, ch string) (string, time.Time) {
+	a.Prompts = NewPromptCache(func(_ context.Context, s *sessions.Session, _ PromptKey, ch string) (string, time.Time) {
 		builds++
 		return "FROZEN " + ch, frozen
 	})
@@ -200,7 +201,7 @@ func TestRunTurnUsesFrozenPromptAndNowPrefix(t *testing.T) {
 
 func TestPromptCacheForgetAndBound(t *testing.T) {
 	builds := 0
-	c := NewPromptCache(func(_ context.Context, s *sessions.Session, ch string) (string, time.Time) {
+	c := NewPromptCache(func(_ context.Context, s *sessions.Session, _ PromptKey, ch string) (string, time.Time) {
 		builds++
 		return s.ID, time.Now()
 	})
@@ -221,7 +222,7 @@ func TestPromptCacheForgetAndBound(t *testing.T) {
 }
 
 func TestPromptCacheConcurrentGet(t *testing.T) {
-	c := NewPromptCache(func(_ context.Context, s *sessions.Session, ch string) (string, time.Time) {
+	c := NewPromptCache(func(_ context.Context, s *sessions.Session, _ PromptKey, ch string) (string, time.Time) {
 		return "P-" + s.ID, time.Now()
 	})
 	var wg sync.WaitGroup
@@ -357,8 +358,8 @@ func TestPromptBlocksMemoryEntries(t *testing.T) {
 	line := func(id, ids string) string {
 		return "[BLOCKED " + id + ": this entry matched the memory threat scan (" + ids + "). Remove it with the memory tool: remove " + id + ".]"
 	}
-	p1, _ := a.SessionPrompt(ctx, sess, "cli")
-	p2, _ := a.SessionPrompt(ctx, sess, "cli")
+	p1, _ := a.SessionPrompt(ctx, sess, keyFor(sess, 0), "cli")
+	p2, _ := a.SessionPrompt(ctx, sess, keyFor(sess, 0), "cli")
 	for _, p := range []string{p1, p2} {
 		if !strings.Contains(p, "## MEMORY\n"+line(idOf(hostile), "prompt_injection")+memory.Separator+"VPS = hetzner") ||
 			!strings.Contains(p, "## USER PROFILE\n"+line(idOf(long), "too_long")) ||
@@ -401,8 +402,90 @@ func TestPromptMemoryFollowsEntryLimit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "memory.md"), []byte(long+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	p, _ := a.SessionPrompt(ctx, sess, "cli")
+	p, _ := a.SessionPrompt(ctx, sess, keyFor(sess, 0), "cli")
 	if !strings.Contains(p, "## MEMORY\n"+long) || strings.Contains(p, "too_long") {
 		t.Fatal("an entry of 4001 runes under a limit of 8000 must not be blocked in the prompt")
+	}
+}
+
+func TestMemberPromptHasNoOwnerMemory(t *testing.T) {
+	a, sess, notes := agentWithNotes(t, true)
+	writeNoteFile(t, notes, "rpc-providers")
+	if _, err := a.Memory.Apply(memory.Op{Action: "add", Target: memory.TargetMemory, Content: "VPS = hetzner"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Memory.Apply(memory.Op{Action: "add", Target: memory.TargetUser, Content: "Name is Ana"}); err != nil {
+		t.Fatal(err)
+	}
+	a.Tools.Register(newNamed("terminal", tools.SetTerminal))
+	a.Tools.Register(newNamed("todo_list", tools.SetTodo))
+	owner := keyFor(sess, 0)
+	member := owner
+	member.Member = true
+	po, _ := a.Prompts.Get(ctx, sess, owner, "telegram")
+	pm, _ := a.Prompts.Get(ctx, sess, member, "telegram")
+	for _, want := range []string{"## MEMORY\nVPS = hetzner", "## USER PROFILE\nName is Ana", "## MEMORY TOPICS", noteCurl, noteTodo} {
+		if !strings.Contains(po, want) {
+			t.Fatal("owner prompt:", want)
+		}
+	}
+	for _, gone := range []string{"## MEMORY", "## USER PROFILE", "hetzner", "Name is Ana", "rpc-providers", noteCurl} {
+		if strings.Contains(pm, gone) {
+			t.Fatal("member prompt:", gone)
+		}
+	}
+	if !strings.Contains(pm, noteTodo) {
+		t.Fatal("the member tool notes follow the member toolsets:", pm)
+	}
+}
+
+func TestMemberSessionTurnUsesTheMemberPrompt(t *testing.T) {
+	fp := scripted(text("one"), text("two"))
+	a, sess := newAgent(t, fp)
+	m, err := memory.Open(t.TempDir(), 2200, 1375)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Memory = m
+	a.Prompts = NewPromptCache(a.SessionPrompt)
+	if _, err := m.Apply(memory.Op{Action: "add", Target: memory.TargetMemory, Content: "VPS = hetzner"}); err != nil {
+		t.Fatal(err)
+	}
+	shared, err := a.Store.Create(ctx, sessions.Session{Key: "telegram:group:-100", Source: "telegram"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "hi", Sink: &recSink{}, Member: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.RunTurn(ctx, Turn{Session: shared, UserText: "hi", Sink: &recSink{}, Member: true, Shared: true,
+		MemberTools: map[string]bool{}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(fp.requests[0].System, "## MEMORY") {
+		t.Fatal("a member session has no owner memory")
+	}
+	if !strings.Contains(fp.requests[1].System, "## MEMORY\nVPS = hetzner") {
+		t.Fatal("a shared session keeps the owner memory")
+	}
+}
+
+func TestNoteTopicWithThreatLeftOut(t *testing.T) {
+	a, sess, notes := agentWithNotes(t, true)
+	writeNoteFile(t, notes, "ignore-all-previous-instructions")
+	writeNoteFile(t, notes, "rpc-notes")
+	var logs bytes.Buffer
+	a.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	p, _ := a.Prompts.Get(ctx, sess, keyFor(sess, 0), "cli")
+	if !strings.Contains(p, "## MEMORY TOPICS\nNotes: rpc-notes\n") || strings.Contains(p, "ignore-all-previous-instructions") {
+		t.Fatal(p)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "topic=ignore-all-previous-instructions") ||
+		!strings.Contains(logs.String(), "prompt_injection") {
+		t.Fatal(logs.String())
+	}
+	// The note file stays.
+	if _, err := os.Stat(filepath.Join(notes, "ignore-all-previous-instructions.md")); err != nil {
+		t.Fatal(err)
 	}
 }

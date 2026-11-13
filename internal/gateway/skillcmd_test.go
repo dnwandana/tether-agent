@@ -190,3 +190,28 @@ func TestSkillCommandsForNoSkills(t *testing.T) {
 		t.Fatalf("no warn line for the load error:\n%s", logs.String())
 	}
 }
+
+// A member gets skill commands only when the member toolsets show skill_view.
+func TestSkillCommandsForSenderMemberGate(t *testing.T) {
+	load := func() ([]skills.Skill, []skills.Warning, error) {
+		return []skills.Skill{testSkill("arxiv")}, nil, nil
+	}
+	cfg := config.Default()
+	cfg.Toolsets["telegram"] = []string{tools.SetFile, tools.SetSkills}
+	cfg.Toolsets["member"] = []string{tools.SetFile}
+	reg := tools.NewRegistry()
+	reg.Register(tools.SkillViewTool{})
+	reg.Register(tools.ReadFileTool{})
+	d := &Deps{Cfg: &cfg, Agent: &agent.Agent{Tools: reg}, Skills: load, Log: slog.New(slog.DiscardHandler)}
+
+	if s := cmdSlugs(d.SkillCommandsForSender("telegram", true)); !slices.Equal(s, []string{"arxiv"}) {
+		t.Fatal("owner:", s)
+	}
+	if got := d.SkillCommandsForSender("telegram", false); got != nil {
+		t.Fatal("member without skill_view:", got)
+	}
+	cfg.Toolsets["member"] = []string{tools.SetFile, tools.SetSkills}
+	if s := cmdSlugs(d.SkillCommandsForSender("telegram", false)); !slices.Equal(s, []string{"arxiv"}) {
+		t.Fatal("member with skill_view:", s)
+	}
+}

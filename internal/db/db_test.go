@@ -395,3 +395,18 @@ func TestACPSessionsKeyIsSessionAndAgent(t *testing.T) {
 		t.Fatal("a second row for (s1, claude-code) must fail")
 	}
 }
+
+func TestBatchOwnerColumn(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if _, err := d.Exec(`INSERT INTO delegation_batches (id) VALUES ('b1')`); err != nil {
+		t.Fatal(err)
+	}
+	var owner int
+	if err := d.QueryRow(`SELECT owner FROM delegation_batches WHERE id = 'b1'`).Scan(&owner); err != nil || owner != 1 {
+		t.Fatal("a row with no owner value is an owner row:", owner, err)
+	}
+}

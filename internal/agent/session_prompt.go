@@ -26,6 +26,8 @@ type PromptKey struct {
 	SessionID, ModelOverride, PromptOverride string
 	Compactions                              int
 	MCPGeneration                            uint64
+	// Member is true for the prompt of a member session, which has no owner memory.
+	Member bool
 }
 
 // promptEntry is the cached prompt of one session.
@@ -39,7 +41,7 @@ type promptEntry struct {
 // PromptCache holds the frozen system prompt of each session, so the prompt cache of the
 // provider can hit on every turn. It is safe for concurrent use.
 type PromptCache struct {
-	build   func(ctx context.Context, s *sessions.Session, channel string) (string, time.Time)
+	build   func(ctx context.Context, s *sessions.Session, key PromptKey, channel string) (string, time.Time)
 	mu      sync.Mutex
 	entries map[string]*promptEntry
 	tick    uint64
@@ -47,7 +49,7 @@ type PromptCache struct {
 
 // NewPromptCache returns a cache that calls build to make a prompt. build returns the
 // prompt and the time at which the prompt was frozen.
-func NewPromptCache(build func(ctx context.Context, s *sessions.Session, channel string) (string, time.Time)) *PromptCache {
+func NewPromptCache(build func(ctx context.Context, s *sessions.Session, key PromptKey, channel string) (string, time.Time)) *PromptCache {
 	return &PromptCache{build: build, entries: map[string]*promptEntry{}}
 }
 
@@ -58,7 +60,7 @@ func (c *PromptCache) Get(ctx context.Context, s *sessions.Session, key PromptKe
 		return e.prompt, e.frozenAt
 	}
 	// The build reads files, so it runs without the lock.
-	prompt, frozenAt = c.build(ctx, s, channel)
+	prompt, frozenAt = c.build(ctx, s, key, channel)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// A concurrent Get can store the same key first. Keep that entry, so the two callers
@@ -83,6 +85,15 @@ func (c *PromptCache) lookup(key PromptKey) (promptEntry, bool) {
 	c.tick++
 	e.used = c.tick
 	return *e, true
+}
+
+// storedMember returns key.Member of the entry of the session. It returns false when the
+// session has no entry.
+func (c *PromptCache) storedMember(sessionID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[sessionID]
+	return ok && e.key.Member
 }
 
 // evict removes the least recently used entries above promptCacheMax. The caller holds mu.
@@ -131,15 +142,16 @@ func NowPrefix(frozenAt, now time.Time) string {
 }
 
 // SessionPrompt builds the system prompt of the session. It reads memory, the note topics,
-// and the skills from disk. A session prompt override replaces the base prompt. The second result
+// and the skills from disk. A session prompt override replaces the base prompt. A member
+// session prompt has no memory sections and no topic list. The second result
 // is the time at which the prompt is frozen. Use it as the build function of NewPromptCache.
-func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, channel string) (string, time.Time) {
+func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, key PromptKey, channel string) (string, time.Time) {
 	now := time.Now()
 	in := PromptInput{Base: BasePrompt(), Now: now, TZ: zoneName(now), WorkDir: a.workDir(), Channel: channel}
 	if s != nil && strings.TrimSpace(s.PromptOverride) != "" {
 		in.Base = s.PromptOverride
 	}
-	if a.Memory != nil {
+	if a.Memory != nil && !key.Member {
 		for _, f := range []struct {
 			target string
 			text   *string
@@ -164,16 +176,30 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, channel st
 	}
 	var visible map[string]bool
 	if a.Tools != nil {
-		visible, _ = a.Tools.Visible(tools.Resolve(a.config().Toolsets[channel], nil, nil), nil)
+		sets := tools.Resolve(a.config().Toolsets[channel], nil, nil)
+		if key.Member {
+			sets = tools.MemberToolsets(a.config().Toolsets[channel], a.config().Toolsets["member"])
+		}
+		visible, _ = a.Tools.Visible(sets, nil)
 		in.ToolNotes = DefaultToolNotes(visible)
 	}
 	// The topic list is useful only when the model can search and read a note.
-	if a.Memory != nil && (a.Tools == nil || visible["memory"]) {
+	if a.Memory != nil && !key.Member && (a.Tools == nil || visible["memory"]) {
 		topics, err := a.Memory.Topics()
 		if err != nil {
 			a.logger().Warn("agent: cannot list the memory notes; the prompt has no topic list", "err", err.Error())
 		} else {
-			in.NoteTopics = topics
+			// A topic name is prompt text, so it gets the same scan as a memory entry.
+			kept := make([]string, 0, len(topics))
+			for _, topic := range topics {
+				ids := tools.MemoryThreatIDs(strings.ReplaceAll(topic, "-", " "))
+				if len(ids) > 0 {
+					a.logger().Warn("agent: a note topic matched the memory threat scan; the prompt leaves it out", "topic", topic, "findings", strings.Join(ids, ", "))
+					continue
+				}
+				kept = append(kept, topic)
+			}
+			in.NoteTopics = kept
 			in.MaxTopics = a.config().Memory.PromptMaxTopics
 		}
 	}
@@ -226,13 +252,13 @@ func (a *Agent) turnSystem(ctx context.Context, t Turn, channel string) (string,
 	if t.System != "" || a.Prompts == nil || t.review != nil {
 		return t.System, time.Time{}
 	}
-	return a.Prompts.Get(ctx, t.Session, a.promptKey(ctx, t.Session), channel)
+	return a.Prompts.Get(ctx, t.Session, a.promptKey(ctx, t.Session, t.Member && !t.Shared), channel)
 }
 
 // promptKey returns the prompt key of the session from its row, the number of its
 // compactions, and the MCP generation.
-func (a *Agent) promptKey(ctx context.Context, s *sessions.Session) PromptKey {
-	k := PromptKey{SessionID: s.ID, ModelOverride: s.ModelOverride, PromptOverride: s.PromptOverride}
+func (a *Agent) promptKey(ctx context.Context, s *sessions.Session, member bool) PromptKey {
+	k := PromptKey{SessionID: s.ID, ModelOverride: s.ModelOverride, PromptOverride: s.PromptOverride, Member: member}
 	k.Compactions = a.compactionCount(ctx, s.ID)
 	if a.MCPGen != nil {
 		k.MCPGeneration = a.MCPGen()

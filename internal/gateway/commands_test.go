@@ -93,7 +93,7 @@ func TestNewResumeRenameArchiveDelete(t *testing.T) {
 	if strings.Contains(out.String(), first) {
 		t.Fatal("archived session listed:", out)
 	}
-	c.Deps.Agent.Prompts = agent.NewPromptCache(func(context.Context, *sessions.Session, string) (string, time.Time) {
+	c.Deps.Agent.Prompts = agent.NewPromptCache(func(context.Context, *sessions.Session, agent.PromptKey, string) (string, time.Time) {
 		return "p", time.Now()
 	})
 	c.Deps.Agent.Prompts.Get(ctx, &sessions.Session{ID: first}, agent.PromptKey{SessionID: first}, "cli")
@@ -579,7 +579,7 @@ func TestHelpTelegram(t *testing.T) {
 		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 		"/goal · keep working toward a goal\n/todo · see the task list\n" +
-		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
+		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/approvals · see and remove the Always answers\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 	run(t, c, "/help")
 	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
 		t.Fatalf("got:\n%s", r.Text)
@@ -597,11 +597,11 @@ func TestHelpCLI(t *testing.T) {
 		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 		"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
-		"**Setup**\n/reload-mcp · reload the MCP servers\n/exit · leave the chat\n"
+		"**Setup**\n/approvals · see and remove the Always answers\n/reload-mcp · reload the MCP servers\n/exit · leave the chat\n"
 	if out.String() != want {
 		t.Fatalf("got:\n%s", out)
 	}
-	if strings.Contains(out.String(), "/approve") || strings.Contains(out.String(), "/sethome") {
+	if strings.Contains(out.String(), "/approve ·") || strings.Contains(out.String(), "/sethome") {
 		t.Fatal(out)
 	}
 }
@@ -1880,5 +1880,25 @@ func TestHelpMemberShared(t *testing.T) {
 	want := helpMember + "\nIn a shared session, only the owner can use /new, /stop, and /now."
 	if r := lastSent(t, sent); r.Text != want {
 		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+func TestMemberNewSkipsTheReview(t *testing.T) {
+	c, _ := cmdCtx(t, "telegram:group:-100:7")
+	run(t, c, "/new")
+	var got context.Context
+	c.Hooks.BeforeNew = func(ctx context.Context, _ *sessions.Session) { got = ctx }
+	for _, tc := range []struct{ owner, shared, skip bool }{
+		{false, false, true},
+		{true, false, false},
+		{false, true, false},
+		{true, true, false},
+	} {
+		got = nil
+		c.Owner, c.Shared = tc.owner, tc.shared
+		run(t, c, "/new")
+		if got == nil || agent.NoReview(got) != tc.skip {
+			t.Fatalf("%+v: the hook must run, and only a member session skips the review", tc)
+		}
 	}
 }

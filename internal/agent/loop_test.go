@@ -1008,10 +1008,53 @@ func TestInlineImagesOnlyForVisionProvider(t *testing.T) {
 	}
 }
 
+func TestVisionMarkerOnlyFromInbox(t *testing.T) {
+	inbox := t.TempDir()
+	in := filepath.Join(inbox, "photo.png")
+	if err := os.WriteFile(in, []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := pngMarkerFile(t) // in another temporary folder
+	link := filepath.Join(inbox, "link.png")
+	if err := os.Symlink(out, link); err != nil {
+		t.Fatal(err)
+	}
+	dotdot := filepath.Join(inbox, "..", filepath.Base(filepath.Dir(out)), "photo.png")
+	fp := scripted(text("ok"))
+	a, sess := newAgent(t, fp, echoTool{})
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", Vision: true}
+	a.MediaInbox = inbox
+	msg := "see [image: " + in + "] [image: " + out + "] [image: " + link + "] [image: " + dotdot + "]"
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: msg, Toolsets: all(), Sink: &recSink{}}); err != nil {
+		t.Fatal(err)
+	}
+	u := lastUser(fp.requests[0])
+	if len(u.Images) != 1 || u.Images[0].Path != in {
+		t.Fatalf("only the inbox file loads: %+v", u.Images)
+	}
+	if u.Content != msg {
+		t.Fatalf("the marker text stays: %q", u.Content)
+	}
+}
+
+func TestVisionMarkerNoInbox(t *testing.T) {
+	p := pngMarkerFile(t)
+	fp := scripted(text("ok"))
+	a, sess := newAgent(t, fp, echoTool{})
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", Vision: true}
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "see [image: " + p + "]", Toolsets: all(), Sink: &recSink{}}); err != nil {
+		t.Fatal(err)
+	}
+	if u := lastUser(fp.requests[0]); len(u.Images) != 0 {
+		t.Fatalf("an empty MediaInbox loads no marker: %+v", u.Images)
+	}
+}
+
 func TestVisionLoadsMarkerFiles(t *testing.T) {
 	p := pngMarkerFile(t)
 	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), text("ok"))
 	a, sess := newAgent(t, fp, echoTool{})
+	a.MediaInbox = filepath.Dir(p)
 	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", Vision: true}
 	text := "compare [image: " + p + "] and [image: /no/such/file.png]"
 	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: text, Toolsets: all(), Sink: &recSink{}}); err != nil {
@@ -1033,6 +1076,7 @@ func TestVisionUsesTheOverrideEntry(t *testing.T) {
 	prim := scripted()
 	eyes := &fakeProv{name: "eyes", model: "gpt-4o", script: []step{text("ok")}}
 	a, sess := newAgent(t, prim, echoTool{})
+	a.MediaInbox = filepath.Dir(p)
 	a.Cfg.Providers["eyes"] = config.Provider{Format: "openai", Model: "gpt-4o", Vision: true}
 	a.Providers["eyes"] = eyes
 	sess.ModelOverride = "eyes:gpt-4o-mini"
@@ -1519,6 +1563,7 @@ func TestMarkerImageFollowsVisionMaxBytes(t *testing.T) {
 		fp := scripted(text("ok"))
 		a, sess := newAgent(t, fp, echoTool{})
 		a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", Vision: true}
+		a.MediaInbox = filepath.Dir(p)
 		a.Cfg.Media.VisionMaxBytes = limit
 		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "see [image: " + p + "]", Toolsets: all(), Sink: &recSink{}}); err != nil {
 			t.Fatal(err)

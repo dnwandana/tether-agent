@@ -50,6 +50,27 @@ func TestMarkerQueuedRoundTrip(t *testing.T) {
 	}
 }
 
+// The owner flag survives the marker, and a v0.18 row with no owner field reads as nil.
+func TestMarkerQueuedOwnerFlag(t *testing.T) {
+	s := New(openTestDB(t))
+	ctx, now := context.Background(), time.UnixMilli(1_000_000)
+	no, yes := false, true
+	q := []QueuedText{{Text: "a", Owner: &no}, {Text: "b", Owner: &yes}, {Text: "c"}}
+	must(t, s.UpsertMarker(ctx, "k", "s1", q, now))
+	m := markers(t, s)
+	if len(m) != 1 || !reflect.DeepEqual(m[0].Queued, q) {
+		t.Fatalf("queued = %+v, want %+v", m, q)
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE turn_markers SET queued = ? WHERE session_key = ?`,
+		`[{"text":"old","lost":0}]`, "k")
+	must(t, err)
+	m = markers(t, s)
+	want := []QueuedText{{Text: "old"}}
+	if len(m) != 1 || !reflect.DeepEqual(m[0].Queued, want) || m[0].Queued[0].Owner != nil {
+		t.Fatalf("queued = %+v, want %+v", m, want)
+	}
+}
+
 func TestMarkerTouchAndDelete(t *testing.T) {
 	s := New(openTestDB(t))
 	ctx, now := context.Background(), time.UnixMilli(1_000_000)

@@ -270,10 +270,18 @@ func cmdNow(_ context.Context, c *CommandCtx, args string) error {
 	return nil
 }
 
+// memberIntoOwnerRun reports whether in is a member text of a shared session and rs is an
+// owner turn. Such a text must not run with the owner tools and the owner grants of the
+// running turn.
+func memberIntoOwnerRun(rs *RunState, in Inbound) bool {
+	return in.Shared && !in.Owner && rs.owner
+}
+
 // onBusy puts the text of in into the running turn rs as a steer and sends the steer
 // ack to r. It returns false when the steer cannot run: in is not plain text, the text is
 // empty, the agent did not start yet (no steer queue), the run ended or stopped, or the
-// gateway stops. The caller then queues in for the next turn. The caller must not hold g.mu.
+// gateway stops, or in is a member text of a shared session and the run is an owner turn.
+// The caller then queues in for the next turn. The caller must not hold g.mu.
 func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer) (handled bool) {
 	if rs == nil || !steerable(in) {
 		return false
@@ -284,12 +292,16 @@ func (g *Gateway) onBusy(_ context.Context, rs *RunState, in Inbound, r Renderer
 		g.mu.Unlock()
 		return false
 	}
+	if memberIntoOwnerRun(rs, in) {
+		g.mu.Unlock()
+		return false
+	}
 	seq, ok := rs.Steer.PushSeq(in.Text)
 	if !ok {
 		g.mu.Unlock()
 		return false
 	}
-	addSteerSenderLocked(rs, seq, senderOf(in))
+	addSteerSenderLocked(rs, seq, senderOf(in), in.Owner)
 	turn := 0
 	if ks := g.keys[in.Key]; ks != nil {
 		turn = ks.currentTurn()
@@ -336,6 +348,22 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 		g.mu.Unlock()
 		return
 	}
+	if ks.running != nil && memberIntoOwnerRun(ks.running, in) {
+		// A refused member steer joins the last waiting member text of the same sender.
+		// Each burst then does not add a model call.
+		if last := lastMemberText(ks, in); last != nil {
+			last.in.Text += "\n" + in.Text
+			op := g.markerUpsertOp(ks, in.Key)
+			g.mu.Unlock()
+			g.sendMarker(op)
+			return
+		}
+	}
+	if senderQueued(ks) >= g.Deps.queueLimit() {
+		g.mu.Unlock()
+		ackReply(r, Reply{Text: QueueFullReply})
+		return
+	}
 	p := &pendingTurn{in: in, newRenderer: newRenderer}
 	ks.queue = append(ks.queue, p)
 	slot, send := g.reserveAckLocked(ks.running, in.Key, ackQueue, 0)
@@ -349,9 +377,25 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 	}
 }
 
+// lastMemberText returns the last waiting turn of ks when it is a plain member text of
+// the sender of in. Otherwise it returns nil. g.mu must be held.
+func lastMemberText(ks *keyState, in Inbound) *pendingTurn {
+	if len(ks.queue) == 0 {
+		return nil
+	}
+	p := ks.queue[len(ks.queue)-1]
+	if p.system || p.goalTurn || p.discard || p.handed || !steerable(p.in) ||
+		!p.in.Shared || p.in.Owner || senderOf(p.in) != senderOf(in) {
+		return nil
+	}
+	return p
+}
+
 // steerCommand runs /steer text for the key of in. With a run, the text goes into the
 // run. While the agent starts, the text waits for the next turn. With no run, the text
-// runs as a normal message: the returned rest runs its turn. Its reply has no busy limit.
+// runs as a normal message: the returned rest runs its turn. A member text of a shared
+// session does not go into an owner turn: it takes the path of a normal message and waits
+// as a member turn. Its reply has no busy limit.
 func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func() Renderer, r Renderer, text string) (rest func() error) {
 	rest = func() error { return nil }
 	m := in
@@ -362,9 +406,13 @@ func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func
 		g.mu.Unlock()
 		return g.acceptMessage(ctx, m, newRenderer)
 	}
+	if rs := ks.running; rs != nil && memberIntoOwnerRun(rs, in) {
+		g.mu.Unlock()
+		return g.acceptMessage(ctx, m, newRenderer)
+	}
 	if rs := ks.running; !g.stopping.Load() && rs != nil && rs.Steer != nil && !rs.ended && !rs.stopped {
 		if seq, ok := rs.Steer.PushSeq(text); ok {
-			addSteerSenderLocked(rs, seq, senderOf(in))
+			addSteerSenderLocked(rs, seq, senderOf(in), in.Owner)
 			// The /steer ack has no busy limit, so its slot has no mark.
 			slot := &ackSlot{kind: ackSteer, seq: seq}
 			rs.steerAcks = append(rs.steerAcks, slot)
@@ -538,9 +586,9 @@ func (g *Gateway) takeOver(key string, turn, msgID int) (took bool, waiting int,
 			takeSteerSendersLocked(rs, seq, &sender)
 		}
 	}
-	if s, id := g.debouncerLocked().TakeFrom(key); s != "" {
+	if s, id, owner := g.debouncerLocked().TakeFrom(key); s != "" {
 		parts = append(parts, s)
-		sender.add(id)
+		sender.add(id, owner)
 	}
 	text := strings.Join(parts, "\n")
 	waiting = senderQueued(ks)
@@ -550,8 +598,10 @@ func (g *Gateway) takeOver(key string, turn, msgID int) (took bool, waiting int,
 	}
 	tappedClose = g.closeSlotLocked(tapped, "")
 	if text != "" {
-		// The text gets a sender only when all of its parts come from one sender.
+		// The text gets a sender only when all of its parts come from one sender. It is an
+		// owner text only when each part is an owner text.
 		in := withSender(cur.in, sender.id())
+		in.Owner = sender.owner()
 		in.Text, in.Images, in.Files, in.IsText, in.Slash = text, nil, nil, true, false
 		// The agent cannot read the drained text now. Its steer acks move with the text, so
 		// the start, the drop, or a restart of the new message closes them.
@@ -913,7 +963,7 @@ type debounceEntry struct {
 	sender textSender
 	first  time.Time
 	timer  *time.Timer
-	flush  func(merged, sender string)
+	flush  func(merged, sender string, owner bool)
 	// gen counts the texts, so that an old timer does not flush.
 	gen int
 }
@@ -926,12 +976,13 @@ func NewDebouncer(window, hardCap time.Duration) *Debouncer {
 // Add adds text with no sender for key. flush receives the texts of the key joined with
 // "\n". The flush function of the last Add runs, in a goroutine of its own.
 func (d *Debouncer) Add(key, text string, flush func(merged string)) {
-	d.AddFrom(key, "", text, func(merged, _ string) { flush(merged) })
+	d.AddFrom(key, "", text, true, func(merged, _ string, _ bool) { flush(merged) })
 }
 
-// AddFrom is Add for a text of sender. flush also receives the sender of the merged text:
-// the sender when all texts come from one sender, else "".
-func (d *Debouncer) AddFrom(key, sender, text string, flush func(merged, sender string)) {
+// AddFrom is Add for a text of sender. owner tells whether the text comes from an owner.
+// flush also receives the sender of the merged text: the sender when all texts come from
+// one sender, else "". It receives owner true only when each text comes from an owner.
+func (d *Debouncer) AddFrom(key, sender, text string, owner bool, flush func(merged, sender string, owner bool)) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e := d.pending[key]
@@ -940,7 +991,7 @@ func (d *Debouncer) AddFrom(key, sender, text string, flush func(merged, sender 
 		d.pending[key] = e
 	}
 	e.texts = append(e.texts, text)
-	e.sender.add(sender)
+	e.sender.add(sender, owner)
 	e.flush = flush
 	e.gen++
 	gen := e.gen
@@ -967,22 +1018,22 @@ func (d *Debouncer) Drop(key string) {
 // Take returns the merged waiting text of key and forgets it, with no flush. It returns ""
 // when no text waits.
 func (d *Debouncer) Take(key string) string {
-	text, _ := d.TakeFrom(key)
+	text, _, _ := d.TakeFrom(key)
 	return text
 }
 
-// TakeFrom is Take, and it also returns the sender of the merged text, as AddFrom gives it
-// to flush.
-func (d *Debouncer) TakeFrom(key string) (text, sender string) {
+// TakeFrom is Take, and it also returns the sender and the owner flag of the merged text,
+// as AddFrom gives them to flush.
+func (d *Debouncer) TakeFrom(key string) (text, sender string, owner bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e := d.pending[key]
 	if e == nil {
-		return "", ""
+		return "", "", false
 	}
 	e.timer.Stop()
 	delete(d.pending, key)
-	return strings.Join(e.texts, "\n"), e.sender.id()
+	return strings.Join(e.texts, "\n"), e.sender.id(), e.sender.owner()
 }
 
 func (d *Debouncer) fire(key string, e *debounceEntry, gen int) {
@@ -993,27 +1044,37 @@ func (d *Debouncer) fire(key string, e *debounceEntry, gen int) {
 	}
 	delete(d.pending, key)
 	d.flushing++
-	merged, sender, flush := strings.Join(e.texts, "\n"), e.sender.id(), e.flush
+	merged, sender, owner, flush := strings.Join(e.texts, "\n"), e.sender.id(), e.sender.owner(), e.flush
 	d.mu.Unlock()
 	defer func() {
 		d.mu.Lock()
 		d.flushing--
 		d.mu.Unlock()
 	}()
-	flush(merged, sender)
+	flush(merged, sender, owner)
 }
 
 // textSender is the sender of a text of several parts, for example a merged busy text or
 // a left-over steer. The text has a sender only when all parts come from one sender. Else
-// its sender is "", and only an owner answers the prompts of its turn.
+// its sender is "", and only an owner answers the prompts of its turn. The text is an
+// owner text only when each part comes from an owner.
 type textSender struct {
-	first string
-	parts int
-	mixed bool
+	first  string
+	parts  int
+	mixed  bool
+	member bool
 }
 
-// add counts one part of the sender id.
-func (s *textSender) add(id string) {
+// owner reports whether each part is an owner text. A text with no part is not an owner
+// text.
+func (s textSender) owner() bool { return s.parts > 0 && !s.member }
+
+// add counts one part of the sender id. A part that is not an owner text makes the text a
+// member text.
+func (s *textSender) add(id string, owner bool) {
+	if !owner {
+		s.member = true
+	}
 	if s.parts > 0 && id != s.first {
 		s.mixed = true
 	}
@@ -1044,13 +1105,14 @@ func withSender(in Inbound, id string) Inbound {
 
 // steerSender is the sender of one steer text of a run.
 type steerSender struct {
-	seq uint64
-	id  string
+	seq   uint64
+	id    string
+	owner bool
 }
 
 // addSteerSenderLocked keeps the sender of the steer text seq of rs. The caller holds g.mu.
-func addSteerSenderLocked(rs *RunState, seq uint64, id string) {
-	rs.steerSenders = append(rs.steerSenders, steerSender{seq: seq, id: id})
+func addSteerSenderLocked(rs *RunState, seq uint64, id string, owner bool) {
+	rs.steerSenders = append(rs.steerSenders, steerSender{seq: seq, id: id, owner: owner})
 }
 
 // takeSteerSendersLocked removes the senders of the steer texts of rs with seq <= upTo and
@@ -1063,7 +1125,7 @@ func takeSteerSendersLocked(rs *RunState, upTo uint64, s *textSender) {
 	for _, ss := range rs.steerSenders {
 		if ss.seq <= upTo {
 			if s != nil {
-				s.add(ss.id)
+				s.add(ss.id, ss.owner)
 			}
 			continue
 		}

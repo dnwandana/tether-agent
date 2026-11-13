@@ -30,8 +30,9 @@ const (
 type Batches struct {
 	DB *db.DB
 	// Enqueue puts a synthetic user turn on a session key. The gateway sets it
-	// (Gateway.Enqueue). When the key is busy, the turn waits in the queue.
-	Enqueue func(ctx context.Context, sessionKey, text string) error
+	// (Gateway.EnqueueAs). owner is the flag of the turn that started the batch. When the
+	// key is busy, the turn waits in the queue.
+	Enqueue func(ctx context.Context, sessionKey, text string, owner bool) error
 	// Owns reports whether this process handles the batches of a session key in
 	// RecoverLost. Nil handles every key. The gateway and a chat process share state.db, so
 	// each process must recover only the keys of its own channels.
@@ -83,10 +84,15 @@ func (b *Batches) Start(ctx context.Context, parentKey, parentSessionID string, 
 		rows[i] = batchTask{Name: s.Name, Goal: s.Goal, Context: s.Context, Role: s.Role, Toolsets: s.Toolsets}
 	}
 	tj, _ := json.Marshal(rows)
+	owner := batchOwner(tasks)
+	ownerInt := 0
+	if owner {
+		ownerInt = 1
+	}
 	dbCtx := context.WithoutCancel(ctx)
 	if _, err := b.DB.ExecContext(dbCtx, `INSERT INTO delegation_batches
-		(id, parent_session_key, parent_session_id, background, status, tasks, created_at) VALUES (?, ?, ?, 1, ?, ?, ?)`,
-		id, parentKey, parentSessionID, BatchRunning, string(tj), time.Now().UnixMilli()); err != nil {
+		(id, parent_session_key, parent_session_id, background, status, tasks, created_at, owner) VALUES (?, ?, ?, 1, ?, ?, ?, ?)`,
+		id, parentKey, parentSessionID, BatchRunning, string(tj), time.Now().UnixMilli(), ownerInt); err != nil {
 		return "", fmt.Errorf("agent: write the batch row: %w", err)
 	}
 
@@ -148,11 +154,22 @@ func (b *Batches) Start(ctx context.Context, parentKey, parentSessionID string, 
 			b.logger().Warn("agent: background delegation finished, but no channel can receive the results", "batch", id, "key", parentKey)
 			return
 		}
-		if err := b.Enqueue(base, parentKey, FormatBatchDone(id, results)); err != nil {
+		if err := b.Enqueue(base, parentKey, FormatBatchDone(id, results), owner); err != nil {
 			b.logger().Error("agent: cannot deliver the results of a background delegation", "batch", id, "key", parentKey, "err", err.Error())
 		}
 	}()
 	return id, nil
+}
+
+// batchOwner returns false when a task runs for a member turn. A task with no ParentEnv
+// counts as an owner task.
+func batchOwner(tasks []ChildSpec) bool {
+	for _, t := range tasks {
+		if t.ParentEnv != nil && t.ParentEnv.Member {
+			return false
+		}
+	}
+	return true
 }
 
 // finish writes the end state of a batch row.
@@ -219,24 +236,30 @@ func (b *Batches) Running(key string) int {
 // RecoverLost runs at startup. A restart loses the running background children, so for each
 // background batch that is still "running", it enqueues "[Background delegation <id> was lost
 // in a restart]" on the key of the batch and marks the row "lost". It skips the batches that
-// this process runs and the keys that Owns refuses.
+// this process runs and the keys that Owns refuses. The note runs with the owner flag of
+// the batch.
 func (b *Batches) RecoverLost(ctx context.Context) error {
 	if b.DB == nil {
 		return nil
 	}
-	type lost struct{ id, key string }
+	type lost struct {
+		id, key string
+		owner   bool
+	}
 	var found []lost
-	rows, err := b.DB.QueryContext(ctx, `SELECT id, parent_session_key FROM delegation_batches
+	rows, err := b.DB.QueryContext(ctx, `SELECT id, parent_session_key, owner FROM delegation_batches
 		WHERE status = ? AND background = 1 ORDER BY created_at`, BatchRunning)
 	if err != nil {
 		return fmt.Errorf("agent: read the running batches: %w", err)
 	}
 	for rows.Next() {
 		var l lost
-		if err := rows.Scan(&l.id, &l.key); err != nil {
+		var owner int
+		if err := rows.Scan(&l.id, &l.key, &owner); err != nil {
 			rows.Close()
 			return fmt.Errorf("agent: read the running batches: %w", err)
 		}
+		l.owner = owner != 0
 		found = append(found, l)
 	}
 	rows.Close()
@@ -257,7 +280,7 @@ func (b *Batches) RecoverLost(ctx context.Context) error {
 		if b.Enqueue == nil {
 			continue
 		}
-		if err := b.Enqueue(ctx, l.key, FormatBatchLost(l.id)); err != nil {
+		if err := b.Enqueue(ctx, l.key, FormatBatchLost(l.id), l.owner); err != nil {
 			errs = append(errs, fmt.Errorf("agent: report the lost batch %s on %s: %w", l.id, l.key, err))
 		}
 	}

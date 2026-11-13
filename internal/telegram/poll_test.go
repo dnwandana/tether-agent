@@ -212,6 +212,7 @@ func TestBotCommandsMenu(t *testing.T) {
 		{Command: "delete", Description: "Delete a session"},
 		{Command: "approve", Description: "Allow the waiting command"},
 		{Command: "deny", Description: "Deny the waiting command"},
+		{Command: "approvals", Description: "See and remove the Always answers"},
 		{Command: "sethome", Description: "Send cron results here"},
 		{Command: "reload_mcp", Description: "Reload the MCP servers"},
 		{Command: "restart", Description: "Restart the gateway"},

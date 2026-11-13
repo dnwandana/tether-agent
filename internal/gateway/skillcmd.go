@@ -101,8 +101,22 @@ func SlashCandidate(text string) bool {
 // commands only when skill_view is visible there, like the skills index of the system
 // prompt. It reads the skill folders.
 func (d *Deps) SkillCommandsFor(channel string) []SkillCommand {
+	return d.skillCommands(channel, d.Toolsets(channel))
+}
+
+// SkillCommandsForSender returns the skill commands that a sender can run on the channel.
+// An owner gets the commands of SkillCommandsFor. A member gets them only when the member
+// toolsets show skill_view, because the member turn cannot load a skill otherwise.
+func (d *Deps) SkillCommandsForSender(channel string, owner bool) []SkillCommand {
+	if owner {
+		return d.SkillCommandsFor(channel)
+	}
+	return d.skillCommands(channel, d.memberToolsets(channel))
+}
+
+func (d *Deps) skillCommands(channel string, sets map[string]bool) []SkillCommand {
 	if d.Agent != nil && d.Agent.Tools != nil {
-		visible, _ := d.Agent.Tools.Visible(d.Toolsets(channel), nil)
+		visible, _ := d.Agent.Tools.Visible(sets, nil)
 		if !visible["skill_view"] {
 			return nil
 		}

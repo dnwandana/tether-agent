@@ -210,7 +210,8 @@ func queuedTexts(q []*pendingTurn) []sessions.QueuedText {
 		if p.goalTurn || isCommandText(p.in) {
 			continue
 		}
-		out = append(out, sessions.QueuedText{Text: p.in.Text, Lost: len(p.in.Images) + len(p.in.Files)})
+		owner := p.in.Owner // a copy, so no two entries share one pointer
+		out = append(out, sessions.QueuedText{Text: p.in.Text, Lost: len(p.in.Images) + len(p.in.Files), Owner: &owner})
 	}
 	return out
 }

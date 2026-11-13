@@ -195,6 +195,54 @@ func TestCLIToolsetsComeFromConfig(t *testing.T) {
 	}
 }
 
+// newErr writes the config extra and returns the error of New.
+func newErr(t *testing.T, extra string) error {
+	t.Helper()
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t), extra)
+	a, err := New(ctx, Options{DataDir: dir})
+	if err == nil {
+		a.Close()
+	}
+	return err
+}
+
+const ghServer = "mcp:\n  servers:\n    gh:\n      command: [gh-mcp]\n"
+
+func TestNewRefusesUnknownMemberToolset(t *testing.T) {
+	err := newErr(t, "toolsets:\n  member: [web, nope]\n")
+	if err == nil || err.Error() != `config: toolsets.member: unknown toolset "nope"` {
+		t.Fatal(err)
+	}
+}
+
+func TestNewRefusesUnknownMCPServerToolset(t *testing.T) {
+	err := newErr(t, ghServer+"toolsets:\n  member: [mcp_other]\n")
+	if err == nil || err.Error() != `config: toolsets.member: unknown toolset "mcp_other"` {
+		t.Fatal(err)
+	}
+}
+
+func TestNewRefusesUnknownChannelToolset(t *testing.T) {
+	err := newErr(t, "toolsets:\n  telegram: [all, nope]\n")
+	if err == nil || err.Error() != `config: toolsets.telegram: unknown toolset "nope"` {
+		t.Fatal(err)
+	}
+}
+
+func TestNewAcceptsMemberToolsets(t *testing.T) {
+	for _, extra := range []string{
+		"toolsets:\n  member: []\n",
+		"toolsets:\n  member: [all]\n",
+		ghServer + "toolsets:\n  member: [mcp]\n",
+		ghServer + "toolsets:\n  member: [mcp_gh]\n",
+	} {
+		if err := newErr(t, extra); err != nil {
+			t.Fatalf("%q: %v", extra, err)
+		}
+	}
+}
+
 func TestHousekeepingRemovesOldSpill(t *testing.T) {
 	a := newApp(t)
 	spill := filepath.Join(a.DataDir, "cache", "spill")
@@ -348,7 +396,7 @@ func TestNewBuildsApprovalGate(t *testing.T) {
 	defer a.Close()
 	g := a.Gate
 	if g == nil || g.Mode != "smart" || g.CronMode != "approve" || g.Timeout != 42*time.Second || g.DB != a.DB ||
-		!g.SudoPasswordSet || g.Judge == nil || g.Log == nil {
+		!g.SudoPasswordSet || g.Judge == nil || g.Log == nil || g.ScriptsDir != filepath.Join(dir, "scripts") {
 		t.Fatalf("%+v", g)
 	}
 	if a.CLIAsk == nil || a.Deps().CLIAsk != a.CLIAsk {
@@ -1776,5 +1824,53 @@ func TestTodoRestoreFollowsConfig(t *testing.T) {
 	}
 	if got := a.todoItems(ctx, sess.ID); len(got) != 300 {
 		t.Fatalf("the restore keeps the configured 300 items, got %d", len(got))
+	}
+}
+
+func TestAddTelegramWiresOwnerOf(t *testing.T) {
+	url, _, _ := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, "telegram:\n  enabled: true\n  bot_token: T\n  group_allowed_chats: [\"-100\"]\n")
+	if a.Deps().OwnerOf != nil {
+		t.Fatal("OwnerOf is set before AddTelegram")
+	}
+	if _, err := a.AddTelegram(ctx); err != nil {
+		t.Fatal(err)
+	}
+	of := a.Gateway().Deps.OwnerOf
+	if of == nil {
+		t.Fatal("OwnerOf is nil after AddTelegram")
+	}
+	if owner, shared := of(&sessions.Session{Key: "telegram:group:-100:77", Source: "telegram", ChatID: "-100", ThreadID: "77"}); owner || !shared {
+		t.Fatalf("topic: owner=%v shared=%v", owner, shared)
+	}
+	if owner, shared := of(&sessions.Session{Key: "telegram:dm:42", Source: "telegram", ChatID: "42"}); !owner || shared {
+		t.Fatalf("DM: owner=%v shared=%v", owner, shared)
+	}
+}
+
+func TestApprovalsCommandRegistered(t *testing.T) {
+	keepCommandTable(t)
+	a := newApp(t)
+	cmd, ok := gateway.Commands()["approvals"]
+	if !ok || cmd.MemberOK || !cmd.WhileBusy {
+		t.Fatalf("/approvals: %+v %v", cmd, ok)
+	}
+	// The command reads the gate of the app.
+	if _, err := a.DB.ExecContext(ctx, "INSERT INTO approvals_always(pattern_id, created_at) VALUES ('recursive_delete', 1)"); err != nil {
+		t.Fatal(err)
+	}
+	var out string
+	if err := cmd.Run(ctx, &gateway.CommandCtx{Reply: func(s string) { out = s }}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "1. recursive delete · ") {
+		t.Fatal(out)
+	}
+}
+
+func TestAgentMediaInbox(t *testing.T) {
+	a := newApp(t)
+	if want := filepath.Join(a.DataDir, "cache", "media"); a.Agent.MediaInbox != want {
+		t.Fatalf("%q, want %q", a.Agent.MediaInbox, want)
 	}
 }

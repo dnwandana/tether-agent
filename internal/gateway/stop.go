@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -273,8 +274,9 @@ func waitAckEdits(dones []<-chan struct{}, deadline time.Time) {
 //  3. The merged text in the debouncer. It is the newest text, and it does not flush now.
 //  4. The queued messages.
 //
-// A stopped run (/stop) keeps its steer, because the end of the run drops it. The caller
-// holds g.mu.
+// A stopped run (/stop) keeps its steer, because the end of the run drops it. Each text
+// keeps the AND of the owner flags of its parts. A steer text with no recorded sender has
+// no owner flag, so a restore uses the owner flag of the session. The caller holds g.mu.
 func stopQueued(key string, ks *keyState, d *Debouncer) []sessions.QueuedText {
 	var out []sessions.QueuedText
 	if ks.busy {
@@ -283,12 +285,19 @@ func stopQueued(key string, ks *keyState, d *Debouncer) []sessions.QueuedText {
 		}
 		if rs := ks.running; rs != nil && !rs.stopped {
 			if text := rs.Steer.Drain(); text != "" {
-				out = append(out, sessions.QueuedText{Text: text})
+				q := sessions.QueuedText{Text: text}
+				var s textSender
+				takeSteerSendersLocked(rs, math.MaxUint64, &s)
+				if s.parts > 0 {
+					owner := s.owner()
+					q.Owner = &owner
+				}
+				out = append(out, q)
 			}
 		}
 	}
-	if text := d.Take(key); text != "" {
-		out = append(out, sessions.QueuedText{Text: text})
+	if text, _, owner := d.TakeFrom(key); text != "" {
+		out = append(out, sessions.QueuedText{Text: text, Owner: &owner})
 	}
 	return append(out, queuedTexts(ks.queue)...)
 }

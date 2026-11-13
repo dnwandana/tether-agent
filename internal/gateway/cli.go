@@ -555,7 +555,7 @@ func (c *CLI) AgentTurn(ctx context.Context, sess *sessions.Session, text string
 	// has another text, and the field is empty then.
 	slash := text != "" && text == c.slashText
 	c.slashText = ""
-	res, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify, Slash: slash})
+	res, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify, Slash: slash, Owner: true})
 	sink.Finish()
 	// The stream already showed each other final text.
 	if res.NoSummary {

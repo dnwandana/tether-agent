@@ -12,6 +12,9 @@ import (
 type QueuedText struct {
 	Text string `json:"text"`
 	Lost int    `json:"lost"`
+	// Owner is the owner flag of the text. A row of v0.18 has no owner field, so Owner is
+	// nil. The gateway then uses the owner flag of the session.
+	Owner *bool `json:"owner,omitempty"`
 }
 
 // TurnMarker is one row of the turn_markers table. It records a busy session key, so the

@@ -55,7 +55,7 @@ func TestRunTurnCompactsBeforeModelCall(t *testing.T) {
 	fp := scripted(text("SUM"), text("ok"))
 	a, sess := compactingAgent(t, fp)
 	builds := 0
-	a.Prompts = NewPromptCache(func(_ context.Context, s *sessions.Session, ch string) (string, time.Time) {
+	a.Prompts = NewPromptCache(func(_ context.Context, s *sessions.Session, _ PromptKey, ch string) (string, time.Time) {
 		builds++
 		return fmt.Sprint("P", builds), time.Time{}
 	})

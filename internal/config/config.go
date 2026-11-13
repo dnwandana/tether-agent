@@ -610,6 +610,7 @@ func Default() Config {
 			"cli":      {"all"},
 			"telegram": {"all"},
 			"cron":     {"all"},
+			"member":   {"web", "ask", "todo"},
 		},
 		Cron: CronConfig{
 			MaxParallelJobs:       2,

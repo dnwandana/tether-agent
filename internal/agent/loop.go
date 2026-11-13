@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,6 +104,10 @@ type Agent struct {
 	// WorkDir is the working directory in the system prompt. Empty uses the process
 	// working directory.
 	WorkDir string
+	// MediaInbox is the folder in which the Telegram channel saves the media of
+	// incoming messages. A vision turn loads an [image: <path>] marker only from
+	// this folder. Empty loads no marker.
+	MediaInbox string
 	// ChatInfo describes the chat of a session for the system prompt, for example the
 	// chat type and the topic on Telegram. It can be nil.
 	ChatInfo func(s *sessions.Session) string
@@ -154,6 +160,13 @@ type Turn struct {
 	// Toolsets holds the allowed toolsets (tools.Resolve).
 	Toolsets    map[string]bool
 	RemoveTools []string
+	// Member is true for a turn of a member. Shared is true when the users of the chat or
+	// the topic share the session.
+	Member, Shared bool
+	// MemberTools holds the toolsets of a member turn in a shared session. The schemas
+	// stay the Toolsets, so the prompt cache keeps its hits. The gateway sets it only when
+	// Member and Shared are both true.
+	MemberTools map[string]bool
 	// Env is the tool context. Its Values map must stay the same for a session across turns.
 	Env  *tools.Env
 	Sink Sink
@@ -244,6 +257,9 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	if t.Session == nil {
 		return res, errors.New("agent: the turn has no session")
 	}
+	if t.Member {
+		ctx = WithNoReview(ctx)
+	}
 	defer func() {
 		// The turn returns the steer also after a cancel. The gateway applies the Hermes
 		// rule "a stop supersedes the steer", or keeps the text for a take-over.
@@ -251,7 +267,8 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	}()
 	// lastReq is the last model request of the turn. The review triggers use its shape.
 	var lastReq provider.Request
-	if t.review == nil {
+	// A review can write the owner memory and the skills, so a member turn starts none.
+	if t.review == nil && !t.Member {
 		defer func() {
 			counted := res
 			if err != nil {
@@ -282,8 +299,18 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	if t.review != nil {
 		visible, schemas, deny = t.review.allow, t.review.schemas, t.review.deny
 	}
+	// A member turn of a shared session keeps the channel schemas. The dispatch, the
+	// execute_code RPC, and the children see only the member tools.
+	turnSets, turnVisible := t.Toolsets, visible
+	if t.review == nil && t.Member && t.Shared {
+		turnSets, turnVisible = t.MemberTools, map[string]bool{}
+		if a.Tools != nil {
+			turnVisible, _ = a.Tools.Visible(t.MemberTools, t.RemoveTools)
+		}
+		deny = memberDeny(turnVisible)
+	}
 	// delegate_task gives the toolsets to the children, and execute_code reads the names.
-	tools.SetTurnTools(env, t.Toolsets, visible)
+	tools.SetTurnTools(env, turnSets, turnVisible)
 	channel := env.Channel
 	if channel == "" {
 		channel = t.Session.Source
@@ -445,7 +472,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		}
 
 		sink.Boundary()
-		results := a.runRound(ctx, out.ToolCalls, env, visible, sink, deny)
+		results := a.runRound(ctx, out.ToolCalls, env, turnVisible, sink, deny)
 		if t.review != nil && t.review.onResult != nil {
 			for i, c := range out.ToolCalls {
 				t.review.onResult(c, results[i])
@@ -459,7 +486,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		stop := false
 		contents := make([]string, len(results))
 		for i, c := range out.ToolCalls {
-			if failures.Observe(a.failureKind(c, visible)) {
+			if failures.Observe(a.failureKind(c, turnVisible)) {
 				stop = true
 			}
 			contents[i] = a.toolText(results[i].Text)
@@ -1058,6 +1085,10 @@ func (a *Agent) visionInput(s *sessions.Session, text string, images []provider.
 				continue
 			}
 			have[p] = true
+			if !inFolder(a.MediaInbox, p) {
+				a.logger().Debug("agent: an image marker is outside the media inbox, so it does not load", "path", p)
+				continue
+			}
 			img, err := tools.LoadImageFile(p, int64(cfg.Media.VisionMaxBytes))
 			if err != nil {
 				a.logger().Warn("agent: the image of a marker does not go inline", "path", p, "err", err.Error())
@@ -1071,6 +1102,27 @@ func (a *Agent) visionInput(s *sessions.Session, text string, images []provider.
 		content = tools.ReplaceImageMarkers(content, tools.NoVisionMarker)
 	}
 	return content, nil
+}
+
+// inFolder reports whether the file p is inside the folder dir, after the
+// symbolic links of both paths are resolved.
+func inFolder(dir, p string) bool {
+	if dir == "" || !filepath.IsAbs(p) {
+		return false
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		real = filepath.Clean(dir)
+	}
+	target, err := filepath.EvalSymlinks(filepath.Clean(p))
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(real, target)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // pinned is a provider entry with a model that replaces the model of the entry.
@@ -1088,6 +1140,20 @@ func (p pinned) Stream(ctx context.Context, req provider.Request) (<-chan provid
 	return p.Provider.Stream(ctx, req)
 }
 
+// memberDeny returns the refusal text for a call of a tool that a member cannot use.
+func memberDeny(visible map[string]bool) string {
+	names := make([]string, 0, len(visible))
+	for n := range visible {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	list := "none"
+	if len(names) > 0 {
+		list = strings.Join(names, ", ")
+	}
+	return "This tool is for the owner only. A member can use these tools: " + list + "."
+}
+
 // visible returns the visible tool names and schemas of the turn.
 func (a *Agent) visible(t Turn) (map[string]bool, []provider.ToolSchema) {
 	if a.Tools == nil {
@@ -1100,7 +1166,7 @@ func (a *Agent) visible(t Turn) (map[string]bool, []provider.ToolSchema) {
 func (a *Agent) turnEnv(t Turn) *tools.Env {
 	env := t.Env
 	if env == nil {
-		env = &tools.Env{SessionID: t.Session.ID, SessionKey: t.Session.Key, Kind: t.Session.Kind, Channel: t.Session.Source}
+		env = &tools.Env{SessionID: t.Session.ID, SessionKey: t.Session.Key, Kind: t.Session.Kind, Channel: t.Session.Source, Member: t.Member}
 	}
 	if env.Values == nil {
 		env.Values = map[string]any{}

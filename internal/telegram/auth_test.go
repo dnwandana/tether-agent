@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
 func dmFrom(user string) Normalized {
@@ -170,5 +171,44 @@ func TestIsOwner(t *testing.T) {
 	// A nil pairing lookup approves nobody.
 	if IsOwner(config.Default().Telegram, dmFrom("9"), nil) {
 		t.Fatal("a nil lookup must not make an owner")
+	}
+}
+
+func TestOwnerOf(t *testing.T) {
+	paired := func(id string) bool { return id == "9" }
+	base := config.Default().Telegram // group_sessions_per_user: true, thread_sessions_per_user: false
+	base.AllowedUsers = []string{"5"}
+	base.GroupAllowedChats = []string{"-100"}
+	type mut = func(*config.TelegramConfig)
+	for _, tc := range []struct {
+		name          string
+		mut           mut
+		sess          *sessions.Session
+		owner, shared bool
+	}{
+		{"nil session", nil, nil, true, false},
+		{"CLI session", nil, &sessions.Session{Key: "cli:main", Source: "cli"}, true, false},
+		{"DM", nil, &sessions.Session{Key: "telegram:dm:42", Source: "telegram", ChatID: "42", UserID: "42"}, true, false},
+		{"per-user group session of an owner", nil, &sessions.Session{Key: "telegram:group:-100:5", Source: "telegram", ChatID: "-100", UserID: "5"}, true, false},
+		{"per-user group session of a paired user", nil, &sessions.Session{Key: "telegram:group:-100:9", Source: "telegram", ChatID: "-100", UserID: "9"}, true, false},
+		{"per-user group session of a member", nil, &sessions.Session{Key: "telegram:group:-100:6", Source: "telegram", ChatID: "-100", UserID: "6"}, false, false},
+		{"shared topic", nil, &sessions.Session{Key: "telegram:group:-100:77", Source: "telegram", ChatID: "-100", ThreadID: "77"}, false, true},
+		{"per-user topic session", func(c *config.TelegramConfig) { c.ThreadSessionsPerUser = true },
+			&sessions.Session{Key: "telegram:group:-100:77:5", Source: "telegram", ChatID: "-100", ThreadID: "77", UserID: "5"}, true, false},
+		{"shared group", func(c *config.TelegramConfig) { c.GroupSessionsPerUser = false },
+			&sessions.Session{Key: "telegram:group:-100", Source: "telegram", ChatID: "-100"}, false, true},
+		{"observed chat", func(c *config.TelegramConfig) { c.ObserveUnmentionedGroupMessages = true },
+			&sessions.Session{Key: "telegram:group:-100", Source: "telegram", ChatID: "-100"}, false, true},
+		{"a per-user key that the config does not rebuild", func(c *config.TelegramConfig) { c.GroupSessionsPerUser = false },
+			&sessions.Session{Key: "telegram:group:-100:5", Source: "telegram", ChatID: "-100", UserID: "5"}, false, true},
+	} {
+		c := base
+		if tc.mut != nil {
+			tc.mut(&c)
+		}
+		owner, shared := OwnerOf(c, paired)(tc.sess)
+		if owner != tc.owner || shared != tc.shared {
+			t.Errorf("%s: got owner=%v shared=%v, want owner=%v shared=%v", tc.name, owner, shared, tc.owner, tc.shared)
+		}
 	}
 }

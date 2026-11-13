@@ -1165,7 +1165,7 @@ func TestStopAfterNowDropsTheSteer(t *testing.T) {
 func TestNowCountsAResumedText(t *testing.T) {
 	g, _, _, done, fp := busyGatewayProv(t)
 	// A restart resumes a queued text of the owner with enqueue, not with Enqueue.
-	if err := g.enqueue(context.Background(), "k", "resumed", false); err != nil {
+	if err := g.enqueue(context.Background(), "k", "resumed", false, true); err != nil {
 		t.Fatal(err)
 	}
 	wantNowReply(t, sendNow(t, g, "/now"), nowOneReply)
@@ -1321,27 +1321,27 @@ func TestMemberRunsTaskCommands(t *testing.T) {
 func TestDebounceKeepsOneSender(t *testing.T) {
 	type flushed struct{ text, sender string }
 	out := make(chan flushed, 4)
-	fl := func(m, s string) { out <- flushed{m, s} }
+	fl := func(m, s string, _ bool) { out <- flushed{m, s} }
 	d := NewDebouncer(20*time.Millisecond, time.Second)
-	d.AddFrom("k", "7", "a", fl)
-	d.AddFrom("k", "7", "b", fl)
+	d.AddFrom("k", "7", "a", true, fl)
+	d.AddFrom("k", "7", "b", true, fl)
 	if got := <-out; got != (flushed{"a\nb", "7"}) {
 		t.Fatal(got)
 	}
 	// The texts of two senders have no sender.
-	d.AddFrom("k", "7", "a", fl)
-	d.AddFrom("k", "8", "b", fl)
+	d.AddFrom("k", "7", "a", true, fl)
+	d.AddFrom("k", "8", "b", true, fl)
 	if got := <-out; got != (flushed{"a\nb", ""}) {
 		t.Fatal(got)
 	}
 	d = NewDebouncer(time.Hour, time.Hour)
-	d.AddFrom("k", "8", "a", fl)
-	if text, sender := d.TakeFrom("k"); text != "a" || sender != "8" {
+	d.AddFrom("k", "8", "a", true, fl)
+	if text, sender, _ := d.TakeFrom("k"); text != "a" || sender != "8" {
 		t.Fatal(text, sender)
 	}
-	d.AddFrom("k", "8", "a", fl)
-	d.AddFrom("k", "", "b", fl)
-	if text, sender := d.TakeFrom("k"); text != "a\nb" || sender != "" {
+	d.AddFrom("k", "8", "a", true, fl)
+	d.AddFrom("k", "", "b", true, fl)
+	if text, sender, _ := d.TakeFrom("k"); text != "a\nb" || sender != "" {
 		t.Fatal(text, sender)
 	}
 }
@@ -1393,6 +1393,9 @@ func TestNowMovedTextOfTwoSendersHasNoSender(t *testing.T) {
 func TestMemberInSharedSessionGetsNoNowButton(t *testing.T) {
 	g, _, _, _ := busyGateway(t)
 	ctx := context.Background()
+	g.mu.Lock()
+	g.key("k").running.owner = false
+	g.mu.Unlock()
 	member := func(in Inbound, shared bool) Inbound {
 		in.Owner, in.Shared, in.SenderID = false, shared, "8"
 		return in

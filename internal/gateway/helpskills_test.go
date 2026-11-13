@@ -7,6 +7,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/skills"
+	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
 // withSkills makes list the skills of c. A nil tool registry opens the toolset gate, so
@@ -162,5 +163,23 @@ func TestHelpSkillsMaxFromConfig(t *testing.T) {
 		if got := d.helpSkillsLimit(); got != helpSkillsMax {
 			t.Fatalf("%+v: %d", d, got)
 		}
+	}
+}
+
+func TestHelpMemberHidesSkillsWithoutSkillView(t *testing.T) {
+	c, sent := interactiveCtx(t)
+	c.Owner = false
+	withSkills(c, threeSkills()...)
+	reg := tools.NewRegistry()
+	reg.Register(tools.SkillViewTool{})
+	reg.Register(tools.ReadFileTool{})
+	c.Deps.Agent.Tools = reg
+	cfg := config.Default()
+	cfg.Toolsets["telegram"] = []string{tools.SetFile, tools.SetSkills}
+	cfg.Toolsets["member"] = []string{tools.SetFile}
+	c.Deps.Cfg = &cfg
+	run(t, c, "/help")
+	if r := lastSent(t, sent); r.Text != helpMember {
+		t.Fatalf("a member with no skill_view must see no skill commands, got:\n%s", r.Text)
 	}
 }

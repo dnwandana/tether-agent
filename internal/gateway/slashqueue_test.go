@@ -163,10 +163,10 @@ func TestSlashMarkResetOnCopies(t *testing.T) {
 	if err := g.Enqueue(ctx, "k", "/arxiv from a batch"); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.enqueue(ctx, "k", "[background task done]", false); err != nil {
+	if err := g.enqueue(ctx, "k", "[background task done]", false, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := g.enqueue(ctx, "k", "/arxiv y", false); err != nil {
+	if err := g.enqueue(ctx, "k", "/arxiv y", false, true); err != nil {
 		t.Fatal(err)
 	}
 	g.mu.Lock()

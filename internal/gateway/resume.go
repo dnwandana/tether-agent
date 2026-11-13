@@ -128,14 +128,15 @@ func (g *Gateway) resumeMarker(ctx context.Context, m sessions.TurnMarker) Resum
 		g.deleteMarker(ctx, m.SessionKey)
 		return ResumeNone
 	}
-	if err := g.Enqueue(ctx, m.SessionKey, agent.ResumeNote); err != nil {
+	owner, _ := g.Deps.ownerOf(sess)
+	if err := g.EnqueueAs(ctx, m.SessionKey, agent.ResumeNote, owner); err != nil {
 		log.Warn("gateway: cannot resume the turn", "key", m.SessionKey, "err", err.Error())
 		g.deleteMarker(ctx, m.SessionKey)
 		return ResumeNone
 	}
 	log.Info("gateway: resume the cut turn", "key", m.SessionKey, "session", m.SessionID,
 		"resumes", m.Resumes+1, "queued", len(m.Queued))
-	g.enqueueQueued(ctx, m)
+	g.enqueueQueued(ctx, m, sess, false)
 	return ResumeResumed
 }
 
@@ -158,20 +159,36 @@ func (g *Gateway) resumeInStep(ctx context.Context, m sessions.TurnMarker) Resum
 	}
 	log.Info("gateway: resume the queued messages after the goal step", "key", m.SessionKey,
 		"session", m.SessionID, "resumes", m.Resumes+1, "queued", len(m.Queued))
-	g.enqueueQueued(ctx, m)
+	sess, err := g.Deps.Store.Active(ctx, m.SessionKey)
+	unknown := err != nil
+	if unknown {
+		log.Warn("gateway: cannot read the session of the queued messages", "key", m.SessionKey, "err", err.Error())
+		sess = nil
+	}
+	g.enqueueQueued(ctx, m, sess, unknown)
 	return ResumeInStep
 }
 
 // enqueueQueued enqueues each queued text of m. The first turn runs now and writes the
 // marker of the key, so the marker is not deleted here. The text is a message of the
-// owner, so /now counts it.
-func (g *Gateway) enqueueQueued(ctx context.Context, m sessions.TurnMarker) {
+// sender, so /now counts it. A text runs as an owner turn only when its marker row has the
+// owner flag and the owner hook still gives owner for the session. A user that left the
+// allow list then gets a member turn. A row with no flag uses the owner flag of the
+// session. When unknown is true, the session read failed: each text runs as a member turn.
+func (g *Gateway) enqueueQueued(ctx context.Context, m sessions.TurnMarker, sess *sessions.Session, unknown bool) {
 	for _, q := range m.Queued {
 		text := resumeText(q)
 		if text == "" {
 			continue
 		}
-		if err := g.enqueue(ctx, m.SessionKey, text, false); err != nil {
+		owner := false
+		if !unknown {
+			owner, _ = g.Deps.ownerOf(sess)
+			if q.Owner != nil {
+				owner = owner && *q.Owner
+			}
+		}
+		if err := g.enqueue(ctx, m.SessionKey, text, false, owner); err != nil {
 			g.logger().Warn("gateway: cannot resume a queued message", "key", m.SessionKey, "err", err.Error())
 			return
 		}

@@ -133,6 +133,8 @@ func (g *Gateway) goalTurnLocked(ks *keyState, p *pendingTurn, c goals.Continuat
 		in, newRenderer = p.in, p.newRenderer
 	}
 	in.Key, in.Text, in.Images, in.Files, in.IsText, in.Slash = p.in.Key, c.Text, nil, nil, true, false
+	// Only an owner starts a goal, so a goal turn is an owner turn.
+	in.Owner = true
 	return &pendingTurn{
 		in: in, newRenderer: newRenderer,
 		system: true, goalTurn: true, goalSession: c.SessionID, goalEpoch: c.Epoch, goalLine: c.StatusLine(),

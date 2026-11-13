@@ -55,7 +55,7 @@ func TestTurnSendsChildProgressToCLISink(t *testing.T) {
 	})
 	var out bytes.Buffer
 	sink := &CLISink{W: &out}
-	if _, err := d.Turn(context.Background(), sess, TurnInput{Text: "go", Channel: "cli", Sink: sink}); err != nil {
+	if _, err := d.Turn(context.Background(), sess, TurnInput{Text: "go", Channel: "cli", Sink: sink, Owner: true}); err != nil {
 		t.Fatal(err)
 	}
 	sink.Finish()
@@ -71,7 +71,7 @@ func TestTurnKeepsChannelProgress(t *testing.T) {
 		return &tools.Env{SessionID: s.ID, Values: map[string]any{}, Progress: func(_ uint64, child, _, _ string) { got = append(got, child) }}
 	})
 	var out bytes.Buffer
-	if _, err := d.Turn(context.Background(), sess, TurnInput{Text: "go", Channel: "cli", Sink: &CLISink{W: &out}}); err != nil {
+	if _, err := d.Turn(context.Background(), sess, TurnInput{Text: "go", Channel: "cli", Sink: &CLISink{W: &out}, Owner: true}); err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 1 || strings.Contains(out.String(), "🔀") {
@@ -102,7 +102,7 @@ func TestTurnEndLogHasCacheReadTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Turn(ctx, sess, TurnInput{Text: "hi", Channel: "cli", Sink: &CLISink{W: io.Discard}}); err != nil {
+	if _, err := d.Turn(ctx, sess, TurnInput{Text: "hi", Channel: "cli", Sink: &CLISink{W: io.Discard}, Owner: true}); err != nil {
 		t.Fatal(err)
 	}
 	var end string

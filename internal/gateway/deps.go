@@ -60,6 +60,9 @@ type Deps struct {
 	// EnvStatus returns the status of each env name of a skill for the skill command text.
 	// Nil gives "not set" for each name.
 	EnvStatus func(names []string) []string
+	// OwnerOf gives the owner flag and the shared flag of a turn that has no sender, for
+	// example a resumed turn. The channel sets it. Nil gives owner, not shared.
+	OwnerOf func(sess *sessions.Session) (owner, shared bool)
 }
 
 // TurnInput is the input of one agent turn that a channel starts.
@@ -81,6 +84,11 @@ type TurnInput struct {
 	// Turn then runs the skill of the command, when the channel has one. A goal text, a
 	// steer, or a system text has Slash false, also when it starts with "/".
 	Slash bool
+	// Owner is true when the text of the turn comes from an owner. The zero value is a
+	// member turn.
+	Owner bool
+	// Shared is true when all users of the chat or the topic share the session.
+	Shared bool
 }
 
 // Turn runs one agent turn for sess with the toolsets of the channel. After a turn with
@@ -96,11 +104,25 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 		Steer:       in.Steer,
 		Notify:      in.Notify,
 		OnSteerRead: in.OnSteerRead,
+		Member:      !in.Owner,
+		Shared:      in.Shared,
+	}
+	if !in.Owner {
+		// A member in a shared session keeps the channel schemas, so the prompt cache stays
+		// valid. The turn refuses the tools outside the member set.
+		if in.Shared {
+			t.MemberTools = d.memberToolsets(in.Channel)
+		} else {
+			t.Toolsets = d.memberToolsets(in.Channel)
+		}
 	}
 	if d.NewTurnEnv != nil {
 		t.Env = d.NewTurnEnv(sess, in.Channel, in.UserID)
 	} else if d.NewEnv != nil {
 		t.Env = d.NewEnv(sess, in.Channel)
+	}
+	if t.Env != nil {
+		t.Env.Member = !in.Owner
 	}
 	t.UserText = d.userText(sess, in)
 	// The progress lines of the delegate_task children go through the CLI sink. Its lock
@@ -142,7 +164,7 @@ func (d *Deps) userText(sess *sessions.Session, in TurnInput) string {
 		return in.Text
 	}
 	// This is the only read of the skill folders in the turn.
-	sc, ok := ResolveSkill(d.SkillCommandsFor(in.Channel), name)
+	sc, ok := ResolveSkill(d.SkillCommandsForSender(in.Channel, in.Owner), name)
 	if !ok {
 		return in.Text
 	}
@@ -186,6 +208,26 @@ func (d *Deps) Toolsets(channel string) map[string]bool {
 		return tools.Resolve(def.Toolsets[channel], nil, nil)
 	}
 	return tools.Resolve(d.Cfg.Toolsets[channel], nil, nil)
+}
+
+// memberToolsets returns the toolsets of a member turn on the channel. It is the part of
+// the channel toolsets that the member list allows.
+func (d *Deps) memberToolsets(channel string) map[string]bool {
+	cfg := d.Cfg
+	if cfg == nil {
+		def := config.Default()
+		cfg = &def
+	}
+	return tools.MemberToolsets(cfg.Toolsets[channel], cfg.Toolsets["member"])
+}
+
+// ownerOf returns the owner flag and the shared flag of a turn with no sender. A nil Deps,
+// a nil hook, or a nil session gives owner, not shared.
+func (d *Deps) ownerOf(sess *sessions.Session) (owner, shared bool) {
+	if d == nil || d.OwnerOf == nil || sess == nil {
+		return true, false
+	}
+	return d.OwnerOf(sess)
 }
 
 func (d *Deps) toolLine(tool, preview string) string {

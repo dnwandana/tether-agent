@@ -261,6 +261,9 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.Gate.SmartScriptMaxChars = a.Cfg.Approvals.SmartScriptMaxChars
 	a.Gate.Log = a.Log
 	a.Gate.InGateway = opts.Gateway
+	a.Gate.ScriptsDir = filepath.Join(dir, "scripts")
+	// The command reads and removes the Always answers of the gate of this process.
+	gateway.Register(gateway.ApprovalsCommand(a.Gate))
 	// CLI.Run attaches the prompt to the REPL input. With no CLI, a question gets no answer.
 	a.CLIAsk = &gateway.CLIAsk{}
 	a.Prices = pricing.NewService(a.Cfg, filepath.Join(dir, "cache"), a.HTTP, a.DB, a.Log)
@@ -275,6 +278,14 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	mcpServers := make([]string, 0, len(a.Cfg.MCP.Servers))
 	for name := range a.Cfg.MCP.Servers {
 		mcpServers = append(mcpServers, name)
+	}
+	// The config package cannot check the names, because the toolset names are in tools.
+	for _, key := range slices.Sorted(maps.Keys(a.Cfg.Toolsets)) {
+		for _, name := range a.Cfg.Toolsets[key] {
+			if !tools.ValidToolset(name, mcpServers) {
+				return nil, fmt.Errorf("config: toolsets.%s: unknown toolset %q", key, name)
+			}
+		}
 	}
 	a.Cron = &cron.Store{DB: a.DB, Loc: time.Local, ValidToolset: func(s string) bool { return tools.ValidToolset(s, mcpServers) }}
 	if opts.Gateway {
@@ -294,21 +305,22 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	}
 
 	a.Agent = &agent.Agent{
-		Prov:      a.Prov,
-		Providers: a.Providers,
-		Chains:    a.Set,
-		Tools:     a.Registry,
-		Store:     a.Store,
-		DB:        a.DB,
-		Cfg:       a.Cfg,
-		Log:       a.Log,
-		SpillDir:  filepath.Join(dir, "cache", "spill"),
-		Redactor:  a.Redactor,
-		Prices:    a.Prices,
-		Memory:    a.Memory,
-		Skills:    a.Skills,
-		WorkDir:   a.WorkDir,
-		Compactor: &ctxmgr.Compactor{Store: a.Store, DB: a.DB, Cfg: a.Cfg.Context, Log: a.Log},
+		Prov:       a.Prov,
+		Providers:  a.Providers,
+		Chains:     a.Set,
+		Tools:      a.Registry,
+		Store:      a.Store,
+		DB:         a.DB,
+		Cfg:        a.Cfg,
+		Log:        a.Log,
+		SpillDir:   filepath.Join(dir, "cache", "spill"),
+		Redactor:   a.Redactor,
+		Prices:     a.Prices,
+		Memory:     a.Memory,
+		Skills:     a.Skills,
+		WorkDir:    a.WorkDir,
+		MediaInbox: filepath.Join(dir, "cache", "media"),
+		Compactor:  &ctxmgr.Compactor{Store: a.Store, DB: a.DB, Cfg: a.Cfg.Context, Log: a.Log},
 	}
 	// The frozen system prompt of each session. A /reload-mcp changes the MCP
 	// generation, so the prompt is rebuilt.
@@ -451,8 +463,8 @@ func (a *App) registerDelegation(gatewayRole bool) {
 		a.Batches = &agent.Batches{
 			DB:  a.DB,
 			Log: a.Log,
-			Enqueue: func(ctx context.Context, key, text string) error {
-				if err := a.Gateway().Enqueue(ctx, key, text); err != nil {
+			Enqueue: func(ctx context.Context, key, text string, owner bool) error {
+				if err := a.Gateway().EnqueueAs(ctx, key, text, owner); err != nil {
 					return err
 				}
 				// A batch result can lift the barrier of a goal that waits on the batches.
@@ -567,7 +579,7 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		Pair: &telegram.Pairing{DB: a.DB, CodeTTL: time.Duration(cfg.PairingCodeTTLS) * time.Second},
 		Inbox: &telegram.Inbox{
 			C:        c,
-			MediaDir: filepath.Join(a.DataDir, "cache", "media"),
+			MediaDir: a.Agent.MediaInbox,
 			// Voice notes go to the speech-to-text backend.
 			Transcribe: a.Media.TranscribeFunc(),
 			Describe:   describe,
@@ -1037,6 +1049,13 @@ func (a *App) Deps() *gateway.Deps {
 	// a.Telegram before its first call of Gateway, so the gateway gets this path.
 	if a.Telegram != nil {
 		d.SendNotice = a.Telegram.SendNotice
+		// A resumed turn with no sender gets the owner flag of its session from the
+		// current allowlists. AddTelegram sets a.Telegram before its first call of
+		// Gateway, so the gateway gets the hook.
+		pair := a.Telegram.Pair
+		d.OwnerOf = telegram.OwnerOf(a.Cfg.Telegram, func(uid string) bool {
+			return pair != nil && pair.IsApproved(context.Background(), "telegram", uid)
+		})
 	}
 	return d
 }
