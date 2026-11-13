@@ -522,6 +522,80 @@ func TestHeaderTransportSSEEndpoint(t *testing.T) {
 	}
 }
 
+// TestHeaderTransportNoLatchAfterRedirect: the SSE GET to A is redirected to B, which
+// is not trusted. The first POST to B must not make B trusted.
+func TestHeaderTransportNoLatchAfterRedirect(t *testing.T) {
+	b, hdrB := recordServer(t, "")
+	a, _ := recordServer(t, b.URL)
+	var buf bytes.Buffer
+	ht, err := newHeaderTransport(a.URL, map[string]string{"X-Test": "sse"}, true,
+		http.DefaultTransport, slog.New(slog.NewTextHandler(&buf, nil)), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Transport: ht}
+	do := func(method, u string) {
+		t.Helper()
+		req, err := http.NewRequest(method, u, strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	do(http.MethodGet, a.URL+"/sse")
+	do(http.MethodPost, b.URL+"/?sessionid=1")
+	if hdrB().Get("X-Test") != "" {
+		t.Fatal("the origin of a redirect must not become trusted")
+	}
+	bURL, _ := url.Parse(b.URL)
+	if n := strings.Count(buf.String(), "origin="+originOf(bURL)); n != 1 {
+		t.Fatalf("want one warning that names %s, got %d: %s", originOf(bURL), n, buf.String())
+	}
+	do(http.MethodPost, b.URL+"/?sessionid=1")
+	if hdrB().Get("X-Test") != "" {
+		t.Fatal("the origin of a redirect must stay not trusted")
+	}
+}
+
+// TestHeaderTransportSameOriginRedirectKeepsLatch: /sse redirects to /sse/ on the same
+// origin. The first POST to the endpoint origin C is still trusted.
+func TestHeaderTransportSameOriginRedirectKeepsLatch(t *testing.T) {
+	a := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sse" {
+			http.Redirect(w, r, "/sse/", http.StatusTemporaryRedirect)
+		}
+	}))
+	t.Cleanup(a.Close)
+	c, hdrC := recordServer(t, "")
+	ht, err := newHeaderTransport(a.URL, map[string]string{"X-Test": "sse"}, true,
+		http.DefaultTransport, slog.New(slog.DiscardHandler), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := &http.Client{Transport: ht}
+	do := func(method, u string) {
+		t.Helper()
+		req, err := http.NewRequest(method, u, strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	do(http.MethodGet, a.URL+"/sse")
+	do(http.MethodPost, c.URL+"/?sessionid=1")
+	if hdrC().Get("X-Test") != "sse" {
+		t.Fatal("a same-origin redirect must keep the endpoint latch")
+	}
+}
+
 // TestSSEEndpointOtherOrigin runs the real SDK. Server A serves only the stream: it copies the
 // stream of server B and gives an absolute endpoint URL on B, so the POSTs go to another origin.
 func TestSSEEndpointOtherOrigin(t *testing.T) {

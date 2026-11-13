@@ -337,7 +337,9 @@ func (t lifeTransport) Connect(context.Context) (sdk.Connection, error) {
 // the endpoint event is also trusted. go-sdk v1.8.0 keeps the endpoint URL
 // unexported, so the transport learns it from the first POST that the SDK
 // starts: a request with no Response, which is not a redirect. net/http sets
-// Response only on a request that a redirect made.
+// Response only on a request that a redirect made. When a redirect took the
+// SSE stream to an origin that is not trusted, no origin is learned, because
+// the endpoint event then comes from that origin.
 type headerTransport struct {
 	headers map[string]string
 	base    http.RoundTripper
@@ -348,7 +350,10 @@ type headerTransport struct {
 	mu       sync.Mutex
 	trusted  map[string]bool
 	endpoint bool // an SSE endpoint origin is known
-	warned   bool
+	// redirected is true when the SSE GET went through a redirect to an origin
+	// that is not trusted, so no POST origin becomes trusted.
+	redirected bool
+	warned     bool
 }
 
 // originOf returns the scheme, the host in lower case, and the port of u, as
@@ -387,7 +392,10 @@ func newHeaderTransport(serverURL string, headers map[string]string, sse bool, b
 func (t *headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	origin := originOf(r.URL)
 	t.mu.Lock()
-	if t.sse && !t.endpoint && r.Method == http.MethodPost && r.Response == nil {
+	if t.sse && r.Method == http.MethodGet && r.Response != nil && !t.trusted[origin] {
+		t.redirected = true
+	}
+	if t.sse && !t.endpoint && !t.redirected && r.Method == http.MethodPost && r.Response == nil {
 		t.trusted[origin] = true
 		t.endpoint = true
 	}
