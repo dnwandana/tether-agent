@@ -1,9 +1,11 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -653,5 +655,137 @@ func TestMediaPolicyNullBytePath(t *testing.T) {
 	_, files := openPolicy.ExtractMedia("here\nMEDIA:`~\x00evil.png`\nMEDIA:" + good)
 	if len(files) != 1 || files[0].Path != good {
 		t.Fatal(files)
+	}
+}
+
+func TestFFmpegToOpusWithinTimeout(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	slow := filepath.Join(t.TempDir(), "ffmpeg")
+	if err := os.WriteFile(slow, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", t.TempDir())
+	conv := FFmpegToOpusWithin(slow, 200*time.Millisecond)
+	start := time.Now()
+	if _, err := conv(ctx, tempFile(t, "reply.mp3")); err == nil || !strings.Contains(err.Error(), "took more than 200ms") || time.Since(start) > 3*time.Second {
+		t.Fatal(err, time.Since(start))
+	}
+	if FFmpegToOpusWithin("", time.Second) != nil {
+		t.Fatal("no ffmpeg must give a nil converter")
+	}
+}
+
+// policyLog returns a logger that writes to the returned buffer.
+func policyLog() (*slog.Logger, *bytes.Buffer) {
+	var buf bytes.Buffer
+	return slog.New(slog.NewTextHandler(&buf, nil)), &buf
+}
+
+func TestMediaPolicyKeysApplyWithoutVariables(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	extra := t.TempDir()
+	cfg := MediaPolicyConfig{Strict: true, AllowDirs: []string{extra, "~/shared"}, TrustRecent: true, TrustRecentS: 60}
+	pol := NewMediaPolicyWith("", policyEnv(nil), cfg, nil)
+	if !pol.Strict || pol.TrustRecent != time.Minute {
+		t.Fatalf("%+v", pol)
+	}
+	if !slices.Contains(pol.Roots, extra) || !slices.Contains(pol.Roots, filepath.Join(home, "shared")) {
+		t.Fatalf("roots %v", pol.Roots)
+	}
+	// A folder of the key that is a symbolic link works through its real path.
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("no symlinks:", err)
+	}
+	strict := NewMediaPolicyWith("", policyEnv(nil), MediaPolicyConfig{Strict: true, AllowDirs: []string{link}}, nil)
+	if _, err := strict.Check(writeAt(t, filepath.Join(real, "report.pdf"), 2*time.Hour)); err != nil {
+		t.Fatal("file in an allowed folder of the key:", err)
+	}
+}
+
+func TestMediaPolicyVariableWins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fromKey, fromVar := t.TempDir(), t.TempDir()
+	cfg := MediaPolicyConfig{AllowDirs: []string{fromKey}, TrustRecent: true, TrustRecentS: 600}
+	env := map[string]string{EnvMediaStrict: "TRUE", EnvMediaAllowDirs: fromVar, EnvMediaTrustRecent: "yes",
+		EnvMediaTrustRecentSeconds: "60"}
+	pol := NewMediaPolicyWith("", policyEnv(env), cfg, nil)
+	if !pol.Strict || pol.TrustRecent != time.Minute {
+		t.Fatalf("%+v", pol)
+	}
+	if !slices.Contains(pol.Roots, fromVar) || slices.Contains(pol.Roots, fromKey) {
+		t.Fatalf("roots %v", pol.Roots)
+	}
+	// A set variable also turns a key off.
+	cfg = MediaPolicyConfig{Strict: true, TrustRecent: true, TrustRecentS: 600}
+	pol = NewMediaPolicyWith("", policyEnv(map[string]string{EnvMediaStrict: "off"}), cfg, nil)
+	if pol.Strict {
+		t.Fatal("TETHER_MEDIA_DELIVERY_STRICT=off must win over the key")
+	}
+}
+
+func TestMediaPolicyEmptyVariableDoesNotWin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	fromKey := t.TempDir()
+	cfg := MediaPolicyConfig{Strict: true, AllowDirs: []string{fromKey}, TrustRecent: true, TrustRecentS: 60}
+	env := map[string]string{EnvMediaStrict: "", EnvMediaAllowDirs: "", EnvMediaTrustRecent: "", EnvMediaTrustRecentSeconds: ""}
+	log, buf := policyLog()
+	pol := NewMediaPolicyWith("", policyEnv(env), cfg, log)
+	if !pol.Strict || pol.TrustRecent != time.Minute || !slices.Contains(pol.Roots, fromKey) {
+		t.Fatalf("%+v", pol)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("an empty variable must not log: %s", buf.String())
+	}
+}
+
+func TestMediaPolicyBadVariableKeepsKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	log, buf := policyLog()
+	cfg := MediaPolicyConfig{Strict: true, TrustRecent: true, TrustRecentS: 600}
+	pol := NewMediaPolicyWith("", policyEnv(map[string]string{EnvMediaStrict: "enabled"}), cfg, log)
+	if !pol.Strict {
+		t.Fatal("a value that is not valid must keep the strict key")
+	}
+	want := "media policy: TETHER_MEDIA_DELIVERY_STRICT has a value that is not valid; the config key gateway.media_delivery_strict applies"
+	if !strings.Contains(buf.String(), want) || !strings.Contains(buf.String(), "level=WARN") {
+		t.Fatalf("log %q", buf.String())
+	}
+	for raw, wantLog := range map[string]string{
+		"1.5": "media policy: TETHER_MEDIA_TRUST_RECENT_SECONDS has a value that is not valid; the config key gateway.media_trust_recent_s applies",
+		"-5":  "media policy: TETHER_MEDIA_TRUST_RECENT_SECONDS has a value that is not valid; the config key gateway.media_trust_recent_s applies",
+	} {
+		log, buf := policyLog()
+		pol := NewMediaPolicyWith("", policyEnv(map[string]string{EnvMediaTrustRecentSeconds: raw}), cfg, log)
+		if pol.TrustRecent != 10*time.Minute || !strings.Contains(buf.String(), wantLog) {
+			t.Fatalf("%q: window %s, log %q", raw, pol.TrustRecent, buf.String())
+		}
+	}
+	log, buf = policyLog()
+	pol = NewMediaPolicyWith("", policyEnv(map[string]string{EnvMediaTrustRecent: "maybe"}), cfg, log)
+	if pol.TrustRecent != 10*time.Minute ||
+		!strings.Contains(buf.String(), "media policy: TETHER_MEDIA_TRUST_RECENT_FILES has a value that is not valid; the config key gateway.media_trust_recent_files applies") {
+		t.Fatalf("window %s, log %q", pol.TrustRecent, buf.String())
+	}
+}
+
+func TestMediaPolicyTrustOffGivesZeroWindow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	pol := NewMediaPolicyWith("", policyEnv(nil), MediaPolicyConfig{Strict: true, TrustRecentS: 600}, nil)
+	if pol.TrustRecent != 0 {
+		t.Fatalf("trust off in the key: window %s", pol.TrustRecent)
+	}
+	env := map[string]string{EnvMediaTrustRecent: "off", EnvMediaTrustRecentSeconds: "60"}
+	cfg := MediaPolicyConfig{Strict: true, TrustRecent: true, TrustRecentS: 600}
+	if pol := NewMediaPolicyWith("", policyEnv(env), cfg, nil); pol.TrustRecent != 0 {
+		t.Fatalf("trust off in the variable: window %s", pol.TrustRecent)
+	}
+	// A seconds value of 0 is valid and gives no recency trust.
+	if pol := NewMediaPolicyWith("", policyEnv(map[string]string{EnvMediaTrustRecentSeconds: "0"}), cfg, nil); pol.TrustRecent != 0 {
+		t.Fatalf("seconds 0: window %s", pol.TrustRecent)
 	}
 }

@@ -759,3 +759,38 @@ func TestGetUpdatesNGoodBatch(t *testing.T) {
 		t.Fatal(ups, err)
 	}
 }
+
+func TestClientTimeoutFields(t *testing.T) {
+	var zero Client
+	if zero.callLimit() != 60*time.Second || zero.uploadLimit() != 5*time.Minute {
+		t.Fatal(zero.callLimit(), zero.uploadLimit())
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := &Client{Token: "T", BaseURL: srv.URL, HC: srv.Client(), Log: slog.New(slog.DiscardHandler),
+		CallTimeout: 100 * time.Millisecond, UploadTimeout: 150 * time.Millisecond}
+	if c.callLimit() != 100*time.Millisecond || c.uploadLimit() != 150*time.Millisecond {
+		t.Fatal(c.callLimit(), c.uploadLimit())
+	}
+	start := time.Now()
+	if _, err := c.SendMessage(ctx, SendMessageParams{ChatID: 1, Text: "x"}); err == nil || time.Since(start) > 2*time.Second {
+		t.Fatal("a call must stop at CallTimeout:", err, time.Since(start))
+	}
+	file := filepath.Join(t.TempDir(), "a.txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start = time.Now()
+	if err := c.Upload(ctx, "sendDocument", map[string]string{"chat_id": "1"}, "document", file, nil); err == nil || time.Since(start) > 2*time.Second {
+		t.Fatal("an upload must stop at UploadTimeout:", err, time.Since(start))
+	}
+	start = time.Now()
+	if err := c.DownloadFile(ctx, "documents/a.txt", filepath.Join(t.TempDir(), "b.txt")); err == nil || time.Since(start) > 2*time.Second {
+		t.Fatal("a download must stop at UploadTimeout:", err, time.Since(start))
+	}
+}

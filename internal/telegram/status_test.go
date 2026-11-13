@@ -1084,3 +1084,30 @@ func fireTimerAfter(s *Status, clk *fakeClock) bool {
 	clk.Advance(2 * time.Second)
 	return fireTimer(s)
 }
+
+func TestToolLineWithinLimit(t *testing.T) {
+	line := ToolLineWithin("all", "terminal", strings.Repeat("é", 100), "{}", 10)
+	start := strings.Index(line, `"`)
+	preview := strings.Trim(line[start:], `"`)
+	if utf8.RuneCountInString(preview) != 10 || !strings.HasSuffix(preview, "...") {
+		t.Fatal(line)
+	}
+	for _, limit := range []int{0, -1} {
+		if ToolLineWithin("all", "terminal", strings.Repeat("é", 100), "{}", limit) != ToolLine("all", "terminal", strings.Repeat("é", 100), "{}") {
+			t.Fatal("a limit of 0 or less keeps 40 characters")
+		}
+	}
+	// The verbose form shows the full arguments, so the limit does not apply.
+	if got := ToolLineWithin("verbose", "read_file", "a.txt", `{"path":"a.txt"}`, 4); got != "📖 read_file(path)\n{\"path\":\"a.txt\"}" {
+		t.Fatal(got)
+	}
+}
+
+func TestStatusPreviewChars(t *testing.T) {
+	s, api, _ := statusWithFakeAPI(t, "all")
+	s.PreviewChars = 10
+	s.Add(ctx, Source{}, "terminal", "abcdefghijklmnop", "{}")
+	if sends := api.textsOf("sendMessage"); len(sends) != 1 || sends[0] != `💻 terminal: "abcdefg..."` {
+		t.Fatal(sends)
+	}
+}

@@ -51,7 +51,7 @@ var ToolEmoji = map[string]string{
 const (
 	// defaultToolEmoji is the emoji of a tool that is not in ToolEmoji.
 	defaultToolEmoji = "🔧"
-	// previewMax is the longest preview in "all" and "new" mode (Hermes).
+	// previewMax is the default longest preview in "all" and "new" mode (Hermes).
 	previewMax = 40
 	// statusTextLimit is the longest status message: 4,096 less 64 (Hermes).
 	statusTextLimit = 4032
@@ -72,13 +72,19 @@ const (
 	closedHoldLimit = 5 * time.Minute
 )
 
-// ToolLine returns the status line for one tool call.
+// ToolLine returns ToolLineWithin with the default preview limit.
+func ToolLine(mode, tool, preview, argsJSON string) string {
+	return ToolLineWithin(mode, tool, preview, argsJSON, 0)
+}
+
+// ToolLineWithin returns the status line for one tool call.
 //
 //   - "all" and "new" give `{emoji} {tool}: "{preview}"`, with the preview
-//     cut to 40 characters, or `{emoji} {tool}...` with no preview.
+//     cut to limit characters, or `{emoji} {tool}...` with no preview.
+//     A limit of 0 or less uses 40.
 //   - "verbose" gives `{emoji} {tool}({keys})` and the JSON arguments on the
 //     next line. Empty arguments give the short form with the full preview.
-func ToolLine(mode, tool, preview, argsJSON string) string {
+func ToolLineWithin(mode, tool, preview, argsJSON string, limit int) string {
 	preview = oneLine(preview)
 	emoji := defaultToolEmoji
 	if e, ok := ToolEmoji[tool]; ok {
@@ -89,7 +95,7 @@ func ToolLine(mode, tool, preview, argsJSON string) string {
 			return fmt.Sprintf("%s %s(%s)\n%s", emoji, tool, strings.Join(keys, ", "), compact)
 		}
 	} else {
-		preview = cutPreview(preview)
+		preview = cutPreview(preview, limit)
 	}
 	if preview == "" {
 		return emoji + " " + tool + "..."
@@ -102,13 +108,20 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// cutPreview cuts s to previewMax characters, with "..." at the end of a cut.
-func cutPreview(s string) string {
+// cutPreview cuts s to limit characters, with "..." at the end of a cut. A
+// limit of 0 or less uses previewMax.
+func cutPreview(s string, limit int) string {
+	if limit <= 0 {
+		limit = previewMax
+	}
 	r := []rune(s)
-	if len(r) <= previewMax {
+	if len(r) <= limit {
 		return s
 	}
-	return string(r[:previewMax-3]) + "..."
+	if limit <= 3 {
+		return string(r[:limit])
+	}
+	return string(r[:limit-3]) + "..."
 }
 
 // argKeys returns the top-level keys of a JSON object in their order, and
@@ -183,9 +196,11 @@ type Status struct {
 	ThreadID string
 	Mode     string
 	Interval time.Duration
-	Now      func() time.Time
-	Cleanup  bool
-	Log      *slog.Logger
+	// PreviewChars is the preview limit of a tool line. 0 uses 40.
+	PreviewChars int
+	Now          func() time.Time
+	Cleanup      bool
+	Log          *slog.Logger
 	// FlushTimer starts the timer of a later flush and returns its stop function. Nil
 	// means time.AfterFunc. Tests give a fake timer.
 	FlushTimer func(d time.Duration, f func()) (stop func() bool)
@@ -242,9 +257,9 @@ func (s *Status) Add(ctx context.Context, src Source, tool, preview, args string
 	s.flushCtx = context.WithoutCancel(ctx)
 	var line string
 	if src.Child != "" {
-		line = tools.ChildProgressLine(src.Child, tool, cutPreview(oneLine(preview)))
+		line = tools.ChildProgressLine(src.Child, tool, cutPreview(oneLine(preview), s.PreviewChars))
 	} else {
-		line = ToolLine(mode, tool, preview, args)
+		line = ToolLineWithin(mode, tool, preview, args, s.PreviewChars)
 	}
 	line = cutUTF16(line, statusTextLimit)
 

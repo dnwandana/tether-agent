@@ -280,10 +280,12 @@ const (
 	// EnvMediaAllowDirs adds folders whose files are always sent. The
 	// separator is the path list separator (":") or ",".
 	EnvMediaAllowDirs = "TETHER_MEDIA_ALLOW_DIRS"
-	// EnvMediaTrustRecent turns off the recency trust of strict mode: 0,
-	// false, no, or off.
+	// EnvMediaTrustRecent turns the recency trust of strict mode on or off.
+	// It wins over gateway.media_trust_recent_files when it is set and valid.
 	EnvMediaTrustRecent = "TETHER_MEDIA_TRUST_RECENT_FILES"
-	// EnvMediaTrustRecentSeconds is the recency window of strict mode.
+	// EnvMediaTrustRecentSeconds is the recency window of strict mode, in
+	// whole seconds. It wins over gateway.media_trust_recent_s when it is set
+	// and valid.
 	EnvMediaTrustRecentSeconds = "TETHER_MEDIA_TRUST_RECENT_SECONDS"
 )
 
@@ -339,36 +341,83 @@ type MediaPolicy struct {
 	now func() time.Time
 }
 
-// NewMediaPolicy returns the media policy for the data folder dataDir. The
-// roots are <data>/cache/media (the received files, and the images and audio
-// of the media tools) and <data>/cache/screenshots (the browser),
-// plus the folders of TETHER_MEDIA_ALLOW_DIRS. The denied paths are the Hermes
-// system folders and the credential folders in the home folder. lookup reads
-// the TETHER_MEDIA_* variables, for example security.EnvLookup(dotenv).
+// MediaPolicyConfig holds the gateway.media_* keys. A TETHER_MEDIA_*
+// variable that is set and valid wins over the matching field.
+type MediaPolicyConfig struct {
+	// Strict is gateway.media_delivery_strict.
+	Strict bool
+	// AllowDirs is gateway.media_allow_dirs.
+	AllowDirs []string
+	// TrustRecent is gateway.media_trust_recent_files.
+	TrustRecent bool
+	// TrustRecentS is gateway.media_trust_recent_s.
+	TrustRecentS int
+}
+
+// NewMediaPolicy returns the media policy with the default values of the
+// gateway.media_* keys.
 func NewMediaPolicy(dataDir string, lookup func(string) (string, bool), log *slog.Logger) *MediaPolicy {
+	return NewMediaPolicyWith(dataDir, lookup, MediaPolicyConfig{TrustRecent: true, TrustRecentS: int(defaultTrustRecent / time.Second)}, log)
+}
+
+// NewMediaPolicyWith returns the media policy for the data folder dataDir.
+// The roots are <data>/cache/media (the received files, and the images and
+// audio of the media tools) and <data>/cache/screenshots (the browser), plus
+// the folders of the allow list. The denied paths are the Hermes system
+// folders and the credential folders in the home folder. lookup reads the
+// TETHER_MEDIA_* variables, for example security.EnvLookup(dotenv).
+//
+// A variable that is set (not empty) and valid wins over its key. A switch
+// variable is valid when it is 1, true, yes, on, 0, false, no, or off. The
+// seconds variable is valid when it is a whole number of 0 or more. A variable
+// that is set but not valid logs a warning, and the key applies.
+func NewMediaPolicyWith(dataDir string, lookup func(string) (string, bool), cfg MediaPolicyConfig, log *slog.Logger) *MediaPolicy {
 	if lookup == nil {
 		lookup = os.LookupEnv
 	}
-	env := func(name string) string {
-		v, _ := lookup(name)
-		return strings.TrimSpace(v)
+	set := func(name string) (string, bool) {
+		v, ok := lookup(name)
+		return v, ok && v != ""
+	}
+	bad := func(name, key string) {
+		if log != nil {
+			log.Warn(fmt.Sprintf("media policy: %s has a value that is not valid; the config key %s applies", name, key))
+		}
+	}
+	switchVar := func(name, key string, cur bool) bool {
+		raw, ok := set(name)
+		if !ok {
+			return cur
+		}
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+		bad(name, key)
+		return cur
 	}
 	home, _ := os.UserHomeDir()
 	p := &MediaPolicy{
-		Protected:   security.ProtectedPaths(dataDir, home),
-		Denied:      append([]string(nil), deniedSystemPrefixes...),
-		Strict:      isTruthy(env(EnvMediaStrict)),
-		TrustRecent: defaultTrustRecent,
-		Log:         log,
+		Protected: security.ProtectedPaths(dataDir, home),
+		Denied:    append([]string(nil), deniedSystemPrefixes...),
+		Strict:    switchVar(EnvMediaStrict, "gateway.media_delivery_strict", cfg.Strict),
+		Log:       log,
 	}
 	if dataDir != "" {
 		p.Roots = append(p.Roots, filepath.Join(dataDir, "cache", "media"), filepath.Join(dataDir, "cache", "screenshots"))
 	}
-	for _, chunk := range filepath.SplitList(env(EnvMediaAllowDirs)) {
-		for _, raw := range strings.Split(chunk, ",") {
-			if root := expandHome(strings.TrimSpace(raw)); filepath.IsAbs(root) {
-				p.Roots = append(p.Roots, root)
-			}
+	dirs := cfg.AllowDirs
+	if raw, ok := set(EnvMediaAllowDirs); ok {
+		dirs = nil
+		for _, chunk := range filepath.SplitList(raw) {
+			dirs = append(dirs, strings.Split(chunk, ",")...)
+		}
+	}
+	for _, raw := range dirs {
+		if root := expandHome(strings.TrimSpace(raw)); filepath.IsAbs(root) {
+			p.Roots = append(p.Roots, root)
 		}
 	}
 	if home != "" {
@@ -376,26 +425,19 @@ func NewMediaPolicy(dataDir string, lookup func(string) (string, bool), log *slo
 			p.Denied = append(p.Denied, filepath.Join(home, sub))
 		}
 	}
-	switch strings.ToLower(env(EnvMediaTrustRecent)) {
-	case "0", "false", "no", "off":
-		p.TrustRecent = 0
-	default:
-		if raw := env(EnvMediaTrustRecentSeconds); raw != "" {
-			if s, err := strconv.ParseFloat(raw, 64); err == nil {
-				p.TrustRecent = time.Duration(max(s, 0) * float64(time.Second))
-			}
+	trust := switchVar(EnvMediaTrustRecent, "gateway.media_trust_recent_files", cfg.TrustRecent)
+	seconds := cfg.TrustRecentS
+	if raw, ok := set(EnvMediaTrustRecentSeconds); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil && n >= 0 {
+			seconds = n
+		} else {
+			bad(EnvMediaTrustRecentSeconds, "gateway.media_trust_recent_s")
 		}
 	}
-	return p
-}
-
-// isTruthy reports whether an environment value means "on" (Hermes).
-func isTruthy(v string) bool {
-	switch strings.ToLower(v) {
-	case "1", "true", "yes", "on":
-		return true
+	if trust {
+		p.TrustRecent = time.Duration(seconds) * time.Second
 	}
-	return false
+	return p
 }
 
 // Check returns the real path of a file that the policy lets the model send.
@@ -587,16 +629,25 @@ func (s *Sender) upload(ctx context.Context, method, field string, fields map[st
 // ffmpegTimeout limits one voice conversion.
 const ffmpegTimeout = 60 * time.Second
 
-// FFmpegToOpus returns a converter that makes an OGG/Opus voice note from an
+// FFmpegToOpus returns FFmpegToOpusWithin with the default time limit.
+func FFmpegToOpus(ffmpegPath string) func(ctx context.Context, in string) (string, error) {
+	return FFmpegToOpusWithin(ffmpegPath, 0)
+}
+
+// FFmpegToOpusWithin returns a converter that makes an OGG/Opus voice note from an
 // audio file with ffmpeg. The output is a new temp file, so a conversion never
 // overwrites a file of the user. The Sender removes it after the send. With no
 // ffmpeg (an empty path), the result is nil, so the Sender sends an audio file.
-func FFmpegToOpus(ffmpegPath string) func(ctx context.Context, in string) (string, error) {
+// The timeout limits one conversion. A value of 0 or less uses 60 s.
+func FFmpegToOpusWithin(ffmpegPath string, timeout time.Duration) func(ctx context.Context, in string) (string, error) {
 	if ffmpegPath == "" {
 		return nil
 	}
+	if timeout <= 0 {
+		timeout = ffmpegTimeout
+	}
 	return func(ctx context.Context, in string) (string, error) {
-		ctx, cancel := context.WithTimeout(ctx, ffmpegTimeout)
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		tmp, err := os.CreateTemp("", "tether-voice-*.ogg")
 		if err != nil {
@@ -615,7 +666,7 @@ func FFmpegToOpus(ffmpegPath string) func(ctx context.Context, in string) (strin
 				msg = msg[len(msg)-300:]
 			}
 			if ctx.Err() != nil {
-				return "", fmt.Errorf("ffmpeg: the conversion to opus took more than %s", ffmpegTimeout)
+				return "", fmt.Errorf("ffmpeg: the conversion to opus took more than %s", timeout)
 			}
 			return "", fmt.Errorf("ffmpeg: the conversion to opus failed: %w: %s", err, msg)
 		}

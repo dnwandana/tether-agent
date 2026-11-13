@@ -40,7 +40,7 @@ func TestCodeShapeAndReply(t *testing.T) {
 			t.Fatalf("code %q has %q, which is not in the alphabet", code, r)
 		}
 	}
-	if reply != PairReply("telegram", code) {
+	if reply != PairReply("telegram", code, 0) {
 		t.Fatal(reply)
 	}
 }
@@ -49,14 +49,14 @@ func TestPairReplyText(t *testing.T) {
 	want := "🔐 **Pairing needed**\nI do not know you yet. Your pairing code is `K7QM2XPA`.\n\n" +
 		"Ask the owner to run this command:\n`tether pairing approve telegram K7QM2XPA`\n" +
 		"_The code expires in 1 hour._"
-	if got := PairReply("telegram", "K7QM2XPA"); got != want {
+	if got := PairReply("telegram", "K7QM2XPA", 0); got != want {
 		t.Fatalf("got  %q\nwant %q", got, want)
 	}
 	if PairBusyReply != "⏳ **Too many pairing requests**\nTry again later." {
 		t.Fatal(PairBusyReply)
 	}
 	// The italic line keeps its markup on Telegram.
-	if got := ToMarkdownV2(PairReply("telegram", "K7QM2XPA")); !strings.HasSuffix(got, "\n_The code expires in 1 hour\\._") {
+	if got := ToMarkdownV2(PairReply("telegram", "K7QM2XPA", 0)); !strings.HasSuffix(got, "\n_The code expires in 1 hour\\._") {
 		t.Fatal(got)
 	}
 	for d, want := range map[time.Duration]string{time.Hour: "1 hour", 2 * time.Hour: "2 hours",
@@ -305,5 +305,33 @@ func TestRequestAfterRevoke(t *testing.T) {
 	again := mustRequest(t, p, "6")
 	if uid, err := p.Approve(ctx, "telegram", again); err != nil || uid != "6" {
 		t.Fatal(uid, err)
+	}
+}
+
+func TestPairingCodeTTL(t *testing.T) {
+	p, clk := pairStore(t)
+	p.CodeTTL = 30 * time.Minute
+	code, reply, err := p.Request(ctx, "telegram", "6", "ana")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != PairReply("telegram", code, 30*time.Minute) || !strings.HasSuffix(reply, "_The code expires in 30 minutes._") {
+		t.Fatal(reply)
+	}
+	clk.advance(31 * time.Minute)
+	if _, err := p.Approve(ctx, "telegram", code); !errors.Is(err, ErrPairCodeExpired) {
+		t.Fatal(err)
+	}
+}
+
+func TestPairReplyShowsTTL(t *testing.T) {
+	for ttl, want := range map[time.Duration]string{
+		0: "1 hour", -time.Minute: "1 hour", time.Hour: "1 hour", 2 * time.Hour: "2 hours",
+		90 * time.Minute: "90 minutes", 30 * time.Minute: "30 minutes", time.Minute: "1 minute",
+		90 * time.Second: "90 seconds", 45 * time.Second: "45 seconds", time.Second: "1 second",
+	} {
+		if got := PairReply("telegram", "K7QM2XPA", ttl); !strings.HasSuffix(got, "\n_The code expires in "+want+"._") {
+			t.Errorf("ttl %v: %q", ttl, got)
+		}
 	}
 }

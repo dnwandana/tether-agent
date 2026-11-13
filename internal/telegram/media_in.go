@@ -153,6 +153,28 @@ type Inbox struct {
 	// RichMediaLimit is the time limit for the media parts of the rich messages of one
 	// BuildFor call. Zero means defaultRichMediaLimit. Tests change it.
 	RichMediaLimit time.Duration
+	// InlineTextMaxBytes is the largest .md or .txt file that goes into the message text.
+	// Zero means maxInlineTextBytes.
+	InlineTextMaxBytes int
+	// DescribeTimeout is the limit for the vision call of a sticker. Zero means
+	// describeTimeout.
+	DescribeTimeout time.Duration
+}
+
+// inlineTextMax returns the largest text file that goes into the message text.
+func (in *Inbox) inlineTextMax() int {
+	if in.InlineTextMaxBytes <= 0 {
+		return maxInlineTextBytes
+	}
+	return in.InlineTextMaxBytes
+}
+
+// describeLimit returns the limit for the vision call of a sticker.
+func (in *Inbox) describeLimit() time.Duration {
+	if in.DescribeTimeout <= 0 {
+		return describeTimeout
+	}
+	return in.DescribeTimeout
 }
 
 // richMediaLimit returns the time limit for the media parts of the rich messages.
@@ -408,7 +430,7 @@ func (in *Inbox) addDocument(ctx context.Context, notes []string, images *[]prov
 	}
 	*files = append(*files, path)
 	if ext == ".md" || ext == ".txt" {
-		if b, err := os.ReadFile(path); err == nil && len(b) <= maxInlineTextBytes && utf8.Valid(b) {
+		if b, err := os.ReadFile(path); err == nil && len(b) <= in.inlineTextMax() && utf8.Valid(b) {
 			return append(notes, savedNote(savedTextDocument, name, path)+"\n\n"+fmt.Sprintf("[Content of %s]:\n%s", name, b))
 		}
 	}
@@ -500,7 +522,7 @@ func (in *Inbox) addSticker(ctx context.Context, notes []string, s *Sticker) []s
 		in.logger().Warn("telegram media download failed", "what", "sticker", "err", err.Error())
 		return append(notes, fallback)
 	}
-	dctx, cancel := context.WithTimeout(ctx, describeTimeout)
+	dctx, cancel := context.WithTimeout(ctx, in.describeLimit())
 	desc, err := in.Describe(dctx, path, stickerVisionPrompt)
 	cancel()
 	if err != nil {

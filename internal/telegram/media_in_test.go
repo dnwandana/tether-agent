@@ -971,3 +971,60 @@ func TestFetchIgnoresOtherNames(t *testing.T) {
 		}
 	}
 }
+
+func TestInlineTextLimitFromField(t *testing.T) {
+	body := strings.Repeat("x", 2000)
+	// A field of 1024 bytes saves a 2000-byte .txt file and does not inline it.
+	in, api := inbox(t)
+	in.InlineTextMaxBytes = 1024
+	api.addFile("d-mid.txt", "documents/mid.txt", []byte(body))
+	txt, _, files, _ := in.Build(ctx, []Message{docMsg("mid.txt", "text/plain", int64(len(body)))})
+	if len(files) != 1 || txt != docNote("mid.txt", files[0]) {
+		t.Fatalf("limit 1024: %q %v", txt[:min(len(txt), 120)], files)
+	}
+	// A zero field keeps 100 KB, so the same file is inlined.
+	in, api = inbox(t)
+	api.addFile("d-mid.txt", "documents/mid.txt", []byte(body))
+	txt, _, files, _ = in.Build(ctx, []Message{docMsg("mid.txt", "text/plain", int64(len(body)))})
+	if len(files) != 1 || !strings.HasPrefix(txt, textDocNote("mid.txt", files[0])) {
+		t.Fatalf("zero field: %q %v", txt[:min(len(txt), 120)], files)
+	}
+	// A larger field inlines a file of 150 KB, which the default refuses.
+	big := strings.Repeat("y", 150*1024)
+	in, api = inbox(t)
+	in.InlineTextMaxBytes = 200 * 1024
+	api.addFile("d-big.md", "documents/big.md", []byte(big))
+	txt, _, files, _ = in.Build(ctx, []Message{docMsg("big.md", "text/markdown", int64(len(big)))})
+	if len(files) != 1 || !strings.HasPrefix(txt, textDocNote("big.md", files[0])) {
+		t.Fatalf("limit 200 KB: %q %v", txt[:min(len(txt), 120)], files)
+	}
+}
+
+func TestStickerDescribeTimeoutFromField(t *testing.T) {
+	const fallback = `[The user sent a sticker~ It shows: "a sticker" (=^.w.^=)]`
+	in, api := inbox(t)
+	api.addFile("s6", "stickers/file_8.webp", []byte("RIFF"))
+	in.DescribeTimeout = 20 * time.Millisecond
+	in.Describe = func(c context.Context, _, _ string) (string, error) { <-c.Done(); return "", c.Err() }
+	start := time.Now()
+	txt, _, _, _ := in.Build(ctx, []Message{stickerMsg(Sticker{FileID: "s6", FileUniqueID: "us6"})})
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("the describe call waited %s", el)
+	}
+	if txt != fallback {
+		t.Fatalf("%q", txt)
+	}
+	// A zero field keeps the package limit of 30 s.
+	in, api = inbox(t)
+	api.addFile("s7", "stickers/file_9.webp", []byte("RIFF"))
+	var left time.Duration
+	in.Describe = func(c context.Context, _, _ string) (string, error) {
+		dl, _ := c.Deadline()
+		left = time.Until(dl)
+		return "A cat", nil
+	}
+	in.Build(ctx, []Message{stickerMsg(Sticker{FileID: "s7", FileUniqueID: "us7"})})
+	if left <= 29*time.Second || left > 30*time.Second {
+		t.Fatalf("deadline in %s, want about 30s", left)
+	}
+}

@@ -35,6 +35,9 @@ type Poller struct {
 	DB       *db.DB
 	Log      *slog.Logger
 	TimeoutS int
+	// MenuMax is the maximum number of entries in the bot menu, with the built-in commands.
+	// Zero means menuMax.
+	MenuMax int
 	// HandleCtx is the context of the handle calls. Nil uses the context of Run. A
 	// separate context lets the turns go on after Run stops to poll.
 	HandleCtx context.Context
@@ -234,7 +237,7 @@ func (c *chatQueues) run(ctx context.Context, u Update) {
 // cmds. When Telegram refuses the menu with the skills, it sets the built-in commands only,
 // so one bad skill entry does not remove the menu.
 func (p *Poller) RegisterCommands(ctx context.Context, cmds []gateway.SkillCommand) error {
-	menu, hidden := botMenu(cmds)
+	menu, hidden := botMenu(cmds, p.MenuMax)
 	if hidden > 0 {
 		p.logger().Info(fmt.Sprintf("telegram: the bot menu hides %d skill commands; send /help skills to see all", hidden))
 	}
@@ -260,16 +263,20 @@ var menuDashes = strings.NewReplacer("\u2010", "-", "\u2011", "-", "\u2012", "-"
 	"\u2014", "-", "\u2015", "-", "\u2212", "-")
 
 // BotCommands returns the bot menu: the built-in commands, and then the skill commands of
-// cmds in their order. cmds is the skill command table, in slug order.
-func BotCommands(cmds []gateway.SkillCommand) []BotCommand {
-	menu, _ := botMenu(cmds)
+// cmds in their order. cmds is the skill command table, in slug order. A max of 0 or less
+// gives menuMax.
+func BotCommands(cmds []gateway.SkillCommand, max int) []BotCommand {
+	menu, _ := botMenu(cmds, max)
 	return menu
 }
 
 // botMenu returns the bot menu and the number of skill commands that the cap leaves out. A
 // skill with a menu name over 32 characters, or with a name already in the menu, is left
-// out. Its typed command still works.
-func botMenu(cmds []gateway.SkillCommand) ([]BotCommand, int) {
+// out. Its typed command still works. A max of 0 or less gives menuMax.
+func botMenu(cmds []gateway.SkillCommand, max int) ([]BotCommand, int) {
+	if max <= 0 {
+		max = menuMax
+	}
 	menu := builtinCommands()
 	seen := make(map[string]bool, len(menu)+len(cmds))
 	for _, b := range menu {
@@ -280,7 +287,7 @@ func botMenu(cmds []gateway.SkillCommand) ([]BotCommand, int) {
 		if len(c.MenuName) > menuNameMax || seen[c.MenuName] {
 			continue
 		}
-		if len(menu) >= menuMax {
+		if len(menu) >= max {
 			hidden++
 			continue
 		}

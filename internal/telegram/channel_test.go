@@ -1737,3 +1737,30 @@ func TestObservedChatClarifyBindsTheMember(t *testing.T) {
 		t.Fatal(result)
 	}
 }
+
+func TestRendererStatusFromConfig(t *testing.T) {
+	api := newFakeBot(t)
+	cfg := config.Default().Telegram
+	cfg.StatusIntervalS = 0.25
+	ch := &Channel{C: api.client(), Cfg: cfg, ToolPreviewChars: 12}
+	r := ch.newRenderer(ctx, 42, "", true)
+	if r.status.Interval != 250*time.Millisecond || r.status.PreviewChars != 12 {
+		t.Fatal(r.status.Interval, r.status.PreviewChars)
+	}
+	ch = &Channel{C: api.client(), Cfg: config.TelegramConfig{}}
+	r = ch.newRenderer(ctx, 42, "", true)
+	if r.status.Interval != 0 || r.status.PreviewChars != 0 {
+		t.Fatal("zero values keep the defaults of Status:", r.status.Interval, r.status.PreviewChars)
+	}
+}
+
+func TestAlbumWaitFromConfig(t *testing.T) {
+	ch := &Channel{Cfg: config.TelegramConfig{AlbumWaitS: 0.2}}
+	if got := ch.albumWait(); got != 200*time.Millisecond {
+		t.Fatal(got)
+	}
+	ch = &Channel{}
+	if got := ch.albumWait(); got != 0 {
+		t.Fatal("0 keeps the default of AlbumBuffer:", got)
+	}
+}

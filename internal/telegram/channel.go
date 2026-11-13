@@ -60,6 +60,9 @@ type Channel struct {
 	// Media decides which local files of an answer go to the chat (MEDIA tags and bare
 	// paths). Nil sends no such file.
 	Media *MediaPolicy
+	// ToolPreviewChars is the preview limit of the tool status lines (agent.tool_preview_chars).
+	// Cfg holds only the telegram block, so the app sets this field. 0 uses 40.
+	ToolPreviewChars int
 	// Bot is the bot user from getMe.
 	Bot User
 	Log *slog.Logger
@@ -116,10 +119,25 @@ func (ch *Channel) Run(ctx context.Context, gw *gateway.Gateway) error {
 	if ch.UI != nil && ch.UI.Owner == nil {
 		ch.UI.Owner = ch.callbackOwner
 	}
+	ch.albums.Wait = ch.albumWait()
 	p := ch.poller()
 	go ch.registerMenu(ctx, p, gw)
 	ch.logger().Info("telegram channel started", "bot", ch.Bot.Username)
 	return p.Run(ctx, func(ctx context.Context, u Update) { ch.handleUpdate(ctx, gw, u) })
+}
+
+// albumWait returns telegram.album_wait_s as a duration.
+func (ch *Channel) albumWait() time.Duration { return secondsFloat(ch.Cfg.AlbumWaitS) }
+
+// statusInterval returns telegram.status_interval_s as a duration.
+func (ch *Channel) statusInterval() time.Duration { return secondsFloat(ch.Cfg.StatusIntervalS) }
+
+// secondsFloat converts a number of seconds to a duration. A value of 0 or less gives 0.
+func secondsFloat(f float64) time.Duration {
+	if f <= 0 {
+		return 0
+	}
+	return time.Duration(f * float64(time.Second))
 }
 
 // registerMenu sets the bot menu with the skill commands of the telegram channel. Run calls
@@ -143,7 +161,8 @@ func (ch *Channel) SetTurnContext(ctx context.Context) { ch.turnCtx = ctx }
 
 // poller returns the poller of Run.
 func (ch *Channel) poller() *Poller {
-	return &Poller{C: ch.C, DB: ch.DB, Log: ch.Log, HandleCtx: ch.turnCtx, Inflight: &ch.inflight}
+	return &Poller{C: ch.C, DB: ch.DB, Log: ch.Log, HandleCtx: ch.turnCtx, Inflight: &ch.inflight,
+		MenuMax: ch.Cfg.MenuMaxCommands}
 }
 
 // Send sends a message to a chat, for cron delivery and other sends with no turn. The text
@@ -1061,7 +1080,8 @@ var (
 func (ch *Channel) newRenderer(ctx context.Context, chatID int64, threadID string, isDM bool) *tgRenderer {
 	rctx := context.WithoutCancel(ctx)
 	st := &Status{C: ch.C, ChatID: chatID, ThreadID: threadID, Mode: ch.Cfg.ToolProgress,
-		Cleanup: ch.Cfg.CleanupProgress, Log: ch.Log}
+		Cleanup: ch.Cfg.CleanupProgress, Log: ch.Log, Interval: ch.statusInterval(),
+		PreviewChars: ch.ToolPreviewChars}
 	sm := &Streamer{C: ch.C, ChatID: chatID, ThreadID: threadID, IsDM: isDM, Cfg: ch.Cfg.Streaming,
 		OnFirstMessage: st.Reset, Log: ch.Log}
 	r := &tgRenderer{ch: ch, ctx: rctx, chatID: chatID, threadID: threadID, status: st, stream: sm}

@@ -56,7 +56,7 @@ var (
 	ErrPairLockedOut = errors.New("pairing is locked after too many failed approvals")
 	// ErrPairCodeNotFound means that no pending code matches.
 	ErrPairCodeNotFound = errors.New("pairing code not found")
-	// ErrPairCodeExpired means that the code matches, but it is older than 1 h.
+	// ErrPairCodeExpired means that the code matches, but it is older than its code TTL.
 	ErrPairCodeExpired = errors.New("pairing code expired")
 	// ErrPairUserNotFound means that the user has no approved or pending pairing.
 	ErrPairUserNotFound = errors.New("pairing user not found")
@@ -75,6 +75,8 @@ type Pairing struct {
 	Now func() time.Time
 	// Rand gives the random bytes for the codes and the salts. Nil means crypto/rand.
 	Rand io.Reader
+	// CodeTTL is the time until a new pairing code expires. Zero means PairCodeTTL.
+	CodeTTL time.Duration
 }
 
 // PairRow is one pending or approved user.
@@ -88,20 +90,36 @@ type PairRow struct {
 	ApprovedAt time.Time // zero for a pending user
 }
 
-// PairReply returns the reply that gives a pairing code to the user.
-func PairReply(platform, code string) string {
+// codeTTL returns the time until a new pairing code expires.
+func (p *Pairing) codeTTL() time.Duration {
+	if p.CodeTTL <= 0 {
+		return PairCodeTTL
+	}
+	return p.CodeTTL
+}
+
+// PairReply returns the reply that gives a pairing code to the user. A ttl of 0 or less
+// gives PairCodeTTL.
+func PairReply(platform, code string, ttl time.Duration) string {
+	if ttl <= 0 {
+		ttl = PairCodeTTL
+	}
 	return "🔐 **Pairing needed**\nI do not know you yet. Your pairing code is `" + code + "`.\n\n" +
 		"Ask the owner to run this command:\n" +
 		"`tether pairing approve " + platform + " " + code + "`\n" +
-		"_The code expires in " + durationText(PairCodeTTL) + "._"
+		"_The code expires in " + durationText(ttl) + "._"
 }
 
-// durationText returns d as whole hours, for example "1 hour", or else as whole minutes,
-// for example "30 minutes".
+// durationText returns d as whole hours, for example "1 hour", else as whole minutes, for
+// example "90 minutes", else as whole seconds, for example "45 seconds". The count 1 takes
+// the singular form.
 func durationText(d time.Duration) string {
-	n, unit := int(d/time.Minute), "minute"
-	if d >= time.Hour && d%time.Hour == 0 {
+	n, unit := int(d/time.Second), "second"
+	switch {
+	case d%time.Hour == 0:
 		n, unit = int(d/time.Hour), "hour"
+	case d%time.Minute == 0:
+		n, unit = int(d/time.Minute), "minute"
 	}
 	if n == 1 {
 		return "1 " + unit
@@ -171,7 +189,7 @@ func (p *Pairing) Request(ctx context.Context, platform, userID, userName string
 VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
 ON CONFLICT(platform, user_id) DO UPDATE SET user_name=excluded.user_name, code=excluded.code,
   status=excluded.status, created_at=excluded.created_at, expires_at=excluded.expires_at, approved_at=NULL`,
-		platform, userID, userName, hash, PairPending, now.UnixMilli(), now.Add(PairCodeTTL).UnixMilli())
+		platform, userID, userName, hash, PairPending, now.UnixMilli(), now.Add(p.codeTTL()).UnixMilli())
 	if err != nil {
 		return "", "", fmt.Errorf("pairing: request: %w", err)
 	}
@@ -181,7 +199,7 @@ ON CONFLICT(platform, user_id) DO UPDATE SET user_name=excluded.user_name, code=
 	if err := tx.Commit(); err != nil {
 		return "", "", fmt.Errorf("pairing: request: %w", err)
 	}
-	return code, PairReply(platform, code), nil
+	return code, PairReply(platform, code, p.codeTTL()), nil
 }
 
 // requestLimit returns ErrPairLockedOut or ErrTooManyPending when the platform

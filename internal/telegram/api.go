@@ -71,6 +71,11 @@ type Client struct {
 	// Pace keeps the call budget of each chat. All copies of the client
 	// share it. Nil means no pacing.
 	Pace *ChatPace
+	// CallTimeout limits a JSON call, and UploadTimeout limits an upload or
+	// a download. Each applies when the context has no deadline. A value of
+	// 0 uses callTimeout or uploadTimeout.
+	CallTimeout   time.Duration
+	UploadTimeout time.Duration
 
 	// sleep waits between rate-limit retries. Tests replace it.
 	sleep func(ctx context.Context, d time.Duration) error
@@ -84,6 +89,22 @@ type Client struct {
 	// fails at once with a *floodError. A pace wait is not part of this
 	// rule, because no 429 came.
 	inlineWaited *bool
+}
+
+// callLimit returns the time limit of a JSON call.
+func (c *Client) callLimit() time.Duration {
+	if c.CallTimeout > 0 {
+		return c.CallTimeout
+	}
+	return callTimeout
+}
+
+// uploadLimit returns the time limit of an upload or a download.
+func (c *Client) uploadLimit() time.Duration {
+	if c.UploadTimeout > 0 {
+		return c.UploadTimeout
+	}
+	return uploadTimeout
 }
 
 // APIError is an "ok": false reply from the Bot API.
@@ -444,7 +465,7 @@ type replyParameters struct {
 // Call sends params as a JSON POST to the method and decodes the result into
 // out. It waits and retries on a rate-limit reply, at most 3 times.
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
-	return c.call(ctx, method, 0, params, out, callTimeout)
+	return c.call(ctx, method, 0, params, out, c.callLimit())
 }
 
 // call sends params as a JSON POST to the method. chatID is the chat of the
@@ -462,7 +483,7 @@ func (c *Client) call(ctx context.Context, method string, chatID int64, params a
 // Upload sends one file and the text fields as a multipart POST to the method.
 // The file goes in the form field fileField.
 func (c *Client) Upload(ctx context.Context, method string, fields map[string]string, fileField, path string, out any) error {
-	return c.do(ctx, method, uploadChatID(fields), true, out, uploadTimeout, func() (io.Reader, string, func(), error) {
+	return c.do(ctx, method, uploadChatID(fields), true, out, c.uploadLimit(), func() (io.Reader, string, func(), error) {
 		f, err := os.Open(path)
 		if err != nil {
 			return nil, "", nil, err
@@ -717,27 +738,27 @@ func (c *Client) GetUpdatesN(ctx context.Context, offset int64, timeoutS, limit 
 // SendMessage sends a text message.
 func (c *Client) SendMessage(ctx context.Context, p SendMessageParams) (Message, error) {
 	var m Message
-	err := c.call(ctx, "sendMessage", p.ChatID, p, &m, callTimeout)
+	err := c.call(ctx, "sendMessage", p.ChatID, p, &m, c.callLimit())
 	return m, err
 }
 
 // SendRichMessage sends a rich message, for example a Markdown table.
 func (c *Client) SendRichMessage(ctx context.Context, p SendRichMessageParams) (Message, error) {
 	var m Message
-	err := c.call(ctx, "sendRichMessage", p.ChatID, p, &m, callTimeout)
+	err := c.call(ctx, "sendRichMessage", p.ChatID, p, &m, c.callLimit())
 	return m, err
 }
 
 // EditMessageText replaces the text of a message.
 func (c *Client) EditMessageText(ctx context.Context, p EditMessageTextParams) (Message, error) {
 	var m Message
-	err := c.call(ctx, "editMessageText", p.ChatID, p, &m, callTimeout)
+	err := c.call(ctx, "editMessageText", p.ChatID, p, &m, c.callLimit())
 	return m, err
 }
 
 // DeleteMessage deletes a message.
 func (c *Client) DeleteMessage(ctx context.Context, chatID int64, messageID int) error {
-	return c.call(ctx, "deleteMessage", chatID, map[string]any{"chat_id": chatID, "message_id": messageID}, nil, callTimeout)
+	return c.call(ctx, "deleteMessage", chatID, map[string]any{"chat_id": chatID, "message_id": messageID}, nil, c.callLimit())
 }
 
 // SendChatAction shows a chat action, for example "typing". A zero threadID
@@ -747,12 +768,12 @@ func (c *Client) SendChatAction(ctx context.Context, chatID int64, threadID int,
 	if threadID != 0 {
 		params["message_thread_id"] = threadID
 	}
-	return c.call(ctx, "sendChatAction", chatID, params, nil, callTimeout)
+	return c.call(ctx, "sendChatAction", chatID, params, nil, c.callLimit())
 }
 
 // SendMessageDraft streams a draft of a message in a private chat.
 func (c *Client) SendMessageDraft(ctx context.Context, p SendMessageDraftParams) error {
-	return c.call(ctx, "sendMessageDraft", p.ChatID, p, nil, callTimeout)
+	return c.call(ctx, "sendMessageDraft", p.ChatID, p, nil, c.callLimit())
 }
 
 // AnswerCallbackQuery answers a button press. An empty text shows nothing.
@@ -784,7 +805,7 @@ func (c *Client) GetFile(ctx context.Context, fileID string) (File, error) {
 func (c *Client) DownloadFile(ctx context.Context, filePath, dst string) error {
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, uploadTimeout)
+		ctx, cancel = context.WithTimeout(ctx, c.uploadLimit())
 		defer cancel()
 	}
 	u := strings.TrimRight(c.base(), "/") + "/file/bot" + c.Token + "/" + strings.TrimLeft(filePath, "/")
