@@ -9,8 +9,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
@@ -157,7 +159,8 @@ func (bt *BrowserTools) Tools() []Tool {
 			name: "browser_run_js",
 			desc: "Run JavaScript in the current page and return the result as JSON. " +
 				"The value of the last expression is the result. The tool waits for a promise. " +
-				"Use it to read data from the page or to do what the other browser tools cannot do.",
+				"Use it to read data from the page or to do what the other browser tools cannot do. " +
+				"A cookie value of 8 or more characters in the result shows as [cookie value].",
 			params: `{
   "type": "object",
   "properties": {
@@ -542,16 +545,60 @@ func (bt *BrowserTools) runJS(ctx context.Context, raw json.RawMessage, env *Env
 	defer done()
 	res, err := chromedp.Run(actx, chromedp.Evaluate[[]byte](a.Code, chromedp.EvalAwaitPromise))
 	if err != nil {
+		// The error text can hold a cookie value, for example from
+		// "throw new Error(document.cookie)". Mask it like a result.
+		if ctx.Err() == nil {
+			if ck, cerr := chromedp.Call(actx, network.GetCookies, network.GetCookiesParams{}); cerr == nil {
+				err = errors.New(maskCookieValues(err.Error(), ck.Cookies))
+			}
+		}
 		return "", bt.fail(ctx, actx, "run the code", err)
 	}
 	if len(bytes.TrimSpace(res)) == 0 {
 		return "undefined", nil
 	}
+	text := string(res)
 	var out bytes.Buffer
-	if err := json.Compact(&out, res); err != nil {
-		return string(res), nil
+	if err := json.Compact(&out, res); err == nil {
+		text = out.String()
 	}
-	return out.String(), nil
+	// A page script can read each cookie that is not HttpOnly, and a tool result
+	// goes to the model provider and into the transcript. Mask the plain values.
+	ck, err := chromedp.Call(actx, network.GetCookies, network.GetCookiesParams{})
+	if err != nil {
+		return "", bt.fail(ctx, actx, "read the cookies", err)
+	}
+	return maskCookieValues(text, ck.Cookies), nil
+}
+
+// maskCookieValues returns result with each cookie value of 8 or more characters
+// replaced by "[cookie value]".
+func maskCookieValues(result string, cookies []*network.Cookie) string {
+	seen := map[string]bool{}
+	var values []string
+	for _, c := range cookies {
+		if c == nil || utf8.RuneCountInString(c.Value) < 8 || seen[c.Value] {
+			continue
+		}
+		seen[c.Value] = true
+		values = append(values, c.Value)
+		// The JSON result escapes a quote or a backslash, so mask that form too.
+		if b, err := json.Marshal(c.Value); err == nil && len(b) >= 2 {
+			if esc := string(b[1 : len(b)-1]); esc != c.Value && !seen[esc] {
+				seen[esc] = true
+				values = append(values, esc)
+			}
+		}
+	}
+	if len(values) == 0 {
+		return result
+	}
+	sort.SliceStable(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	pairs := make([]string, 0, 2*len(values))
+	for _, v := range values {
+		pairs = append(pairs, v, "[cookie value]")
+	}
+	return strings.NewReplacer(pairs...).Replace(result)
 }
 
 // cookieOut is one cookie in the browser_cookies result. It has no value: a cookie

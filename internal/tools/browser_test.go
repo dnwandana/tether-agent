@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
+
 	"github.com/dnwandana/tether-agent/internal/browser"
 	"github.com/dnwandana/tether-agent/internal/hostos"
 )
@@ -330,5 +332,47 @@ func TestNavigateExcerptFollowsField(t *testing.T) {
 	out := runToolEnv(t, bt.Tool("browser_navigate"), fmt.Sprintf(`{"url":%q}`, srv.URL), sessEnv("s1"))
 	if n := strings.Count(out, "é"); n != 300 || !strings.Contains(out, "the text is cut at 300 characters") {
 		t.Fatalf("%d characters: %s", n, out)
+	}
+}
+
+func TestMaskCookieValues(t *testing.T) {
+	ck := func(name, value string) *network.Cookie { return &network.Cookie{Name: name, Value: value} }
+	for _, tc := range []struct {
+		name    string
+		result  string
+		cookies []*network.Cookie
+		want    string
+	}{
+		{"plain value", `"sid=abcdef123456; lang=en"`,
+			[]*network.Cookie{ck("sid", "abcdef123456"), ck("lang", "en")},
+			`"sid=[cookie value]; lang=en"`},
+		{"short value stays", `"a=1234567"`, []*network.Cookie{ck("a", "1234567")}, `"a=1234567"`},
+		{"eight characters", `"a=12345678"`, []*network.Cookie{ck("a", "12345678")}, `"a=[cookie value]"`},
+		{"longest first", `"abcdefgh1234 abcdefgh"`,
+			[]*network.Cookie{ck("a", "abcdefgh"), ck("b", "abcdefgh1234")},
+			`"[cookie value] [cookie value]"`},
+		{"encoded value passes", `"t%3D1%2B2%2F3%3D%3D"`, []*network.Cookie{ck("t", "t=1+2/3==")}, `"t%3D1%2B2%2F3%3D%3D"`},
+		{"quote and backslash", `"a=ab\"cd\\ef12"`, []*network.Cookie{ck("a", `ab"cd\ef12`)}, `"a=[cookie value]"`},
+		{"raw form in error text", `Error: ab"cd\ef12`, []*network.Cookie{ck("a", `ab"cd\ef12`)}, `Error: [cookie value]`},
+		{"nil cookie", `"x"`, []*network.Cookie{nil}, `"x"`},
+		{"no cookies", `{"a":1}`, nil, `{"a":1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := maskCookieValues(tc.result, tc.cookies); got != tc.want {
+				t.Errorf("maskCookieValues = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunJSMasksCookieInError(t *testing.T) {
+	srv := htmlServer(t, `<html><body>c</body></html>`)
+	bt := browserTools(t)
+	env := sessEnv("s1")
+	runToolEnv(t, bt.Tool("browser_navigate"), fmt.Sprintf(`{"url":%q}`, srv.URL), env)
+	runToolEnv(t, bt.Tool("browser_cookies"), `{"action":"set","name":"sid","value":"secretvalue123"}`, env)
+	out := runToolEnvErr(t, bt.Tool("browser_run_js"), `{"code":"throw new Error(document.cookie)"}`, env)
+	if strings.Contains(out, "secretvalue123") || !strings.Contains(out, "[cookie value]") {
+		t.Fatal(out)
 	}
 }
