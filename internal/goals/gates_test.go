@@ -1,6 +1,10 @@
 package goals
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/dnwandana/tether-agent/internal/security"
+)
 
 func TestCheckGateCommand(t *testing.T) {
 	cases := []struct {
@@ -33,6 +37,17 @@ func TestCheckGateCommand(t *testing.T) {
 		if got := CheckGateCommand(c.cmd, c.inGateway, c.sudoSet); got != c.want {
 			t.Errorf("CheckGateCommand(%q, %v, %v) = %+v, want %+v", c.cmd, c.inGateway, c.sudoSet, got, c.want)
 		}
+	}
+}
+
+func TestGateCommandGlobOfStateDB(t *testing.T) {
+	t.Cleanup(func() { security.AddProtectedPathPatterns(nil) })
+	security.AddProtectedPathPatterns(security.ProtectedPaths("/home/d/.tether", "/home/d"))
+	want := GateCheck{Dangerous: true, Description: "use of the Tether Agent database",
+		Reason: "⚠️ This gate matches a dangerous pattern: use of the Tether Agent database. " +
+			"The gate runs before each judge call, with no approval prompt. Add it?"}
+	if got := CheckGateCommand("sqlite3 /home/d/.tether/stat*", true, false); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
 

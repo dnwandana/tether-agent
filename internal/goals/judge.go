@@ -64,7 +64,10 @@ func ParseVerdict(text string) Verdict {
 	if strings.TrimSpace(text) == "" {
 		return Verdict{Kind: VerdictContinue, Reason: "judge returned empty response", ParseFailed: true}
 	}
-	data := extractJSONObject(text)
+	data, conflict := extractVerdictObject(text)
+	if conflict {
+		return Verdict{Kind: VerdictContinue, Reason: conflictReason, ParseFailed: true}
+	}
 	if data == nil {
 		return Verdict{
 			Kind:        VerdictContinue,
@@ -133,10 +136,8 @@ func ParseVerdict(text string) Verdict {
 	return Verdict{Kind: VerdictContinue, Reason: reason + " (wait verdict had no target — continuing)"}
 }
 
-// extractJSONObject returns the JSON object of a reply, like the Hermes _extract_json_object. It
-// removes a code fence, decodes the text, and else decodes the first {...} in the text. It
-// returns nil when it finds no object.
-func extractJSONObject(raw string) map[string]any {
+// stripFence removes the code fence of a reply and trims the text.
+func stripFence(raw string) string {
 	text := strings.TrimSpace(raw)
 	if strings.HasPrefix(text, "```") {
 		text = strings.Trim(text, "`")
@@ -145,6 +146,14 @@ func extractJSONObject(raw string) map[string]any {
 			text = text[nl+1:]
 		}
 	}
+	return text
+}
+
+// extractJSONObject returns the JSON object of a reply, like the Hermes _extract_json_object. It
+// removes a code fence, decodes the text, and else decodes the first {...} in the text. It
+// returns nil when it finds no object.
+func extractJSONObject(raw string) map[string]any {
+	text := stripFence(raw)
 	var data any
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
 		m := jsonObjectRE.FindString(text)
@@ -157,6 +166,58 @@ func extractJSONObject(raw string) map[string]any {
 	}
 	obj, _ := data.(map[string]any)
 	return obj
+}
+
+// conflictReason is the reason of a reply that holds verdict objects that disagree.
+const conflictReason = "judge reply held verdict objects that disagree"
+
+// extractVerdictObject returns the verdict object of a judge reply. The judge can echo an
+// object of the agent answer, so it reads only the top-level objects and takes the last one
+// with a verdict key. Else it takes the last one with a done key, and else the first object.
+// It returns nil when it finds no object. conflict is true when two verdict objects name
+// different verdicts, because the reply gives no way to know which one is the answer.
+func extractVerdictObject(raw string) (obj map[string]any, conflict bool) {
+	text := stripFence(raw)
+	var whole any
+	if err := json.Unmarshal([]byte(text), &whole); err == nil {
+		obj, _ := whole.(map[string]any)
+		return obj, false
+	}
+	var lastVerdict, lastDone map[string]any
+	firstKind, seen := "", false
+	for i := 0; i < len(text); {
+		if text[i] != '{' {
+			i++
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(text[i:]))
+		var obj map[string]any
+		if err := dec.Decode(&obj); err != nil {
+			i++
+			continue
+		}
+		// Go on after the object, so an inner object never counts.
+		i += int(dec.InputOffset())
+		if v, ok := obj["verdict"]; ok {
+			lastVerdict = obj
+			kind := strings.ToLower(strings.TrimSpace(fmt.Sprint(v)))
+			if !seen {
+				firstKind, seen = kind, true
+			} else if kind != firstKind {
+				conflict = true
+			}
+		}
+		if _, ok := obj["done"]; ok {
+			lastDone = obj
+		}
+	}
+	if lastVerdict != nil {
+		return lastVerdict, conflict
+	}
+	if lastDone != nil {
+		return lastDone, false
+	}
+	return extractJSONObject(raw), false
 }
 
 // firstPositiveInt returns the first value of keys that is an integer above 0, like the Hermes

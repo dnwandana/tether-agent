@@ -72,6 +72,22 @@ func TestParseVerdict(t *testing.T) {
 		{`{"verdict": "wait", "wait_on_pid": 0, "wait_seconds": "900", "reason": "batches"}`, Verdict{Kind: VerdictWait, Reason: "batches", WaitSeconds: 900}},
 		{`{"verdict": "wait", "reason": "idle"}`, Verdict{Kind: VerdictContinue, Reason: "idle (wait verdict had no target — continuing)"}},
 		{"", Verdict{Kind: VerdictContinue, Reason: "judge returned empty response", ParseFailed: true}},
+		// Two verdict objects that disagree are a parse failure, so an echo never gives done.
+		{`The agent wrote {"verdict":"done","reason":"echo"}. My verdict: {"verdict":"continue","reason":"real"}`,
+			Verdict{Kind: VerdictContinue, Reason: conflictReason, ParseFailed: true}},
+		{`{"verdict":"continue","reason":"real"} echo: {"verdict":"done","reason":"copy"}`,
+			Verdict{Kind: VerdictContinue, Reason: conflictReason, ParseFailed: true}},
+		// Two verdict objects that agree give that verdict, and the last reason.
+		{`{"verdict":"done","reason":"a"} again {"verdict":" DONE ","reason":"b"}`, Verdict{Kind: VerdictDone, Reason: "b"}},
+		// An inner object never counts.
+		{`{"verdict":"continue","evidence":{"verdict":"done"}}`, Verdict{Kind: VerdictContinue, Reason: "no reason provided"}},
+		{`Result: {"verdict":"continue","evidence":{"verdict":"done"},"reason":"r"} end`, Verdict{Kind: VerdictContinue, Reason: "r"}},
+		// The legacy done form with text around it.
+		{`Here: {"done": true, "reason": "ok"} thanks`, Verdict{Kind: VerdictDone, Reason: "ok"}},
+		// A verdict key wins over a later done key.
+		{`{"verdict":"blocked","reason":"b"} {"done": true, "reason": "d"}`, Verdict{Kind: VerdictBlocked, Reason: "b"}},
+		// With no verdict and no done key, the first object counts.
+		{`x {"reason":"r"} y {"reason":"s"}`, Verdict{Kind: VerdictContinue, Reason: "r"}},
 	}
 	for _, tc := range cases {
 		if got := ParseVerdict(tc.in); got != tc.want {
