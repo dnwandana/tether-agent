@@ -285,6 +285,7 @@ func (g GateApprover) CheckCommand(ctx context.Context, env *Env, command, summa
 	req := security.ApprovalRequest{Command: command, Summary: summary}
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
+		req.Member = env.Member
 		req.ChildName = childName(env)
 	}
 	return g.Gate.Check(ctx, req, g.Prompter)
@@ -299,6 +300,7 @@ func (g GateApprover) CheckScript(ctx context.Context, env *Env, code, summary s
 	req := security.ApprovalRequest{Command: code, Summary: summary}
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
+		req.Member = env.Member
 		req.ChildName = childName(env)
 	}
 	return g.Gate.CheckScript(ctx, req, g.Prompter)
@@ -313,8 +315,24 @@ func (g GateApprover) AskPermission(ctx context.Context, env *Env, req security.
 	}
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
+		req.Member = env.Member
 	}
 	return g.Gate.AskACP(ctx, req, g.Prompter)
+}
+
+// ACPFloor checks command against the floor of the gate. It passes false for the sudo
+// password flag, because the adapter does not get SUDO_PASSWORD. Kind and RootKind make the
+// floor skip the self-stop rule in a cron run, as for terminal.
+func (g GateApprover) ACPFloor(env *Env, command string) (label string, err error) {
+	if g.Gate == nil {
+		return "approval gate missing", errors.New("approval gate missing: the coding agent cannot get an approval without the approval gate")
+	}
+	req := security.ApprovalRequest{Command: command}
+	if env != nil {
+		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
+		req.Member = env.Member
+	}
+	return g.Gate.FloorLabel(req, false)
 }
 
 // ResetSession removes the "This session" answers of sessionID from the gate. A run with

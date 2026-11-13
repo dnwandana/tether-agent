@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -415,5 +416,43 @@ func TestACPDelegateResultMaxChars(t *testing.T) {
 	}
 	if want := "…(13 characters cut) " + strings.Repeat("a", 997) + "END"; res.Text != want {
 		t.Fatalf("%q", res.Text)
+	}
+}
+
+func TestACPDelegateHooksFloorAndPaths(t *testing.T) {
+	allow, home := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	fd := &fakeDelegator{}
+	env := acpEnv(t)
+	env.DataDir = t.TempDir()
+	env.Member = true
+	env.Gate = GateApprover{Gate: &security.Gate{InGateway: true, SudoPasswordSet: true}}
+	runToolEnv(t, NewACPDelegateTool(acpConfig(allow), fd, time.Minute), acpArgs(allow, ""), env)
+	h := fd.last(t).Hooks
+	if !h.Member {
+		t.Fatal("Hooks.Member must copy env.Member")
+	}
+	for _, p := range []string{filepath.Join(env.DataDir, "config.yaml"), filepath.Join(home, ".ssh") + "/"} {
+		if !slices.Contains(h.Protected, p) {
+			t.Fatalf("Protected has no %q: %q", p, h.Protected)
+		}
+	}
+	if h.Floor == nil {
+		t.Fatal("a GateApprover must give a Floor hook")
+	}
+	for cmd, want := range map[string]string{
+		"echo x | sudo -S id":             "sudo -S",
+		"systemctl --user restart tether": "gateway self-stop",
+		"go test ./...":                   "",
+	} {
+		if label, err := h.Floor(cmd); label != want || (err != nil) != (want != "") {
+			t.Errorf("Floor(%q) = %q, %v; want %q", cmd, label, err, want)
+		}
+	}
+	// A gate with no ACPFloor gives a nil Floor, so the bridge uses MatchHardline.
+	env.Gate, env.Member = plainGate{}, false
+	runToolEnv(t, NewACPDelegateTool(acpConfig(allow), fd, time.Minute), acpArgs(allow, ""), env)
+	if h := fd.last(t).Hooks; h.Floor != nil || h.Member {
+		t.Fatalf("%+v", h)
 	}
 }

@@ -181,7 +181,13 @@ func (t *acpDelegateTool) Run(ctx context.Context, raw json.RawMessage, env *Env
 
 // hooks builds the hooks of the coding agent from the env of the current turn.
 func (t *acpDelegateTool) hooks(agent string, env *Env) acp.Hooks {
-	h := acp.Hooks{ApprovalTimeout: t.approvalTimeout}
+	h := acp.Hooks{ApprovalTimeout: t.approvalTimeout, Member: env.Member}
+	// The bridge refuses the same paths as the write_file tool.
+	home, _ := os.UserHomeDir()
+	h.Protected = security.ProtectedPaths(env.DataDir, home)
+	if af, ok := env.Gate.(ACPFloor); ok {
+		h.Floor = func(command string) (string, error) { return af.ACPFloor(env, command) }
+	}
 	if env.Progress != nil {
 		progress := env.Progress
 		h.Progress = func(kind, title string) { progress(0, agent, kind, title) }

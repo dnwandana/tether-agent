@@ -110,3 +110,65 @@ func TestRemoveTools(t *testing.T) {
 		t.Fatal(names)
 	}
 }
+
+func TestMemberToolsets(t *testing.T) {
+	allButOwner := map[string]bool{}
+	for _, s := range AllToolsets() {
+		if s != SetCron && s != SetDelegation {
+			allButOwner[s] = true
+		}
+	}
+	for _, tc := range []struct {
+		name            string
+		channel, member []string
+		want            map[string]bool
+	}{
+		{"default list", []string{"all"}, []string{"web", "ask", "todo"}, map[string]bool{"web": true, "ask": true, "todo": true}},
+		{"all keeps the channel set", []string{"all"}, []string{"all"}, allButOwner},
+		{"the channel limits the list", []string{"web", "file"}, []string{"web", "terminal"}, map[string]bool{"web": true}},
+		{"cron and delegation are removed", []string{"all"}, []string{"cron", "delegation", "web"}, map[string]bool{"web": true}},
+		{"empty list", []string{"all"}, []string{}, nil},
+		{"nil list", []string{"all"}, nil, nil},
+		{"mcp with an all channel", []string{"all"}, []string{"mcp"}, map[string]bool{"mcp": true}},
+		{"mcp keeps the servers of the channel", []string{"web", "mcp_gh"}, []string{"mcp"}, map[string]bool{"mcp_gh": true}},
+		{"one server with an all channel", []string{"all"}, []string{"mcp_gh"}, map[string]bool{"mcp_gh": true}},
+		{"one server with an mcp channel", []string{"mcp"}, []string{"mcp_gh"}, map[string]bool{"mcp_gh": true}},
+		{"one server that the channel does not have", []string{"web"}, []string{"mcp_gh"}, nil},
+		{"another server", []string{"mcp_fs"}, []string{"mcp_gh"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MemberToolsets(tc.channel, tc.member)
+			if got == nil {
+				t.Fatal("got a nil map")
+			}
+			if tc.want == nil {
+				if len(got) != 0 {
+					t.Fatalf("got %v, want empty", got)
+				}
+				return
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The member sees the MCP tools of the channel only.
+func TestMemberToolsetsVisibleMCP(t *testing.T) {
+	r := NewRegistry()
+	r.Register(fakeTool{name: "web_fetch", set: "web"})
+	r.Register(fakeTool{name: "mcp_gh_search", set: "mcp_gh"})
+	r.Register(fakeTool{name: "mcp_fs_read", set: "mcp_fs"})
+	names, _ := r.Visible(MemberToolsets([]string{"web", "mcp_gh"}, []string{"mcp"}), nil)
+	if !reflect.DeepEqual(names, map[string]bool{"mcp_gh_search": true}) {
+		t.Fatal(names)
+	}
+}
+
+// The zero value of Env.Member means owner.
+func TestEnvMemberZeroIsOwner(t *testing.T) {
+	if (Env{}).Member || !(Env{Member: true}).Member {
+		t.Fatal("Env.Member")
+	}
+}

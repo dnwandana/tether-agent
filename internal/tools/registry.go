@@ -59,6 +59,9 @@ type Env struct {
 	// ScriptCall is true for a call from an execute_code script. The script reads a
 	// successful result as data, so the result gets no note.
 	ScriptCall bool
+	// Member is true for the tool context of a member turn. The zero value means owner,
+	// so each Env of a member turn must set it.
+	Member bool
 }
 
 // RunRootKind returns the kind of the top-level run of env: RootKind, or Kind for a
@@ -108,6 +111,13 @@ type ScriptApprover interface {
 // acp_delegate tool reads it from env.Gate with a type assertion.
 type PermissionAsker interface {
 	AskPermission(ctx context.Context, env *Env, req security.ApprovalRequest) (security.Scope, error)
+}
+
+// ACPFloor is an optional interface of Env.Gate. The acp_delegate tool reads it with a type
+// assertion. It checks the command of a permission request of a coding agent against the
+// floor of the gate. label is the short text for the progress line.
+type ACPFloor interface {
+	ACPFloor(env *Env, command string) (label string, err error)
 }
 
 // Result is the result of one tool call for the model.

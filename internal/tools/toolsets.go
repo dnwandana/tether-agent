@@ -121,6 +121,33 @@ func Resolve(channel []string, narrow []string, remove []string) map[string]bool
 	return out
 }
 
+// MemberToolsets returns the toolsets of a member turn. It keeps each set of the
+// channel list that the member list covers, and each set of the member list that the
+// channel list covers. An empty member list gives an empty map, not the channel set.
+// A member never gets cronjob or delegate_task, because a cron job and a batch
+// result run with the owner tools.
+func MemberToolsets(channel, member []string) map[string]bool {
+	out := map[string]bool{}
+	m := expand(member)
+	if len(m) == 0 {
+		return out
+	}
+	c := expand(channel)
+	for name := range c {
+		if covers(m, name) {
+			out[name] = true
+		}
+	}
+	for name := range m {
+		if covers(c, name) {
+			out[name] = true
+		}
+	}
+	delete(out, SetCron)
+	delete(out, SetDelegation)
+	return out
+}
+
 // Visible returns the names and the schemas of the tools whose toolset is in
 // sets, without the tools in removeTools. The set "mcp" makes the tools of
 // every MCP server visible. The schemas are sorted by name, so the order

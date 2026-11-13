@@ -336,6 +336,34 @@ func TestGateApproverNilGateFailsClosed(t *testing.T) {
 
 var _ PermissionAsker = GateApprover{}
 
+var _ ACPFloor = GateApprover{}
+
+func TestGateApproverACPFloor(t *testing.T) {
+	// The adapter has no SUDO_PASSWORD, so the ACP floor ignores SudoPasswordSet.
+	g := GateApprover{Gate: &security.Gate{Mode: "off", InGateway: true, SudoPasswordSet: true}}
+	chat := &Env{SessionID: "s1", Kind: "chat"}
+	cronChild := &Env{SessionID: "c1", Kind: "subagent", RootKind: "cron"}
+	for _, tc := range []struct {
+		env        *Env
+		cmd, label string
+	}{
+		{chat, "rm -rf /", "hardline: recursive delete of root filesystem"},
+		{chat, "echo x | sudo -S id", "sudo -S"},
+		{chat, "systemctl --user restart tether", "gateway self-stop"},
+		{cronChild, "systemctl --user restart tether", ""},
+		{chat, "go test ./...", ""},
+	} {
+		label, err := g.ACPFloor(tc.env, tc.cmd)
+		if label != tc.label || (err != nil) != (tc.label != "") {
+			t.Errorf("ACPFloor(%q) = %q, %v; want %q", tc.cmd, label, err, tc.label)
+		}
+	}
+	// A nil gate fails closed, as CheckCommand does.
+	if label, err := (GateApprover{}).ACPFloor(chat, "ls"); err == nil || label != "approval gate missing" {
+		t.Fatal(label, err)
+	}
+}
+
 // acpRequest is a permission request as the ACP bridge builds it.
 func acpRequest() security.ApprovalRequest {
 	return security.ApprovalRequest{
@@ -481,5 +509,27 @@ func TestTerminalPassesCleanSummary(t *testing.T) {
 	runToolEnvErr(t, tool, `{"command":"ls"}`, env)
 	if !slices.Equal(got, []string{"List the files.", ""}) {
 		t.Fatalf("%q", got)
+	}
+}
+
+func TestGateApproverPassesMember(t *testing.T) {
+	p := &recPrompter{scope: security.ScopeDeny}
+	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
+	env := &Env{SessionID: "s1", Member: true}
+	_ = g.CheckCommand(ctx, env, "rm -rf /tmp/x", "")
+	_ = g.CheckScript(ctx, env, "print(1)", "")
+	_, _ = g.AskPermission(ctx, env, acpRequest())
+	if len(p.reqs) != 3 {
+		t.Fatal(len(p.reqs))
+	}
+	for i, r := range p.reqs {
+		if !r.Member || !r.NoSession || !r.NoAlways {
+			t.Fatalf("request %d: %+v", i, r)
+		}
+	}
+	// An owner Env gives an owner request.
+	_ = g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x", "")
+	if r := p.reqs[3]; r.Member || r.NoSession {
+		t.Fatalf("%+v", r)
 	}
 }
