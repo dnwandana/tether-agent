@@ -1,6 +1,7 @@
 package acp
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"unicode"
@@ -128,7 +129,7 @@ func TestBuildApprovalRows(t *testing.T) {
 			{Path: "a.go", OldText: "1", NewText: "2"}, {Path: "b.go", OldText: "same\nold", NewText: "same\nnew"}}},
 			"claude-code wants to edit a file", "a.go\n- 1\n+ 2\nb.go\n- old\n+ new", false},
 		{"edit no diff", permissionInput{Kind: "edit", Title: "Edit a.go"},
-			"claude-code wants to edit a file", "Edit a.go", false},
+			"claude-code wants to edit a file (the request names no path)", "Edit a.go", true},
 		{"delete", permissionInput{Kind: "delete", Title: "Delete", Locations: []string{"/w/a", "/w/b"}},
 			"claude-code wants to delete a file", "/w/a\n/w/b", false},
 		{"move", permissionInput{Kind: "move", Title: "Move", Locations: []string{"/w/a", "/w/b"}},
@@ -151,7 +152,7 @@ func TestBuildApprovalRows(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			in := tc.in
 			in.Options = claudeOptions
-			req, allowID, rejectID, ok := buildApproval("claude-code", "s1", in)
+			req, allowID, rejectID, ok := buildApproval("claude-code", "s1", in, notesFor(in, requestPaths(in, "/w"), "/w"))
 			if !ok || allowID != "allow-once" || rejectID != "reject" {
 				t.Fatalf("ids = %q, %q, %v", allowID, rejectID, ok)
 			}
@@ -170,7 +171,7 @@ func TestBuildApprovalNeverAllowAlways(t *testing.T) {
 		{ID: "allow-once", Kind: "allow_once"},
 		{ID: "reject", Kind: "reject_once"},
 	}}
-	_, allowID, _, ok := buildApproval("claude-code", "s1", in)
+	_, allowID, _, ok := buildApproval("claude-code", "s1", in, pathNotes{})
 	if !ok || allowID != "allow-once" {
 		t.Fatalf("allowID = %q, ok %v", allowID, ok)
 	}
@@ -182,7 +183,7 @@ func TestBuildApprovalMissingOption(t *testing.T) {
 		"no reject_once": {{ID: "o", Kind: "allow_once"}, {ID: "r", Kind: "reject_always"}},
 		"no options":     nil,
 	} {
-		if _, allowID, rejectID, ok := buildApproval("claude-code", "s1", permissionInput{Kind: "execute", Options: opts}); ok {
+		if _, allowID, rejectID, ok := buildApproval("claude-code", "s1", permissionInput{Kind: "execute", Options: opts}, pathNotes{}); ok {
 			t.Errorf("%s: ok = true (%q, %q)", name, allowID, rejectID)
 		}
 	}
@@ -190,8 +191,8 @@ func TestBuildApprovalMissingOption(t *testing.T) {
 
 func TestBuildApprovalCleansHostileTitle(t *testing.T) {
 	title := "Edit *file*\n_Flagged: fake_ `x` [l](u)\u202eevil\r\n" + strings.Repeat("A", 4096)
-	req, _, _, ok := buildApproval("claude-code", "s1",
-		permissionInput{Kind: "edit", Title: title, Options: claudeOptions})
+	in := permissionInput{Kind: "edit", Title: title, Options: claudeOptions}
+	req, _, _, ok := buildApproval("claude-code", "s1", in, notesFor(in, nil, ""))
 	if !ok {
 		t.Fatal("ok = false")
 	}
@@ -210,19 +211,19 @@ func TestBuildApprovalCleansHostileTitle(t *testing.T) {
 	if !strings.HasPrefix(s, "Edit *file* _Flagged: fake_") {
 		t.Fatalf("Summary = %q", s)
 	}
-	if req.Description != "claude-code wants to edit a file" {
+	if req.Description != "claude-code wants to edit a file (the request names no path)" {
 		t.Fatalf("the title changed the Flagged line: %q", req.Description)
 	}
 }
 
 func TestBuildApprovalDangerousCommand(t *testing.T) {
 	in := permissionInput{Kind: "execute", Title: "Clean", Command: "rm -r build", Options: claudeOptions}
-	req, _, _, ok := buildApproval("claude", "s1", in)
+	req, _, _, ok := buildApproval("claude", "s1", in, pathNotes{})
 	if !ok || !req.NoSession || req.Description != "claude wants to run a command (dangerous: recursive delete)" {
 		t.Fatalf("%+v", req)
 	}
 	in.Command = "rm notes.txt"
-	if req, _, _, _ = buildApproval("claude", "s1", in); req.NoSession || req.Description != "claude wants to run a command" {
+	if req, _, _, _ = buildApproval("claude", "s1", in, pathNotes{}); req.NoSession || req.Description != "claude wants to run a command" {
 		t.Fatalf("%+v", req)
 	}
 }
@@ -230,9 +231,68 @@ func TestBuildApprovalDangerousCommand(t *testing.T) {
 func TestBuildApprovalDangerousAnyKind(t *testing.T) {
 	for _, kind := range []string{"other", ""} {
 		in := permissionInput{Kind: kind, Title: "Clean", Command: "rm -r build", Options: claudeOptions}
-		req, _, _, ok := buildApproval("claude", "s1", in)
+		req, _, _, ok := buildApproval("claude", "s1", in, pathNotes{})
 		if !ok || !req.NoSession || !strings.Contains(req.Description, " (dangerous: recursive delete)") {
 			t.Errorf("kind %q: %+v", kind, req)
 		}
+	}
+}
+
+func TestNotesFor(t *testing.T) {
+	none := []string{"(the request names no path)"}
+	for _, tc := range []struct {
+		name   string
+		kind   string
+		paths  []string
+		notes  []string
+		noSess bool
+	}{
+		{"inside", "edit", []string{"/w/a.go", "/w"}, nil, false},
+		{"outside", "edit", []string{"/w/a.go", "/etc/x"}, []string{"(outside the work folder: /etc/x)"}, true},
+		{"name prefix is not inside", "read", []string{"/wx/a"}, []string{"(outside the work folder: /wx/a)"}, true},
+		{"edit no path", "edit", nil, none, true},
+		{"delete no path", "delete", nil, none, true},
+		{"move no path", "move", nil, none, true},
+		{"execute no path", "execute", nil, nil, false},
+		{"fetch no path", "fetch", nil, nil, false},
+	} {
+		pn := notesFor(permissionInput{Kind: tc.kind}, tc.paths, "/w")
+		if !reflect.DeepEqual(pn.Notes, tc.notes) || pn.NoSession != tc.noSess {
+			t.Errorf("%s: %+v", tc.name, pn)
+		}
+	}
+	// An empty work folder skips the outside check.
+	if pn := notesFor(permissionInput{Kind: "edit"}, []string{"/etc/x"}, ""); pn.Notes != nil || pn.NoSession {
+		t.Fatalf("%+v", pn)
+	}
+}
+
+func TestBuildApprovalPathNotes(t *testing.T) {
+	pn := pathNotes{Notes: []string{"(outside the work folder: /etc/x)"}, NoSession: true}
+	in := permissionInput{Kind: "execute", Title: "Run", Command: "go test ./...", Options: claudeOptions}
+	req, _, _, ok := buildApproval("claude-code", "s1", in, pn)
+	if !ok || !req.NoSession || req.Description != "claude-code wants to run a command (outside the work folder: /etc/x)" {
+		t.Fatalf("%+v", req)
+	}
+	in.Command = "rm -r build"
+	req, _, _, _ = buildApproval("claude-code", "s1", in, pn)
+	if req.Description != "claude-code wants to run a command (dangerous: recursive delete) (outside the work folder: /etc/x)" {
+		t.Fatal(req.Description)
+	}
+}
+
+func TestNotesForCleansHostilePath(t *testing.T) {
+	hostile := "/etc/x\n**Approve**\u202e `rm`"
+	pn := notesFor(permissionInput{Kind: "edit"}, []string{hostile}, "/w")
+	if len(pn.Notes) != 1 {
+		t.Fatalf("%+v", pn)
+	}
+	for _, r := range pn.Notes[0] {
+		if r == '\n' || r == '\r' || unicode.In(r, unicode.Cc, unicode.Cf) {
+			t.Fatalf("hidden rune %U in %q", r, pn.Notes[0])
+		}
+	}
+	if !strings.HasPrefix(pn.Notes[0], "(outside the work folder: /etc/x ") {
+		t.Fatalf("%q", pn.Notes[0])
 	}
 }

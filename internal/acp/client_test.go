@@ -400,3 +400,27 @@ func TestRequestPermissionJoinsArgv(t *testing.T) {
 		t.Fatalf("%+v", perms)
 	}
 }
+
+func TestRequestPermissionRawPaths(t *testing.T) {
+	for _, tc := range []struct {
+		raw  map[string]any
+		want []string
+	}{
+		{map[string]any{"file_path": "src/a.go", "notebook_path": "/w/n.ipynb", "command": "x"}, []string{"src/a.go", "/w/n.ipynb"}},
+		{map[string]any{"file_path": 42, "notebook_path": ""}, nil},
+	} {
+		c := &Client{agentID: "test-agent", log: slog.New(slog.DiscardHandler)}
+		s := sdkClient{c: c}
+		h := &recordHandler{sid: "s1", outcome: permissionOutcome{OptionID: "reject"}}
+		c.attach(h)
+		req := acpsdk.RequestPermissionRequest{SessionId: "s1", Options: []acpsdk.PermissionOption{
+			{OptionId: "reject", Name: "Reject", Kind: acpsdk.PermissionOptionKindRejectOnce},
+		}, ToolCall: acpsdk.ToolCallUpdate{ToolCallId: "t1", Kind: acpsdk.Ptr(acpsdk.ToolKindOther), RawInput: tc.raw}}
+		if _, err := s.RequestPermission(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+		if _, perms := h.got(); len(perms) != 1 || !reflect.DeepEqual(perms[0].RawPaths, tc.want) {
+			t.Fatalf("%v: %+v", tc.raw, perms)
+		}
+	}
+}

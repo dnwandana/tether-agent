@@ -25,6 +25,17 @@ type Hooks struct {
 	Ask func(ctx context.Context, text string, choices []string, timeout time.Duration) (string, error)
 	// ApprovalTimeout is approvals.timeout_s. It is the timeout of an Ask question.
 	ApprovalTimeout time.Duration
+	// Protected holds the protected paths. A request with such a path is refused with no
+	// prompt. Empty skips the check.
+	Protected []string
+	// CWD is the resolved work folder of the ACP session. A path outside it asks each time.
+	// Empty skips the check.
+	CWD string
+	// Floor is the floor of the gate. A non-nil error refuses a command. Nil uses
+	// security.MatchHardline.
+	Floor func(command string) (label string, err error)
+	// Member is true for a member turn. The Ask fallback reads it.
+	Member bool
 }
 
 // bridge answers the permission requests of one Prompt call. It lets one
@@ -93,11 +104,24 @@ func (b *bridge) decide(ctx context.Context, acpSessionID string, in permissionI
 // ask maps one request to an Approve call, or to an Ask call when the
 // request has no allow_once or no reject_once option.
 //
-// A request of any kind with a command that matches a hardline rule is refused first. No
-// session grant and no hook call can permit it.
+// It runs these steps in order:
+//  1. A request of any kind with a command that fails the floor is refused. No session
+//     grant and no hook call can permit it.
+//  2. A request with a protected path is refused.
+//  3. A path outside the work folder, or an edit with no path, makes the request ask each
+//     time.
+//  4. The request goes to Approve, or to Ask when an option is missing.
 func (b *bridge) ask(ctx context.Context, acpSessionID string, in permissionInput) permissionOutcome {
 	if in.Command != "" {
-		if p, hit := security.MatchHardline(in.Command); hit {
+		if b.h.Floor != nil {
+			if label, err := b.h.Floor(in.Command); err != nil {
+				b.log.Warn("acp: refused a command at the floor", "agent", b.agentID, "label", label)
+				if b.progress != nil {
+					b.progress("blocked", label)
+				}
+				return rejectOutcome(in.Options)
+			}
+		} else if p, hit := security.MatchHardline(in.Command); hit {
 			b.log.Warn("acp: refused a hardline command", "agent", b.agentID, "pattern", p.ID)
 			if b.progress != nil {
 				b.progress("blocked", "hardline: "+p.Description)
@@ -105,9 +129,26 @@ func (b *bridge) ask(ctx context.Context, acpSessionID string, in permissionInpu
 			return rejectOutcome(in.Options)
 		}
 	}
-	req, allowID, rejectID, ok := buildApproval(b.agentID, acpSessionID, in)
+	paths := requestPaths(in, b.h.CWD)
+	if len(b.h.Protected) > 0 {
+		for _, p := range paths {
+			if security.CheckWritable(p, b.h.Protected, false) != nil {
+				b.log.Warn("acp: refused a protected path", "agent", b.agentID, "path", p)
+				if b.progress != nil {
+					b.progress("blocked", "protected path "+p)
+				}
+				return rejectOutcome(in.Options)
+			}
+		}
+	}
+	pn := notesFor(in, paths, b.h.CWD)
+	req, allowID, rejectID, ok := buildApproval(b.agentID, acpSessionID, in, pn)
 	if !ok {
-		return b.askChoice(ctx, in)
+		if b.h.Member {
+			// The question goes to the user of the turn, not to an owner.
+			return rejectOutcome(in.Options)
+		}
+		return b.askChoice(ctx, in, pn)
 	}
 	reject := permissionOutcome{OptionID: rejectID}
 	if b.h.Approve == nil {
@@ -145,8 +186,13 @@ func rejectOutcome(opts []option) permissionOutcome {
 	return permissionOutcome{Cancelled: true}
 }
 
-// askChoice asks with Hooks.Ask and the option names of the agent.
-func (b *bridge) askChoice(ctx context.Context, in permissionInput) permissionOutcome {
+// maxFallbackBodyRunes is the length limit of the code fence in the fallback question.
+const maxFallbackBodyRunes = 1000
+
+// askChoice asks with Hooks.Ask and the option names of the agent. The question shows the
+// description, the dangerous note, the path notes, and the body in a code fence. Text from
+// the repository must not change the question.
+func (b *bridge) askChoice(ctx context.Context, in permissionInput, pn pathNotes) permissionOutcome {
 	fallback := permissionOutcome{Cancelled: true}
 	for _, o := range in.Options {
 		if strings.HasPrefix(o.Kind, "reject_") {
@@ -174,7 +220,8 @@ func (b *bridge) askChoice(ctx context.Context, in permissionInput) permissionOu
 	if b.h.Ask == nil || len(choices) == 0 {
 		return fallback
 	}
-	question := b.agentID + " asks for a permission: " + security.CleanSummary(in.Title)
+	question := b.agentID + " asks for a permission: " + security.CleanSummary(in.Title) + "\n" +
+		describe(b.agentID, in, pn) + "\n```\n" + fenceBody(bodyFor(in)) + "\n```"
 	answer, err := b.h.Ask(ctx, question, choices, b.h.ApprovalTimeout)
 	if ctx.Err() != nil {
 		return permissionOutcome{Cancelled: true}
@@ -186,6 +233,31 @@ func (b *bridge) askChoice(ctx context.Context, in permissionInput) permissionOu
 		return permissionOutcome{OptionID: id}
 	}
 	return fallback
+}
+
+// fenceBody makes the text safe for a code fence. It shows hidden runes, cuts the text, and
+// replaces each run of three or more backticks with three single quotes.
+func fenceBody(s string) string {
+	s = cutRunes(security.ShowHidden(s), maxFallbackBodyRunes)
+	var sb strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '`' {
+			sb.WriteByte(s[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && s[j] == '`' {
+			j++
+		}
+		if j-i >= 3 {
+			sb.WriteString("'''")
+		} else {
+			sb.WriteString(s[i:j])
+		}
+		i = j
+	}
+	return sb.String()
 }
 
 // cutRunes returns the first n runes of s.

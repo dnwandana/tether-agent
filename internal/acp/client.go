@@ -66,6 +66,9 @@ type permissionInput struct {
 	Locations                                         []string
 	Diffs                                             []diffItem
 	Options                                           []option
+	// RawPaths holds the string values of rawInput.file_path and rawInput.notebook_path.
+	// An adapter can send such a path with kind other and no location.
+	RawPaths []string
 }
 
 // permissionOutcome is the answer to a permission request. An empty OptionID counts as
@@ -535,6 +538,11 @@ func (s sdkClient) RequestPermission(ctx context.Context, p acpsdk.RequestPermis
 		in.Command = commandText(m["command"])
 		if v, ok := m["plan"].(string); ok {
 			in.Plan = v
+		}
+		for _, k := range []string{"file_path", "notebook_path"} {
+			if v, ok := m[k].(string); ok && v != "" {
+				in.RawPaths = append(in.RawPaths, v)
+			}
 		}
 	}
 	for _, l := range tc.Locations {

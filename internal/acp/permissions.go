@@ -102,11 +102,61 @@ func commandProgram(command string) (program string, indirect bool) {
 	return "", indirect
 }
 
+// pathNotes holds the path notes of a request. NoSession is true when a note makes the user
+// answer each time.
+type pathNotes struct {
+	Notes     []string
+	NoSession bool
+}
+
+// notesFor returns the path notes of a request. With a cwd that is not empty, a path outside
+// cwd gets a note. The note shows the path as one clean line, because the agent
+// controls the path text. An edit, delete, or move request with no path also gets a note.
+func notesFor(in permissionInput, paths []string, cwd string) pathNotes {
+	var pn pathNotes
+	if cwd != "" {
+		for _, p := range paths {
+			if p != cwd && !strings.HasPrefix(p, cwd+string(filepath.Separator)) {
+				pn.Notes = append(pn.Notes, "(outside the work folder: "+security.CleanSummary(p)+")")
+			}
+		}
+	}
+	if len(paths) == 0 {
+		switch in.Kind {
+		case "edit", "delete", "move":
+			pn.Notes = append(pn.Notes, "(the request names no path)")
+		}
+	}
+	pn.NoSession = len(pn.Notes) > 0
+	return pn
+}
+
+// describe returns the "Flagged:" line of a permission request. It has the verb of the kind,
+// the danger note of the command, and the path notes.
+func describe(agentID string, in permissionInput, pn pathNotes) string {
+	var desc strings.Builder
+	desc.WriteString(agentID)
+	desc.WriteString(" wants to ")
+	desc.WriteString(verbFor(in.Kind))
+	if in.Command != "" {
+		if p, hit := security.MatchDangerous(in.Command); hit {
+			desc.WriteString(" (dangerous: ")
+			desc.WriteString(p.Description)
+			desc.WriteString(")")
+		}
+	}
+	for _, n := range pn.Notes {
+		desc.WriteString(" ")
+		desc.WriteString(n)
+	}
+	return desc.String()
+}
+
 // buildApproval maps a permission request of the agent to an approval request. allowID and
 // rejectID are the ids of the first allow_once and the first reject_once options. ok is
 // false when one of them is missing. An allow_always option is never selected, because
 // Tether Agent keeps the grants itself.
-func buildApproval(agentID, acpSessionID string, in permissionInput) (req security.ApprovalRequest, allowID, rejectID string, ok bool) {
+func buildApproval(agentID, acpSessionID string, in permissionInput, pn pathNotes) (req security.ApprovalRequest, allowID, rejectID string, ok bool) {
 	for _, o := range in.Options {
 		switch o.Kind {
 		case "allow_once":
@@ -123,19 +173,13 @@ func buildApproval(agentID, acpSessionID string, in permissionInput) (req securi
 		return security.ApprovalRequest{}, "", "", false
 	}
 	id, noSession := patternID(agentID, acpSessionID, in.Kind, in.Command)
-	desc := agentID + " wants to " + verbFor(in.Kind)
-	if in.Command != "" {
-		if p, hit := security.MatchDangerous(in.Command); hit {
-			desc += " (dangerous: " + p.Description + ")"
-		}
-	}
 	req = security.ApprovalRequest{
 		Summary:     security.CleanSummary(in.Title),
-		Description: desc,
+		Description: describe(agentID, in, pn),
 		Command:     bodyFor(in),
 		PatternID:   id,
 		NoAlways:    true,
-		NoSession:   noSession,
+		NoSession:   noSession || pn.NoSession,
 	}
 	return req, allowID, rejectID, true
 }

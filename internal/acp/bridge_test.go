@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -221,7 +223,7 @@ func TestBridgeAskFallback(t *testing.T) {
 				t.Fatalf("decide() = %+v, want %+v", got, tc.want)
 			}
 			if !reflect.DeepEqual(choices, wantChoices) || timeout != 10*time.Minute ||
-				text != "claude-code asks for a permission: Strange request" {
+				text != "claude-code asks for a permission: Strange request\nclaude-code wants to use a tool\n```\nStrange\nrequest\n```" {
 				t.Fatalf("Ask got %q, %v, %s", text, choices, timeout)
 			}
 		})
@@ -386,6 +388,37 @@ func TestBridgeHardlineAnyKind(t *testing.T) {
 			t.Errorf("kind %q: decide() = %+v, approves %d, asks %d", kind, got, approves, asks)
 		}
 	}
+	g := &security.Gate{InGateway: true}
+	floor := func(cmd string) (string, error) {
+		return g.FloorLabel(security.ApprovalRequest{Command: cmd, Kind: "chat"}, false)
+	}
+	for cmd, label := range map[string]string{
+		"echo x | sudo -S id":             "sudo -S",
+		"systemctl --user restart tether": "gateway self-stop",
+	} {
+		for _, kind := range []string{"execute", "other", ""} {
+			var approves, asks int
+			var events []string
+			b := newBridge(context.Background(), "claude-code", Hooks{
+				Floor: floor,
+				Approve: func(context.Context, security.ApprovalRequest) (security.Scope, error) {
+					approves++
+					return security.ScopeOnce, nil
+				},
+				Ask: func(context.Context, string, []string, time.Duration) (string, error) {
+					asks++
+					return "Allow", nil
+				},
+				Progress: func(k, title string) { events = append(events, k+"|"+title) },
+			}, nil)
+			in := cmdInput(cmd)
+			in.Kind = kind
+			if got := b.decide(context.Background(), "acp-1", in); got != (permissionOutcome{OptionID: "reject"}) ||
+				approves != 0 || asks != 0 || !slices.Equal(events, []string{"blocked|" + label}) {
+				t.Errorf("floor %q kind %q: decide() = %+v, approves %d, asks %d, events %v", cmd, kind, got, approves, asks, events)
+			}
+		}
+	}
 }
 
 func TestBridgeDangerousOtherKindAsksWithNoSession(t *testing.T) {
@@ -401,5 +434,237 @@ func TestBridgeDangerousOtherKindAsksWithNoSession(t *testing.T) {
 	}
 	if !got.NoSession || !strings.Contains(got.Description, "(dangerous: recursive delete)") {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// pathRig is a bridge with a real gate. Its prompter answers Session. last is the last
+// request that reached Approve.
+type pathRig struct {
+	b         *bridge
+	p         *scopePrompter
+	last      security.ApprovalRequest
+	events    []string
+	cwd, data string
+}
+
+func newPathRig(t *testing.T) *pathRig {
+	t.Helper()
+	r := &pathRig{p: &scopePrompter{answer: security.ScopeSession}, cwd: realTemp(t), data: realTemp(t)}
+	g := &security.Gate{Timeout: time.Second}
+	r.b = newBridge(context.Background(), "claude-code", Hooks{
+		CWD:       r.cwd,
+		Protected: security.ProtectedPaths(r.data, ""),
+		Approve: func(ctx context.Context, req security.ApprovalRequest) (security.Scope, error) {
+			req.SessionID = "s1"
+			r.last = req
+			return g.AskACP(ctx, req, r.p)
+		},
+		Progress: func(kind, title string) { r.events = append(r.events, kind+"|"+title) },
+	}, nil)
+	return r
+}
+
+func (r *pathRig) decide(in permissionInput) permissionOutcome {
+	return r.b.decide(context.Background(), "acp-1", in)
+}
+
+// editOf is an edit request of one diff with the claude options.
+func editOf(path string) permissionInput {
+	return permissionInput{Kind: "edit", Title: "Edit", Diffs: []diffItem{{Path: path, NewText: "x"}}, Options: claudeOptions}
+}
+
+var allowOnce, rejectOnce = permissionOutcome{OptionID: "allow-once"}, permissionOutcome{OptionID: "reject"}
+
+func TestBridgePathChecksAfterSessionGrant(t *testing.T) {
+	r := newPathRig(t)
+	other := realTemp(t)
+	protected := filepath.Join(r.data, "config.yaml")
+	steps := []struct {
+		in      permissionInput
+		want    permissionOutcome
+		prompts int
+	}{
+		{editOf("a.go"), allowOnce, 1},
+		{editOf("b.go"), allowOnce, 1},
+		{editOf(protected), rejectOnce, 1},
+		{editOf(filepath.Join(other, "x.txt")), allowOnce, 2},
+		{editOf(filepath.Join(other, "x.txt")), allowOnce, 3},
+		{permissionInput{Kind: "edit", Title: "Edit", Options: claudeOptions}, allowOnce, 4},
+	}
+	for i, s := range steps {
+		if got := r.decide(s.in); got != s.want || r.p.n != s.prompts {
+			t.Fatalf("step %d: %+v, prompts %d", i, got, r.p.n)
+		}
+		switch i {
+		case 3:
+			if !r.last.NoSession || !strings.Contains(r.last.Description, "(outside the work folder: "+filepath.Join(other, "x.txt")+")") {
+				t.Fatalf("%+v", r.last)
+			}
+		case 5:
+			if !r.last.NoSession || !strings.Contains(r.last.Description, "(the request names no path)") {
+				t.Fatalf("%+v", r.last)
+			}
+		}
+	}
+	if !slices.Equal(r.events, []string{"blocked|protected path " + protected}) {
+		t.Fatal(r.events)
+	}
+}
+
+func TestBridgeDotDotLeavesWorkFolder(t *testing.T) {
+	r := newPathRig(t)
+	if got := r.decide(editOf("a.go")); got != allowOnce || r.p.n != 1 {
+		t.Fatal(got, r.p.n)
+	}
+	if got := r.decide(editOf("sub/../../x")); got != allowOnce || r.p.n != 2 {
+		t.Fatal(got, r.p.n)
+	}
+	want := "claude-code wants to edit a file (outside the work folder: " + filepath.Join(filepath.Dir(r.cwd), "x") + ")"
+	if !r.last.NoSession || r.last.Description != want {
+		t.Fatalf("%+v", r.last)
+	}
+}
+
+func TestBridgeTildeProtectedRefused(t *testing.T) {
+	home := realTemp(t)
+	t.Setenv("HOME", home)
+	var approves int
+	b := newBridge(context.Background(), "claude-code", Hooks{
+		Protected: security.ProtectedPaths(filepath.Join(home, ".tether"), home),
+		Approve: func(context.Context, security.ApprovalRequest) (security.Scope, error) {
+			approves++
+			return security.ScopeOnce, nil
+		},
+	}, nil)
+	in := permissionInput{Kind: "edit", Locations: []string{"~/.tether/config.yaml"}, Options: claudeOptions}
+	if got := b.decide(context.Background(), "acp-1", in); got != rejectOnce || approves != 0 {
+		t.Fatal(got, approves)
+	}
+}
+
+func TestBridgeLinkOutsideAsks(t *testing.T) {
+	r := newPathRig(t)
+	out := realTemp(t)
+	if err := os.Symlink(out, filepath.Join(r.cwd, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.decide(editOf("a.go")); got != allowOnce || r.p.n != 1 {
+		t.Fatal(got, r.p.n)
+	}
+	if got := r.decide(editOf("link/x.txt")); got != allowOnce || r.p.n != 2 {
+		t.Fatal(got, r.p.n)
+	}
+	if !r.last.NoSession || !strings.Contains(r.last.Description, "(outside the work folder: "+filepath.Join(out, "x.txt")+")") {
+		t.Fatalf("%+v", r.last)
+	}
+}
+
+func TestBridgeChecksRawFilePath(t *testing.T) {
+	r := newPathRig(t)
+	in := permissionInput{Kind: "other", Title: "NotebookEdit", RawPaths: []string{filepath.Join(r.data, ".env")}, Options: claudeOptions}
+	if got := r.decide(in); got != rejectOnce || r.p.n != 0 {
+		t.Fatal(got, r.p.n)
+	}
+	out := realTemp(t)
+	in.RawPaths = []string{filepath.Join(out, "n.ipynb")}
+	if got := r.decide(in); got != allowOnce || r.p.n != 1 {
+		t.Fatal(got, r.p.n)
+	}
+	if !r.last.NoSession || !strings.Contains(r.last.Description, "(outside the work folder: "+filepath.Join(out, "n.ipynb")+")") {
+		t.Fatalf("%+v", r.last)
+	}
+}
+
+func TestBridgeProtectedSkipsAsk(t *testing.T) {
+	data := realTemp(t)
+	var asks int
+	b := newBridge(context.Background(), "claude-code", Hooks{
+		Protected: security.ProtectedPaths(data, ""),
+		Ask: func(context.Context, string, []string, time.Duration) (string, error) {
+			asks++
+			return "Allow", nil
+		},
+	}, nil)
+	in := permissionInput{Kind: "edit", Locations: []string{filepath.Join(data, "state.db")}, Options: []option{
+		{ID: "always", Name: "Allow", Kind: "allow_always"}, {ID: "never", Name: "Reject", Kind: "reject_always"}}}
+	if got := b.decide(context.Background(), "acp-1", in); got != (permissionOutcome{OptionID: "never"}) || asks != 0 {
+		t.Fatal(got, asks)
+	}
+}
+
+func TestBridgeNoCWDKeepsKindGrant(t *testing.T) {
+	p := &scopePrompter{answer: security.ScopeSession}
+	g := &security.Gate{Timeout: time.Second}
+	b := newBridge(context.Background(), "claude-code", Hooks{Approve: func(ctx context.Context, req security.ApprovalRequest) (security.Scope, error) {
+		req.SessionID = "s1"
+		return g.AskACP(ctx, req, p)
+	}}, nil)
+	for range 2 {
+		if got := b.decide(context.Background(), "acp-1", editOf("/anywhere/a.go")); got != allowOnce {
+			t.Fatal(got)
+		}
+	}
+	if p.n != 1 {
+		t.Fatal(p.n)
+	}
+}
+
+func TestBridgeAskFallbackFence(t *testing.T) {
+	opts := []option{{ID: "always", Name: "Allow", Kind: "allow_always"}, {ID: "never", Name: "Reject", Kind: "reject_always"}}
+	fence := func(body string) string { return "\n```\n" + body + "\n```" }
+	for _, tc := range []struct {
+		name string
+		in   permissionInput
+		want string
+	}{
+		{"dangerous command", permissionInput{Kind: "execute", Title: "Run tests", Command: "rm -rf build"},
+			"claude asks for a permission: Run tests\nclaude wants to run a command (dangerous: recursive delete)" + fence("rm -rf build")},
+		{"backtick runs", permissionInput{Kind: "execute", Title: "x", Command: "echo ```x```` done"},
+			"claude asks for a permission: x\nclaude wants to run a command" + fence("echo '''x''' done")},
+		{"hidden rune", permissionInput{Kind: "execute", Title: "x", Command: "ls \u202e x"},
+			"claude asks for a permission: x\nclaude wants to run a command" + fence("ls <U+202E> x")},
+		{"long body", permissionInput{Kind: "execute", Title: "x", Command: strings.Repeat("a", 1500)},
+			"claude asks for a permission: x\nclaude wants to run a command" + fence(strings.Repeat("a", 1000))},
+		{"no path note", permissionInput{Kind: "edit", Title: "Edit"},
+			"claude asks for a permission: Edit\nclaude wants to edit a file (the request names no path)" + fence("Edit")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var text string
+			b := newBridge(context.Background(), "claude", Hooks{Ask: func(_ context.Context, q string, _ []string, _ time.Duration) (string, error) {
+				text = q
+				return "Reject", nil
+			}}, nil)
+			in := tc.in
+			in.Options = opts
+			if got := b.decide(context.Background(), "acp-1", in); got != (permissionOutcome{OptionID: "never"}) || text != tc.want {
+				t.Fatalf("decide() = %+v\ntext %q\nwant %q", got, text, tc.want)
+			}
+		})
+	}
+}
+
+func TestBridgeMemberFallbackRefused(t *testing.T) {
+	asks := 0
+	h := Hooks{Member: true, Ask: func(context.Context, string, []string, time.Duration) (string, error) {
+		asks++
+		return "Allow", nil
+	}}
+	b := newBridge(context.Background(), "claude", h, nil)
+	in := permissionInput{Kind: "other", Title: "x", Options: []option{
+		{ID: "always", Name: "Allow", Kind: "allow_always"}, {ID: "never", Name: "Reject", Kind: "reject_always"}}}
+	if got := b.decide(context.Background(), "acp-1", in); got != (permissionOutcome{OptionID: "never"}) || asks != 0 {
+		t.Fatal(got, asks)
+	}
+	in.Options = []option{{ID: "always", Name: "Allow", Kind: "allow_always"}}
+	if got := b.decide(context.Background(), "acp-1", in); !got.Cancelled || asks != 0 {
+		t.Fatal(got, asks)
+	}
+	// A member request with allow_once and reject_once still goes to Approve.
+	h.Approve = func(context.Context, security.ApprovalRequest) (security.Scope, error) {
+		return security.ScopeOnce, nil
+	}
+	b = newBridge(context.Background(), "claude", h, nil)
+	if got := b.decide(context.Background(), "acp-1", execInput("x")); got != (permissionOutcome{OptionID: "allow-once"}) {
+		t.Fatal(got)
 	}
 }

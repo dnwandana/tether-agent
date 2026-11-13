@@ -396,6 +396,9 @@ func (m *Manager) Delegate(ctx context.Context, d Delegation) (Outcome, error) {
 		notes = append(notes, note)
 	}
 
+	// The work folder is fixed for each ACP session: session closes the entry when the folder
+	// changes, and it resumes a row only for the same folder.
+	d.Hooks.CWD = e.cwd
 	res, err := e.client.Prompt(ctx, e.info.ID, d.Task, d.Hooks)
 	if err != nil {
 		return Outcome{}, m.promptErr(ctx, e, err)

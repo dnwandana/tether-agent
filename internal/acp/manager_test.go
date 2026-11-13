@@ -5,12 +5,14 @@ import (
 	"errors"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 const fakeModes = `"mode_config":true,"modes":["default","acceptEdits","auto","bypassPermissions"]`
@@ -459,4 +461,25 @@ func TestCloseBusySession(t *testing.T) {
 		_, ok, _ := st.Get(context.Background(), "s1", "claude-code")
 		return !ok
 	})
+}
+
+func TestDelegateSetsHooksCWD(t *testing.T) {
+	cwd, outside := realTemp(t), filepath.Join(realTemp(t), "x.txt")
+	js := `{` + fakeModes + `,"turns":[{"steps":[` +
+		`{"permission":{"tool_call":{"id":"t1","kind":"edit","title":"Edit x","locations":[` + strconv.Quote(outside) + `]},` + permOptions + `}},` +
+		`{"message":"one"}],"stop_reason":"end_turn"}]}`
+	agents, _ := fakeAgents(t, js)
+	m, _, _ := newTestManager(t, 2, agents, nil)
+	var got security.ApprovalRequest
+	d := del("s1", cwd)
+	d.Hooks.Approve = func(_ context.Context, r security.ApprovalRequest) (security.Scope, error) {
+		got = r
+		return security.ScopeOnce, nil
+	}
+	if _, err := m.Delegate(context.Background(), d); err != nil {
+		t.Fatal(err)
+	}
+	if !got.NoSession || !strings.Contains(got.Description, "(outside the work folder: "+outside+")") {
+		t.Fatalf("Delegate did not give the work folder to the bridge: %+v", got)
+	}
 }
