@@ -112,13 +112,22 @@ func (m modelItem) unixTime() int64 {
 // model. The newest model is first when the items have a time. The list
 // has no model that cannot chat. When no model stays, the error is
 // ErrNoChatModels. An OpenRouter entry on the preset URL gets two groups
-// from the server sort.
+// from the server sort. It uses a time limit of 10 seconds.
 func ListModels(ctx context.Context, name string, p config.Provider, hc *http.Client) (ModelList, error) {
+	return ListModelsWithin(ctx, name, p, hc, 0)
+}
+
+// ListModelsWithin works like ListModels, with the time limit timeout for the
+// list call. A timeout of 0 or less means 10 seconds.
+func ListModelsWithin(ctx context.Context, name string, p config.Provider, hc *http.Client, timeout time.Duration) (ModelList, error) {
+	if timeout <= 0 {
+		timeout = listTimeout
+	}
 	if isOpenRouter(p) {
-		return listOpenRouter(ctx, name, p, hc)
+		return listOpenRouter(ctx, name, p, hc, timeout)
 	}
 	e := newEndpoint(name, p, hc)
-	ctx, cancel := context.WithTimeout(ctx, listTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var raw json.RawMessage
 	if err := getJSON(ctx, e.hc, name, listURL(e), listHeader(e), e.apiKey, &raw); err != nil {

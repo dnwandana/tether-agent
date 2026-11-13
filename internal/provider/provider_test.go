@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 )
@@ -138,5 +139,29 @@ func TestFromConfigNeedsPrimary(t *testing.T) {
 	bad.Providers["deepseek"] = config.Provider{Format: "grpc"}
 	if _, err := FromConfig(bad, nil, nil); err == nil {
 		t.Fatal("want the format error")
+	}
+}
+
+func TestFromConfigSetsProviderKeys(t *testing.T) {
+	c := setConfig("old")
+	c.Provider.FailureSkipS = 5
+	c.Provider.AnthropicMaxTokens = 2048
+	s, err := FromConfig(c, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Health.Skip != 5*time.Second {
+		t.Fatal(s.Health.Skip)
+	}
+	if got := s.Raw["fallback"].(*anthropic).maxTokens; got != 2048 {
+		t.Fatal(got)
+	}
+	c.Provider = config.ProviderConfig{}
+	s, err = FromConfig(c, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Health.Skip != 0 || s.Raw["fallback"].(*anthropic).maxTokens != 0 {
+		t.Fatal("zero keys keep the consts:", s.Health.Skip)
 	}
 }

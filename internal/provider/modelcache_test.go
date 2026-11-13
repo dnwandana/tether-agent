@@ -130,3 +130,49 @@ func TestNilModelCache(t *testing.T) {
 	eq(t, calls.Load(), int32(2))
 	c.Forget("primary", p)
 }
+
+// slowServer starts a fake provider that never answers. The handler ends when the
+// request ends or when the test ends.
+func slowServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) }) // runs before srv.Close
+	return srv
+}
+
+func TestModelCacheTTLField(t *testing.T) {
+	srv, calls := cacheServer(t)
+	c := NewModelCache(srv.Client())
+	c.TTL = 10 * time.Minute
+	start := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	now := start
+	c.now = func() time.Time { return now }
+	p := cacheEntry(srv.URL, "k1")
+	cacheGet(t, c, "primary", p)
+	now = start.Add(10*time.Minute - time.Second)
+	cacheGet(t, c, "primary", p)
+	eq(t, calls.Load(), int32(1))
+	now = start.Add(10 * time.Minute)
+	cacheGet(t, c, "primary", p)
+	eq(t, calls.Load(), int32(2))
+}
+
+func TestModelCacheListTimeoutField(t *testing.T) {
+	srv := slowServer(t)
+	c := NewModelCache(srv.Client())
+	c.ListTimeout = 50 * time.Millisecond
+	start := time.Now()
+	if _, err := c.Get(ctx, "primary", cacheEntry(srv.URL, "k1")); err == nil {
+		t.Fatal("a list call past the time limit must fail")
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("the call took %v; the limit is 50ms", d)
+	}
+}

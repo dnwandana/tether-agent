@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 )
@@ -256,5 +257,14 @@ func TestModelListCause(t *testing.T) {
 	}
 	for _, c := range cases {
 		eq(t, ModelListCause(c.err), c.want)
+	}
+}
+
+func TestListModelsWithinTimeout(t *testing.T) {
+	srv := slowServer(t)
+	start := time.Now()
+	_, err := ListModelsWithin(ctx, "p", config.Provider{Format: "openai", BaseURL: srv.URL}, srv.Client(), 50*time.Millisecond)
+	if err == nil || time.Since(start) > 2*time.Second {
+		t.Fatalf("err %v after %v", err, time.Since(start))
 	}
 }

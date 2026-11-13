@@ -17,6 +17,11 @@ const modelCacheTTL = time.Hour
 // ModelCache keeps the model lists of the provider entries in memory, for the
 // gateway and the CLI chat. It stores a list on success only.
 type ModelCache struct {
+	// TTL is the time that a list stays in the cache. 0 means modelCacheTTL.
+	TTL time.Duration
+	// ListTimeout is the time limit of one list call. 0 means 10 seconds.
+	ListTimeout time.Duration
+
 	hc    *http.Client
 	now   func() time.Time
 	mu    sync.Mutex
@@ -35,21 +40,25 @@ func NewModelCache(hc *http.Client) *ModelCache {
 }
 
 // Get returns the model list of the entry p with the name name. It calls the
-// provider when the cache has no list, or when the list is 1 hour old.
+// provider when the cache has no list, or when the list is older than TTL.
 func (c *ModelCache) Get(ctx context.Context, name string, p config.Provider) (ModelList, error) {
 	if c == nil {
 		return ListModels(ctx, name, p, nil)
+	}
+	ttl := c.TTL
+	if ttl <= 0 {
+		ttl = modelCacheTTL
 	}
 	key := modelCacheKey(name, p)
 	c.mu.Lock()
 	e, ok := c.lists[key]
 	c.mu.Unlock()
-	if ok && c.now().Before(e.at.Add(modelCacheTTL)) {
+	if ok && c.now().Before(e.at.Add(ttl)) {
 		return e.list, nil
 	}
-	// The call can take 10 seconds, so the mutex is free during the call. Two calls at
+	// The call can take as long as ListTimeout, so the mutex is free during the call. Two calls at
 	// the same time can both go to the provider, and the last result stays.
-	l, err := ListModels(ctx, name, p, c.hc)
+	l, err := ListModelsWithin(ctx, name, p, c.hc, c.ListTimeout)
 	if err != nil {
 		return ModelList{}, err
 	}

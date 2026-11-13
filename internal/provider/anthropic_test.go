@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/dnwandana/tether-agent/internal/config"
 )
 
 // anthropicCapture starts a fake server that stores the request body in
@@ -313,5 +315,37 @@ func TestAnthropicEffortFields(t *testing.T) {
 		if !strings.Contains(s, c.want) {
 			t.Errorf("%s %s: %s", c.style, c.level, s)
 		}
+	}
+}
+
+func TestAnthropicMaxTokensFromNewWith(t *testing.T) {
+	maxTokens := func(p Provider, req Request) any {
+		t.Helper()
+		var body map[string]any
+		srv := anthropicCapture(t, &body)
+		p.(*anthropic).baseURL = srv.URL
+		p.(*anthropic).hc = srv.Client()
+		ch, err := p.Stream(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = Collect(ch, nil)
+		return body["max_tokens"]
+	}
+	pc := config.Provider{Format: "anthropic", BaseURL: "http://unused", APIKey: "k", Model: "claude-x"}
+	hi := []Message{{Role: RoleUser, Content: "hi"}}
+	p, err := NewWith("a", pc, nil, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := maxTokens(p, Request{Messages: hi}); got != float64(4096) {
+		t.Fatal(got)
+	}
+	if got := maxTokens(p, Request{Messages: hi, MaxTokens: 100}); got != float64(100) {
+		t.Fatal("the request value wins:", got)
+	}
+	p, _ = New("a", pc, nil)
+	if got := maxTokens(p, Request{Messages: hi}); got != float64(8192) {
+		t.Fatal("New keeps 8192:", got)
 	}
 }

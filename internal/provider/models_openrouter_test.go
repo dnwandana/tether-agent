@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 )
@@ -266,4 +267,28 @@ func TestSearchModelsOtherEntry(t *testing.T) {
 		}
 	}
 	eq(t, len(f.queries), 0)
+}
+
+func TestOpenRouterWithinTimeout(t *testing.T) {
+	srv := slowServer(t)
+	calls := map[string]func(time.Duration) error{
+		"list": func(d time.Duration) error {
+			_, err := ListModelsWithin(ctx, "primary", orEntry(), orClient(srv.URL), d)
+			return err
+		},
+		"search": func(d time.Duration) error {
+			_, err := SearchModelsWithin(ctx, "primary", orEntry(), orClient(srv.URL), "glm", d)
+			return err
+		},
+	}
+	for name, call := range calls {
+		start := time.Now()
+		if err := call(50 * time.Millisecond); err == nil || time.Since(start) > 2*time.Second {
+			t.Fatalf("%s: err %v after %v", name, err, time.Since(start))
+		}
+	}
+	p := config.Provider{Format: "openai", BaseURL: srv.URL}
+	if _, err := SearchModelsWithin(ctx, "e", p, srv.Client(), "glm", time.Second); !errors.Is(err, ErrNoSearch) {
+		t.Fatalf("an entry that is not OpenRouter has no search: %v", err)
+	}
 }

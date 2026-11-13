@@ -39,9 +39,10 @@ func isOpenRouter(p config.Provider) bool {
 
 // listOpenRouter gets the two OpenRouter groups. The groups keep the server
 // order. When no group has models, the error is the error of the first
-// group, else the error of the second group, else ErrNoChatModels.
-func listOpenRouter(ctx context.Context, name string, p config.Provider, hc *http.Client) (ModelList, error) {
-	ctx, cancel := context.WithTimeout(ctx, listTimeout)
+// group, else the error of the second group, else ErrNoChatModels. The two
+// calls share the one time limit timeout.
+func listOpenRouter(ctx context.Context, name string, p config.Provider, hc *http.Client, timeout time.Duration) (ModelList, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	e := newEndpoint(name, p, hc)
 	var top, agentic []string
@@ -99,10 +100,19 @@ func openRouterIDs(ctx context.Context, e endpoint, path string) ([]string, erro
 // SearchModels runs a server search on an OpenRouter entry. Other entries return
 // ErrNoSearch, and the caller filters the full list.
 func SearchModels(ctx context.Context, name string, p config.Provider, hc *http.Client, text string) ([]string, error) {
+	return SearchModelsWithin(ctx, name, p, hc, text, 0)
+}
+
+// SearchModelsWithin works like SearchModels, with the time limit timeout. A
+// timeout of 0 or less means 10 seconds.
+func SearchModelsWithin(ctx context.Context, name string, p config.Provider, hc *http.Client, text string, timeout time.Duration) ([]string, error) {
 	if !isOpenRouter(p) {
 		return nil, ErrNoSearch
 	}
-	ctx, cancel := context.WithTimeout(ctx, listTimeout)
+	if timeout <= 0 {
+		timeout = listTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return openRouterIDs(ctx, newEndpoint(name, p, hc), "/models?q="+url.QueryEscape(text)+openRouterSearchQuery)
 }

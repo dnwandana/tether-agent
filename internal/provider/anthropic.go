@@ -15,7 +15,7 @@ import (
 // anthropicVersion is the value of the anthropic-version header.
 const anthropicVersion = "2023-06-01"
 
-// anthropicMaxTokens is max_tokens when Request.MaxTokens is not set.
+// anthropicMaxTokens is the default max_tokens when Request.MaxTokens is not set.
 const anthropicMaxTokens = 8192
 
 // anthropicCacheBreakpoints is the number of last messages that get a
@@ -205,6 +205,9 @@ func (p *anthropic) buildRequest(req Request) (*anRequest, error) {
 	}
 	if out.MaxTokens <= 0 {
 		out.MaxTokens = anthropicMaxTokens
+		if p.maxTokens > 0 {
+			out.MaxTokens = p.maxTokens
+		}
 	}
 	// add appends blocks as a message of role. It joins them to the last
 	// message when that message has the same role, because the format

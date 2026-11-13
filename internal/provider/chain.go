@@ -36,8 +36,8 @@ func StatusOf(p Provider) (FallbackStatus, bool) {
 	return r.FallbackStatus(), true
 }
 
-// waitTime is the time that the chain skips an entry after it fails before
-// the first byte. Hermes uses the same value after an HTTP 429.
+// waitTime is the default skip time of a failed entry. Hermes uses the same
+// value after an HTTP 429.
 const waitTime = 60 * time.Second
 
 // healthKey names one entry and one model. A failure of a pinned model does
@@ -54,6 +54,10 @@ type failure struct {
 // one Health, because it describes a provider, not one session. It lives in
 // memory, so a restart clears it.
 type Health struct {
+	// Skip is the time that the chain skips an entry after it fails before the first byte.
+	// 0 uses 60 s. Set it before the first call.
+	Skip time.Duration
+
 	now func() time.Time
 
 	mu    sync.Mutex
@@ -85,10 +89,18 @@ func (h *Health) rejectEffort(name, model string) {
 	h.mu.Unlock()
 }
 
-// waiting reports whether the entry failed less than waitTime ago.
+// skip returns the skip time of a failed entry.
+func (h *Health) skip() time.Duration {
+	if h.Skip > 0 {
+		return h.Skip
+	}
+	return waitTime
+}
+
+// waiting reports whether the entry failed less than the skip time ago.
 func (h *Health) waiting(name, model string) bool {
 	f, ok := h.last(name, model)
-	return ok && h.now().Sub(f.at) < waitTime
+	return ok && h.now().Sub(f.at) < h.skip()
 }
 
 // last returns the last failure of the entry.

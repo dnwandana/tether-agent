@@ -20,7 +20,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
 
-// DefaultContextWindow is the context window when no source gives one.
+// DefaultContextWindow is the context window when provider.default_context_window is 0.
 const DefaultContextWindow = 128000
 
 // The source names of pricing.sources.
@@ -133,7 +133,8 @@ func (s *Service) Cost(providerName string, p config.Provider, u provider.Usage)
 }
 
 // ContextWindow returns the context window of the model of p. The order is the
-// context_window of the config, then the price data, then DefaultContextWindow.
+// context_window of the entry, then the price data, then provider.default_context_window
+// (DefaultContextWindow when it is 0).
 func (s *Service) ContextWindow(providerName string, p config.Provider) int {
 	if p.ContextWindow > 0 {
 		return p.ContextWindow
@@ -142,6 +143,9 @@ func (s *Service) ContextWindow(providerName string, p config.Provider) int {
 		if pr.ContextWindow > 0 {
 			return pr.ContextWindow
 		}
+	}
+	if w := s.cfg.Provider.DefaultContextWindow; w > 0 {
+		return w
 	}
 	return DefaultContextWindow
 }

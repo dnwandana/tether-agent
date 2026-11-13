@@ -327,3 +327,28 @@ func TestNewModelSkipsETag(t *testing.T) {
 		t.Fatal("the new model must be found")
 	}
 }
+
+func TestContextWindowDefaultFromConfig(t *testing.T) {
+	s := newSvc(t)
+	unknown := config.Provider{Model: "unknown"}
+	s.cfg.Provider.DefaultContextWindow = 200000
+	if w := s.ContextWindow("primary", unknown); w != 200000 {
+		t.Fatal("the config default applies when no source gives a window:", w)
+	}
+	if w := s.ContextWindow("primary", config.Provider{Model: "unknown", ContextWindow: 64000}); w != 64000 {
+		t.Fatal("the context_window of the entry wins:", w)
+	}
+	s.cfg.Provider.DefaultContextWindow = 0
+	if w := s.ContextWindow("primary", unknown); w != DefaultContextWindow {
+		t.Fatal("0 keeps the const:", w)
+	}
+}
+
+func TestContextWindowPriceDataWinsOverConfigDefault(t *testing.T) {
+	s := serviceWith(t, overrides{"glm-4.7": {Input: 1}})
+	s.cfg.Provider.DefaultContextWindow = 50000
+	p := config.Provider{BaseURL: "https://api.z.ai/v4", Model: "glm-4.7"}
+	if w := s.ContextWindow("primary", p); w != 200000 {
+		t.Fatal("the price data wins over the config default:", w)
+	}
+}

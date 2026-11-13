@@ -341,3 +341,32 @@ func TestChainEffortNotRecordedWhenRetryFails(t *testing.T) {
 		t.Fatal("a 400 with another cause must not turn off the effort")
 	}
 }
+
+func TestHealthSkipFromField(t *testing.T) {
+	clk := &clock{t: time.Unix(1000, 0)}
+	h := NewHealth(clk.now)
+	h.Skip = 10 * time.Second
+	a := &failing{name: "primary", code: 503}
+	ch := chainOf(h, a, &stub{name: "fallback"})
+	mustCollect(t, ch, Request{})
+	clk.add(9 * time.Second)
+	mustCollect(t, ch, Request{})
+	if a.calls.Load() != 1 {
+		t.Fatal("an entry in its skip time got a call")
+	}
+	clk.add(2 * time.Second)
+	mustCollect(t, ch, Request{})
+	if a.calls.Load() != 2 {
+		t.Fatal("after the skip time the first entry must get the call")
+	}
+	// A zero Skip keeps 60 s.
+	h0 := NewHealth(clk.now)
+	b := &failing{name: "primary", code: 503}
+	ch0 := chainOf(h0, b, &stub{name: "fallback"})
+	mustCollect(t, ch0, Request{})
+	clk.add(59 * time.Second)
+	mustCollect(t, ch0, Request{})
+	if b.calls.Load() != 1 {
+		t.Fatal("a zero Skip must keep 60 s")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 )
@@ -34,6 +35,8 @@ type endpoint struct {
 	hc                                   *http.Client
 	quirks                               map[string]bool
 	effortStyle                          string
+	// maxTokens is max_tokens of an Anthropic call that sets none. 0 uses 8192.
+	maxTokens int
 }
 
 // newEndpoint returns the endpoint of the config entry p. The quirks and
@@ -79,9 +82,16 @@ func (u *unusable) Stream(context.Context, Request) (<-chan Event, error) {
 	return nil, fmt.Errorf("provider %s: %w: %s", u.name, ErrBeforeFirstByte, u.reason)
 }
 
-// New returns the adapter for one config entry. An entry with Unusable set
-// gets an adapter that fails each call. A nil hc uses http.DefaultClient.
+// New returns NewWith with the default max_tokens of an Anthropic call.
 func New(name string, p config.Provider, hc *http.Client) (Provider, error) {
+	return NewWith(name, p, hc, 0)
+}
+
+// NewWith returns the adapter for one config entry. An entry with Unusable
+// set gets an adapter that fails each call. A nil hc uses http.DefaultClient.
+// anthropicMaxTokens is max_tokens of an Anthropic call that sets none. A
+// value of 0 or less uses 8192.
+func NewWith(name string, p config.Provider, hc *http.Client, anthropicMaxTokens int) (Provider, error) {
 	if p.Unusable != "" {
 		return &unusable{name: name, model: p.Model, reason: p.Unusable}, nil
 	}
@@ -89,7 +99,9 @@ func New(name string, p config.Provider, hc *http.Client) (Provider, error) {
 	case "openai":
 		return newOpenAI(newEndpoint(name, p, hc)), nil
 	case "anthropic":
-		return newAnthropic(newEndpoint(name, p, hc)), nil
+		e := newEndpoint(name, p, hc)
+		e.maxTokens = anthropicMaxTokens
+		return newAnthropic(e), nil
 	case "responses":
 		return newResponses(newEndpoint(name, p, hc)), nil
 	default:
@@ -120,16 +132,18 @@ func FromConfig(cfg *config.Config, hc *http.Client, log *slog.Logger) (*Set, er
 	if _, ok := cfg.Providers["primary"]; !ok {
 		return nil, errors.New("provider: providers.primary is missing in the config. Add it to config.yaml, or run \"tether setup\"")
 	}
+	health := NewHealth(nil)
+	health.Skip = time.Duration(cfg.Provider.FailureSkipS) * time.Second
 	s := &Set{
 		Raw:      make(map[string]Provider, len(cfg.Providers)),
-		Health:   NewHealth(nil),
+		Health:   health,
 		log:      log,
 		fallback: cfg.FallbackList(),
 		vision:   make(map[string]bool, len(cfg.Providers)),
 		effort:   make(map[string]string, len(cfg.Providers)),
 	}
 	for name, pc := range cfg.Providers {
-		p, err := New(name, pc, hc)
+		p, err := NewWith(name, pc, hc, cfg.Provider.AnthropicMaxTokens)
 		if err != nil {
 			return nil, err
 		}
