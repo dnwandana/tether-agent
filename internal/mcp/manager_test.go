@@ -731,3 +731,51 @@ func TestManagerWithRealStdioServer(t *testing.T) {
 		t.Fatal(res)
 	}
 }
+
+// dialTriesManager returns a manager whose server gh has max_dial_tries set to tries.
+func dialTriesManager(t *testing.T, tries int) (*Manager, *fakeServer, *[]time.Duration, *tools.Registry) {
+	t.Helper()
+	servers := ghServer(false)
+	s := servers["gh"]
+	s.MaxDialTries = tries
+	servers["gh"] = s
+	f := &fakeServer{tools: []ToolDef{{Name: "search"}}}
+	m, _, waits := testManager(t, servers, map[string]*fakeServer{"gh": f})
+	writeCache(t, m, "gh", f.tools)
+	reg := tools.NewRegistry()
+	if err := m.Init(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	return m, f, waits, reg
+}
+
+func TestDialTriesFromServerEntry(t *testing.T) {
+	_, f, waits, reg := dialTriesManager(t, 2)
+	f.mu.Lock()
+	f.failDials = 9
+	f.mu.Unlock()
+	res := callTool(t, reg, "mcp_gh_search", `{}`)
+	if !res.IsError || !strings.Contains(res.Text, "MCP server gh is not reachable after 2 tries") {
+		t.Fatal(res)
+	}
+	if f.dialCount() != 2 {
+		t.Fatal(f.dialCount())
+	}
+	if fmt.Sprint(*waits) != fmt.Sprint([]time.Duration{500 * time.Millisecond}) {
+		t.Fatal(*waits)
+	}
+}
+
+func TestDialTriesZeroUsesDefault(t *testing.T) {
+	_, f, _, reg := dialTriesManager(t, 0)
+	f.mu.Lock()
+	f.failDials = 9
+	f.mu.Unlock()
+	res := callTool(t, reg, "mcp_gh_search", `{}`)
+	if !res.IsError || !strings.Contains(res.Text, "MCP server gh is not reachable after 5 tries") {
+		t.Fatal(res)
+	}
+	if f.dialCount() != 5 {
+		t.Fatal(f.dialCount())
+	}
+}

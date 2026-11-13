@@ -20,8 +20,8 @@ import (
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
-// The reconnect limits: a cold call tries maxDialTries dials and waits
-// backoffBase × 2ⁿ between them.
+// The reconnect limits: maxDialTries is the number of dial tries of a cold call when
+// the server entry gives 0. The call waits backoffBase × 2ⁿ between the tries.
 const (
 	maxDialTries = 5
 	backoffBase  = 500 * time.Millisecond
@@ -230,7 +230,7 @@ func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMe
 }
 
 // acquire returns a live connection of st and counts one call in flight. It dials when
-// the server is cold, with backoff, maxDialTries times at most.
+// the server is cold, with backoff, as many times as the tries of the server entry.
 func (m *Manager) acquire(ctx context.Context, st *serverState) (conn, error) {
 	if c, err := m.take(st); c != nil || err != nil {
 		return c, err
@@ -241,7 +241,8 @@ func (m *Manager) acquire(ctx context.Context, st *serverState) (conn, error) {
 		return c, err
 	}
 	var last error
-	for try := 1; try <= maxDialTries; try++ {
+	tries := st.dialTries()
+	for try := 1; try <= tries; try++ {
 		if try > 1 {
 			if err := m.wait(ctx, backoffBase<<(try-2)); err != nil {
 				return nil, err
@@ -263,7 +264,7 @@ func (m *Manager) acquire(ctx context.Context, st *serverState) (conn, error) {
 		}
 		m.logger().Warn("mcp: cannot start the server", "server", st.name, "try", try, "err", err.Error())
 	}
-	return nil, fmt.Errorf("%w: MCP server %s is not reachable after %d tries: %v", tools.ErrToolError, st.name, maxDialTries, last)
+	return nil, fmt.Errorf("%w: MCP server %s is not reachable after %d tries: %v", tools.ErrToolError, st.name, tries, last)
 }
 
 // take returns the live connection of st and counts one call in flight, or nil.
@@ -609,6 +610,15 @@ func (st *serverState) config() config.MCPServer {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.cfg
+}
+
+// dialTries returns the number of dial tries of the server entry, or maxDialTries when
+// the entry gives 0.
+func (st *serverState) dialTries() int {
+	if n := st.config().MaxDialTries; n > 0 {
+		return n
+	}
+	return maxDialTries
 }
 
 func (m *Manager) dialer() func(ctx context.Context, name string, s config.MCPServer) (conn, error) {
