@@ -43,8 +43,8 @@ const NoteNoSummaryCron = "I used all %d tool rounds of this run, and I could no
 
 // streamIdleTimeout ends a model call when its stream sends no event for this time. A
 // connection can stay open and send nothing. That connection must not hang the turn.
-// Hermes uses 180 s for small contexts and up to 300 s for large contexts. Tests change it.
-var streamIdleTimeout = 300 * time.Second
+// Hermes uses 180 s for small contexts and up to 300 s for large contexts.
+const streamIdleTimeout = 300 * time.Second
 
 // Sink receives the live output of a turn. The loop calls it from the goroutine of the
 // turn, except ToolStart and ToolEnd, which a parallel round calls under a lock.
@@ -131,6 +131,19 @@ type Agent struct {
 	reviewHook func(r ReviewRequest)
 	// compactionRead is a test hook. viewOf calls it before it reads the latest compaction.
 	compactionRead func()
+	// streamIdle is a test hook. When it is above 0, it wins over agent.stream_idle_timeout_s.
+	streamIdle time.Duration
+}
+
+// streamIdleLimit returns the time with no stream event that ends a model call.
+func (a *Agent) streamIdleLimit() time.Duration {
+	if a.streamIdle > 0 {
+		return a.streamIdle
+	}
+	if s := a.config().Agent.StreamIdleTimeoutS; s > 0 {
+		return time.Duration(s) * time.Second
+	}
+	return streamIdleTimeout
 }
 
 // Turn is the input of one user turn.
@@ -305,7 +318,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	}
 	var (
 		lastText string
-		failures failureTracker
+		failures = failureTracker{limit: a.config().Agent.MaxSameToolFailures}
 	)
 	for round := 1; ; round++ {
 		// The pass after the last round makes the summary call.
@@ -755,6 +768,9 @@ func (a *Agent) modelWindow(name, model string) int {
 	if pc.ContextWindow > 0 {
 		return pc.ContextWindow
 	}
+	if w := a.config().Provider.DefaultContextWindow; w > 0 {
+		return w
+	}
 	return pricing.DefaultContextWindow
 }
 
@@ -826,8 +842,9 @@ func (a *Agent) save(ctx context.Context, ts *turnState, m provider.Message, met
 }
 
 // callModel streams one request. It returns when the stream ends, when ctx ends, or when
-// the stream sends no event for streamIdleTimeout. The result keeps the partial text.
+// the stream sends no event for the stream idle limit. The result keeps the partial text.
 func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provider.Request, sink Sink) (provider.Result, error) {
+	idleLimit := a.streamIdleLimit()
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	ch, err := prov.Stream(cctx, req)
@@ -839,7 +856,7 @@ func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provi
 	var stalled atomic.Bool
 	go func() {
 		defer close(relay)
-		idle := time.NewTimer(streamIdleTimeout)
+		idle := time.NewTimer(idleLimit)
 		defer idle.Stop()
 		for {
 			select {
@@ -847,7 +864,7 @@ func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provi
 				if !ok {
 					return
 				}
-				idle.Reset(streamIdleTimeout)
+				idle.Reset(idleLimit)
 				select {
 				case relay <- ev:
 				case <-cctx.Done():
@@ -872,7 +889,7 @@ func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provi
 		if res.Provider != "" {
 			name = res.Provider
 		}
-		err = fmt.Errorf("provider %s: the stream sent no data for %s", name, streamIdleTimeout)
+		err = fmt.Errorf("provider %s: the stream sent no data for %s", name, idleLimit)
 	}
 	return res, err
 }
@@ -1041,7 +1058,7 @@ func (a *Agent) visionInput(s *sessions.Session, text string, images []provider.
 				continue
 			}
 			have[p] = true
-			img, err := tools.LoadImageFile(p, 0)
+			img, err := tools.LoadImageFile(p, int64(cfg.Media.VisionMaxBytes))
 			if err != nil {
 				a.logger().Warn("agent: the image of a marker does not go inline", "path", p, "err", err.Error())
 				continue

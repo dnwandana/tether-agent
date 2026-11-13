@@ -37,7 +37,7 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 			results[i] = tools.Result{Text: cancelledText, IsError: true}
 			return
 		}
-		ls.ToolStart(c.Name, tools.ArgPreview(c.Name, c.Args))
+		ls.ToolStart(c.Name, tools.ArgPreview(c.Name, c.Args, a.config().Agent.ToolPreviewChars))
 		// todo_list is not parallel-safe, so no other call of the round writes the list
 		// between the two reads.
 		todo := c.Name == "todo_list" && env != nil && env.Kind != KindSubagent
@@ -125,11 +125,13 @@ func (a *Agent) failureKind(c provider.ToolCall, visible map[string]bool) string
 type failureTracker struct {
 	kind  string
 	count int
+	// limit is the count that stops the turn. 0 or less uses maxSameFailures.
+	limit int
 }
 
 // Observe records the result of one call. kind is kindUnknownTool, kindInvalidJSON, or ""
-// for a success. A success resets the count. It returns true at the third failure of the
-// same kind in a row.
+// for a success. A success resets the count. It returns true at the failure at the limit
+// of the same kind in a row.
 func (f *failureTracker) Observe(kind string) (stop bool) {
 	switch {
 	case kind == "":
@@ -139,7 +141,11 @@ func (f *failureTracker) Observe(kind string) (stop bool) {
 	default:
 		f.kind, f.count = kind, 1
 	}
-	return f.count >= maxSameFailures
+	n := f.limit
+	if n <= 0 {
+		n = maxSameFailures
+	}
+	return f.count >= n
 }
 
 // Err returns the error that ends the turn after Observe returned true.

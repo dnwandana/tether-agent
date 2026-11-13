@@ -166,3 +166,14 @@ func TestMemoryTopicsCap40(t *testing.T) {
 		t.Fatal("40 names have no more text:", s)
 	}
 }
+
+func TestMemoryTopicsCapFromInput(t *testing.T) {
+	var names []string
+	for i := range 45 {
+		names = append(names, fmt.Sprintf("t%02d", i))
+	}
+	s := BuildSystemPrompt(PromptInput{Base: "B", NoteTopics: names, MaxTopics: 10, Now: time.Unix(0, 0)})
+	if !strings.Contains(s, "\nNotes: "+strings.Join(names[:10], ", ")+", and 35 more\n") {
+		t.Fatal(s)
+	}
+}

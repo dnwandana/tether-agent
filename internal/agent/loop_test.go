@@ -737,11 +737,9 @@ func TestStreamDropInToolCallRunsNoTool(t *testing.T) {
 
 // A stream that stops sending data does not hang the turn.
 func TestStalledStreamEndsTurn(t *testing.T) {
-	old := streamIdleTimeout
-	streamIdleTimeout = 100 * time.Millisecond
-	t.Cleanup(func() { streamIdleTimeout = old })
 	fp := scripted(step{text: "half", stall: true})
 	a, sess := newAgent(t, fp)
+	a.streamIdle = 100 * time.Millisecond
 	start := time.Now()
 	res, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}})
 	if err == nil || !strings.Contains(err.Error(), "no data") || time.Since(start) > 2*time.Second {
@@ -942,10 +940,8 @@ func TestPinnedPrimaryFallbackRow(t *testing.T) {
 
 // A partial answer from a fallback stream that stops sending data names the fallback.
 func TestStalledFallbackRowNamesFallback(t *testing.T) {
-	old := streamIdleTimeout
-	streamIdleTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { streamIdleTimeout = old })
 	a, sess := fallbackAgent(t, nil, step{text: "half", noClose: true})
+	a.streamIdle = 50 * time.Millisecond
 	_, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}})
 	// The error names the provider that stalled, not the primary that failed before it.
 	want := "agent: the model call to fallback failed: provider fallback: the stream sent no data for 50ms"
@@ -1446,6 +1442,107 @@ func TestConfigOfZeroAgentHasNoRace(t *testing.T) {
 	for _, c := range got {
 		if c == nil || c.Agent.MaxTurns != want.Agent.MaxTurns || c.Delegation.MaxConcurrentChildren != want.Delegation.MaxConcurrentChildren {
 			t.Fatalf("%+v", c)
+		}
+	}
+}
+
+func TestStreamIdleLimit(t *testing.T) {
+	a := &Agent{}
+	if got := a.streamIdleLimit(); got != 300*time.Second {
+		t.Fatal("no config gives 300 s:", got)
+	}
+	cfg := config.Default()
+	cfg.Agent.StreamIdleTimeoutS = 7
+	a.Cfg = &cfg
+	if got := a.streamIdleLimit(); got != 7*time.Second {
+		t.Fatal(got)
+	}
+	cfg.Agent.StreamIdleTimeoutS = 0
+	if got := a.streamIdleLimit(); got != 300*time.Second {
+		t.Fatal("0 keeps 300 s:", got)
+	}
+	a.streamIdle = 20 * time.Millisecond
+	cfg.Agent.StreamIdleTimeoutS = 7
+	if got := a.streamIdleLimit(); got != 20*time.Millisecond {
+		t.Fatal("the test hook wins over the key:", got)
+	}
+}
+
+func TestStalledStreamUsesConfig(t *testing.T) {
+	fp := scripted(step{text: "half", stall: true})
+	a, sess := newAgent(t, fp)
+	a.Cfg.Agent.StreamIdleTimeoutS = 1
+	start := time.Now()
+	_, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Sink: &recSink{}})
+	if err == nil || !strings.Contains(err.Error(), "the stream sent no data for 1s") || time.Since(start) > 3*time.Second {
+		t.Fatal(err, time.Since(start))
+	}
+}
+
+func TestSameFailureLimitFromConfig(t *testing.T) {
+	fp := scriptedForever(toolCalls(tc("c", "nope", `{}`)))
+	a, sess := newAgent(t, fp)
+	a.Cfg.Agent.MaxSameToolFailures = 2
+	_, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "x", Toolsets: all(), Sink: &noticeSink{}, MaxTurns: 5})
+	if err == nil || !strings.Contains(err.Error(), "the model called an unknown tool 2 times in a row") || len(fp.requests) != 2 {
+		t.Fatal(len(fp.requests), err)
+	}
+}
+
+func TestDefaultContextWindowFromConfig(t *testing.T) {
+	a, _ := newAgent(t, scripted())
+	if got := a.modelWindow("primary", ""); got != pricing.DefaultContextWindow {
+		t.Fatal(got)
+	}
+	a.Cfg.Provider.DefaultContextWindow = 200000
+	if got := a.modelWindow("primary", ""); got != 200000 {
+		t.Fatal(got)
+	}
+	a.Cfg.Provider.DefaultContextWindow = 0
+	if got := a.modelWindow("primary", ""); got != pricing.DefaultContextWindow {
+		t.Fatal("0 keeps the const:", got)
+	}
+	a.Cfg.Provider.DefaultContextWindow = 200000
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", ContextWindow: 64000}
+	if got := a.modelWindow("primary", ""); got != 64000 {
+		t.Fatal("the entry wins:", got)
+	}
+}
+
+func TestMarkerImageFollowsVisionMaxBytes(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "big.png")
+	data := append([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"), make([]byte, 2048)...)
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for limit, want := range map[int]int{1024: 0, 4096: 1} {
+		fp := scripted(text("ok"))
+		a, sess := newAgent(t, fp, echoTool{})
+		a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", Vision: true}
+		a.Cfg.Media.VisionMaxBytes = limit
+		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "see [image: " + p + "]", Toolsets: all(), Sink: &recSink{}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := len(lastUser(fp.requests[0]).Images); got != want {
+			t.Fatalf("limit %d: %d inline images, want %d", limit, got, want)
+		}
+	}
+}
+
+func TestToolPreviewFollowsConfig(t *testing.T) {
+	for limit, want := range map[int]string{
+		10: "echo:abcdefg...",
+		40: "echo:abcdefghijklmnopqrstuvwxyz",
+	} {
+		fp := scripted(toolCalls(tc("c1", "echo", `{"s":"abcdefghijklmnopqrstuvwxyz"}`)), text("ok"))
+		a, sess := newAgent(t, fp, echoTool{})
+		a.Cfg.Agent.ToolPreviewChars = limit
+		sink := &recSink{}
+		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "go", Toolsets: all(), Sink: sink}); err != nil {
+			t.Fatal(err)
+		}
+		if len(sink.starts) != 1 || sink.starts[0] != want {
+			t.Fatalf("limit %d: %q", limit, sink.starts)
 		}
 	}
 }

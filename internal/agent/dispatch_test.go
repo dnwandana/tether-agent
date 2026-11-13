@@ -307,3 +307,13 @@ func TestParallelResultsSavedInCallOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestFailureTrackerLimit(t *testing.T) {
+	f := failureTracker{limit: 1}
+	if !f.Observe(kindInvalidJSON) {
+		t.Fatal("a limit of 1 stops at the first failure")
+	}
+	if !strings.Contains(f.Err().Error(), "the model sent invalid JSON arguments 1 times in a row") {
+		t.Fatal(f.Err())
+	}
+}

@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 )
 
-// previewMax is the maximum number of characters (runes) in a tool preview.
+// previewMax is the default maximum number of characters (runes) in a tool preview.
 const previewMax = 40
 
 // PreviewKeys maps a tool name to the argument that ArgPreview shows for the tool. The keys
@@ -56,15 +56,19 @@ type previewArg struct {
 	value json.RawMessage
 }
 
-// ArgPreview returns the main argument of a call of tool, on one line and cut to previewMax
-// characters. It returns "" when args is not a JSON object or has no argument to show.
-func ArgPreview(tool, args string) string {
+// ArgPreview returns the main argument of a call of tool, on one line and cut to limit
+// characters. A limit of 0 or less uses previewMax. It returns "" when args is not a JSON
+// object or has no argument to show.
+func ArgPreview(tool, args string, limit int) string {
+	if limit <= 0 {
+		limit = previewMax
+	}
 	list, ok := previewArgs(args)
 	if !ok {
 		return ""
 	}
 	if tool == "delegate_task" {
-		if p := delegatePreview(list); p != "" {
+		if p := delegatePreview(list, limit); p != "" {
 			return p
 		}
 	}
@@ -73,12 +77,12 @@ func ArgPreview(tool, args string) string {
 		return todoPreview(list)
 	}
 	if key, ok := PreviewKeys[tool]; ok {
-		if p := valuePreview(argValue(list, key)); p != "" {
+		if p := valuePreview(argValue(list, key), limit); p != "" {
 			return p
 		}
 	}
 	for _, key := range previewFallbackKeys {
-		if p := valuePreview(argValue(list, key)); p != "" {
+		if p := valuePreview(argValue(list, key), limit); p != "" {
 			return p
 		}
 	}
@@ -87,7 +91,7 @@ func ArgPreview(tool, args string) string {
 	for _, a := range list {
 		var s string
 		if len(a.value) > 0 && a.value[0] == '"' && json.Unmarshal(a.value, &s) == nil {
-			return cutPreview(oneLine(s), previewMax)
+			return cutPreview(oneLine(s), limit)
 		}
 	}
 	return ""
@@ -132,8 +136,8 @@ func argValue(list []previewArg, key string) json.RawMessage {
 // delegatePreview returns the goal of a delegate_task call, the goal of its only task, or
 // "N tasks" for a batch. Each child line names its child, so the batch line does not repeat
 // the goals.
-func delegatePreview(list []previewArg) string {
-	if p := stringPreview(argValue(list, "goal")); p != "" {
+func delegatePreview(list []previewArg, limit int) string {
+	if p := stringPreview(argValue(list, "goal"), limit); p != "" {
 		return p
 	}
 	var tasks []json.RawMessage
@@ -148,7 +152,7 @@ func delegatePreview(list []previewArg) string {
 		if json.Unmarshal(tasks[0], &task) != nil {
 			return ""
 		}
-		return stringPreview(task.Goal)
+		return stringPreview(task.Goal, limit)
 	case len(tasks) >= 2:
 		return fmt.Sprintf("%d tasks", len(tasks))
 	}
@@ -180,8 +184,8 @@ func todoPreview(list []previewArg) string {
 // valuePreview returns the preview of one argument value. A string gives its text. A list of
 // strings gives its first item that is not empty, and "+N" for the N other items. The "+N"
 // part is never cut. Any other value gives "".
-func valuePreview(v json.RawMessage) string {
-	if p := stringPreview(v); p != "" {
+func valuePreview(v json.RawMessage, limit int) string {
+	if p := stringPreview(v, limit); p != "" {
 		return p
 	}
 	var items []json.RawMessage
@@ -197,21 +201,21 @@ func valuePreview(v json.RawMessage) string {
 			continue
 		}
 		if len(items) == 1 {
-			return cutPreview(s, previewMax)
+			return cutPreview(s, limit)
 		}
 		more := fmt.Sprintf(" +%d", len(items)-1)
-		return cutPreview(s, previewMax-utf8.RuneCountInString(more)) + more
+		return cutPreview(s, limit-utf8.RuneCountInString(more)) + more
 	}
 	return ""
 }
 
 // stringPreview returns the preview of a string value, or "" for any other value.
-func stringPreview(v json.RawMessage) string {
+func stringPreview(v json.RawMessage, limit int) string {
 	var s string
 	if v == nil || json.Unmarshal(v, &s) != nil {
 		return ""
 	}
-	return cutPreview(oneLine(s), previewMax)
+	return cutPreview(oneLine(s), limit)
 }
 
 // cutPreview cuts s to limit runes. A cut string ends with "...". The cut never splits a rune.

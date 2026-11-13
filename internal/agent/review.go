@@ -23,7 +23,8 @@ var ReviewAllowedTools = []string{"memory", "skill_view", "skill_manage"}
 // reviewDeny is the tool result of a call to a tool outside ReviewAllowedTools.
 const reviewDeny = "review runs may only use memory, skill_view, skill_manage"
 
-// reviewMaxTurns limits the tool rounds of a review run (Hermes max_iterations=16).
+// reviewMaxTurns is the default of review.max_rounds. It limits the tool rounds of a review
+// run (Hermes max_iterations=16).
 const reviewMaxTurns = 16
 
 // MemoryReviewPrompt asks the review run to save facts about the user. It is the text of
@@ -241,7 +242,8 @@ type ReviewRequest struct {
 // failed in its wait time. The review starts no session and makes no call.
 var ErrReviewProviderDown = errors.New("agent: no review now, because each provider entry failed recently")
 
-// maxConcurrentReviews is the number of background reviews that run at the same time.
+// maxConcurrentReviews is the default of review.max_concurrent: the number of background
+// reviews that run at the same time.
 // Each review sends the full parent view to the provider. The other reviews wait.
 const maxConcurrentReviews = 2
 
@@ -306,7 +308,7 @@ func (a *Agent) RunReview(ctx context.Context, r ReviewRequest) (saved []string,
 		UserText: reviewPrompt(r.Memory, r.Skills, r.FocusRange),
 		Env:      env,
 		System:   r.System,
-		MaxTurns: reviewMaxTurns,
+		MaxTurns: a.reviewRounds(),
 		review: &reviewOpts{
 			history:  append([]provider.Message(nil), r.View...),
 			schemas:  r.Tools,
@@ -525,8 +527,8 @@ func HoldNotices(send func(string)) (notify func(string), release func()) {
 	return notify, release
 }
 
-// reviewMinUserTurns is the number of user turns that a session needs before a review at
-// compaction or at /new.
+// reviewMinUserTurns is the default of review.min_user_turns: the number of user turns that
+// a session needs before a review at compaction or at /new.
 const reviewMinUserTurns = 6
 
 // ReviewCounters counts, for each session, the user turns and the tool rounds since the
@@ -693,8 +695,8 @@ func (a *Agent) MaybeStartReviews(ctx context.Context, sess *sessions.Session, l
 }
 
 // ReviewOnCompaction starts one memory and skill review of the part of the view that a
-// compaction replaces: view[start:end]. It needs a session with 6 or more user
-// turns. It returns at once, and the review runs in the background. It is the
+// compaction replaces: view[start:end]. It needs a session with review.min_user_turns or
+// more user turns. It returns at once, and the review runs in the background. It is the
 // Compactor.OnCompact hook.
 func (a *Agent) ReviewOnCompaction(ctx context.Context, sess *sessions.Session, view []provider.Message, start, end int) {
 	if sess == nil || noReviews(sess.Kind) {
@@ -717,8 +719,8 @@ func (a *Agent) ReviewOnCompaction(ctx context.Context, sess *sessions.Session, 
 }
 
 // ReviewBeforeNew starts one memory and skill review of a session that /new replaces.
-// It needs a session with 6 or more user turns. It returns at once, and the
-// review runs in the background. It is the gateway.Deps.BeforeNew hook.
+// It needs a session with review.min_user_turns or more user turns. It returns at once,
+// and the review runs in the background. It is the gateway.Deps.BeforeNew hook.
 func (a *Agent) ReviewBeforeNew(ctx context.Context, old *sessions.Session) {
 	if old == nil || noReviews(old.Kind) {
 		return
@@ -767,14 +769,40 @@ func (a *Agent) reviewProviderDown(sess *sessions.Session) bool {
 	return ok && c.Down()
 }
 
-// enoughTurns reports whether the session has reviewMinUserTurns or more user turns.
+// reviewRounds returns the tool round limit of a review run (review.max_rounds).
+func (a *Agent) reviewRounds() int {
+	if n := a.config().Review.MaxRounds; n > 0 {
+		return n
+	}
+	return reviewMaxTurns
+}
+
+// reviewConcurrency returns the number of reviews that run at the same time
+// (review.max_concurrent).
+func (a *Agent) reviewConcurrency() int {
+	if n := a.config().Review.MaxConcurrent; n > 0 {
+		return n
+	}
+	return maxConcurrentReviews
+}
+
+// reviewMinTurns returns the user turns that a review at compaction or at /new needs
+// (review.min_user_turns).
+func (a *Agent) reviewMinTurns() int {
+	if n := a.config().Review.MinUserTurns; n > 0 {
+		return n
+	}
+	return reviewMinUserTurns
+}
+
+// enoughTurns reports whether the session has review.min_user_turns or more user turns.
 func (a *Agent) enoughTurns(ctx context.Context, sess *sessions.Session) bool {
 	n, err := a.userTurns(ctx, sess.ID)
 	if err != nil {
 		a.logger().Warn("agent: cannot count the user turns; no review", "session", sess.ID, "err", err.Error())
 		return false
 	}
-	return n >= reviewMinUserTurns
+	return n >= a.reviewMinTurns()
 }
 
 // startReview runs the review in its own goroutine. A request without a view gets the
@@ -811,7 +839,7 @@ func (a *Agent) startReview(ctx context.Context, r ReviewRequest) {
 // goReview runs f in a background goroutine that WaitReviews counts. The context of f
 // keeps the values of ctx, but the end of ctx does not stop f. The end of Agent.Background
 // stops f. After the end of Agent.Background, goReview does not start f. At most
-// maxConcurrentReviews f run at the same time, and the others wait in their goroutines.
+// review.max_concurrent f run at the same time, and the others wait in their goroutines.
 func (a *Agent) goReview(ctx context.Context, f func(context.Context)) {
 	base := a.Background
 	if base == nil {
@@ -824,7 +852,7 @@ func (a *Agent) goReview(ctx context.Context, f func(context.Context)) {
 	}
 	a.reviewWG.Add(1)
 	if a.reviewSlots == nil {
-		a.reviewSlots = make(chan struct{}, maxConcurrentReviews)
+		a.reviewSlots = make(chan struct{}, a.reviewConcurrency())
 	}
 	slots := a.reviewSlots
 	a.reviewMu.Unlock()
@@ -834,7 +862,7 @@ func (a *Agent) goReview(ctx context.Context, f func(context.Context)) {
 		defer a.reviewWG.Done()
 		defer stop()
 		defer cancel()
-		// At most maxConcurrentReviews reviews run. The end of Agent.Background also ends
+		// At most review.max_concurrent reviews run. The end of Agent.Background also ends
 		// the wait.
 		select {
 		case slots <- struct{}{}:

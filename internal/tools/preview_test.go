@@ -42,7 +42,7 @@ func TestArgPreview(t *testing.T) {
 		{"todo_list", `{"todos":[{"id":"1"}],"merge":`, "planning 1 task(s)"},
 	}
 	for _, c := range cases {
-		if got := ArgPreview(c.tool, c.args); got != c.want {
+		if got := ArgPreview(c.tool, c.args, 0); got != c.want {
 			t.Errorf("ArgPreview(%q, %s) = %q, want %q", c.tool, c.args, got, c.want)
 		}
 	}
@@ -54,13 +54,37 @@ func TestArgPreviewLimits(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		urls = append(urls, "https://x.org")
 	}
-	got := ArgPreview("web_fetch", `{"urls":["`+strings.Join(urls, `","`)+`"]}`)
+	got := ArgPreview("web_fetch", `{"urls":["`+strings.Join(urls, `","`)+`"]}`, 0)
 	if !strings.HasSuffix(got, "... +12") || utf8.RuneCountInString(got) != previewMax {
 		t.Errorf("13 URLs: got %q (%d runes)", got, utf8.RuneCountInString(got))
 	}
 
-	got = ArgPreview("web_fetch", `{"urls":["https://例え.jp/ドキュメント/はじめに/クラウドフレア/ワーカーの設定/詳細","https://x.org"]}`)
+	got = ArgPreview("web_fetch", `{"urls":["https://例え.jp/ドキュメント/はじめに/クラウドフレア/ワーカーの設定/詳細","https://x.org"]}`, 0)
 	if !strings.HasSuffix(got, "... +1") || utf8.RuneCountInString(got) > previewMax || !utf8.ValidString(got) {
 		t.Errorf("multibyte URL: got %q (%d runes)", got, utf8.RuneCountInString(got))
+	}
+}
+
+func TestArgPreviewLimit(t *testing.T) {
+	long := "https://hono.dev/docs/getting-started/cloudflare-workers"
+	cases := []struct {
+		tool, args string
+		limit      int
+		want       string
+	}{
+		{"web_fetch", `{"urls":["` + long + `"]}`, 20, "https://hono.dev/..."},
+		{"web_fetch", `{"urls":["` + long + `","https://a.org"]}`, 20, "https://hono.d... +1"},
+		{"delegate_task", `{"goal":"Find the Hono version"}`, 10, "Find th..."},
+		{"delegate_task", `{"tasks":[{"goal":"Find the Hono version"}]}`, 10, "Find th..."},
+		{"mcp_x_search", `{"x":"abcdefghijkl"}`, 8, "abcde..."},
+		{"echo", `{"path":"` + strings.Repeat("a", 60) + `"}`, 0, strings.Repeat("a", 37) + "..."},
+		{"echo", `{"path":"` + strings.Repeat("a", 60) + `"}`, -5, strings.Repeat("a", 37) + "..."},
+		{"echo", `{"path":"` + strings.Repeat("a", 60) + `"}`, 50, strings.Repeat("a", 47) + "..."},
+		{"todo_list", `{"todos":[{"id":"1"}]}`, 4, "planning 1 task(s)"},
+	}
+	for _, c := range cases {
+		if got := ArgPreview(c.tool, c.args, c.limit); got != c.want {
+			t.Errorf("ArgPreview(%q, %s, %d) = %q, want %q", c.tool, c.args, c.limit, got, c.want)
+		}
 	}
 }

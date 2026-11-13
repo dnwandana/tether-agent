@@ -169,7 +169,7 @@ func (t *acpDelegateTool) Run(ctx context.Context, raw json.RawMessage, env *Env
 		StopReason: out.StopReason,
 		DurationS:  int(time.Since(start).Round(time.Second) / time.Second),
 		ToolCalls:  out.ToolCalls,
-		Text:       cutACPText(out.Text),
+		Text:       cutACPText(out.Text, t.cfg.ResultMaxChars),
 		Note:       strings.Join(notes, "; "),
 	}
 	b, err := json.Marshal(res)
@@ -251,13 +251,14 @@ func (t *acpDelegateTool) workdir(arg string, env *Env) (string, error) {
 	return "", toolErr("acp: workdir %s is outside acp.workdir_allowlist.", p)
 }
 
-// cutACPText keeps the last acpTextMax characters of s and puts the count of the cut
-// characters at the start.
-func cutACPText(s string) string {
+// cutACPText keeps the last max characters of s and puts the count of the cut
+// characters at the start. A max of 0 or less uses acpTextMax.
+func cutACPText(s string, max int) string {
+	max = positiveOr(max, acpTextMax)
 	r := []rune(s)
 	n := len(r)
-	if n <= acpTextMax {
+	if n <= max {
 		return s
 	}
-	return fmt.Sprintf("…(%d characters cut) ", n-acpTextMax) + string(r[n-acpTextMax:])
+	return fmt.Sprintf("…(%d characters cut) ", n-max) + string(r[n-max:])
 }

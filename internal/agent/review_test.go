@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/provider"
@@ -922,5 +923,77 @@ func TestBackgroundReviewsRunAtMostTwoAtATime(t *testing.T) {
 	close(release)
 	if !a.WaitReviews(5 * time.Second) {
 		t.Fatal("the waiting reviews must run after the first ones end")
+	}
+}
+
+func TestReviewRoundsFromConfig(t *testing.T) {
+	a, sess, parentReq, _ := agentAfterTurn(t)
+	a.Cfg.Review.MaxRounds = 2
+	fp := a.Prov.(*fakeProv)
+	fp.script = []step{
+		toolCalls(tc("r1", "memory", `{"action":"add","target":"memory","content":"VPS = hetzner"}`)),
+		toolCalls(tc("r2", "memory", `{"action":"add","target":"memory","content":"DNS = cloudflare"}`)),
+		text("Saved two facts."),
+	}
+	if _, err := a.RunReview(ctx, ReviewRequest{Session: sess, View: reviewView(t, a, sess), System: parentReq.System, Tools: parentReq.Tools, Memory: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fp.requests) != 3 {
+		t.Fatal("2 rounds and the summary call:", len(fp.requests))
+	}
+	last := fp.requests[2]
+	if m := last.Messages[len(last.Messages)-1]; m.Role != provider.RoleUser || m.Content != NoteSummaryRequest {
+		t.Fatalf("%+v", m)
+	}
+}
+
+func TestReviewConcurrencyFromConfig(t *testing.T) {
+	cfg := config.Default()
+	cfg.Review.MaxConcurrent = 3
+	a := &Agent{Cfg: &cfg}
+	var running, peak atomic.Int32
+	release := make(chan struct{})
+	for range 6 {
+		a.goReview(ctx, func(context.Context) {
+			n := running.Add(1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			<-release
+			running.Add(-1)
+		})
+	}
+	waitUntil(t, func() bool { return running.Load() == 3 })
+	time.Sleep(50 * time.Millisecond)
+	if p := peak.Load(); p != 3 {
+		t.Fatal("peak", p)
+	}
+	close(release)
+	if !a.WaitReviews(5 * time.Second) {
+		t.Fatal("the waiting reviews must run after the first ones end")
+	}
+}
+
+func TestReviewMinUserTurnsFromConfig(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	a.Cfg.Review.MinUserTurns = 3
+	seedHistory(t, a, sess.ID, 4) // 2 user turns
+	a.ReviewOnCompaction(ctx, sess, reviewView(t, a, sess), 1, 3)
+	time.Sleep(20 * time.Millisecond)
+	if len(reviews()) != 0 {
+		t.Fatal("2 user turns: no review")
+	}
+	seedHistory(t, a, sess.ID, 2) // 3 user turns
+	a.ReviewOnCompaction(ctx, sess, reviewView(t, a, sess), 1, 3)
+	waitUntil(t, func() bool { return len(reviews()) == 1 })
+}
+
+func TestReviewLimitsZeroKeepConsts(t *testing.T) {
+	a := &Agent{Cfg: &config.Config{}}
+	if a.reviewRounds() != reviewMaxTurns || a.reviewConcurrency() != maxConcurrentReviews || a.reviewMinTurns() != reviewMinUserTurns {
+		t.Fatal(a.reviewRounds(), a.reviewConcurrency(), a.reviewMinTurns())
 	}
 }

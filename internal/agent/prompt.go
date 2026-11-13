@@ -29,7 +29,10 @@ type PromptInput struct {
 	ToolNotes             []string
 	// NoteTopics holds the topics of the memory notes, in the order of the prompt.
 	NoteTopics []string
-	Now        time.Time
+	// MaxTopics is the maximum number of topics in the MEMORY TOPICS section. 0 or less uses
+	// promptTopicsMax.
+	MaxTopics int
+	Now       time.Time
 	// TZ is the name of the time zone, for example "Asia/Jakarta". It can be empty.
 	TZ, WorkDir, Channel string
 	// ChatInfo describes the chat, for example the chat type and the topic on Telegram.
@@ -69,7 +72,11 @@ func BuildSystemPrompt(in PromptInput) string {
 		parts = append(parts, "## USER PROFILE\n"+s)
 	}
 	if len(in.NoteTopics) > 0 {
-		parts = append(parts, "## MEMORY TOPICS\nNotes: "+joinTopics(in.NoteTopics, promptTopicsMax)+
+		maxTopics := in.MaxTopics
+		if maxTopics <= 0 {
+			maxTopics = promptTopicsMax
+		}
+		parts = append(parts, "## MEMORY TOPICS\nNotes: "+joinTopics(in.NoteTopics, maxTopics)+
 			"\nFind facts with memory action search. Open a note with memory action read.")
 	}
 	if len(in.SkillsIndex) > 0 {

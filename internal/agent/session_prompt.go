@@ -150,12 +150,13 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, channel st
 				continue
 			}
 			shown := make([]string, len(entries))
+			limit := a.config().Memory.EntryMaxChars
 			for i, e := range entries {
 				shown[i] = e
-				if line, blocked := tools.MemoryBlockedLine(e); blocked {
+				if line, blocked := tools.MemoryBlockedLineWithin(e, limit); blocked {
 					shown[i] = line
 					a.logger().Warn("agent: a memory entry matched the memory threat scan; the prompt has a BLOCKED line in its place",
-						"target", f.target, "id", tools.MemoryEntryID(e), "findings", strings.Join(tools.MemoryThreatIDs(e), ", "))
+						"target", f.target, "id", tools.MemoryEntryID(e), "findings", strings.Join(tools.MemoryThreatIDsWithin(e, limit), ", "))
 				}
 			}
 			*f.text = strings.Join(shown, memory.Separator)
@@ -173,6 +174,7 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, channel st
 			a.logger().Warn("agent: cannot list the memory notes; the prompt has no topic list", "err", err.Error())
 		} else {
 			in.NoteTopics = topics
+			in.MaxTopics = a.config().Memory.PromptMaxTopics
 		}
 	}
 	// The index is useful only when the model can load a skill.

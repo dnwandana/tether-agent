@@ -377,10 +377,43 @@ func TestACPDelegateErrorPassThrough(t *testing.T) {
 }
 
 func TestACPDelegatePreviewAndNeeds(t *testing.T) {
-	if got := ArgPreview("acp_delegate", `{"agent":"claude-code","workdir":"/w","task":"Fix the login bug"}`); got != "Fix the login bug" {
+	if got := ArgPreview("acp_delegate", `{"agent":"claude-code","workdir":"/w","task":"Fix the login bug"}`, 0); got != "Fix the login bug" {
 		t.Fatalf("preview = %q", got)
 	}
 	if got := toolNeeds("acp_delegate"); got != "acp.enabled, an agent, and acp.workdir_allowlist." {
 		t.Fatalf("needs = %q", got)
+	}
+}
+
+func TestCutACPTextLimit(t *testing.T) {
+	s := strings.Repeat("a", 30) + "END"
+	if got := cutACPText(s, 10); got != "…(23 characters cut) aaaaaaaEND" {
+		t.Fatalf("%q", got)
+	}
+	if got := cutACPText(s, 0); got != s {
+		t.Fatalf("%q", got)
+	}
+	long := strings.Repeat("a", 16010) + "END"
+	if got := cutACPText(long, 0); got != "…(13 characters cut) "+strings.Repeat("a", 15997)+"END" {
+		t.Fatal("a limit of 0 must keep 16000 characters:", len([]rune(got)))
+	}
+}
+
+func TestACPDelegateResultMaxChars(t *testing.T) {
+	allow := t.TempDir()
+	fd := &fakeDelegator{run: func(context.Context, acp.Delegation) (acp.Outcome, error) {
+		return acp.Outcome{Session: "s", StopReason: "end_turn", Text: strings.Repeat("a", 1010) + "END"}, nil
+	}}
+	cfg := acpConfig(allow)
+	cfg.ResultMaxChars = 1000
+	out := runToolEnv(t, NewACPDelegateTool(cfg, fd, time.Minute), acpArgs(allow, ""), acpEnv(t))
+	var res struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	if want := "…(13 characters cut) " + strings.Repeat("a", 997) + "END"; res.Text != want {
+		t.Fatalf("%q", res.Text)
 	}
 }

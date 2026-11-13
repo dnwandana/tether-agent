@@ -376,3 +376,33 @@ func TestPromptBlocksMemoryEntries(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryTopicsCapFromConfig(t *testing.T) {
+	a, sess, notes := agentWithNotes(t, true)
+	a.Cfg.Memory.PromptMaxTopics = 1
+	writeNoteFile(t, notes, "alpha")
+	writeNoteFile(t, notes, "beta")
+	p, _ := a.Prompts.Get(ctx, sess, keyFor(sess, 0), "cli")
+	if !strings.Contains(p, ", and 1 more\n") {
+		t.Fatal(p)
+	}
+}
+
+func TestPromptMemoryFollowsEntryLimit(t *testing.T) {
+	a, sess := newAgent(t, scripted())
+	dir := t.TempDir()
+	m, err := memory.Open(dir, 20000, 1375)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Memory = m
+	a.Cfg.Memory.EntryMaxChars = 8000
+	long := strings.Repeat("a", 4001)
+	if err := os.WriteFile(filepath.Join(dir, "memory.md"), []byte(long+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := a.SessionPrompt(ctx, sess, "cli")
+	if !strings.Contains(p, "## MEMORY\n"+long) || strings.Contains(p, "too_long") {
+		t.Fatal("an entry of 4001 runes under a limit of 8000 must not be blocked in the prompt")
+	}
+}
