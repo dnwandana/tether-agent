@@ -312,9 +312,9 @@ The tool has these arguments:
 
 The permission preset sets what the coding agent asks before it acts. The presets, from strict
 to loose, are `all`, `risky`, `auto`, and `folder`. The default is `auto`. Each request of the
-coding agent comes to you as an approval with three buttons: "Allow once", "Allow in this
-session", and "Deny". A request with no session answer, for example a compound command, has
-two buttons: "Allow once" and "Deny". There is no "Always" button. No answer in
+coding agent comes to you as an approval with three buttons: "Deny", "Once", and
+"Session". A request with no session answer, for example a compound command, has
+two buttons: "Deny" and "Once". There is no "Always" button. No answer in
 `approvals.timeout_s` denies the request. Refer to [Security](Security#coding-agents).
 
 The status message shows the `acp_delegate` call as its own tool line. Below it, the status

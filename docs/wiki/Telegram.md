@@ -404,22 +404,21 @@ The final answer has these rules:
 The agent asks you before it runs a dangerous command. The message shows a short summary when the
 agent gives one, the reason for the flag, the command, and these buttons:
 
-- ✅ Allow once
-- ✅ Allow in this session
-- ✅ Always allow
-- ❌ Deny
+- First row: ❌ Deny
+- Second row: ✅ Once, ✅ Session, ✅ Always
+
+❌ Deny is alone on the first row. The allow buttons share the second row.
 
 No answer in 10 minutes counts as a denial. `approvals.timeout_s` sets this time. After the answer
 or the timeout, the message shows the result, the summary, and the command in a closed quote.
 
-A permission request of a coding agent (`acp_delegate`) has no **Always allow** button. It shows
+A permission request of a coding agent (`acp_delegate`) has no **Always** button. It shows
 these buttons:
 
-- ✅ Allow once
-- ✅ Allow in this session
-- ❌ Deny
+- First row: ❌ Deny
+- Second row: ✅ Once, ✅ Session
 
-A request with no session answer shows only ✅ Allow once and ❌ Deny. An example is a compound
+A request with no session answer shows only ❌ Deny and ✅ Once. An example is a compound
 command. See [Security](Security#coding-agents) for the full rule.
 
 You can also answer with a command:

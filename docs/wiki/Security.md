@@ -163,14 +163,14 @@ screen.
 The bot sends a message with the title **Approval needed**, a short summary when the agent gives
 one, the reason for the flag, and the command. The message has four buttons:
 
-- ✅ Allow once
-- ✅ Allow in this session
-- ✅ Always allow
-- ❌ Deny
+- First row: ❌ Deny
+- Second row: ✅ Once, ✅ Session, ✅ Always
 
-A permission request of a coding agent has three buttons: ✅ Allow once, ✅ Allow in this
-session, and ❌ Deny. A request with no session answer has two buttons: ✅ Allow once and
-❌ Deny. A command with no `always` answer has no ✅ Always allow button.
+❌ Deny is alone on the first row. The allow buttons share the second row.
+
+A permission request of a coding agent has three buttons: ❌ Deny, ✅ Once, and ✅ Session. A
+request with no session answer has two buttons: ❌ Deny and ✅ Once. A command with no `always`
+answer has no ✅ Always button.
 
 After your answer or after the timeout, the bot edits the message. It shows the result, for
 example "✅ **Approval allowed** · this session", the summary, and the command in a closed quote.
