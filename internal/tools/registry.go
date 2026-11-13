@@ -54,6 +54,8 @@ type Env struct {
 	Progress ProgressFunc
 	// Values holds per-session tool state, for example the read tracker.
 	Values map[string]any
+	// Todo holds the todo limits of the session. A zero field uses the const.
+	Todo TodoLimits
 	// ScriptCall is true for a call from an execute_code script. The script reads a
 	// successful result as data, so the result gets no note.
 	ScriptCall bool

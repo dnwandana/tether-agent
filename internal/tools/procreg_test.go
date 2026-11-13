@@ -133,3 +133,20 @@ print(terminal("sleep 0.3", background=True))`
 		t.Fatalf("%+v %v", p, ok)
 	}
 }
+
+func TestProcRegistryKeepField(t *testing.T) {
+	t0 := time.Unix(1_800_000_000, 0)
+	for _, c := range []struct {
+		keep time.Duration
+		kept bool
+	}{{10 * time.Minute, false}, {0, true}} {
+		r := NewProcRegistry()
+		r.Keep = c.keep
+		r.Add("s1", 101, "make", "", t0)
+		r.Exit(101, 0, t0.Add(time.Minute))
+		r.Add("s1", 102, "true", "", t0.Add(time.Minute+10*time.Minute+time.Second))
+		if _, ok := r.Get(101); ok != c.kept {
+			t.Fatalf("Keep %v: kept = %v, want %v", c.keep, ok, c.kept)
+		}
+	}
+}

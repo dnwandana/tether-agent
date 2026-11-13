@@ -116,3 +116,11 @@ func TestTodoToolSchemaAndToolset(t *testing.T) {
 		t.Fatal("the todo toolset must be in AllToolsets")
 	}
 }
+
+func TestTodoToolUsesEnvLimits(t *testing.T) {
+	env := &Env{Values: map[string]any{}, Todo: TodoLimits{MaxItems: 2}}
+	out, res := callTodo(t, env, `{"todos":[{"id":"a","content":"A","status":"pending"},{"id":"b","content":"B","status":"pending"},{"id":"c","content":"C","status":"pending"}]}`)
+	if res.IsError || todoIDs(out.Todos) != "a,b" {
+		t.Fatal(res.Text)
+	}
+}

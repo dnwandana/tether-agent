@@ -176,7 +176,7 @@ func TestClickFillRunJS(t *testing.T) {
 func TestMissingSelectorTimesOut(t *testing.T) {
 	srv := htmlServer(t, formPage)
 	bt := browserTools(t)
-	bt.timeout = 2 * time.Second
+	bt.ActionTimeout = 2 * time.Second
 	env := sessEnv("s1")
 	runToolEnv(t, bt.Tool("browser_navigate"), fmt.Sprintf(`{"url":%q}`, srv.URL), env)
 	for _, name := range []string{"browser_click", "browser_read"} {
@@ -298,5 +298,37 @@ func TestRegisterBrowserTools(t *testing.T) {
 		if s.Name != tool.Name() || s.Description == "" || !json.Valid(s.Parameters) {
 			t.Fatal("bad schema:", tool.Name())
 		}
+	}
+}
+
+func TestBrowserLimitFields(t *testing.T) {
+	zero := &BrowserTools{}
+	if zero.limit() != 30*time.Second || zero.excerptChars() != 2000 || zero.settle() != 500*time.Millisecond {
+		t.Fatal(zero.limit(), zero.excerptChars(), zero.settle())
+	}
+	bt := &BrowserTools{ActionTimeout: 5 * time.Second, ExcerptChars: 300, Settle: 2 * time.Second}
+	if bt.limit() != 5*time.Second || bt.excerptChars() != 300 || bt.settle() != 2*time.Second {
+		t.Fatal(bt.limit(), bt.excerptChars(), bt.settle())
+	}
+}
+
+func TestNavigateDescriptionShowsExcerptChars(t *testing.T) {
+	d := (&BrowserTools{}).Tool("browser_navigate").Schema().Description
+	if !strings.Contains(d, "the first 2000 characters of the page text") {
+		t.Fatal(d)
+	}
+	d = (&BrowserTools{ExcerptChars: 300}).Tool("browser_navigate").Schema().Description
+	if !strings.Contains(d, "the first 300 characters of the page text") {
+		t.Fatal(d)
+	}
+}
+
+func TestNavigateExcerptFollowsField(t *testing.T) {
+	srv := htmlServer(t, `<html><body><p>`+strings.Repeat("é", 5000)+`</p></body></html>`)
+	bt := browserTools(t)
+	bt.ExcerptChars = 300
+	out := runToolEnv(t, bt.Tool("browser_navigate"), fmt.Sprintf(`{"url":%q}`, srv.URL), sessEnv("s1"))
+	if n := strings.Count(out, "é"); n != 300 || !strings.Contains(out, "the text is cut at 300 characters") {
+		t.Fatalf("%d characters: %s", n, out)
 	}
 }

@@ -389,3 +389,19 @@ func TestTerminalStubKeepsTimeoutBeforeDescription(t *testing.T) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestScriptStderrCapField(t *testing.T) {
+	pythonOrSkip(t)
+	src := "import sys\nsys.stderr.write('e'*500)\nsys.exit(3)"
+	tool := scriptTool(t, NewRegistry())
+	tool.MaxStderrChars = 20
+	out := runToolEnv(t, tool, code(src), visEnv())
+	if !strings.Contains(out, "--- stderr ---\n"+strings.Repeat("e", 20)+"\n[exit code: 3]") {
+		t.Fatalf("%q", out)
+	}
+	tool.MaxStderrChars = 0
+	out = runToolEnv(t, tool, code(src), visEnv())
+	if !strings.Contains(out, "--- stderr ---\n"+strings.Repeat("e", 500)+"\n[exit code: 3]") {
+		t.Fatalf("%q", out)
+	}
+}

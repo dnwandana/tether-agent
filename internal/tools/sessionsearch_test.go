@@ -107,3 +107,31 @@ func TestToolSearchErrors(t *testing.T) {
 		t.Fatal("bad tool metadata")
 	}
 }
+
+func TestSessionSearchLimitFields(t *testing.T) {
+	s, sess, ms := openSessions(t, 60)
+	tool := SessionSearchTool{Store: s, MaxChars: 50000, DefaultResults: 2, MaxResults: 4, DefaultWindow: 3, MaxWindow: 4}
+	if out := runTool(t, tool, `{"query":"message"}`); !strings.HasPrefix(out, "2 hits for") {
+		t.Fatal(out)
+	}
+	if out := runTool(t, tool, `{"query":"message","limit":50}`); !strings.HasPrefix(out, "4 hits for") {
+		t.Fatal(out)
+	}
+	hit := ms[36]
+	out := runTool(t, tool, fmt.Sprintf(`{"session_id":%q,"around_message_id":%d}`, sess.ID, hit.ID))
+	if strings.Count(out, "\nmsg ") != 7 {
+		t.Fatal("the default window must be 3:", out)
+	}
+	out = runTool(t, tool, fmt.Sprintf(`{"session_id":%q,"around_message_id":%d,"window":50}`, sess.ID, hit.ID))
+	if strings.Count(out, "\nmsg ") != 9 {
+		t.Fatal("the maximum window must be 4:", out)
+	}
+	p := string(tool.Schema().Parameters)
+	if !strings.Contains(p, "The default is 2, the maximum is 4.") || !strings.Contains(p, "The default is 3, the maximum is 4.") {
+		t.Fatal(p)
+	}
+	p = string(SessionSearchTool{}.Schema().Parameters)
+	if !strings.Contains(p, "The default is 5, the maximum is 20.") || !strings.Contains(p, "The default is 10, the maximum is 50.") {
+		t.Fatal(p)
+	}
+}

@@ -20,6 +20,9 @@ import (
 // defaultVisionMaxBytes is the size limit of one image (10 MB).
 const defaultVisionMaxBytes = 10 << 20
 
+// defaultImageDownloadTimeout limits one image download.
+const defaultImageDownloadTimeout = 60 * time.Second
+
 // defaultVisionQuestion is the question when the call gives none.
 const defaultVisionQuestion = "Describe this image in detail."
 
@@ -71,6 +74,8 @@ type VisionTool struct {
 	Client *http.Client
 	// MaxBytes limits the image size. Zero or less means 10 MB.
 	MaxBytes int64
+	// DownloadTimeout limits one image download. Zero or less means 60 s.
+	DownloadTimeout time.Duration
 	// Record records the usage of each completed vision call. Nil records nothing.
 	Record provider.RecordUsage
 	// Protected lists the paths that the tool does not send to the provider. Nil checks nothing.
@@ -205,6 +210,14 @@ func (t VisionTool) loadFile(path string) (provider.Image, error) {
 	return imageOf(path, data)
 }
 
+// downloadTimeout returns the time limit of one image download.
+func (t VisionTool) downloadTimeout() time.Duration {
+	if t.DownloadTimeout > 0 {
+		return t.DownloadTimeout
+	}
+	return defaultImageDownloadTimeout
+}
+
 // loadURL downloads an image with the guarded client.
 func (t VisionTool) loadURL(ctx context.Context, raw string) (provider.Image, error) {
 	u, err := url.Parse(raw)
@@ -214,7 +227,7 @@ func (t VisionTool) loadURL(ctx context.Context, raw string) (provider.Image, er
 	if t.Client == nil {
 		return provider.Image{}, toolErr("image URLs are not available in this process. Download the image and give its path")
 	}
-	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	cctx, cancel := context.WithTimeout(ctx, t.downloadTimeout())
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, u.String(), nil)
 	if err != nil {
@@ -269,10 +282,16 @@ func LoadImageFile(path string, maxBytes int64) (provider.Image, error) {
 // an error. The Telegram inbox uses it to describe a sticker. A record that is not nil gets
 // the usage of the call with no session and the task "sticker".
 func DescribeImage(ctx context.Context, prov provider.Provider, path, prompt string, record provider.RecordUsage) (string, error) {
+	return DescribeImageWithin(ctx, prov, path, prompt, record, 0)
+}
+
+// DescribeImageWithin does the work of DescribeImage. The file must not be larger than
+// maxBytes. A maxBytes of zero or less means 10 MB.
+func DescribeImageWithin(ctx context.Context, prov provider.Provider, path, prompt string, record provider.RecordUsage, maxBytes int64) (string, error) {
 	if prov == nil {
 		return "", errors.New("no vision model is configured")
 	}
-	img, err := VisionTool{}.loadFile(path)
+	img, err := VisionTool{MaxBytes: maxBytes}.loadFile(path)
 	if err != nil {
 		return "", errors.New(errorText("view_image", err))
 	}

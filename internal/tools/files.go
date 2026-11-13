@@ -95,8 +95,18 @@ func (rt *ReadTracker) CheckFresh(path string) error {
 	return nil
 }
 
-// ReadFileTool is the read_file tool.
-type ReadFileTool struct{}
+// ReadFileTool is the read_file tool. A zero field uses maxReadLines or
+// maxLineRunes.
+type ReadFileTool struct {
+	MaxLines     int
+	MaxLineChars int
+}
+
+// maxLines returns the line count limit of one call.
+func (t ReadFileTool) maxLines() int { return positiveOr(t.MaxLines, maxReadLines) }
+
+// maxLineChars returns the length limit of one line in characters.
+func (t ReadFileTool) maxLineChars() int { return positiveOr(t.MaxLineChars, maxLineRunes) }
 
 type readArgs struct {
 	Path   string `json:"path"`
@@ -114,26 +124,26 @@ func (ReadFileTool) Toolset() string { return SetFile }
 func (ReadFileTool) ParallelSafe() bool { return true }
 
 // Schema returns the tool schema for the model.
-func (ReadFileTool) Schema() provider.ToolSchema {
+func (t ReadFileTool) Schema() provider.ToolSchema {
 	return provider.ToolSchema{
 		Name: "read_file",
 		Description: "Read a text file. The result has numbered lines: the line number, a tab, then the line. " +
-			"One call returns at most 2000 lines and 2000 characters per line. When more lines follow, " +
+			fmt.Sprintf("One call returns at most %d lines and %d characters per line. When more lines follow, ", t.maxLines(), t.maxLineChars()) +
 			"the result ends with next_offset; call again with that offset to read more.",
-		Parameters: json.RawMessage(`{
+		Parameters: json.RawMessage(fmt.Sprintf(`{
   "type": "object",
   "properties": {
     "path": {"type": "string", "description": "The file path. A relative path starts at the session working folder."},
     "offset": {"type": "integer", "description": "The first line to read, starting at 1. The default is 1."},
-    "limit": {"type": "integer", "description": "The maximum number of lines to read. The default and the maximum are 2000."}
+    "limit": {"type": "integer", "description": "The maximum number of lines to read. The default and the maximum are %d."}
   },
   "required": ["path"]
-}`),
+}`, t.maxLines())),
 	}
 }
 
 // Run reads the file of the call and marks it as read for the session.
-func (ReadFileTool) Run(_ context.Context, raw json.RawMessage, env *Env) (string, error) {
+func (t ReadFileTool) Run(_ context.Context, raw json.RawMessage, env *Env) (string, error) {
 	var a readArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return "", err
@@ -144,8 +154,8 @@ func (ReadFileTool) Run(_ context.Context, raw json.RawMessage, env *Env) (strin
 	path := resolvePath(env, a.Path)
 	offset := max(a.Offset, 1)
 	limit := a.Limit
-	if limit <= 0 || limit > maxReadLines {
-		limit = maxReadLines
+	if limit <= 0 || limit > t.maxLines() {
+		limit = t.maxLines()
 	}
 
 	f, err := os.Open(path)
@@ -170,7 +180,7 @@ func (ReadFileTool) Run(_ context.Context, raw json.RawMessage, env *Env) (strin
 	lineNo, shown := 0, 0
 	more := false
 	for {
-		line, ok, err := readLine(br)
+		line, ok, err := readLine(br, t.maxLineChars())
 		if err != nil {
 			return "", toolErr("cannot read %s: %v", path, err)
 		}
@@ -203,9 +213,9 @@ func (ReadFileTool) Run(_ context.Context, raw json.RawMessage, env *Env) (strin
 }
 
 // readLine returns the next line of br without its line end, as valid UTF-8
-// and cut to maxLineRunes characters. A long line is never held in memory in
+// and cut to maxRunes characters. A long line is never held in memory in
 // full. ok is false at the end of the input.
-func readLine(br *bufio.Reader) (line string, ok bool, err error) {
+func readLine(br *bufio.Reader, maxRunes int) (line string, ok bool, err error) {
 	var buf []byte
 	cut := false
 	got := false
@@ -217,8 +227,8 @@ func readLine(br *bufio.Reader) (line string, ok bool, err error) {
 		if !cut {
 			buf = append(buf, frag...)
 			// 4 bytes per rune is the worst case; keep a margin for the cut.
-			if len(buf) > maxLineRunes*4+4 {
-				buf = buf[:maxLineRunes*4+4]
+			if len(buf) > maxRunes*4+4 {
+				buf = buf[:maxRunes*4+4]
 				cut = true
 			}
 		}
@@ -239,8 +249,8 @@ func readLine(br *bufio.Reader) (line string, ok bool, err error) {
 	buf = bytes.TrimSuffix(buf, []byte("\n"))
 	buf = bytes.TrimSuffix(buf, []byte("\r"))
 	s := ctxmgr.SanitizeUTF8(string(buf))
-	if cut || utf8.RuneCountInString(s) > maxLineRunes {
-		s = s[:runeByteOffset(s, maxLineRunes)] + lineCutMarker
+	if cut || utf8.RuneCountInString(s) > maxRunes {
+		s = s[:runeByteOffset(s, maxRunes)] + lineCutMarker
 	}
 	return s, true, nil
 }

@@ -410,3 +410,35 @@ func TestSTTRefusesTextFile(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestMediaBackendTimeouts(t *testing.T) {
+	m := &MediaSet{Cfg: mediaCfg("tts", "command", "say {text} {out}")}
+	m.Cfg.TTS.TimeoutS = 7
+	r, _ := m.runner("tts", m.Cfg.TTS)
+	if r == nil || r.cmd == nil || r.cmd.Timeout != 7*time.Second {
+		t.Fatal("the command backend must get media.tts.timeout_s")
+	}
+	m.Cfg.TTS.TimeoutS = 0
+	if r, _ := m.runner("tts", m.Cfg.TTS); r.cmd.Timeout != 0 {
+		t.Fatal("0 must keep the command default:", r.cmd.Timeout)
+	}
+	e := &MediaSet{Cfg: mediaCfg("stt", "endpoint", ""), Providers: map[string]config.Provider{"primary": {}}}
+	e.Cfg.STT.TimeoutS = 9
+	r, _ = e.runner("stt", e.Cfg.STT)
+	if r == nil || r.ep == nil || r.ep.Timeout != 9*time.Second {
+		t.Fatal("the endpoint backend must get media.stt.timeout_s")
+	}
+}
+
+func TestImageCommandUsesConfiguredSize(t *testing.T) {
+	m := &MediaSet{Cfg: mediaCfg("image", "command", `sh -c 'printf "%s|%s" "$1" "$2" > "$0"' {out} {prompt} {size}`), Dir: t.TempDir()}
+	m.Cfg.ImageSize = "512x768"
+	out := runTool(t, tool(m, "generate_image"), `{"prompt":"a dog"}`)
+	if b, _ := os.ReadFile(strings.TrimPrefix(out, "MEDIA:")); string(b) != "a dog|512x768" {
+		t.Fatal(string(b))
+	}
+	out = runTool(t, tool(m, "generate_image"), `{"prompt":"a dog","size":"256x256"}`)
+	if b, _ := os.ReadFile(strings.TrimPrefix(out, "MEDIA:")); string(b) != "a dog|256x256" {
+		t.Fatal("the size of the call must win:", string(b))
+	}
+}

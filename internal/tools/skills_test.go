@@ -319,3 +319,20 @@ func TestSkillViewReplacesTemplateTokens(t *testing.T) {
 		t.Fatal(out, err)
 	}
 }
+
+func TestSkillViewMaxLinkedFiles(t *testing.T) {
+	cat := catalogWith(t, "deploy", "Deploy steps.", "# Steps\n1. build", map[string]string{
+		"references/a.md": "a", "references/b.md": "b", "references/c.md": "c"})
+	tool := SkillViewTool{Catalog: cat, MaxLinkedFiles: 2}
+	out := runTool(t, tool, `{"name":"deploy"}`)
+	if !strings.Contains(out, "- references/a.md\n- references/b.md\n") || strings.Contains(out, "references/c.md") {
+		t.Fatal(out)
+	}
+	out = runToolErr(t, tool, `{"name":"deploy","file":"references/none.md"}`)
+	if !strings.Contains(out, "the files are: references/a.md, references/b.md") || strings.Contains(out, "c.md") {
+		t.Fatal(out)
+	}
+	if out := runTool(t, SkillViewTool{Catalog: cat}, `{"name":"deploy"}`); !strings.Contains(out, "references/c.md") {
+		t.Fatal("0 keeps the limit of 50:", out)
+	}
+}

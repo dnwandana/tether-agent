@@ -16,6 +16,7 @@ import (
 )
 
 // The limits of skill_manage writes (Hermes tools/skill_manager_tool.py).
+// The two size consts are the fallbacks when a Manager limit field is 0.
 const (
 	maxNameLen        = 64
 	maxSkillMDChars   = 100_000
@@ -37,8 +38,28 @@ type Manager struct {
 	Dir string
 	// Guard turns on the skill guard (skills.guard).
 	Guard bool
+	// SkillMDMaxChars is the limit of SKILL.md in runes. 0 means maxSkillMDChars.
+	SkillMDMaxChars int
+	// SupportFileMaxBytes is the limit of a support file in bytes. 0 means maxSupportFileLen.
+	SupportFileMaxBytes int
 
 	mu sync.Mutex
+}
+
+// skillMDLimit returns the limit of SKILL.md in runes.
+func (m *Manager) skillMDLimit() int {
+	if m.SkillMDMaxChars > 0 {
+		return m.SkillMDMaxChars
+	}
+	return maxSkillMDChars
+}
+
+// supportFileLimit returns the limit of a support file in bytes.
+func (m *Manager) supportFileLimit() int {
+	if m.SupportFileMaxBytes > 0 {
+		return m.SupportFileMaxBytes
+	}
+	return maxSupportFileLen
 }
 
 // Result is the result of a write.
@@ -69,7 +90,7 @@ func (m *Manager) Create(name, content string) (Result, error) {
 	if _, err := os.Lstat(dir); err == nil {
 		return Result{}, fmt.Errorf("the folder %s already exists; choose another name", dir)
 	}
-	if err := validSkillMD(name, content); err != nil {
+	if err := validSkillMD(name, content, m.skillMDLimit()); err != nil {
 		return Result{}, err
 	}
 	res, err := m.guard(map[string]string{skillFile: content})
@@ -138,11 +159,11 @@ func (m *Manager) PatchFile(name, rel, old, new string) (Result, error) {
 	}
 	content = strings.Replace(content, old, new, 1)
 	if rel == skillFile {
-		if err := validSkillMD(name, content); err != nil {
+		if err := validSkillMD(name, content, m.skillMDLimit()); err != nil {
 			return Result{}, fmt.Errorf("the patch breaks SKILL.md: %w", err)
 		}
-	} else if len(content) > maxSupportFileLen {
-		return Result{}, fmt.Errorf("%s would be %d bytes; the limit is %d", rel, len(content), maxSupportFileLen)
+	} else if limit := m.supportFileLimit(); len(content) > limit {
+		return Result{}, fmt.Errorf("%s would be %d bytes; the limit is %d", rel, len(content), limit)
 	}
 	return m.save(s, rel, target, content)
 }
@@ -154,8 +175,8 @@ func (m *Manager) WriteFile(name, rel, content string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if len(content) > maxSupportFileLen {
-		return Result{}, fmt.Errorf("the file is %d bytes; the limit is %d", len(content), maxSupportFileLen)
+	if limit := m.supportFileLimit(); len(content) > limit {
+		return Result{}, fmt.Errorf("the file is %d bytes; the limit is %d", len(content), limit)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -366,9 +387,9 @@ func validName(name string) error {
 
 // validSkillMD checks SKILL.md content: valid frontmatter, a name equal to
 // the folder name, a description, a body, and the size limit.
-func validSkillMD(name, content string) error {
-	if n := utf8.RuneCountInString(content); n > maxSkillMDChars {
-		return fmt.Errorf("SKILL.md has %d characters; the limit is %d. Move details into references/ files", n, maxSkillMDChars)
+func validSkillMD(name, content string, maxChars int) error {
+	if n := utf8.RuneCountInString(content); n > maxChars {
+		return fmt.Errorf("SKILL.md has %d characters; the limit is %d. Move details into references/ files", n, maxChars)
 	}
 	s, err := parseSkill([]byte(content))
 	if err != nil {

@@ -326,3 +326,35 @@ func TestPatchRefusesProtectedByDefault(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestUnifiedDiffWithContext(t *testing.T) {
+	var before, after strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&before, "l%d\n", i)
+		if i == 10 {
+			after.WriteString("changed\n")
+			continue
+		}
+		fmt.Fprintf(&after, "l%d\n", i)
+	}
+	d := UnifiedDiffWith("f.txt", before.String(), after.String(), 1)
+	want := "--- a/f.txt\n+++ b/f.txt\n@@ -9,3 +9,3 @@\n l9\n-l10\n+changed\n l11\n"
+	if d != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", d, want)
+	}
+	if UnifiedDiffWith("f.txt", before.String(), after.String(), 0) != UnifiedDiff("f.txt", before.String(), after.String()) {
+		t.Fatal("a context of 0 must give 3 lines of context")
+	}
+}
+
+func TestPatchToolContextLines(t *testing.T) {
+	var b strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&b, "l%d\n", i)
+	}
+	p := writeFile(t, b.String())
+	out := runToolEnv(t, PatchTool{ContextLines: 1}, fmt.Sprintf(`{"path":%q,"old_string":"l10\n","new_string":"changed\n"}`, p), newEnv(t))
+	if !strings.Contains(out, "@@ -9,3 +9,3 @@\n l9\n-l10\n+changed\n l11\n") || strings.Contains(out, " l8\n") {
+		t.Fatal(out)
+	}
+}

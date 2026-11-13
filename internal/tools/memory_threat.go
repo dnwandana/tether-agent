@@ -14,9 +14,10 @@ import (
 	"github.com/dnwandana/tether-agent/internal/skills"
 )
 
-// memoryScanMaxRunes is the entry limit of the memory store (maxEntryRunes in
-// internal/memory/store.go). The guard does not scan a longer text, because the
-// store refuses it with the length error. Hermes also caps the scan (MAX_SCAN_CHARS).
+// memoryScanMaxRunes is the default entry limit of the memory store (maxEntryRunes in
+// internal/memory/store.go). It is the fallback when a caller passes a limit of 0.
+// The guard does not scan a longer text, because the store refuses it with the length
+// error. Hermes also caps the scan (MAX_SCAN_CHARS).
 const memoryScanMaxRunes = 4000
 
 // memoryThreatRow is one rule of the memory guard: the ID, a short description,
@@ -97,12 +98,16 @@ var envVarName = regexp.MustCompile(`^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$`)
 // memoryFinding is one finding of the memory guard.
 type memoryFinding struct{ ID, Description string }
 
-// scanMemory returns the findings of the memory guard for content, in order.
-func scanMemory(content string) []memoryFinding {
+// scanMemory returns the findings of the memory guard for content, in order. A
+// maxRunes of 0 or less uses memoryScanMaxRunes.
+func scanMemory(content string, maxRunes int) []memoryFinding {
+	if maxRunes <= 0 {
+		maxRunes = memoryScanMaxRunes
+	}
 	// The store trims the text before its length check and saves the trimmed text. Trim
 	// here too, so spaces at the end cannot put a text over the scan limit.
 	content = strings.TrimSpace(content)
-	if utf8.RuneCountInString(content) > memoryScanMaxRunes {
+	if utf8.RuneCountInString(content) > maxRunes {
 		return nil
 	}
 	var out []memoryFinding
@@ -149,8 +154,9 @@ func realSecret(re *regexp.Regexp, text string) bool {
 }
 
 // memoryThreat returns the refusal text for a memory write, or "" when the text is allowed.
-func memoryThreat(content string) string {
-	findings := scanMemory(content)
+// A maxRunes of 0 or less uses memoryScanMaxRunes.
+func memoryThreat(content string, maxRunes int) string {
+	findings := scanMemory(content, maxRunes)
 	if len(findings) == 0 {
 		return ""
 	}
@@ -163,14 +169,22 @@ func memoryThreat(content string) string {
 		"send data out. Save the fact in your own words, without the flagged text."
 }
 
-// MemoryThreatIDs returns the finding IDs of the memory threat scan for text. A text
-// of more than 4000 runes gives "too_long". It returns nil when there is no finding.
-func MemoryThreatIDs(text string) []string {
-	if utf8.RuneCountInString(strings.TrimSpace(text)) > memoryScanMaxRunes {
+// MemoryThreatIDs returns the finding IDs of the memory threat scan for text, with
+// the default limit of 4000 runes.
+func MemoryThreatIDs(text string) []string { return MemoryThreatIDsWithin(text, 0) }
+
+// MemoryThreatIDsWithin returns the finding IDs of the memory threat scan for text. A
+// text of more than maxRunes runes gives "too_long". A maxRunes of 0 or less uses
+// memoryScanMaxRunes. It returns nil when there is no finding.
+func MemoryThreatIDsWithin(text string, maxRunes int) []string {
+	if maxRunes <= 0 {
+		maxRunes = memoryScanMaxRunes
+	}
+	if utf8.RuneCountInString(strings.TrimSpace(text)) > maxRunes {
 		return []string{"too_long"}
 	}
 	var ids []string
-	for _, f := range scanMemory(text) {
+	for _, f := range scanMemory(text, maxRunes) {
 		ids = append(ids, f.ID)
 	}
 	return ids
@@ -184,9 +198,16 @@ func MemoryEntryID(entry string) string {
 }
 
 // MemoryBlockedLine returns the line that replaces a blocked entry in the system
-// prompt. It returns false and no line when the scan has no finding.
+// prompt, with the default limit of 4000 runes.
 func MemoryBlockedLine(entry string) (line string, blocked bool) {
-	ids := MemoryThreatIDs(entry)
+	return MemoryBlockedLineWithin(entry, 0)
+}
+
+// MemoryBlockedLineWithin returns the line that replaces a blocked entry in the system
+// prompt. It returns false and no line when the scan has no finding. A maxRunes of 0 or
+// less uses memoryScanMaxRunes.
+func MemoryBlockedLineWithin(entry string, maxRunes int) (line string, blocked bool) {
+	ids := MemoryThreatIDsWithin(entry, maxRunes)
 	if len(ids) == 0 {
 		return "", false
 	}

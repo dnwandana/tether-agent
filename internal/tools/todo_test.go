@@ -403,3 +403,62 @@ func TestTodoChangeAfterFailedWrite(t *testing.T) {
 		t.Fatal("a failed write must change nothing:", before, items, writes)
 	}
 }
+
+func TestTodoStoreWithLimits(t *testing.T) {
+	five := todoRaw(t, todoItem("1", "pending", ""), todoItem("2", "pending", ""), todoItem("3", "pending", ""),
+		todoItem("4", "pending", ""), todoItem("5", "pending", ""))
+
+	values := map[string]any{}
+	s := TodoStoreWith(values, TodoLimits{MaxItems: 3})
+	if s != TodoStoreFor(values) {
+		t.Fatal("TodoStoreWith must return the store of the values map")
+	}
+	if err := s.Write(five, false); err != nil {
+		t.Fatal(err)
+	}
+	if items, _, _ := s.Items(); len(items) != 3 {
+		t.Fatal("MaxItems 3 must keep 3 items:", todoIDs(items))
+	}
+
+	c := TodoStoreWith(map[string]any{}, TodoLimits{MaxChars: 200})
+	long, _ := json.Marshal(map[string]string{"id": "1", "content": strings.Repeat("A", 300), "status": "pending"})
+	if err := c.Write([]json.RawMessage{long}, false); err != nil {
+		t.Fatal(err)
+	}
+	items, _, _ := c.Items()
+	if n := utf8.RuneCountInString(items[0].Content); n != 200 || !strings.HasSuffix(items[0].Content, "… [truncated]") {
+		t.Fatal("a write must cut to MaxChars:", n)
+	}
+	if err := c.Write(todoRaw(t, `{"id":"1","content":"`+strings.Repeat("B", 300)+`"}`), true); err != nil {
+		t.Fatal(err)
+	}
+	items, _, _ = c.Items()
+	if n := utf8.RuneCountInString(items[0].Content); n != 200 {
+		t.Fatal("a merge must cut to MaxChars:", n)
+	}
+
+	// A lower limit cuts a longer list on the next write. A zero field keeps the limit of the store.
+	v := map[string]any{}
+	if err := TodoStoreWith(v, TodoLimits{}).Write(five, false); err != nil {
+		t.Fatal(err)
+	}
+	low := TodoStoreWith(v, TodoLimits{MaxItems: 2})
+	if err := low.Write(todoRaw(t, `{"id":"1","status":"completed"}`), true); err != nil {
+		t.Fatal(err)
+	}
+	if items, _, _ := low.Items(); len(items) != 2 {
+		t.Fatal("a lower limit must cut the list on the next write:", todoIDs(items))
+	}
+	if err := TodoStoreWith(v, TodoLimits{}).Write(five, false); err != nil {
+		t.Fatal(err)
+	}
+	if items, _, _ := low.Items(); len(items) != 2 {
+		t.Fatal("a zero field must keep the limit of the store:", todoIDs(items))
+	}
+
+	r := TodoStoreWith(map[string]any{}, TodoLimits{MaxItems: 1})
+	r.Restore([]TodoItem{{ID: "a", Content: "A", Status: "pending"}, {ID: "b", Content: "B", Status: "pending"}}, 4)
+	if items, rev, _ := r.Items(); len(items) != 1 || rev != 4 {
+		t.Fatal("a restore must cut to MaxItems:", todoIDs(items), rev)
+	}
+}

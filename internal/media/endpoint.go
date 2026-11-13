@@ -19,7 +19,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
-// The timeouts of the endpoint calls.
+// The timeouts of the endpoint calls. They apply when Endpoint.Timeout is 0.
 const (
 	speechTimeout     = 60 * time.Second
 	transcribeTimeout = 120 * time.Second
@@ -48,6 +48,16 @@ type Endpoint struct {
 	P        config.Provider
 	HC       *http.Client
 	Download *http.Client
+	// Timeout limits each call. 0 uses the const of the call.
+	Timeout time.Duration
+}
+
+// limit returns Timeout when it is above 0, else def.
+func (e *Endpoint) limit(def time.Duration) time.Duration {
+	if e.Timeout > 0 {
+		return e.Timeout
+	}
+	return def
 }
 
 // Speech sends text to {base}/audio/speech and writes the MP3 body to
@@ -56,7 +66,7 @@ func (e *Endpoint) Speech(ctx context.Context, text, voice, outPath string) erro
 	if voice == "" {
 		voice = DefaultVoice
 	}
-	ctx, cancel := context.WithTimeout(ctx, speechTimeout)
+	ctx, cancel := context.WithTimeout(ctx, e.limit(speechTimeout))
 	defer cancel()
 	body, err := json.Marshal(map[string]any{"model": e.P.Model, "input": text, "voice": voice, "response_format": "mp3"})
 	if err != nil {
@@ -79,7 +89,7 @@ func (e *Endpoint) Transcribe(ctx context.Context, path string) (string, error) 
 		return "", fmt.Errorf("audio/transcriptions: open the audio file: %w", err)
 	}
 	defer f.Close()
-	ctx, cancel := context.WithTimeout(ctx, transcribeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, e.limit(transcribeTimeout))
 	defer cancel()
 
 	pr, pw := io.Pipe()
@@ -122,7 +132,7 @@ func writeForm(mw *multipart.Writer, model, name string, f io.Reader) error {
 // image to outPath. It accepts data[0].b64_json and data[0].url. An empty
 // size is left out of the request.
 func (e *Endpoint) Image(ctx context.Context, prompt, size, outPath string) error {
-	ctx, cancel := context.WithTimeout(ctx, imageTimeout)
+	ctx, cancel := context.WithTimeout(ctx, e.limit(imageTimeout))
 	defer cancel()
 	req := map[string]any{"model": e.P.Model, "prompt": prompt, "n": 1}
 	if size != "" {

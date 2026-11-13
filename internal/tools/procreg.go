@@ -27,6 +27,9 @@ type ProcRegistry struct {
 	mu     sync.Mutex
 	procs  map[int]*ProcInfo
 	onExit func(sessionID string, pid int)
+	// Keep is the time that the registry keeps a process after its exit.
+	// Zero uses procKeep. Set it before the first Add.
+	Keep time.Duration
 }
 
 // NewProcRegistry returns an empty registry.
@@ -141,11 +144,19 @@ func (r *ProcRegistry) OnExit(f func(sessionID string, pid int)) {
 	r.onExit = f
 }
 
-// pruneLocked removes each exited entry that ended more than procKeep before
-// now. The caller holds r.mu.
+// keep returns the keep time of an exited process.
+func (r *ProcRegistry) keep() time.Duration {
+	if r.Keep > 0 {
+		return r.Keep
+	}
+	return procKeep
+}
+
+// pruneLocked removes each exited entry that ended more than the keep time
+// before now. The caller holds r.mu.
 func (r *ProcRegistry) pruneLocked(now time.Time) {
 	for pid, p := range r.procs {
-		if p.Exited && now.Sub(p.EndedAt) > procKeep {
+		if p.Exited && now.Sub(p.EndedAt) > r.keep() {
 			delete(r.procs, pid)
 		}
 	}

@@ -63,6 +63,8 @@ type SkillViewTool struct {
 	// EnvStatus returns the status of each env name of a skill, in the same order. Nil
 	// gives "not set" for each name.
 	EnvStatus func(names []string) []string
+	// MaxLinkedFiles limits the support files that a result lists. 0 means maxLinkedFiles.
+	MaxLinkedFiles int
 }
 
 // envStatusLine returns the status line of the env names of a skill. It calls status one
@@ -132,7 +134,7 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 		return "", err
 	}
 	if strings.TrimSpace(a.File) != "" {
-		return readSkillFile(s, a.File)
+		return readSkillFile(s, a.File, t.MaxLinkedFiles)
 	}
 	sessionID := ""
 	if env != nil {
@@ -145,7 +147,7 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 	if !strings.HasSuffix(b.String(), "\n") {
 		b.WriteString("\n")
 	}
-	if files := linkedFiles(s.Dir); len(files) > 0 {
+	if files := linkedFiles(s.Dir, t.MaxLinkedFiles); len(files) > 0 {
 		fmt.Fprintf(&b, "\nSupport files (read one with skill_view and file):\n- %s\n", strings.Join(files, "\n- "))
 	}
 	if len(s.RequiredEnv) > 0 {
@@ -156,7 +158,7 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 
 // readSkillFile returns the content of file in the folder of s. The file
 // must stay in the folder after ".." and symlinks resolve.
-func readSkillFile(s skills.Skill, file string) (string, error) {
+func readSkillFile(s skills.Skill, file string, maxFiles int) (string, error) {
 	const outside = "file must be inside the skill folder"
 	p := filepath.Join(s.Dir, file)
 	if !inside(s.Dir, p) {
@@ -168,7 +170,7 @@ func readSkillFile(s skills.Skill, file string) (string, error) {
 	}
 	real, err := filepath.EvalSymlinks(p)
 	if errors.Is(err, fs.ErrNotExist) {
-		files := linkedFiles(s.Dir)
+		files := linkedFiles(s.Dir, maxFiles)
 		if len(files) == 0 {
 			return "", toolErr("skill %s has no file %s and no support files", s.Name, file)
 		}
@@ -185,7 +187,7 @@ func readSkillFile(s skills.Skill, file string) (string, error) {
 		return "", toolErr("cannot read %s: %v", file, err)
 	}
 	if info.IsDir() {
-		return "", toolErr("%s is a folder; the files are: %s", file, strings.Join(linkedFiles(s.Dir), ", "))
+		return "", toolErr("%s is a folder; the files are: %s", file, strings.Join(linkedFiles(s.Dir, maxFiles), ", "))
 	}
 	data, err := os.ReadFile(real)
 	if err != nil {
@@ -204,8 +206,11 @@ func inside(dir, path string) bool {
 }
 
 // linkedFiles returns the support files of a skill folder: every file except
-// SKILL.md and hidden files, as slash paths, sorted, at most maxLinkedFiles.
-func linkedFiles(dir string) []string {
+// SKILL.md and hidden files, as slash paths, sorted, at most max. A max of 0 or less means maxLinkedFiles.
+func linkedFiles(dir string, max int) []string {
+	if max <= 0 {
+		max = maxLinkedFiles
+	}
 	var out []string
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || path == dir {
@@ -220,7 +225,7 @@ func linkedFiles(dir string) []string {
 		if d.IsDir() || path == filepath.Join(dir, "SKILL.md") {
 			return nil
 		}
-		if len(out) == maxLinkedFiles {
+		if len(out) >= max {
 			return fs.SkipAll
 		}
 		if rel, err := filepath.Rel(dir, path); err == nil {
@@ -250,7 +255,7 @@ func SkillInvocationText(s skills.Skill, body, args string, status func(names []
 		parts = append(parts, "",
 			"["+envStatusLine(s.RequiredEnv, status)+"]")
 	}
-	if files := linkedFiles(s.Dir); len(files) > 0 {
+	if files := linkedFiles(s.Dir, 0); len(files) > 0 {
 		parts = append(parts, "", "[This skill has supporting files (paths relative to the skill directory above):]")
 		for _, f := range files {
 			parts = append(parts, "- "+f)

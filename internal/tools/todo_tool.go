@@ -103,11 +103,15 @@ func (t TodoTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (strin
 	if err := decodeArgs(raw, &a); err != nil {
 		return "", err
 	}
-	var values map[string]any
+	var (
+		values map[string]any
+		lim    TodoLimits
+	)
 	if env != nil {
 		values = env.Values
+		lim = env.Todo
 	}
-	store := TodoStoreFor(values)
+	store := TodoStoreWith(values, lim)
 	if _, _, loaded := store.Items(); !loaded && t.Sessions != nil && env != nil {
 		// Restore the list first, so a merge after a restart keeps the old
 		// items. A query error does not fail the call: the call then works on

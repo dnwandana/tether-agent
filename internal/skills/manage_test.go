@@ -1,11 +1,13 @@
 package skills
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const deployMD = "---\nname: deploy\ndescription: Deploy. Use when deploying.\n---\n# Steps\n1. build\n"
@@ -278,5 +280,32 @@ func TestSkillFilesReadsHeadOfLargeBinary(t *testing.T) {
 	}
 	if n := after.TotalAlloc - before.TotalAlloc; n > 8<<20 {
 		t.Fatalf("skillFiles allocated %d bytes for a binary file that it does not scan", n)
+	}
+}
+
+func TestManagerLimitFields(t *testing.T) {
+	m := newManager(t, false)
+	m.SkillMDMaxChars = 1000
+	big := "---\nname: big\ndescription: d\n---\n" + strings.Repeat("x", 1000)
+	want := fmt.Sprintf("SKILL.md has %d characters; the limit is 1000. Move details into references/ files", utf8.RuneCountInString(big))
+	if _, err := m.Create("big", big); err == nil || err.Error() != want {
+		t.Fatalf("got %v, want %q", err, want)
+	}
+	if _, err := m.Create("deploy", deployMD); err != nil {
+		t.Fatal(err)
+	}
+	m.SupportFileMaxBytes = 1024
+	if _, err := m.WriteFile("deploy", "references/a.md", strings.Repeat("x", 1025)); err == nil || err.Error() != "the file is 1025 bytes; the limit is 1024" {
+		t.Fatal(err)
+	}
+	if _, err := m.WriteFile("deploy", "references/a.md", "y"+strings.Repeat("x", 1023)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.PatchFile("deploy", "references/a.md", "y", "zz"); err == nil || err.Error() != "references/a.md would be 1025 bytes; the limit is 1024" {
+		t.Fatal(err)
+	}
+	m.SupportFileMaxBytes = 0 // the const: 1 MiB
+	if _, err := m.WriteFile("deploy", "references/b.md", strings.Repeat("x", 1025)); err != nil {
+		t.Fatal("0 keeps the limit of 1 MiB:", err)
 	}
 }

@@ -277,3 +277,27 @@ func TestWriteRefusesMemoryFiles(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestReadFileLimitFields(t *testing.T) {
+	tool := ReadFileTool{MaxLines: 3, MaxLineChars: 100}
+	p := writeLines(t, 10)
+	out := runTool(t, tool, fmt.Sprintf(`{"path":%q,"limit":50}`, p))
+	if !strings.Contains(out, "     3\tline 3\n") || strings.Contains(out, "line 4\n") || !strings.Contains(out, "next_offset: 4") {
+		t.Fatalf("%q", out)
+	}
+	long := writeFile(t, strings.Repeat("é", 500)+"\n")
+	first, _, _ := strings.Cut(runTool(t, tool, fmt.Sprintf(`{"path":%q}`, long)), "\n")
+	if first != "     1\t"+strings.Repeat("é", 100)+" …[line truncated]" {
+		t.Fatalf("%d runes", utf8.RuneCountInString(first))
+	}
+	s := tool.Schema()
+	if !strings.Contains(s.Description, "at most 3 lines and 100 characters per line") ||
+		!strings.Contains(string(s.Parameters), "The default and the maximum are 3.") {
+		t.Fatal(s.Description, string(s.Parameters))
+	}
+	s = ReadFileTool{}.Schema()
+	if !strings.Contains(s.Description, "at most 2000 lines and 2000 characters per line") ||
+		!strings.Contains(string(s.Parameters), "The default and the maximum are 2000.") {
+		t.Fatal(s.Description, string(s.Parameters))
+	}
+}

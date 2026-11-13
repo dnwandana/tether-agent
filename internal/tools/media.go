@@ -68,6 +68,8 @@ type mediaRunner struct {
 // runner returns the backend of the media.<kind> config, or nil when the tool
 // is off. The warning is not empty when the config is set but not usable.
 func (m *MediaSet) runner(kind string, b config.MediaBackend) (r *mediaRunner, warning string) {
+	// A zero limit keeps the default of the backend.
+	d := time.Duration(b.TimeoutS) * time.Second
 	switch b.Backend {
 	case "":
 		return nil, ""
@@ -75,7 +77,7 @@ func (m *MediaSet) runner(kind string, b config.MediaBackend) (r *mediaRunner, w
 		if strings.TrimSpace(b.Command) == "" {
 			return nil, fmt.Sprintf("media.%s.command is empty", kind)
 		}
-		return &mediaRunner{cmd: &media.CommandBackend{Template: b.Command, WorkDir: m.Dir, Env: m.Env}}, ""
+		return &mediaRunner{cmd: &media.CommandBackend{Template: b.Command, WorkDir: m.Dir, Env: m.Env, Timeout: d}}, ""
 	case mediaEndpoint:
 		name := b.Provider
 		if name == "" {
@@ -85,10 +87,18 @@ func (m *MediaSet) runner(kind string, b config.MediaBackend) (r *mediaRunner, w
 		if !ok {
 			return nil, fmt.Sprintf("media.%s.provider %q is not in providers", kind, name)
 		}
-		return &mediaRunner{ep: &media.Endpoint{P: p, HC: m.HC, Download: m.Download}}, ""
+		return &mediaRunner{ep: &media.Endpoint{P: p, HC: m.HC, Download: m.Download, Timeout: d}}, ""
 	default:
 		return nil, fmt.Sprintf("media.%s.backend %q is not known; use command or endpoint", kind, b.Backend)
 	}
+}
+
+// imageSize returns the {size} value for a call that gives no size.
+func (m *MediaSet) imageSize() string {
+	if s := strings.TrimSpace(m.Cfg.ImageSize); s != "" {
+		return s
+	}
+	return defaultImageSize
 }
 
 func (m *MediaSet) log() *slog.Logger {
@@ -313,7 +323,7 @@ func (m *MediaSet) imageTool(r *mediaRunner) Tool {
 			if r.cmd != nil {
 				size := a.Size
 				if size == "" {
-					size = defaultImageSize
+					size = m.imageSize()
 				}
 				if err := r.cmd.Run(ctx, map[string]string{"prompt": a.Prompt, "size": size, "out": out}); err != nil {
 					return "", mediaErr(ctx, err)

@@ -31,7 +31,20 @@ type SessionSearchTool struct {
 	// MaxChars caps the text of the read shape (context.tool_output_max_chars).
 	// A value <= 0 means no cap.
 	MaxChars int
+	// The result and window limits. 0 uses searchDefaultLimit,
+	// searchMaxLimit, scrollDefaultWin, and scrollMaxWin.
+	DefaultResults int
+	MaxResults     int
+	DefaultWindow  int
+	MaxWindow      int
 }
+
+func (t SessionSearchTool) defaultResults() int {
+	return positiveOr(t.DefaultResults, searchDefaultLimit)
+}
+func (t SessionSearchTool) maxResults() int    { return positiveOr(t.MaxResults, searchMaxLimit) }
+func (t SessionSearchTool) defaultWindow() int { return positiveOr(t.DefaultWindow, scrollDefaultWin) }
+func (t SessionSearchTool) maxWindow() int     { return positiveOr(t.MaxWindow, scrollMaxWin) }
 
 type sessionSearchArgs struct {
 	Query           string `json:"query"`
@@ -51,7 +64,7 @@ func (SessionSearchTool) Toolset() string { return SetMemory }
 func (SessionSearchTool) ParallelSafe() bool { return true }
 
 // Schema returns the tool schema for the model.
-func (SessionSearchTool) Schema() provider.ToolSchema {
+func (t SessionSearchTool) Schema() provider.ToolSchema {
 	return provider.ToolSchema{
 		Name: "session_search",
 		Description: "Search the messages of past sessions, or read in one session. The search uses SQLite FTS5 " +
@@ -65,16 +78,16 @@ func (SessionSearchTool) Schema() provider.ToolSchema {
 			"FTS5 SYNTAX: all words must match by default. Use OR for more results (alpha OR beta), quotes for an exact " +
 			"phrase (\"docker networking\"), NOT to exclude a word, and * for a prefix (deploy*).\n\n" +
 			"Use this tool first for questions like 'what did we do about X' or 'where did we stop with Y'.",
-		Parameters: json.RawMessage(`{
+		Parameters: json.RawMessage(fmt.Sprintf(`{
   "type": "object",
   "properties": {
     "query": {"type": "string", "description": "The FTS5 query (discovery shape)."},
-    "limit": {"type": "integer", "description": "Discovery shape: the maximum number of hits. The default is 5, the maximum is 20."},
+    "limit": {"type": "integer", "description": "Discovery shape: the maximum number of hits. The default is %d, the maximum is %d."},
     "session_id": {"type": "string", "description": "Read and scroll shapes: the session to read."},
     "around_message_id": {"type": "integer", "description": "Scroll shape: the message id at the center of the window."},
-    "window": {"type": "integer", "description": "Scroll shape: the number of messages on each side. The default is 10, the maximum is 50."}
+    "window": {"type": "integer", "description": "Scroll shape: the number of messages on each side. The default is %d, the maximum is %d."}
   }
-}`),
+}`, t.defaultResults(), t.maxResults(), t.defaultWindow(), t.maxWindow())),
 	}
 }
 
@@ -118,9 +131,9 @@ func (t SessionSearchTool) Run(ctx context.Context, raw json.RawMessage, env *En
 func (t SessionSearchTool) discover(ctx context.Context, a sessionSearchArgs, sc sessions.Scope) (string, error) {
 	limit := a.Limit
 	if limit <= 0 {
-		limit = searchDefaultLimit
+		limit = t.defaultResults()
 	}
-	limit = min(limit, searchMaxLimit)
+	limit = min(limit, t.maxResults())
 	hits, err := t.Store.Search(ctx, a.Query, limit, sc)
 	if errors.Is(err, sessions.ErrQuerySyntax) {
 		return "", toolErr("%s", sessions.ErrQuerySyntax.Error())
@@ -170,9 +183,9 @@ func (t SessionSearchTool) read(ctx context.Context, id string) (string, error) 
 func (t SessionSearchTool) scroll(ctx context.Context, a sessionSearchArgs) (string, error) {
 	win := a.Window
 	if win <= 0 {
-		win = scrollDefaultWin
+		win = t.defaultWindow()
 	}
-	win = min(win, scrollMaxWin)
+	win = min(win, t.maxWindow())
 	ms, err := t.Store.Around(ctx, a.SessionID, a.AroundMessageID, win)
 	if errors.Is(err, sessions.ErrNotFound) {
 		return "", toolErr("session %s has no message %d", a.SessionID, a.AroundMessageID)

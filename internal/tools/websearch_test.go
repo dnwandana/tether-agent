@@ -140,3 +140,26 @@ func TestDefaultEndpoint(t *testing.T) {
 		t.Fatal("wrong default endpoint")
 	}
 }
+
+func TestWebSearchLimitFields(t *testing.T) {
+	var page strings.Builder
+	page.WriteString("<html><body>")
+	for i := range 15 {
+		fmt.Fprintf(&page, `<div class="result results_links web-result"><h2 class="result__title"><a class="result__a" href="https://e.com/%d">T%d</a></h2><a class="result__snippet">S%d</a></div>`, i, i, i)
+	}
+	page.WriteString("</body></html>")
+	srv := htmlServer(t, page.String())
+	tool := &WebSearchTool{Client: srv.Client(), Endpoint: srv.URL, DefaultResults: 3, MaxResults: 7}
+	if out := runTool(t, tool, `{"query":"x"}`); !strings.Contains(out, "3. T2") || strings.Contains(out, "4. ") {
+		t.Fatal(out)
+	}
+	if out := runTool(t, tool, `{"query":"x","limit":50}`); !strings.Contains(out, "7. T6") || strings.Contains(out, "8. ") {
+		t.Fatal(out)
+	}
+	if p := string(tool.Schema().Parameters); !strings.Contains(p, "The default is 3 and the maximum is 7.") {
+		t.Fatal(p)
+	}
+	if p := string((&WebSearchTool{}).Schema().Parameters); !strings.Contains(p, "The default is 5 and the maximum is 10.") {
+		t.Fatal(p)
+	}
+}

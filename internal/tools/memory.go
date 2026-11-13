@@ -123,9 +123,11 @@ func (t MemoryTool) Run(_ context.Context, raw json.RawMessage, _ *Env) (string,
 	if t.Store == nil {
 		return "", toolErr("memory is not available in this session")
 	}
+	limit := t.Store.EntryLimit()
+	mask := func(e string) (string, bool) { return MemoryBlockedLineWithin(e, limit) }
 	switch a.Action {
 	case "search":
-		out, err := t.Store.SearchMasked(a.Query, MemoryBlockedLine)
+		out, err := t.Store.SearchMasked(a.Query, mask)
 		if err != nil {
 			return "", toolErr("%v", err)
 		}
@@ -141,12 +143,12 @@ func (t MemoryTool) Run(_ context.Context, raw json.RawMessage, _ *Env) (string,
 			return "", toolErr("target is required for %s; use memory or user", a.Action)
 		}
 		if a.Action != "remove" {
-			if msg := memoryThreat(a.Content); msg != "" {
+			if msg := memoryThreat(a.Content, limit); msg != "" {
 				return "", toolErr("%s", msg)
 			}
 		}
 		// Mask keeps the raw text of a blocked entry out of an error text.
-		op := memory.Op{Action: a.Action, Target: a.Target, Topic: a.Topic, Content: a.Content, OldText: a.OldText, Mask: MemoryBlockedLine}
+		op := memory.Op{Action: a.Action, Target: a.Target, Topic: a.Topic, Content: a.Content, OldText: a.OldText, Mask: mask}
 		if a.Action == "remove" && a.Topic == "" {
 			if id := strings.TrimSpace(a.OldText); memoryEntryIDRe.MatchString(id) {
 				entry, err := t.entryByID(a.Target, id)

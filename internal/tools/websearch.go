@@ -50,6 +50,10 @@ type SearchResult struct {
 type WebSearchTool struct {
 	Client   *http.Client
 	Endpoint string
+	// DefaultResults and MaxResults set the result limits. 0 uses
+	// defaultSearchLimit and maxSearchLimit.
+	DefaultResults int
+	MaxResults     int
 
 	once     sync.Once
 	fallback *http.Client
@@ -69,20 +73,26 @@ func (t *WebSearchTool) Toolset() string { return SetWeb }
 // ParallelSafe returns true, because a search changes no local state.
 func (t *WebSearchTool) ParallelSafe() bool { return true }
 
+// defaultResults returns the number of results when the call gives no limit.
+func (t *WebSearchTool) defaultResults() int { return positiveOr(t.DefaultResults, defaultSearchLimit) }
+
+// maxResults returns the largest number of results that a call can ask for.
+func (t *WebSearchTool) maxResults() int { return positiveOr(t.MaxResults, maxSearchLimit) }
+
 // Schema returns the tool schema for the model.
 func (t *WebSearchTool) Schema() provider.ToolSchema {
 	return provider.ToolSchema{
 		Name: "web_search",
 		Description: "Search the web with DuckDuckGo. The result is a numbered list with the title, the URL, " +
 			"and a snippet of each hit. Use web_fetch to read a result page.",
-		Parameters: json.RawMessage(`{
+		Parameters: json.RawMessage(fmt.Sprintf(`{
   "type": "object",
   "properties": {
     "query": {"type": "string", "description": "The search query."},
-    "limit": {"type": "integer", "description": "The number of results. The default is 5 and the maximum is 10."}
+    "limit": {"type": "integer", "description": "The number of results. The default is %d and the maximum is %d."}
   },
   "required": ["query"]
-}`),
+}`, t.defaultResults(), t.maxResults())),
 	}
 }
 
@@ -115,9 +125,9 @@ func (t *WebSearchTool) Run(ctx context.Context, raw json.RawMessage, _ *Env) (s
 	}
 	limit := a.Limit
 	if limit <= 0 {
-		limit = defaultSearchLimit
+		limit = t.defaultResults()
 	}
-	limit = min(limit, maxSearchLimit)
+	limit = min(limit, t.maxResults())
 
 	form := url.Values{"q": {query}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.endpoint(), strings.NewReader(form.Encode()))

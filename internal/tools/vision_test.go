@@ -335,3 +335,34 @@ func TestViewImageRefusesProtectedPath(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestViewImageDownloadTimeoutField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	fp := recording("no")
+	tool := VisionTool{Prov: fp, Client: GuardedClient(false, 30*time.Second, 3), DownloadTimeout: 100 * time.Millisecond}
+	start := time.Now()
+	out := runToolErr(t, tool, fmt.Sprintf(`{"url":%q}`, srv.URL+"/x.png"))
+	if !strings.Contains(out, "cannot download the image") || time.Since(start) > 2*time.Second || len(fp.requests) != 0 {
+		t.Fatal(out, time.Since(start))
+	}
+	if (VisionTool{}).downloadTimeout() != 60*time.Second || tool.downloadTimeout() != 100*time.Millisecond {
+		t.Fatal((VisionTool{}).downloadTimeout(), tool.downloadTimeout())
+	}
+}
+
+func TestDescribeImageWithinSizeLimit(t *testing.T) {
+	png := pngFile(t)
+	if _, err := DescribeImageWithin(ctx, recording("x"), png, "q", nil, 10); err == nil || !strings.Contains(err.Error(), "larger than 10 bytes") {
+		t.Fatal(err)
+	}
+	out, err := DescribeImageWithin(ctx, recording("  A duck.  "), png, "q", nil, 0)
+	if err != nil || out != "A duck." {
+		t.Fatalf("%q %v", out, err)
+	}
+}

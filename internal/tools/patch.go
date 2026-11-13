@@ -25,6 +25,9 @@ const maxLCSCells = 4_000_000
 
 // PatchTool is the patch tool.
 type PatchTool struct {
+	// ContextLines is the number of context lines in the diff of a result.
+	// 0 uses diffContext.
+	ContextLines int
 	// Protected returns an error when the agent must not write to path. When
 	// it is nil, the tool refuses the paths of security.ProtectedPaths.
 	Protected func(path string) error
@@ -108,7 +111,7 @@ func (t PatchTool) Run(_ context.Context, raw json.RawMessage, env *Env) (string
 	if n != 1 {
 		word = "replacements"
 	}
-	return fmt.Sprintf("patched %s (%d %s)\n%s", path, n, word, UnifiedDiff(path, before, after)), nil
+	return fmt.Sprintf("patched %s (%d %s)\n%s", path, n, word, UnifiedDiffWith(path, before, after, t.ContextLines)), nil
 }
 
 // applyPatch replaces old with new in content and returns the new content
@@ -334,6 +337,13 @@ type diffOp struct {
 // UnifiedDiff returns a unified diff from before to after with 3 lines of
 // context. It is empty when the texts have the same lines.
 func UnifiedDiff(path, before, after string) string {
+	return UnifiedDiffWith(path, before, after, 0)
+}
+
+// UnifiedDiffWith returns a unified diff from before to after with context
+// lines of context. 0 uses diffContext.
+func UnifiedDiffWith(path, before, after string, context int) string {
+	n := positiveOr(context, diffContext)
 	a, b := diffLines(before), diffLines(after)
 	ops := lineDiff(a, b)
 	changed := false
@@ -367,7 +377,7 @@ func UnifiedDiff(path, before, after string) string {
 			i++
 			continue
 		}
-		start := max(i-diffContext, 0)
+		start := max(i-n, 0)
 		end := i
 		// Extend the hunk while the next change is within 2*context lines.
 		for {
@@ -378,11 +388,11 @@ func UnifiedDiff(path, before, after string) string {
 			for next < len(ops) && ops[next].kind == ' ' {
 				next++
 			}
-			if next < len(ops) && next-end <= 2*diffContext {
+			if next < len(ops) && next-end <= 2*n {
 				end = next
 				continue
 			}
-			end = min(end+diffContext, len(ops))
+			end = min(end+n, len(ops))
 			break
 		}
 		aCount := aLine[end] - aLine[start]

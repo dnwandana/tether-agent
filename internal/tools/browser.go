@@ -41,8 +41,12 @@ type BrowserTools struct {
 	ShotDir   string // cache/screenshots
 	DetectErr func() error
 
-	// timeout replaces browserTimeout in tests.
-	timeout time.Duration
+	// ActionTimeout, ExcerptChars, and Settle replace browserTimeout,
+	// navExcerptChars, and navSettle when they are above 0. The settle wait
+	// runs inside the action timeout.
+	ActionTimeout time.Duration
+	ExcerptChars  int
+	Settle        time.Duration
 }
 
 // funcTool is a tool from a name, a toolset, a schema, and a run func. It
@@ -80,7 +84,7 @@ func (bt *BrowserTools) Tools() []Tool {
 			set:  SetBrowser,
 			name: "browser_navigate",
 			desc: "Open a URL in the headless browser and wait for the page and its JavaScript. " +
-				"Returns the title, the final URL, and the first 2000 characters of the page text. " +
+				fmt.Sprintf("Returns the title, the final URL, and the first %d characters of the page text. ", bt.excerptChars()) +
 				"Call it before the other browser tools. For plain pages, web_fetch is faster; " +
 				"use the browser for pages that need JavaScript, a login, clicks, or forms. " +
 				"The browser keeps cookies and logins between calls and restarts.",
@@ -212,10 +216,23 @@ func (bt *BrowserTools) detect() error {
 }
 
 func (bt *BrowserTools) limit() time.Duration {
-	if bt.timeout > 0 {
-		return bt.timeout
+	if bt.ActionTimeout > 0 {
+		return bt.ActionTimeout
 	}
 	return browserTimeout
+}
+
+// excerptChars returns the length of the text excerpt of browser_navigate.
+func (bt *BrowserTools) excerptChars() int {
+	return positiveOr(bt.ExcerptChars, navExcerptChars)
+}
+
+// settle returns the wait after the page body is ready.
+func (bt *BrowserTools) settle() time.Duration {
+	if bt.Settle > 0 {
+		return bt.Settle
+	}
+	return navSettle
 }
 
 // tab returns the action context of the session tab, with the action
@@ -319,7 +336,7 @@ func (bt *BrowserTools) navigate(ctx context.Context, raw json.RawMessage, env *
 	if err != nil {
 		return "", bt.fail(ctx, actx, "open "+a.URL, err)
 	}
-	if err := chromedp.Do(actx, chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(navSettle)); err != nil {
+	if err := chromedp.Do(actx, chromedp.WaitReady(chromedp.CSS("body")), chromedp.Sleep(bt.settle())); err != nil {
 		return "", bt.fail(ctx, actx, "wait for the page body", err)
 	}
 	info, err := chromedp.Run(actx, chromedp.Evaluate[pageInfo](pageInfoJS))
@@ -333,8 +350,9 @@ func (bt *BrowserTools) navigate(ctx context.Context, raw json.RawMessage, env *
 		fmt.Fprintf(&b, "status: HTTP %d\n", resp.Status)
 	}
 	text := strings.TrimSpace(info.Text)
-	if r := []rune(text); len(r) > navExcerptChars {
-		text = string(r[:navExcerptChars]) + fmt.Sprintf("\n[the text is cut at %d characters; use browser_read for the full text]", navExcerptChars)
+	n := bt.excerptChars()
+	if r := []rune(text); len(r) > n {
+		text = string(r[:n]) + fmt.Sprintf("\n[the text is cut at %d characters; use browser_read for the full text]", n)
 	}
 	if text == "" {
 		text = "[the page has no text]"

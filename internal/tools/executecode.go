@@ -48,6 +48,8 @@ type ExecuteCodeTool struct {
 	// TimeoutS is the maximum run time (300). MaxCalls limits the tool calls of one script
 	// (50). MaxStdout limits the returned stdout in bytes (50,000). Zero uses the default.
 	TimeoutS, MaxCalls, MaxStdout int
+	// MaxStderrChars limits the stderr text of a failed script. Zero uses scriptStderrMax.
+	MaxStderrChars int
 	// Python is the python3 program (exec.LookPath("python3")). Empty refuses each call.
 	Python string
 	// DotEnv holds the .env values. The script gets no secret.
@@ -196,7 +198,7 @@ func socketDir(dir string) (string, func(), error) {
 func (t ExecuteCodeTool) runPython(ctx context.Context, env *Env, dir, sock string, timeout time.Duration) (string, error) {
 	maxOut := positiveOr(t.MaxStdout, defaultScriptStdout)
 	stdout := &headBuffer{max: maxOut}
-	stderr := &headBuffer{max: scriptStderrMax}
+	stderr := &headBuffer{max: positiveOr(t.MaxStderrChars, scriptStderrMax)}
 	cmd := exec.Command(t.Python, "main.py")
 	cmd.Dir = dir
 	cmd.Env = append(t.childEnv(env),

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 )
@@ -205,4 +206,28 @@ func writeTemp(t *testing.T) string {
 	p := filepath.Join(t.TempDir(), "a.wav")
 	os.WriteFile(p, []byte("RIFF"), 0o600)
 	return p
+}
+
+func TestEndpointTimeoutField(t *testing.T) {
+	e := &Endpoint{}
+	if e.limit(speechTimeout) != 60*time.Second || e.limit(transcribeTimeout) != 120*time.Second || e.limit(imageTimeout) != 120*time.Second {
+		t.Fatal("a zero Timeout must keep the const of each call")
+	}
+	e.Timeout = 5 * time.Second
+	if e.limit(speechTimeout) != 5*time.Second || e.limit(imageTimeout) != 5*time.Second {
+		t.Fatal("Timeout must apply to each call")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(5 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	ep := endpoint(srv, "tts-1")
+	ep.Timeout = 100 * time.Millisecond
+	start := time.Now()
+	if err := ep.Speech(ctx, "hi", "", filepath.Join(t.TempDir(), "o.mp3")); err == nil || time.Since(start) > 2*time.Second {
+		t.Fatal(err, time.Since(start))
+	}
 }

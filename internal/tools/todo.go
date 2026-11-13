@@ -26,6 +26,13 @@ const (
 	TodoMaxContent = 4000
 )
 
+// TodoLimits holds the limits of one todo store. A zero field uses TodoMaxItems
+// or TodoMaxContent.
+type TodoLimits struct {
+	MaxItems int
+	MaxChars int
+}
+
 const (
 	todoPending    = "pending"
 	todoInProgress = "in_progress"
@@ -60,22 +67,48 @@ type TodoStore struct {
 	// writes counts the successful Write calls. revision cannot do this job,
 	// because a Restore sets revision from history and makes no Write.
 	writes int64
+	// lim holds the limits of the store. The mutex guards it.
+	lim TodoLimits
 }
+
+// maxItems returns the item count limit. The caller holds s.mu.
+func (s *TodoStore) maxItems() int { return positiveOr(s.lim.MaxItems, TodoMaxItems) }
+
+// maxChars returns the item length limit. The caller holds s.mu.
+func (s *TodoStore) maxChars() int { return positiveOr(s.lim.MaxChars, TodoMaxContent) }
 
 // TodoStoreFor returns the TodoStore of the session that owns values, and
 // creates it on the first call. It holds valuesMu only for the lookup, so a
 // /todo read never blocks the other tools of the session. A nil map gives a
 // new store that is not kept.
 func TodoStoreFor(values map[string]any) *TodoStore {
+	return TodoStoreWith(values, TodoLimits{})
+}
+
+// TodoStoreWith returns the TodoStore of values like TodoStoreFor does. It
+// then sets each limit of lim that is above 0. A zero field keeps the limit
+// that the store has.
+func TodoStoreWith(values map[string]any, lim TodoLimits) *TodoStore {
+	var s *TodoStore
 	if values == nil {
-		return &TodoStore{}
-	}
-	valuesMu.Lock()
-	defer valuesMu.Unlock()
-	s, ok := values[todoStoreKey].(*TodoStore)
-	if !ok {
 		s = &TodoStore{}
-		values[todoStoreKey] = s
+	} else {
+		valuesMu.Lock()
+		var ok bool
+		s, ok = values[todoStoreKey].(*TodoStore)
+		if !ok {
+			s = &TodoStore{}
+			values[todoStoreKey] = s
+		}
+		valuesMu.Unlock()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if lim.MaxItems > 0 {
+		s.lim.MaxItems = lim.MaxItems
+	}
+	if lim.MaxChars > 0 {
+		s.lim.MaxChars = lim.MaxChars
 	}
 	return s
 }
@@ -113,15 +146,15 @@ func (s *TodoStore) Write(raw []json.RawMessage, merge bool) error {
 		err  error
 	)
 	if merge {
-		next, err = mergeTodos(s.items, in)
+		next, err = mergeTodos(s.items, in, s.maxChars())
 	} else {
-		next, err = freshTodos(in, false)
+		next, err = freshTodos(in, false, s.maxChars())
 	}
 	if err != nil {
 		return err
 	}
-	if len(next) > TodoMaxItems {
-		next = next[:TodoMaxItems]
+	if len(next) > s.maxItems() {
+		next = next[:s.maxItems()]
 	}
 	sanitizeTodoParents(next)
 	if !slices.Equal(next, s.items) {
@@ -152,9 +185,9 @@ func (s *TodoStore) Restore(items []TodoItem, revision int64) {
 		}
 		in = append(in, parseTodoInput(b))
 	}
-	next, _ := freshTodos(in, true)
-	if len(next) > TodoMaxItems {
-		next = next[:TodoMaxItems]
+	next, _ := freshTodos(in, true, s.maxChars())
+	if len(next) > s.maxItems() {
+		next = next[:s.maxItems()]
 	}
 	sanitizeTodoParents(next)
 	s.items = next
@@ -249,7 +282,7 @@ func todoText(v json.RawMessage) string {
 
 // validateTodo makes a new item from in. The model sees the error text, so the
 // text says how to fix the item.
-func validateTodo(in todoInput) (TodoItem, error) {
+func validateTodo(in todoInput, maxChars int) (TodoItem, error) {
 	if in.obj == nil {
 		return TodoItem{ID: "?", Content: "(invalid item)", Status: todoPending}, nil
 	}
@@ -271,7 +304,7 @@ func validateTodo(in todoInput) (TodoItem, error) {
 	if !todoStatusValid(status) {
 		status = todoPending
 	}
-	it := TodoItem{ID: id, Content: capTodo(content), Status: status}
+	it := TodoItem{ID: id, Content: capTodo(content, maxChars), Status: status}
 	parent, _ := in.field("parent")
 	if parent = strings.TrimSpace(parent); parent != "" && parent != id {
 		it.Parent = parent
@@ -281,11 +314,11 @@ func validateTodo(in todoInput) (TodoItem, error) {
 
 // capTodo keeps the head of a long content, because the head is the part that
 // says what to do. The cut never splits a rune.
-func capTodo(content string) string {
-	if utf8.RuneCountInString(content) <= TodoMaxContent {
+func capTodo(content string, max int) string {
+	if utf8.RuneCountInString(content) <= max {
 		return content
 	}
-	keep := TodoMaxContent - utf8.RuneCountInString(todoTruncated)
+	keep := max - utf8.RuneCountInString(todoTruncated)
 	n := 0
 	for i := range content {
 		if n == keep {
@@ -350,11 +383,11 @@ func orderTodos(items []TodoItem) []TodoItem {
 
 // freshTodos makes a whole new list with the replace rules. When skipBlank is
 // true, an item with a blank content is left out instead of an error.
-func freshTodos(in []todoInput, skipBlank bool) ([]TodoItem, error) {
+func freshTodos(in []todoInput, skipBlank bool, maxChars int) ([]TodoItem, error) {
 	deduped := dedupeTodos(in)
 	items := make([]TodoItem, 0, len(deduped))
 	for _, d := range deduped {
-		it, err := validateTodo(d)
+		it, err := validateTodo(d, maxChars)
 		if err != nil {
 			if skipBlank {
 				continue
@@ -368,7 +401,7 @@ func freshTodos(in []todoInput, skipBlank bool) ([]TodoItem, error) {
 
 // mergeTodos changes only the given fields of the known items and adds the
 // unknown items at the end. It returns a new slice and leaves cur as it was.
-func mergeTodos(cur []TodoItem, in []todoInput) ([]TodoItem, error) {
+func mergeTodos(cur []TodoItem, in []todoInput, maxChars int) ([]TodoItem, error) {
 	items := slices.Clone(cur)
 	existing := make(map[string]int, len(items))
 	for i, it := range items {
@@ -384,7 +417,7 @@ func mergeTodos(cur []TodoItem, in []todoInput) ([]TodoItem, error) {
 		}
 		i, ok := existing[id]
 		if !ok {
-			it, err := validateTodo(d)
+			it, err := validateTodo(d, maxChars)
 			if err != nil {
 				return nil, err
 			}
@@ -393,7 +426,7 @@ func mergeTodos(cur []TodoItem, in []todoInput) ([]TodoItem, error) {
 			continue
 		}
 		if content, _ := d.field("content"); strings.TrimSpace(content) != "" {
-			items[i].Content = capTodo(strings.TrimSpace(content))
+			items[i].Content = capTodo(strings.TrimSpace(content), maxChars)
 		}
 		if status, _ := d.field("status"); todoStatusValid(strings.ToLower(strings.TrimSpace(status))) {
 			items[i].Status = strings.ToLower(strings.TrimSpace(status))
