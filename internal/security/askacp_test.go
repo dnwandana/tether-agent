@@ -139,3 +139,19 @@ func TestAskACPNoSession(t *testing.T) {
 		t.Fatal("a NoSession answer must not go into the session memory")
 	}
 }
+
+func TestAskACPMember(t *testing.T) {
+	g := newGate(t, "manual", "deny")
+	p := &countingPrompter{answer: ScopeSession}
+	if got, _ := g.AskACP(ctx, acpReq("acp:claude-code:a1:execute:go"), p); got != ScopeSession || p.n != 1 {
+		t.Fatal(got, p.n)
+	}
+	member := acpReq("acp:claude-code:a1:execute:go")
+	member.Member = true
+	for want := 2; want <= 3; want++ {
+		got, err := g.AskACP(ctx, member, p)
+		if got != ScopeOnce || err != nil || p.n != want || !p.last.NoSession {
+			t.Fatalf("a member request must ask each time: %v %v %d %+v", got, err, p.n, p.last)
+		}
+	}
+}

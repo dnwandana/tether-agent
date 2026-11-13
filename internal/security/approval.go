@@ -67,6 +67,9 @@ type ApprovalRequest struct {
 	// NoSession hides the "this session" answer too. A UI applies "once" for a
 	// "this session" or an "always" answer. A request whose rule does not say what runs sets it.
 	NoSession bool
+	// Member is true for a request of a member turn. The zero value means owner.
+	// The gate then reads no earlier answer and saves no grant.
+	Member bool
 }
 
 // Prompter asks the user about one dangerous command. It is the UI of a
@@ -130,7 +133,10 @@ type Gate struct {
 	// InGateway is true in the gateway process. The gate then blocks a command
 	// that stops or restarts the gateway, except in a run that cron started.
 	InGateway bool
-	Log       *slog.Logger
+	// ScriptsDir is the scripts folder of the data folder. The cron block text
+	// of CheckScript names it. An empty value gives a general text.
+	ScriptsDir string
+	Log        *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[string]map[string]bool
@@ -155,9 +161,11 @@ func NewGate(cfg config.ApprovalsConfig, d *db.DB) *Gate {
 // grant for a protected path in one part of a compound command cannot cover a
 // different danger in another part. The gate asks about the first rule that
 // has no grant. A protected rule never saves an "Always" answer and never
-// reads one, because an older version saved such rows.
+// reads one, because an older version saved such rows. A member request reads
+// no earlier answer and saves none. A protected rule never goes to the smart
+// judge. The gate asks the user.
 func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error {
-	if err := g.floor(req); err != nil {
+	if err := g.Floor(req); err != nil {
 		return err
 	}
 	pats := MatchAllDangerous(req.Command)
@@ -170,7 +178,7 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 	}
 	pat := pats[0]
 	stateDB := IsStateDBPatternID(pat.ID)
-	if !stateDB {
+	if !stateDB && !req.Member {
 		var ok bool
 		if pat, ok = g.firstUngranted(ctx, sessionOf(req), pats); !ok {
 			return nil
@@ -183,6 +191,9 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 	if stateDB {
 		req.NoSession = true
 	}
+	if req.Member {
+		req.NoSession, req.NoAlways = true, true
+	}
 
 	if isCron(req) {
 		if cronApproves(g.CronMode) {
@@ -193,7 +204,7 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 			"To allow dangerous commands in cron jobs, set approvals.cron_mode: approve in config.yaml.",
 			pat.Description)
 	}
-	if g.Mode == "smart" && g.Judge != nil && !stateDB {
+	if g.Mode == "smart" && g.Judge != nil && !IsProtectedPatternID(pat.ID) {
 		risky, err := g.Judge.Judge(ctx, req.Command, pat.Description, req.SessionID)
 		if err != nil {
 			g.logf("approval: the smart judge failed, so the gate asks the user", "pattern", pat.ID, "err", err)
@@ -207,33 +218,41 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 	return g.ask(ctx, req, p)
 }
 
-// floor runs the checks that no mode and no earlier answer can skip: the
+// Floor runs the checks that no mode and no earlier answer can skip: the
 // hardline list, the sudo guard, and the gateway self-stop rules.
-func (g *Gate) floor(req ApprovalRequest) error {
+func (g *Gate) Floor(req ApprovalRequest) error {
+	_, err := g.FloorLabel(req, g.SudoPasswordSet)
+	return err
+}
+
+// FloorLabel runs the same checks as Floor. Returns the short label for a progress line and a
+// log line. The ACP bridge calls it with sudoPasswordSet false, because the adapter does not
+// get SUDO_PASSWORD.
+func (g *Gate) FloorLabel(req ApprovalRequest, sudoPasswordSet bool) (label string, err error) {
 	if pat, ok := MatchHardline(req.Command); ok {
-		return blocked("BLOCKED (hardline): %s. This command is on the unconditional blocklist. "+
+		return "hardline: " + pat.Description, blocked("BLOCKED (hardline): %s. This command is on the unconditional blocklist. "+
 			"No approval mode, cron setting, or earlier answer can allow it. "+
 			"If you really need it, the user must run it in a terminal outside the agent.", pat.Description)
 	}
-	if MatchSudoStdin(req.Command, g.SudoPasswordSet) {
-		return blocked("BLOCKED: sudo password guessing via stdin (sudo -S). " +
+	if MatchSudoStdin(req.Command, sudoPasswordSet) {
+		return "sudo -S", blocked("BLOCKED: sudo password guessing via stdin (sudo -S). " +
 			"Do not pipe passwords to 'sudo -S'. Set SUDO_PASSWORD in the .env file " +
 			"if the agent needs sudo, or run the sudo command in your own terminal.")
 	}
 	if g.InGateway && !isCron(req) {
 		if _, ok := MatchGatewaySelf(req.Command); ok {
-			return blocked("%s", GatewaySelfBlocked)
+			return "gateway self-stop", blocked("%s", GatewaySelfBlocked)
 		}
 	}
-	return nil
+	return "", nil
 }
 
 // CheckScript returns nil when the script in req.Command may run. It asks one
 // time for each script with the rule ScriptPatternID. A literal match of a
-// danger rule makes the gate ask each time. A script never reads or writes
-// approvals_always.
+// danger rule makes the gate ask each time. In a cron run, each script follows
+// approvals.cron_mode. A script never reads or writes approvals_always. A member request reads no earlier answer and saves none.
 func (g *Gate) CheckScript(ctx context.Context, req ApprovalRequest, p Prompter) error {
-	if err := g.floor(req); err != nil {
+	if err := g.Floor(req); err != nil {
 		return err
 	}
 	if g.Mode == "off" {
@@ -244,21 +263,27 @@ func (g *Gate) CheckScript(ctx context.Context, req ApprovalRequest, p Prompter)
 	if literal {
 		req.NoSession = true
 		req.Description = scriptDescription + " (" + pat.Description + ")"
-	} else if g.sessionApproved(sessionOf(req), ScriptPatternID) {
+	} else if !req.Member && g.sessionApproved(sessionOf(req), ScriptPatternID) {
 		return nil
 	}
+	if req.Member {
+		req.NoSession = true
+	}
 	if isCron(req) {
-		if !literal || cronApproves(g.CronMode) {
+		if cronApproves(g.CronMode) {
 			return nil
 		}
-		return blocked("BLOCKED: Command flagged as dangerous (%s) but cron jobs run without a user "+
-			"present to approve it. Find an alternative approach that avoids this command. "+
-			"To allow dangerous commands in cron jobs, set approvals.cron_mode: approve in config.yaml.",
-			pat.Description)
+		if literal {
+			return blocked("BLOCKED: Command flagged as dangerous (%s) but cron jobs run without a user "+
+				"present to approve it. Find an alternative approach that avoids this command. "+
+				"To allow dangerous commands in cron jobs, set approvals.cron_mode: approve in config.yaml.",
+				pat.Description)
+		}
+		return blocked("%s", cronScriptBlocked(g.ScriptsDir))
 	}
-	// A script that uses state.db never goes to the judge, the same as a command.
-	stateDB := literal && IsStateDBPatternID(pat.ID)
-	if sj, ok := g.Judge.(ScriptJudge); ok && g.Mode == "smart" && !stateDB &&
+	// A script with a protected literal match never goes to the judge, the same as a command.
+	protected := literal && IsProtectedPatternID(pat.ID)
+	if sj, ok := g.Judge.(ScriptJudge); ok && g.Mode == "smart" && !protected &&
 		utf8.RuneCountInString(req.Command) <= g.scriptMax() {
 		risky, err := sj.JudgeScript(ctx, req.Command, req.Description, req.SessionID)
 		if err != nil {
@@ -269,6 +294,17 @@ func (g *Gate) CheckScript(ctx context.Context, req ApprovalRequest, p Prompter)
 		}
 	}
 	return g.ask(ctx, req, p)
+}
+
+// cronScriptBlocked returns the block text for a script with no literal match
+// in a cron run. It names the scripts folder when scriptsDir is set.
+func cronScriptBlocked(scriptsDir string) string {
+	where := "the scripts folder of the data folder"
+	if scriptsDir != "" {
+		where = scriptsDir + "/"
+	}
+	return "BLOCKED: execute_code runs Python on the host, and cron jobs run without a user present to approve it. " +
+		"Ask the user to move the code to a cron script in " + where + ", or to set approvals.cron_mode: approve in config.yaml."
 }
 
 // scriptMax returns the longest script, in runes, that goes to the judge.
@@ -359,12 +395,16 @@ func (g *Gate) prompt(ctx context.Context, req ApprovalRequest, p Prompter) (Sco
 //   - a nil p: (ScopeDeny, nil).
 //
 // An "always" answer becomes ScopeSession. With req.NoSession, a "this
-// session" or "always" answer becomes ScopeOnce, and the gate saves nothing.
+// session" or "always" answer becomes ScopeOnce, and the gate saves nothing. A
+// member request reads no earlier answer and saves none.
 func (g *Gate) AskACP(ctx context.Context, req ApprovalRequest, p Prompter) (Scope, error) {
 	if p == nil {
 		return ScopeDeny, nil
 	}
 	req.NoAlways = true
+	if req.Member {
+		req.NoSession = true
+	}
 	session := sessionOf(req)
 	if !req.NoSession && g.sessionApproved(session, req.PatternID) {
 		return ScopeSession, nil
@@ -498,6 +538,58 @@ func (g *Gate) saveAlways(ctx context.Context, patternID string) error {
 		patternID, time.Now().UnixMilli())
 	if err != nil {
 		return fmt.Errorf("approval: save Always answer for %s: %w", patternID, err)
+	}
+	return nil
+}
+
+// AlwaysRow is one stored "Always" answer.
+type AlwaysRow struct {
+	PatternID string
+	CreatedAt time.Time
+}
+
+// ListAlways returns the stored "Always" answers, oldest first. It leaves out
+// the rows of protected rules, because the gate never reads them.
+func (g *Gate) ListAlways(ctx context.Context) ([]AlwaysRow, error) {
+	if g.DB == nil {
+		return nil, nil
+	}
+	rows, err := g.DB.QueryContext(ctx, "SELECT pattern_id, created_at FROM approvals_always ORDER BY created_at, pattern_id")
+	if err != nil {
+		return nil, fmt.Errorf("approval: list the Always answers: %w", err)
+	}
+	defer rows.Close()
+	var out []AlwaysRow
+	for rows.Next() {
+		var id string
+		var ms int64
+		if err := rows.Scan(&id, &ms); err != nil {
+			return nil, fmt.Errorf("approval: read an Always answer: %w", err)
+		}
+		if IsProtectedPatternID(id) {
+			continue
+		}
+		out = append(out, AlwaysRow{PatternID: id, CreatedAt: time.UnixMilli(ms)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("approval: list the Always answers: %w", err)
+	}
+	return out, nil
+}
+
+// RemoveAlways removes the "Always" answer of patternID. It also removes the
+// "this session" answer for the rule from each session of this gate.
+func (g *Gate) RemoveAlways(ctx context.Context, patternID string) error {
+	g.mu.Lock()
+	for _, m := range g.sessions {
+		delete(m, patternID)
+	}
+	g.mu.Unlock()
+	if g.DB == nil {
+		return nil
+	}
+	if _, err := g.DB.ExecContext(ctx, "DELETE FROM approvals_always WHERE pattern_id = ?", patternID); err != nil {
+		return fmt.Errorf("approval: remove the Always answer for %s: %w", patternID, err)
 	}
 	return nil
 }

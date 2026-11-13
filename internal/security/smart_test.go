@@ -3,6 +3,8 @@ package security
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -386,5 +388,35 @@ func TestGateSmartScriptMaxCharsField(t *testing.T) {
 	}
 	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: strings.Repeat("é", 100)}, p); err != nil || p.n != 1 || calls != 1 {
 		t.Fatal("a script of 100 characters must go to the judge", err, p.n, calls)
+	}
+}
+
+func TestProtectedSkipsTheJudge(t *testing.T) {
+	g := protectedGate(t, "smart")
+	var calls int
+	g.Judge = fixedJudge{risky: false, n: &calls}
+	p := &countingPrompter{answer: ScopeOnce}
+	env := filepath.Join(os.Getenv("HOME"), ".tether", ".env")
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "tee " + env}, p); err != nil || p.n != 1 || calls != 0 {
+		t.Fatal("a protected write must go to the user, not to the judge", err, p.n, calls)
+	}
+	if !strings.HasPrefix(p.last.PatternID, "protected_path_write_") {
+		t.Fatal(p.last.PatternID)
+	}
+	// A general rule still goes to the judge.
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "rm -rf build"}, p); err != nil || p.n != 1 || calls != 1 {
+		t.Fatal(err, p.n, calls)
+	}
+}
+
+func TestProtectedScriptSkipsTheJudge(t *testing.T) {
+	g := protectedGate(t, "smart")
+	var calls int
+	g.Judge = scriptJudge{n: &calls}
+	p := &countingPrompter{answer: ScopeOnce}
+	env := filepath.Join(os.Getenv("HOME"), ".tether", ".env")
+	script := "import os\nos.system('cp x " + env + "')"
+	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: script}, p); err != nil || p.n != 1 || calls != 0 {
+		t.Fatal("a script with a protected literal match must go to the user", err, p.n, calls)
 	}
 }

@@ -637,17 +637,38 @@ func TestCheckScriptModeOffAndHardline(t *testing.T) {
 }
 
 func TestCheckScriptCron(t *testing.T) {
+	cron := func(code string) ApprovalRequest { return ApprovalRequest{SessionID: "c", Kind: "cron", Command: code} }
 	g := newGate(t, "manual", "deny")
-	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "c", Kind: "cron", Command: "print(1)"}, nil); err != nil {
-		t.Fatal("a clean script runs in a cron run", err)
+	g.ScriptsDir = "/d/scripts"
+	want := "BLOCKED: execute_code runs Python on the host, and cron jobs run without a user present to approve it. " +
+		"Ask the user to move the code to a cron script in /d/scripts/, or to set approvals.cron_mode: approve in config.yaml."
+	if reason := blockedReason(t, g.CheckScript(ctx, cron("print(1)"), nil)); reason != want {
+		t.Fatal(reason)
 	}
-	if reason := blockedReason(t, g.CheckScript(ctx, ApprovalRequest{SessionID: "c", Kind: "cron", Command: litScript}, nil)); !strings.Contains(reason, "cron") {
+	g.ScriptsDir = ""
+	if reason := blockedReason(t, g.CheckScript(ctx, cron("print(1)"), nil)); !strings.Contains(reason,
+		"a cron script in the scripts folder of the data folder, or to set approvals.cron_mode: approve") {
+		t.Fatal(reason)
+	}
+	// A literal match keeps the text that names the rule.
+	if reason := blockedReason(t, g.CheckScript(ctx, cron(litScript), nil)); !strings.Contains(reason,
+		"Command flagged as dangerous (recursive delete) but cron jobs run without a user") {
 		t.Fatal(reason)
 	}
 	// A child of a cron run follows the same rule.
-	blockedReason(t, g.CheckScript(ctx, ApprovalRequest{SessionID: "c2", Kind: "subagent", RootKind: "cron", Command: litScript}, nil))
+	blockedReason(t, g.CheckScript(ctx, ApprovalRequest{SessionID: "c2", Kind: "subagent", RootKind: "cron", Command: "print(1)"}, nil))
 	g = newGate(t, "manual", "approve")
-	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "c", Kind: "cron", Command: litScript}, nil); err != nil {
+	for _, code := range []string{"print(1)", litScript} {
+		if err := g.CheckScript(ctx, cron(code), nil); err != nil {
+			t.Fatal(code, err)
+		}
+	}
+	// The floor runs first, also with approve.
+	if reason := blockedReason(t, g.CheckScript(ctx, cron("import os\nos.system('mkfs.ext4 /dev/sdb1')"), nil)); !strings.Contains(reason, "hardline") {
+		t.Fatal(reason)
+	}
+	// Mode off runs each script, also in cron.
+	if err := newGate(t, "off", "deny").CheckScript(ctx, cron("print(1)"), nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -779,6 +800,20 @@ func TestStateDBScriptSkipsTheJudge(t *testing.T) {
 	}
 }
 
+func TestCheckScriptGlobOfStateDB(t *testing.T) {
+	g := protectedGate(t, "manual")
+	p := &countingPrompter{answer: ScopeSession}
+	script := "import os\nos.system('sqlite3 ~/.tether/stat* .tables')"
+	for want := 1; want <= 2; want++ {
+		if err := g.CheckScript(ctx, scriptReq("s", script), p); err != nil || p.n != want {
+			t.Fatal("a glob of state.db in a script must ask each time", err, p.n)
+		}
+		if r := p.last; r.Description != "run a Python script on the host (use of the Tether Agent database)" || !r.NoSession {
+			t.Fatalf("%+v", r)
+		}
+	}
+}
+
 func TestCompoundAfterProtectedGrantAsksForOtherRule(t *testing.T) {
 	g := protectedGate(t, "manual")
 	p := &countingPrompter{answer: ScopeSession}
@@ -840,6 +875,22 @@ func TestProtectedWriteIgnoresAlwaysRow(t *testing.T) {
 	}
 }
 
+func TestInlineCodeIgnoresAlwaysRow(t *testing.T) {
+	g := protectedGate(t, "manual")
+	if _, err := g.DB.ExecContext(ctx, "INSERT INTO approvals_always(pattern_id, created_at) VALUES ('script_execution_via_e_c_flag', 1)"); err != nil {
+		t.Fatal(err)
+	}
+	env := filepath.Join(os.Getenv("HOME"), ".tether", ".env")
+	cmd := `python3 -c "import os; open('` + env + `','w')"`
+	p := &countingPrompter{answer: ScopeDeny}
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: cmd}, p); err == nil || p.n != 1 {
+		t.Fatal("an Always row for the -c rule must not cover a protected write", err, p.n)
+	}
+	if r := p.last; !strings.HasPrefix(r.PatternID, "protected_path_write_") || !r.NoAlways {
+		t.Fatalf("%+v", r)
+	}
+}
+
 func TestProtectedWriteAlwaysSavesNothing(t *testing.T) {
 	g := protectedGate(t, "manual")
 	p := &countingPrompter{answer: ScopeAlways}
@@ -885,5 +936,178 @@ func TestProtectedWriteSessionGrantCoversRepeat(t *testing.T) {
 	}
 	if n := alwaysRows(t, g); n != 0 {
 		t.Fatal("an Always answer to a protected write saved a row", n)
+	}
+}
+
+func TestMemberRequestIgnoresOwnerSessionGrant(t *testing.T) {
+	g := newGate(t, "manual", "deny")
+	p := &countingPrompter{answer: ScopeSession}
+	owner := ApprovalRequest{SessionID: "s", Command: "rm -rf build"}
+	member := ApprovalRequest{SessionID: "s", Command: "rm -rf build", Member: true}
+	// The owner taps Session one time. The grant covers the next owner request.
+	for range 2 {
+		if err := g.Check(ctx, owner, p); err != nil || p.n != 1 || p.last.PatternID != "recursive_delete" {
+			t.Fatal(err, p.n, p.last.PatternID)
+		}
+	}
+	// The member asks each time. A Session tap on a member prompt grants nothing.
+	for want := 2; want <= 3; want++ {
+		if err := g.Check(ctx, member, p); err != nil || p.n != want {
+			t.Fatal("a member request must ask each time", err, p.n)
+		}
+		if r := p.last; !r.Member || !r.NoSession || !r.NoAlways || r.PatternID != "recursive_delete" {
+			t.Fatalf("%+v", r)
+		}
+	}
+}
+
+func TestMemberRequestIgnoresAlwaysRow(t *testing.T) {
+	g := newGate(t, "manual", "deny")
+	if _, err := g.DB.ExecContext(ctx, "INSERT INTO approvals_always(pattern_id, created_at) VALUES ('recursive_delete', 1)"); err != nil {
+		t.Fatal(err)
+	}
+	p := &countingPrompter{answer: ScopeAlways}
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "rm -rf build"}, p); err != nil || p.n != 0 {
+		t.Fatal("the Always row covers an owner request", err, p.n)
+	}
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s", Command: "rm -rf build", Member: true}, p); err != nil || p.n != 1 {
+		t.Fatal("an Always row must not cover a member request", err, p.n)
+	}
+	if n := alwaysRows(t, g); n != 1 {
+		t.Fatal("an Always tap on a member prompt saved a row", n)
+	}
+}
+
+func TestMemberScriptIgnoresOwnerSessionGrant(t *testing.T) {
+	g := newGate(t, "manual", "deny")
+	p := &countingPrompter{answer: ScopeSession}
+	if err := g.CheckScript(ctx, scriptReq("s", "print(1)"), p); err != nil || p.n != 1 {
+		t.Fatal(err, p.n)
+	}
+	if err := g.CheckScript(ctx, scriptReq("s", "print(2)"), p); err != nil || p.n != 1 {
+		t.Fatal("the owner grant covers the next owner script", err, p.n)
+	}
+	member := scriptReq("s", "print(2)")
+	member.Member = true
+	for want := 2; want <= 3; want++ {
+		if err := g.CheckScript(ctx, member, p); err != nil || p.n != want {
+			t.Fatal("a member script must ask each time", err, p.n)
+		}
+		if r := p.last; r.PatternID != ScriptPatternID || !r.NoSession || !r.NoAlways {
+			t.Fatalf("%+v", r)
+		}
+	}
+}
+
+func TestFloorBlocksSudoAndSelfStop(t *testing.T) {
+	g := &Gate{InGateway: true, SudoPasswordSet: true}
+	self := "systemctl --user restart tether"
+	for _, tc := range []struct {
+		req     ApprovalRequest
+		sudoSet bool
+		label   string
+	}{
+		{ApprovalRequest{Command: "rm -rf /"}, false, "hardline: recursive delete of root filesystem"},
+		{ApprovalRequest{Command: "echo x | sudo -S id"}, false, "sudo -S"},
+		{ApprovalRequest{Command: "echo x | sudo -S id"}, true, ""},
+		{ApprovalRequest{Command: self, Kind: "chat"}, false, "gateway self-stop"},
+		{ApprovalRequest{Command: self, Kind: "cron"}, false, ""},
+		{ApprovalRequest{Command: self, Kind: "subagent", RootKind: "cron"}, false, ""},
+		{ApprovalRequest{Command: "go test ./..."}, false, ""},
+	} {
+		label, err := g.FloorLabel(tc.req, tc.sudoSet)
+		if label != tc.label || (err != nil) != (tc.label != "") {
+			t.Errorf("FloorLabel(%q, %v) = %q, %v; want %q", tc.req.Command, tc.sudoSet, label, err, tc.label)
+		}
+		if err != nil {
+			blockedReason(t, err)
+		}
+	}
+	if r := blockedReason(t, g.Floor(ApprovalRequest{Command: "rm -rf /"})); !strings.HasPrefix(r, "BLOCKED (hardline): ") {
+		t.Fatal(r)
+	}
+	if r := blockedReason(t, g.Floor(ApprovalRequest{Command: self, Kind: "chat"})); r != GatewaySelfBlocked {
+		t.Fatal(r)
+	}
+	// Floor uses g.SudoPasswordSet.
+	if err := g.Floor(ApprovalRequest{Command: "echo x | sudo -S id"}); err != nil {
+		t.Fatal(err)
+	}
+	if r := blockedReason(t, (&Gate{}).Floor(ApprovalRequest{Command: "echo x | sudo -S id"})); !strings.Contains(r, "sudo -S") {
+		t.Fatal(r)
+	}
+}
+
+func TestListAlwaysOrderAndFilter(t *testing.T) {
+	g := newGate(t, "manual", "deny")
+	for _, r := range []struct {
+		id string
+		at int64
+	}{
+		{"recursive_delete", 2000},
+		{"git_force_push", 1000},
+		{"disk_copy", 2000},
+		{"protected_path_write_x", 500},
+		{"sqlite_client_state_db", 600},
+	} {
+		if _, err := g.DB.ExecContext(ctx, "INSERT INTO approvals_always(pattern_id, created_at) VALUES (?, ?)", r.id, r.at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := g.ListAlways(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []AlwaysRow{
+		{PatternID: "git_force_push", CreatedAt: time.UnixMilli(1000)},
+		{PatternID: "disk_copy", CreatedAt: time.UnixMilli(2000)},
+		{PatternID: "recursive_delete", CreatedAt: time.UnixMilli(2000)},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("%+v", rows)
+	}
+	for i := range want {
+		if rows[i].PatternID != want[i].PatternID || !rows[i].CreatedAt.Equal(want[i].CreatedAt) {
+			t.Fatalf("row %d: %+v, want %+v", i, rows[i], want[i])
+		}
+	}
+	// A gate with no state.db has no rows.
+	if rows, err := (&Gate{}).ListAlways(ctx); err != nil || len(rows) != 0 {
+		t.Fatal(rows, err)
+	}
+}
+
+func TestRemoveAlwaysClearsRowAndSessionGrants(t *testing.T) {
+	g := newGate(t, "manual", "deny")
+	cmd := "rm -rf build" // the rule recursive_delete
+	// First a "this session" answer in s2, then an "Always" answer in s1.
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s2", Command: cmd}, &countingPrompter{answer: ScopeSession}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Check(ctx, ApprovalRequest{SessionID: "s1", Command: cmd}, &countingPrompter{answer: ScopeAlways}); err != nil {
+		t.Fatal(err)
+	}
+	if n := alwaysRows(t, g); n != 1 {
+		t.Fatal(n)
+	}
+	if err := g.RemoveAlways(ctx, "recursive_delete"); err != nil {
+		t.Fatal(err)
+	}
+	if n := alwaysRows(t, g); n != 0 {
+		t.Fatal(n)
+	}
+	// The gate asks again in both sessions.
+	p := &countingPrompter{answer: ScopeDeny}
+	for _, s := range []string{"s1", "s2"} {
+		if err := g.Check(ctx, ApprovalRequest{SessionID: s, Command: cmd}, p); err == nil {
+			t.Fatal(s, "the removed answer still permits the command")
+		}
+	}
+	if p.n != 2 {
+		t.Fatal(p.n)
+	}
+	// A gate with no state.db only clears the session answers.
+	if err := (&Gate{}).RemoveAlways(ctx, "recursive_delete"); err != nil {
+		t.Fatal(err)
 	}
 }
