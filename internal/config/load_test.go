@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -435,4 +437,256 @@ func TestMediaCacheRetentionDays(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "media.cache_retention_days") {
 		t.Fatalf("a negative value must name the key, got %v", err)
 	}
+}
+
+// validBase returns the defaults with a primary entry, so that Validate checks only the
+// changed key.
+func validBase() Config {
+	c := Default()
+	c.Providers["primary"] = Provider{Format: "openai"}
+	return c
+}
+
+// intKey is one new int key, its range, and a setter.
+type intKey struct {
+	key string
+	min int
+	max int
+	set func(c *Config, v int)
+}
+
+const maxS = 2592000
+
+func newIntKeys() []intKey {
+	i32 := math.MaxInt32
+	imax := math.MaxInt
+	return []intKey{
+		{"cron.script_timeout_s", 1, maxS, func(c *Config, v int) { c.Cron.ScriptTimeoutS = v }},
+		{"cron.agent_timeout_s", 0, maxS, func(c *Config, v int) { c.Cron.AgentTimeoutS = v }},
+		{"cron.script_output_max_chars", 1000, i32, func(c *Config, v int) { c.Cron.ScriptOutputMaxChars = v }},
+		{"cron.script_stderr_tail_lines", 1, i32, func(c *Config, v int) { c.Cron.ScriptStderrTailLines = v }},
+		{"cron.tick_s", 1, maxS, func(c *Config, v int) { c.Cron.TickS = v }},
+		{"cron.grace_min_s", 1, maxS, func(c *Config, v int) { c.Cron.GraceMinS = v; c.Cron.GraceMaxS = maxS }},
+		{"cron.grace_max_s", 1, maxS, func(c *Config, v int) { c.Cron.GraceMaxS = v; c.Cron.GraceMinS = 1 }},
+		{"agent.stream_idle_timeout_s", 1, maxS, func(c *Config, v int) { c.Agent.StreamIdleTimeoutS = v }},
+		{"agent.max_same_tool_failures", 1, i32, func(c *Config, v int) { c.Agent.MaxSameToolFailures = v }},
+		{"agent.tool_preview_chars", 4, i32, func(c *Config, v int) { c.Agent.ToolPreviewChars = v }},
+		{"review.max_rounds", 1, i32, func(c *Config, v int) { c.Review.MaxRounds = v }},
+		{"review.max_concurrent", 1, i32, func(c *Config, v int) { c.Review.MaxConcurrent = v }},
+		{"review.min_user_turns", 1, i32, func(c *Config, v int) { c.Review.MinUserTurns = v }},
+		{"provider.failure_skip_s", 1, maxS, func(c *Config, v int) { c.Provider.FailureSkipS = v }},
+		{"provider.anthropic_max_tokens", 1, i32, func(c *Config, v int) { c.Provider.AnthropicMaxTokens = v }},
+		{"provider.model_cache_ttl_s", 1, maxS, func(c *Config, v int) { c.Provider.ModelCacheTTLS = v }},
+		{"provider.model_list_timeout_s", 1, maxS, func(c *Config, v int) { c.Provider.ModelListTimeoutS = v }},
+		{"provider.default_context_window", 1000, i32, func(c *Config, v int) { c.Provider.DefaultContextWindow = v }},
+		{"context.summary_timeout_s", 1, maxS, func(c *Config, v int) { c.Context.SummaryTimeoutS = v }},
+		{"context.summary_min_tokens", 100, i32, func(c *Config, v int) { c.Context.SummaryMinTokens = v; c.Context.SummaryMaxTokens = i32 }},
+		{"context.summary_max_tokens", 100, i32, func(c *Config, v int) { c.Context.SummaryMaxTokens = v; c.Context.SummaryMinTokens = 100 }},
+		{"context.compact_max_failures", 1, i32, func(c *Config, v int) { c.Context.CompactMaxFailures = v }},
+		{"context.compact_max_ineffective", 1, i32, func(c *Config, v int) { c.Context.CompactMaxIneffective = v }},
+		{"goals.judge_max_tokens", 256, i32, func(c *Config, v int) { c.Goals.JudgeMaxTokens = v }},
+		{"goals.judge_max_parse_failures", 1, i32, func(c *Config, v int) { c.Goals.JudgeMaxParseFailures = v }},
+		{"goals.judge_max_transport_failures", 1, i32, func(c *Config, v int) { c.Goals.JudgeMaxTransportFailures = v }},
+		{"goals.gate_timeout_s", 1, maxS, func(c *Config, v int) { c.Goals.GateTimeoutS = v }},
+		{"goals.gate_max_retries", 1, i32, func(c *Config, v int) { c.Goals.GateMaxRetries = v }},
+		{"goals.gate_output_tail_chars", 100, i32, func(c *Config, v int) { c.Goals.GateOutputTailChars = v }},
+		{"goals.max_barrier_wait_s", 1, maxS, func(c *Config, v int) { c.Goals.MaxBarrierWaitS = v }},
+		{"goals.draft_objective_chars", 100, i32, func(c *Config, v int) { c.Goals.DraftObjectiveChars = v }},
+		{"goals.judge_chars.goal", 1, i32, func(c *Config, v int) { c.Goals.JudgeChars.Goal = v }},
+		{"goals.judge_chars.response", 1, i32, func(c *Config, v int) { c.Goals.JudgeChars.Response = v }},
+		{"goals.judge_chars.contract", 1, i32, func(c *Config, v int) { c.Goals.JudgeChars.Contract = v }},
+		{"goals.judge_chars.subgoal", 1, i32, func(c *Config, v int) { c.Goals.JudgeChars.Subgoal = v }},
+		{"goals.judge_chars.todo", 1, i32, func(c *Config, v int) { c.Goals.JudgeChars.Todo = v }},
+		{"goals.judge_chars.process", 1, i32, func(c *Config, v int) { c.Goals.JudgeChars.Process = v }},
+		{"memory.entry_max_chars", 100, i32, func(c *Config, v int) { c.Memory.EntryMaxChars = v }},
+		{"memory.lock_wait_s", 1, maxS, func(c *Config, v int) { c.Memory.LockWaitS = v }},
+		{"memory.read_max_chars", 1000, i32, func(c *Config, v int) { c.Memory.ReadMaxChars = v }},
+		{"memory.search_max_hits", 1, i32, func(c *Config, v int) { c.Memory.SearchMaxHits = v }},
+		{"memory.prompt_max_topics", 1, i32, func(c *Config, v int) { c.Memory.PromptMaxTopics = v }},
+		{"skills.git_timeout_s", 1, maxS, func(c *Config, v int) { c.Skills.GitTimeoutS = v }},
+		{"skills.skill_md_max_chars", 1000, i32, func(c *Config, v int) { c.Skills.SkillMDMaxChars = v }},
+		{"skills.support_file_max_bytes", 1024, imax, func(c *Config, v int) { c.Skills.SupportFileMaxBytes = v }},
+		{"skills.view_max_linked_files", 1, i32, func(c *Config, v int) { c.Skills.ViewMaxLinkedFiles = v }},
+		{"web.http_timeout_s", 1, maxS, func(c *Config, v int) { c.Web.HTTPTimeoutS = v }},
+		{"web.search_default_results", 1, i32, func(c *Config, v int) { c.Web.SearchDefaultResults = v; c.Web.SearchMaxResults = i32 }},
+		{"web.search_max_results", 1, i32, func(c *Config, v int) { c.Web.SearchMaxResults = v; c.Web.SearchDefaultResults = 1 }},
+		{"browser.action_timeout_s", 1, maxS, func(c *Config, v int) { c.Browser.ActionTimeoutS = v; c.Browser.SettleS = 0.1 }},
+		{"browser.navigate_excerpt_chars", 100, i32, func(c *Config, v int) { c.Browser.NavigateExcerptChars = v }},
+		{"files.read_max_lines", 1, i32, func(c *Config, v int) { c.Files.ReadMaxLines = v }},
+		{"files.read_max_line_chars", 100, i32, func(c *Config, v int) { c.Files.ReadMaxLineChars = v }},
+		{"files.patch_context_lines", 1, i32, func(c *Config, v int) { c.Files.PatchContextLines = v }},
+		{"todo.max_items", 1, i32, func(c *Config, v int) { c.Todo.MaxItems = v }},
+		{"todo.max_item_chars", 100, i32, func(c *Config, v int) { c.Todo.MaxItemChars = v }},
+		{"terminal.process_keep_s", 1, maxS, func(c *Config, v int) { c.Terminal.ProcessKeepS = v }},
+		{"code_execution.max_stderr_chars", 100, i32, func(c *Config, v int) { c.CodeExecution.MaxStderrChars = v }},
+		{"acp.result_max_chars", 1000, i32, func(c *Config, v int) { c.ACP.ResultMaxChars = v }},
+		{"approvals.smart_timeout_s", 1, maxS, func(c *Config, v int) { c.Approvals.SmartTimeoutS = v }},
+		{"approvals.smart_script_max_chars", 100, i32, func(c *Config, v int) { c.Approvals.SmartScriptMaxChars = v }},
+		{"mcp.servers.gh.max_dial_tries", 1, 10, func(c *Config, v int) {
+			s := DefaultMCPServer()
+			s.MaxDialTries = v
+			c.MCP.Servers = map[string]MCPServer{"gh": s}
+		}},
+		{"sessions.search_default_results", 1, i32, func(c *Config, v int) { c.Sessions.SearchDefaultResults = v; c.Sessions.SearchMaxResults = i32 }},
+		{"sessions.search_max_results", 1, i32, func(c *Config, v int) { c.Sessions.SearchMaxResults = v; c.Sessions.SearchDefaultResults = 1 }},
+		{"sessions.scroll_default_window", 1, i32, func(c *Config, v int) { c.Sessions.ScrollDefaultWindow = v; c.Sessions.ScrollMaxWindow = i32 }},
+		{"sessions.scroll_max_window", 1, i32, func(c *Config, v int) { c.Sessions.ScrollMaxWindow = v; c.Sessions.ScrollDefaultWindow = 1 }},
+		{"media.vision_max_bytes", 1024, imax, func(c *Config, v int) { c.Media.VisionMaxBytes = v }},
+		{"media.image_download_timeout_s", 1, maxS, func(c *Config, v int) { c.Media.ImageDownloadTimeoutS = v }},
+		{"media.tts.timeout_s", 0, maxS, func(c *Config, v int) { c.Media.TTS.TimeoutS = v }},
+		{"media.stt.timeout_s", 0, maxS, func(c *Config, v int) { c.Media.STT.TimeoutS = v }},
+		{"media.image.timeout_s", 0, maxS, func(c *Config, v int) { c.Media.Image.TimeoutS = v }},
+		{"telegram.api_timeout_s", 1, maxS, func(c *Config, v int) { c.Telegram.APITimeoutS = v }},
+		{"telegram.upload_timeout_s", 1, maxS, func(c *Config, v int) { c.Telegram.UploadTimeoutS = v }},
+		{"telegram.rich_media_timeout_s", 1, maxS, func(c *Config, v int) { c.Telegram.RichMediaTimeoutS = v }},
+		{"telegram.inline_text_max_bytes", 1024, imax, func(c *Config, v int) { c.Telegram.InlineTextMaxBytes = v }},
+		{"telegram.sticker_describe_timeout_s", 1, maxS, func(c *Config, v int) { c.Telegram.StickerDescribeTimeoutS = v }},
+		{"telegram.voice_convert_timeout_s", 1, maxS, func(c *Config, v int) { c.Telegram.VoiceConvertTimeoutS = v }},
+		{"telegram.menu_max_commands", 22, 100, func(c *Config, v int) { c.Telegram.MenuMaxCommands = v }},
+		{"telegram.pairing_code_ttl_s", 1, maxS, func(c *Config, v int) { c.Telegram.PairingCodeTTLS = v }},
+		{"gateway.max_queued_messages", 1, i32, func(c *Config, v int) { c.Gateway.MaxQueuedMessages = v }},
+		{"gateway.model_page_size", 1, i32, func(c *Config, v int) { c.Gateway.ModelPageSize = v }},
+		{"gateway.session_page_size", 1, i32, func(c *Config, v int) { c.Gateway.SessionPageSize = v }},
+		{"gateway.help_max_skills", 1, i32, func(c *Config, v int) { c.Gateway.HelpMaxSkills = v }},
+		{"gateway.housekeeping_interval_s", 60, maxS, func(c *Config, v int) { c.Gateway.HousekeepingIntervalS = v }},
+		{"gateway.media_trust_recent_s", 0, maxS, func(c *Config, v int) { c.Gateway.MediaTrustRecentS = v }},
+		{"update.download_timeout_s", 1, maxS, func(c *Config, v int) { c.Update.DownloadTimeoutS = v }},
+		{"update.api_timeout_s", 1, maxS, func(c *Config, v int) { c.Update.APITimeoutS = v }},
+		{"doctor.check_timeout_s", 1, maxS, func(c *Config, v int) { c.Doctor.CheckTimeoutS = v }},
+		{"doctor.acp_check_timeout_s", 1, maxS, func(c *Config, v int) { c.Doctor.ACPCheckTimeoutS = v }},
+		{"doctor.min_free_bytes", 1, imax, func(c *Config, v int) { c.Doctor.MinFreeBytes = v }},
+	}
+}
+
+// TestValidateNewIntKeys checks the lowest and the highest permitted value of each new int
+// key, and one value below and one value above them. The error names the key.
+func TestValidateNewIntKeys(t *testing.T) {
+	for _, k := range newIntKeys() {
+		for _, v := range []int{k.min, k.max} {
+			c := validBase()
+			k.set(&c, v)
+			if err := c.Validate(); err != nil {
+				t.Errorf("%s = %d must be valid: %v", k.key, v, err)
+			}
+		}
+		for _, v := range []int{k.min - 1, k.max + 1} {
+			if v < k.min-1 { // k.max + 1 wraps when k.max is math.MaxInt
+				continue
+			}
+			c := validBase()
+			k.set(&c, v)
+			want := fmt.Sprintf("config: %s is %d. Use a value from %d to %d", k.key, v, k.min, k.max)
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s = %d: got %v, want %q", k.key, v, err, want)
+			}
+		}
+	}
+}
+
+func TestValidateNewFloatKeys(t *testing.T) {
+	keys := map[string]func(c *Config, v float64){
+		"browser.settle_s":           func(c *Config, v float64) { c.Browser.SettleS = v; c.Browser.ActionTimeoutS = maxS },
+		"telegram.album_wait_s":      func(c *Config, v float64) { c.Telegram.AlbumWaitS = v },
+		"telegram.status_interval_s": func(c *Config, v float64) { c.Telegram.StatusIntervalS = v },
+		"gateway.debounce_s":         func(c *Config, v float64) { c.Gateway.DebounceS = v; c.Gateway.DebounceMaxS = maxS },
+		"gateway.debounce_max_s":     func(c *Config, v float64) { c.Gateway.DebounceMaxS = v; c.Gateway.DebounceS = 0.001 },
+	}
+	for key, set := range keys {
+		for _, v := range []float64{0.001, 2592000} {
+			if key == "browser.settle_s" && v == 2592000 {
+				continue // The settle pair needs a larger action timeout, and the max refuses it.
+			}
+			c := validBase()
+			set(&c, v)
+			if err := c.Validate(); err != nil {
+				t.Errorf("%s = %g must be valid: %v", key, v, err)
+			}
+		}
+		for _, v := range []float64{0, -1, 2592001, math.NaN(), math.Inf(1)} {
+			c := validBase()
+			set(&c, v)
+			want := fmt.Sprintf("config: %s is %g. Use a number above 0 and up to 2592000", key, v)
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("%s = %g: got %v, want %q", key, v, err, want)
+			}
+		}
+	}
+}
+
+func TestValidateOrderedPairs(t *testing.T) {
+	cases := []struct {
+		mut  func(*Config)
+		want string
+	}{
+		{func(c *Config) { c.Cron.GraceMinS, c.Cron.GraceMaxS = 300, 200 },
+			"config: cron.grace_min_s is 300, which is more than cron.grace_max_s (200). Make cron.grace_min_s smaller or cron.grace_max_s larger"},
+		{func(c *Config) { c.Context.SummaryMinTokens, c.Context.SummaryMaxTokens = 5000, 4000 },
+			"config: context.summary_min_tokens is 5000, which is more than context.summary_max_tokens (4000). Make context.summary_min_tokens smaller or context.summary_max_tokens larger"},
+		{func(c *Config) { c.Gateway.DebounceS, c.Gateway.DebounceMaxS = 2, 1.5 },
+			"config: gateway.debounce_s is 2, which is more than gateway.debounce_max_s (1.5). Make gateway.debounce_s smaller or gateway.debounce_max_s larger"},
+		{func(c *Config) { c.Web.SearchDefaultResults, c.Web.SearchMaxResults = 12, 10 },
+			"config: web.search_default_results is 12, which is more than web.search_max_results (10). Make web.search_default_results smaller or web.search_max_results larger"},
+		{func(c *Config) { c.Sessions.SearchDefaultResults, c.Sessions.SearchMaxResults = 30, 20 },
+			"config: sessions.search_default_results is 30, which is more than sessions.search_max_results (20). Make sessions.search_default_results smaller or sessions.search_max_results larger"},
+		{func(c *Config) { c.Sessions.ScrollDefaultWindow, c.Sessions.ScrollMaxWindow = 60, 50 },
+			"config: sessions.scroll_default_window is 60, which is more than sessions.scroll_max_window (50). Make sessions.scroll_default_window smaller or sessions.scroll_max_window larger"},
+		{func(c *Config) { c.Browser.SettleS, c.Browser.ActionTimeoutS = 30, 30 },
+			"config: browser.settle_s is 30, which is not less than browser.action_timeout_s (30). Make browser.settle_s smaller"},
+	}
+	for _, tc := range cases {
+		c := validBase()
+		tc.mut(&c)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("got %v, want %q", err, tc.want)
+		}
+	}
+	// Equal values are in order, except for the settle pair.
+	c := validBase()
+	c.Cron.GraceMinS, c.Cron.GraceMaxS = 600, 600
+	c.Gateway.DebounceS, c.Gateway.DebounceMaxS = 1, 1
+	c.Browser.SettleS, c.Browser.ActionTimeoutS = 29.9, 30
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateImageSizeAndAllowDirs(t *testing.T) {
+	for _, ok := range []string{"1024x1024", "1x1", "1792x1024"} {
+		c := validBase()
+		c.Media.ImageSize = ok
+		if err := c.Validate(); err != nil {
+			t.Errorf("%q must be valid: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "1024", "0x10", "10x0", "-1x5", "axb", "1024x1024x1", "1024 x 1024"} {
+		c := validBase()
+		c.Media.ImageSize = bad
+		want := fmt.Sprintf("config: media.image_size is %q. Use the form <W>x<H>, for example 1024x1024", bad)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: got %v", bad, err)
+		}
+	}
+	c := validBase()
+	c.Gateway.MediaAllowDirs = []string{"/srv/out", "~/exports"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	c.Gateway.MediaAllowDirs = []string{"/srv/out", "exports"}
+	want := `config: gateway.media_allow_dirs has "exports", which is not an absolute path. Use a path that starts with / or ~/`
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadRefusesNewKeyOutOfRange(t *testing.T) {
+	_, err := Load(writeTemp(t, minimal+"cron:\n  script_timeout_s: 0\n  agent_timeout_s: -1\n"), mapEnv(nil))
+	if err == nil || !strings.Contains(err.Error(), "config: cron.script_timeout_s is 0. Use a value from 1 to 2592000") ||
+		!strings.Contains(err.Error(), "config: cron.agent_timeout_s is -1. Use a value from 0 to 2592000") {
+		t.Fatal(err)
+	}
+	c, err := Load(writeTemp(t, minimal+"cron:\n  script_timeout_s: 900\n  agent_timeout_s: 0\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Cron.ScriptTimeoutS, 900)
 }

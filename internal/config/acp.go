@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,10 +16,12 @@ import (
 // ACPConfig sets the acp_delegate tool, which gives a coding task to an external coding agent
 // over the Agent Client Protocol.
 type ACPConfig struct {
-	Enabled          bool                `yaml:"enabled"`
-	IdleTimeoutS     int                 `yaml:"idle_timeout_s"`
-	MaxSessions      int                 `yaml:"max_sessions"`
-	TurnTimeoutS     int                 `yaml:"turn_timeout_s"`
+	Enabled      bool `yaml:"enabled"`
+	IdleTimeoutS int  `yaml:"idle_timeout_s"`
+	MaxSessions  int  `yaml:"max_sessions"`
+	TurnTimeoutS int  `yaml:"turn_timeout_s"`
+	// ResultMaxChars is the maximum length of the text in an acp_delegate result, in characters.
+	ResultMaxChars   int                 `yaml:"result_max_chars"`
 	WorkdirAllowlist []string            `yaml:"workdir_allowlist"`
 	Agents           map[string]ACPAgent `yaml:"agents"`
 }
@@ -272,6 +275,9 @@ func (c ACPConfig) validate() []error {
 	}
 	if c.TurnTimeoutS < 60 {
 		errs = append(errs, fmt.Errorf("config: acp.turn_timeout_s is %d. Use 60 or more seconds", c.TurnTimeoutS))
+	}
+	if err := intRange("acp.result_max_chars", c.ResultMaxChars, 1000, math.MaxInt32); err != nil {
+		errs = append(errs, err)
 	}
 	for i, p := range c.WorkdirAllowlist {
 		if !filepath.IsAbs(p) {

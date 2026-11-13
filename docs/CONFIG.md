@@ -14,6 +14,9 @@ keeps the secrets safe.
 - A reference to a variable that is not set stops the load. The error names the variable and
   the key.
 - An enum key with an unknown value stops the load. The error gives the permitted values.
+- A number below its minimum, or above its maximum, stops the load. A time in seconds has a
+  maximum of 2592000 (30 days). Some pairs must be in order, for example `cron.grace_min_s`
+  and `cron.grace_max_s`. The error names the key.
 - A config change applies after a restart. There are two exceptions:
   - The program reads the skills again at the start of each session.
   - The `/reload-mcp` command reloads the MCP servers.
@@ -96,7 +99,7 @@ not load. The error tells what to set in its place.
 | `providers.<name>.api_key` | `""` | The API key. Use `${VAR}` and keep the value in `.env`. |
 | `providers.<name>.model` | `""` | The model name that the agent sends to the endpoint. |
 | `providers.<name>.vision` | `false` | When `true`, images go inline to this model. When `false`, the `view_image` tool uses `agent.vision_provider`. |
-| `providers.<name>.context_window` | `0` | The context window in tokens. `0` takes the value from the price data. When the price data has no value, the agent uses 128000. |
+| `providers.<name>.context_window` | `0` | The context window in tokens. `0` takes the value from the price data. When the price data has no value, the agent uses `provider.default_context_window` (128000). |
 | `providers.<name>.price_key` | `""` | The LiteLLM price key, for example `zai/glm-5.3`. Set it when the automatic key match fails. |
 | `providers.<name>.effort` | `""` | The reasoning effort of this entry: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. `""` sends no effort field, so the provider uses its default. The `/effort` command of a session wins. Each level goes to the nearest level that the provider accepts. The effort style of a preset applies only on the preset URL. Else the entry uses the standard style of its `format`. When the entry rejects the effort with an HTTP 400 that names `effort`, `reasoning`, or `thinking`, the chain sends the call again with no effort. When that call works, the entry gets no effort until a restart. |
 
@@ -106,6 +109,18 @@ Each model call goes through a chain of entries: the pinned entry, then `primary
 entries of `agent.fallback`. The wiki page
 [The fallback chain](https://github.com/dnwandana/tether-agent/wiki/Providers#the-fallback-chain)
 gives the order, the failures that move a call to the next entry, and the wait times.
+
+## provider
+
+These keys apply to all entries of `providers`.
+
+| Key | Default | Effect |
+|---|---|---|
+| `provider.failure_skip_s` | `60` | The time in seconds that the chain skips an entry after the entry fails before the first byte. The minimum is 1. The maximum is 2592000. |
+| `provider.anthropic_max_tokens` | `8192` | The `max_tokens` value of a call to an `anthropic` entry when the call sets no value. A value above the output limit of the model gives HTTP 400 on each call. The chain then skips the entry and uses the fallback. The minimum is 1. |
+| `provider.model_cache_ttl_s` | `3600` | The time in seconds that `/model` keeps the model list of an entry. The minimum is 1. The maximum is 2592000. |
+| `provider.model_list_timeout_s` | `10` | The time limit of one model list call of `/model`, in seconds. `tether setup` does not use it. The minimum is 1. The maximum is 2592000. |
+| `provider.default_context_window` | `128000` | The context window in tokens when the entry and the price data give no value. The minimum is 1000. |
 
 ## agent
 
@@ -118,6 +133,9 @@ gives the order, the failures that move a call to the next entry, and the wait t
 | `agent.restart_drain_timeout_s` | `180` | The maximum time in seconds that a stop or a restart waits for the running turns. The turns that still run after it are cancelled, and they continue after the restart. `tether setup` writes `TimeoutStopSec` from this value. |
 | `agent.fallback` | `[]` | The ordered list of entry names after `primary` in the chain (see "The fallback chain"). Each name must be an entry in `providers`. The list must not contain `primary` or a name two times. The default is no key. With no key, the list is the entry `fallback` when it exists, else there is no fallback. An explicit `[]` turns off the fallback. |
 | `agent.resume_freshness_s` | `3600` | A turn that a restart or a crash cut continues at the next start when the cut is not older than this time, in seconds. `0` turns off the resume. An active goal also continues only within this time. Else it pauses. `0` pauses each goal. |
+| `agent.stream_idle_timeout_s` | `300` | A model call stops when its stream sends no data for this time, in seconds. The turn keeps the partial answer and ends with an error. The minimum is 1. The maximum is 2592000. |
+| `agent.max_same_tool_failures` | `3` | The turn stops when the model calls an unknown tool, or sends JSON arguments that are not valid, this number of times in a row. The minimum is 1. |
+| `agent.tool_preview_chars` | `40` | The maximum length, in characters, of the argument preview in a tool status line on Telegram and in the CLI. The minimum is 4. |
 
 ## context
 
@@ -129,14 +147,23 @@ gives the order, the failures that move a call to the next entry, and the wait t
 | `context.summary_target_ratio` | `0.2` | The target size of the compaction summary, as a part of the trigger size. |
 | `context.tool_output_max_chars` | `50000` | A longer tool output keeps its head and its tail. The full output goes to a spill file in `cache/spill/`. |
 | `context.spill_retention_days` | `7` | The program deletes spill files that are older than this number of days. |
+| `context.summary_timeout_s` | `300` | The time limit of one compaction summary call, in seconds. The minimum is 1. The maximum is 2592000. |
+| `context.summary_min_tokens` | `2000` | The lowest token budget of a compaction summary. It must not be more than `context.summary_max_tokens`. The minimum is 100. |
+| `context.summary_max_tokens` | `12000` | The highest token budget of a compaction summary. The minimum is 100. |
+| `context.compact_max_failures` | `3` | After this number of failed compactions in a row, the program tells the user. The minimum is 1. |
+| `context.compact_max_ineffective` | `2` | After this number of compactions in a row that leave the context over the threshold, the automatic compaction stops until the context is under the threshold again. The minimum is 1. |
 
 ## sessions
 
 | Key | Default | Effect |
 |---|---|---|
 | `sessions.retention_days` | `90` | The gateway deletes an automatic session when its last activity is older than this number of days. `0` keeps all sessions. |
+| `sessions.search_default_results` | `5` | The number of `session_search` results when the call sets no limit. It must not be more than `sessions.search_max_results`. The minimum is 1. |
+| `sessions.search_max_results` | `20` | The maximum number of `session_search` results. The minimum is 1. |
+| `sessions.scroll_default_window` | `10` | The number of messages in a `session_search` scroll when the call sets no window. It must not be more than `sessions.scroll_max_window`. The minimum is 1. |
+| `sessions.scroll_max_window` | `50` | The maximum number of messages in one `session_search` scroll. The minimum is 1. |
 
-The gateway deletes old automatic sessions when it starts, and then one time each day. These
+The gateway deletes old automatic sessions when it starts, and then one time each day (`gateway.housekeeping_interval_s`). These
 kinds of session are automatic:
 
 - `cron`: one session for each cron run.
@@ -156,6 +183,21 @@ stays with no parent.
 | `memory.memory_char_limit` | `2200` | The maximum size of `memory/memory.md`, in characters. |
 | `memory.user_char_limit` | `1375` | The maximum size of `memory/user_profile.md`, in characters. |
 | `memory.review_interval_turns` | `10` | A background memory review starts after this number of user turns. `0` stops the reviews. |
+| `memory.entry_max_chars` | `4000` | The maximum length of one memory entry, in characters. The memory threat scan uses the same limit. The minimum is 100. |
+| `memory.lock_wait_s` | `30` | The maximum time that a memory change waits for the file lock, in seconds. The minimum is 1. The maximum is 2592000. |
+| `memory.read_max_chars` | `32000` | The maximum length of the result of a memory `read` action, in characters. The minimum is 1000. |
+| `memory.search_max_hits` | `8` | The maximum number of hits of a memory `search` action. The minimum is 1. |
+| `memory.prompt_max_topics` | `40` | The maximum number of note topics in the MEMORY TOPICS section of the system prompt. The minimum is 1. |
+
+## review
+
+The background memory and skill review.
+
+| Key | Default | Effect |
+|---|---|---|
+| `review.max_rounds` | `16` | The maximum number of tool rounds in one background review. The minimum is 1. |
+| `review.max_concurrent` | `2` | The maximum number of background reviews that run at the same time. The other reviews wait. The minimum is 1. |
+| `review.min_user_turns` | `6` | A review at compaction or at `/new` starts only when the session has this number of user turns or more. The minimum is 1. |
 
 ## skills
 
@@ -164,6 +206,10 @@ stays with no parent.
 | `skills.external_dirs` | `[]` | More skill folders. The agent reads them but never writes to them. |
 | `skills.review_interval_tool_rounds` | `10` | A background skill review starts after this number of tool rounds. `0` stops the reviews. |
 | `skills.guard` | `true` | When `true`, the skill guard scans agent-written skills and skills in external folders. |
+| `skills.git_timeout_s` | `120` | The time limit of each git call of `tether skills`, in seconds. The minimum is 1. The maximum is 2592000. |
+| `skills.skill_md_max_chars` | `100000` | The maximum length of a `SKILL.md` file that `skill_manage` writes, in characters. The minimum is 1000. |
+| `skills.support_file_max_bytes` | `1048576` | The maximum size of a support file that `skill_manage` writes, in bytes. The minimum is 1024. |
+| `skills.view_max_linked_files` | `50` | The maximum number of support files that `skill_view` lists. The minimum is 1. |
 
 ## web
 
@@ -173,6 +219,9 @@ stays with no parent.
 | `web.fetch_max_urls` | `5` | The maximum number of URLs in one `web_fetch` call. |
 | `web.fetch_max_bytes` | `750000` | The maximum size of one page that `web_fetch` downloads. |
 | `web.block_private_networks` | `true` | When `true`, the web tools refuse loopback, private, link-local, and CGNAT addresses. |
+| `web.http_timeout_s` | `30` | The time limit of one HTTP request of `web_search` and `web_fetch`, in seconds. The minimum is 1. The maximum is 2592000. |
+| `web.search_default_results` | `5` | The number of `web_search` results when the call sets no limit. It must not be more than `web.search_max_results`. The minimum is 1. |
+| `web.search_max_results` | `10` | The maximum number of `web_search` results. The minimum is 1. |
 
 ## browser
 
@@ -180,6 +229,9 @@ stays with no parent.
 |---|---|---|
 | `browser.chrome_path` | `""` | The path of the Chrome program. `""` uses the `CHROME_PATH` environment variable, then finds Chrome or Chromium in `PATH`. Then it tries `/snap/bin/chromium` on Linux, and the Chrome and Chromium apps on macOS. |
 | `browser.idle_close_minutes` | `10` | The program stops Chrome after this number of minutes with no browser call. |
+| `browser.action_timeout_s` | `30` | The time limit of each browser action, in seconds. The minimum is 1. The maximum is 2592000. |
+| `browser.navigate_excerpt_chars` | `2000` | The length of the page text excerpt that `browser_navigate` returns, in characters. The minimum is 100. |
+| `browser.settle_s` | `0.5` | The wait after a page is ready, in seconds, so that the page scripts can render. It must be less than `browser.action_timeout_s`. The value must be above 0. The maximum is 2592000. |
 
 ## terminal
 
@@ -187,6 +239,7 @@ stays with no parent.
 |---|---|---|
 | `terminal.default_timeout_s` | `120` | The default timeout of the `terminal` tool, in seconds. |
 | `terminal.env_passthrough` | `[]` | Names of secret environment variables that child processes can see. A secret that a skill needs passes only through this list. |
+| `terminal.process_keep_s` | `3600` | The time that the program keeps the record of a background process after the process exits, in seconds. The minimum is 1. The maximum is 2592000. |
 
 ## code_execution
 
@@ -195,6 +248,22 @@ stays with no parent.
 | `code_execution.timeout_s` | `300` | The timeout of one `execute_code` call, in seconds. |
 | `code_execution.max_tool_calls` | `50` | The maximum number of tool calls from one `execute_code` call. |
 | `code_execution.max_stdout_bytes` | `50000` | The maximum stdout of one `execute_code` call that goes back to the model. |
+| `code_execution.max_stderr_chars` | `10000` | The maximum stderr text that a failed `execute_code` script returns, in characters. The minimum is 100. |
+
+## files
+
+| Key | Default | Effect |
+|---|---|---|
+| `files.read_max_lines` | `2000` | The maximum number of lines that one `read_file` call returns. The minimum is 1. |
+| `files.read_max_line_chars` | `2000` | `read_file` cuts a longer line to this number of characters. The minimum is 100. |
+| `files.patch_context_lines` | `3` | The number of unchanged lines around each change in the diff that the file tools return. The minimum is 1. |
+
+## todo
+
+| Key | Default | Effect |
+|---|---|---|
+| `todo.max_items` | `256` | The maximum number of items in the todo list of a session. When you lower the value, the next write cuts a longer list to the new limit. The minimum is 1. |
+| `todo.max_item_chars` | `4000` | The maximum length of one todo item, in characters. The minimum is 100. |
 
 ## delegation
 
@@ -212,6 +281,8 @@ stays with no parent.
 | `approvals.mode` | `manual` | The approval mode for dangerous commands: `manual`, `smart`, or `off`. |
 | `approvals.timeout_s` | `600` | The time that the gate waits for an answer, in seconds. No answer is a denial. It also ends the confirm of a dangerous goal gate. |
 | `approvals.cron_mode` | `deny` | The result for a dangerous command in a cron run: `deny` or `approve`. |
+| `approvals.smart_timeout_s` | `30` | The time limit of one call of the smart judge, in seconds. The minimum is 1. The maximum is 2592000. |
+| `approvals.smart_script_max_chars` | `8000` | The smart judge gets at most this number of characters of a script. The minimum is 100. |
 
 ## goals
 
@@ -220,6 +291,20 @@ stays with no parent.
 | `goals.max_turns` | `20` | The turn budget of a new goal. When the goal uses all its turns, it pauses. |
 | `goals.judge_provider` | `""` | The provider entry of the goal judge and of `/goal draft`. The chain is the entry, then `primary`, then `agent.fallback`. `""` uses the chain of the session. The name must be an entry in `providers`. |
 | `goals.judge_timeout_s` | `30` | The timeout of one judge call or draft call, in seconds. |
+| `goals.judge_max_tokens` | `4096` | The output limit of one judge call, in tokens. The minimum is 256. |
+| `goals.judge_max_parse_failures` | `3` | The goal pauses after this number of judge replies in a row that the program cannot parse. The minimum is 1. |
+| `goals.judge_max_transport_failures` | `5` | The goal pauses after this number of failed judge calls in a row. The minimum is 1. |
+| `goals.gate_timeout_s` | `300` | The time limit of one gate run, in seconds. A gate with its own timeout keeps it. The value applies to a gate that you add after the change. A stored gate keeps its value. The minimum is 1. The maximum is 2592000. |
+| `goals.gate_max_retries` | `3` | The number of failed gate runs before the goal pauses. The value applies to a gate that you add after the change. A stored gate keeps its value. The minimum is 1. |
+| `goals.gate_output_tail_chars` | `3000` | The number of output characters that one gate run keeps. The minimum is 100. |
+| `goals.max_barrier_wait_s` | `1800` | The longest time that a pid or a process barrier holds a goal, in seconds. The minimum is 1. The maximum is 2592000. |
+| `goals.draft_objective_chars` | `4000` | The maximum length of the objective in a `/goal draft` prompt, in characters. The minimum is 100. |
+| `goals.judge_chars.goal` | `2000` | The judge prompt cuts the goal text to this number of characters. The minimum is 1. |
+| `goals.judge_chars.response` | `4000` | The judge prompt cuts the last answer of the agent to this number of characters. The minimum is 1. |
+| `goals.judge_chars.contract` | `2500` | The judge prompt cuts the completion contract to this number of characters. The minimum is 1. |
+| `goals.judge_chars.subgoal` | `2000` | The judge prompt cuts each subgoal to this number of characters. The minimum is 1. |
+| `goals.judge_chars.todo` | `2000` | The judge prompt cuts the todo list to this number of characters. The minimum is 1. |
+| `goals.judge_chars.process` | `120` | The judge prompt cuts each background process line to this number of characters. The minimum is 1. |
 
 ## toolsets
 
@@ -236,17 +321,59 @@ only make its channel set smaller.
 |---|---|---|
 | `cron.max_parallel_jobs` | `2` | The maximum number of cron jobs that run at the same time. More due jobs wait for the next tick. |
 | `cron.missed_runs` | `skip` | The rule for a run that the program missed while it was stopped: `skip` or `catchup`. |
+| `cron.script_timeout_s` | `120` | The time limit of one cron script run, in seconds. It applies to a script job and to the data script of an agent job. At the limit, the program stops the script. A script job sends an alert. In an agent job, the failure goes into the prompt, and the model reports it. The minimum is 1. The maximum is 2592000. |
+| `cron.agent_timeout_s` | `0` | The time limit of the agent turn of one cron job, in seconds. `0` means no limit. At the limit, the program stops the turn and sends an alert. A partial answer follows the alert. The script of the job does not count. The maximum is 2592000. |
+| `cron.script_output_max_chars` | `50000` | The maximum number of stdout characters that a cron script result keeps. A longer stdout goes to a spill file. The minimum is 1000. |
+| `cron.script_stderr_tail_lines` | `20` | The number of last stderr lines in the alert of a failed cron script. The minimum is 1. |
+| `cron.tick_s` | `30` | The time between two checks for due cron jobs, in seconds. The minimum is 1. The maximum is 2592000. |
+| `cron.grace_min_s` | `120` | The minimum grace window of a late recurring run, in seconds. It must not be more than `cron.grace_max_s`. The minimum is 1. The maximum is 2592000. |
+| `cron.grace_max_s` | `7200` | The maximum grace window of a late recurring run, in seconds. The minimum is 1. The maximum is 2592000. |
+
+One run of an agent job can last `cron.script_timeout_s` plus `cron.agent_timeout_s`. For that time,
+the run holds one slot of `cron.max_parallel_jobs`.
 
 The gateway applies `cron.missed_runs` when it starts. The rules are:
 
 - `skip`: a recurring job that is late by less than its grace window still runs one time. The
-  grace window is half the period of the schedule, with a minimum of 2 minutes and a maximum of
-  2 hours. For example, an `every 30m` job has a grace window of 15 minutes, and a daily job has
+  grace window is half the period of the schedule, with a minimum of `cron.grace_min_s` (2 minutes) and a maximum of
+  `cron.grace_max_s` (2 hours). For example, an `every 30m` job has a grace window of 15 minutes, and a daily job has
   a grace window of 2 hours. A job that is later than its grace window does not run. It moves to
   its next scheduled time after the start.
 - `catchup`: each recurring job that is due runs one time, also when it missed more than one run.
 - A one-shot job always runs one time when it is late, because it has no next run. This applies
   to the two rules.
+
+## gateway
+
+These keys set the gateway: the message queue, the command lists, the housekeeping, and the local files that an answer can send.
+
+| Key | Default | Effect |
+|---|---|---|
+| `gateway.max_queued_messages` | `20` | The maximum number of messages that wait in the queue of a busy session. The minimum is 1. |
+| `gateway.debounce_s` | `0.35` | While a session is busy, the gateway merges the texts that arrive within this time, in seconds. It must not be more than `gateway.debounce_max_s`. The value must be above 0. The maximum is 2592000. |
+| `gateway.debounce_max_s` | `1` | The maximum wait of one merge, in seconds. The value must be above 0. The maximum is 2592000. |
+| `gateway.model_page_size` | `8` | The number of models on one page of `/model`. The minimum is 1. |
+| `gateway.session_page_size` | `8` | The number of sessions on one page of `/sessions`. The minimum is 1. |
+| `gateway.help_max_skills` | `10` | The number of skill commands that `/help` shows with no argument. The minimum is 1. |
+| `gateway.housekeeping_interval_s` | `86400` | The time between two housekeeping runs of the gateway, in seconds. A run deletes old sessions and old media files. The minimum is 60. The maximum is 2592000. |
+| `gateway.media_delivery_strict` | `false` | When `true`, an answer can send a local file only from an allowed folder, or a file that changed recently. `TETHER_MEDIA_DELIVERY_STRICT` wins when it is set. |
+| `gateway.media_allow_dirs` | `[]` | More folders that an answer can send files from. Each entry must be an absolute path, or a path that starts with `~/`. `TETHER_MEDIA_ALLOW_DIRS` wins when it is set. |
+| `gateway.media_trust_recent_files` | `true` | When `true`, strict mode also sends a file that changed in the last `gateway.media_trust_recent_s` seconds. `TETHER_MEDIA_TRUST_RECENT_FILES` wins when it is set. |
+| `gateway.media_trust_recent_s` | `600` | The recency window of strict mode, in seconds. `0` trusts no recent file. `TETHER_MEDIA_TRUST_RECENT_SECONDS` wins when it is set to a whole number of 0 or more. The maximum is 2592000. |
+
+The four `gateway.media_*` keys control the local files that an answer can send. Each key has an
+environment variable. When the variable is set in `.env` or in the process environment, it wins
+over the key. `docs/SECURITY.md` ("Files that the bot sends") gives the full rule.
+
+- `gateway.media_delivery_strict`: `TETHER_MEDIA_DELIVERY_STRICT`
+- `gateway.media_allow_dirs`: `TETHER_MEDIA_ALLOW_DIRS`. The variable separates the folders
+  with `:` or `,`.
+- `gateway.media_trust_recent_files`: `TETHER_MEDIA_TRUST_RECENT_FILES`
+- `gateway.media_trust_recent_s`: `TETHER_MEDIA_TRUST_RECENT_SECONDS`. The value must be a whole
+  number of 0 or more, for example `600`. A value such as `1.5` is not valid.
+
+A variable with a value that is not valid does not win. The log then gives a warning that names
+the variable and the key, and the key gives the value.
 
 ## telegram
 
@@ -280,14 +407,16 @@ The gateway applies `cron.missed_runs` when it starts. The rules are:
 | `telegram.streaming.fresh_final_after_s` | `60` | When the preview message is older than this number of seconds, the final answer goes out as a new message. |
 | `telegram.tool_progress` | `all` | The tool status lines: `off`, `new` (a line when the tool changes), `all` (one line per tool, with a count), or `verbose` (each call, with its arguments). With `off`, a goal turn still sends its goal line as one silent message. No plan message goes out. |
 | `telegram.cleanup_progress` | `false` | When `true`, the bot deletes the status message after a successful run. The goal message and the plan messages go too, but the "Plan done" message stays. In `off` mode, the goal message stays. |
-
-Four environment variables control the local files that an answer can send. Set them in `.env`
-or in the process environment. `docs/SECURITY.md` ("Files that the bot sends") gives the full rule.
-
-- `TETHER_MEDIA_DELIVERY_STRICT=1` turns on strict mode.
-- `TETHER_MEDIA_ALLOW_DIRS` lists more folders that the bot can send from, separated by `:` or `,`.
-- `TETHER_MEDIA_TRUST_RECENT_FILES=0` stops strict mode from sending recently changed files.
-- `TETHER_MEDIA_TRUST_RECENT_SECONDS` sets the recency window of strict mode. The default is 600.
+| `telegram.api_timeout_s` | `60` | The time limit of one Bot API call, in seconds, when the call has no other limit. The minimum is 1. The maximum is 2592000. |
+| `telegram.upload_timeout_s` | `300` | The time limit of one upload or download, in seconds, when the call has no other limit. The minimum is 1. The maximum is 2592000. |
+| `telegram.album_wait_s` | `0.8` | The wait for the other parts of an album, in seconds. The value must be above 0. The maximum is 2592000. |
+| `telegram.rich_media_timeout_s` | `120` | The time limit for the media parts of one incoming message, in seconds. The later messages of the chat wait for them. The minimum is 1. The maximum is 2592000. |
+| `telegram.inline_text_max_bytes` | `102400` | A `.md` or `.txt` file up to this size, in bytes, goes inline into the message text. The minimum is 1024. |
+| `telegram.sticker_describe_timeout_s` | `30` | The time limit of the vision call that describes a sticker, in seconds. The minimum is 1. The maximum is 2592000. |
+| `telegram.voice_convert_timeout_s` | `60` | The time limit of one voice conversion with `ffmpeg`, in seconds. The minimum is 1. The maximum is 2592000. |
+| `telegram.menu_max_commands` | `60` | The maximum number of entries in the bot menu. The count includes the 22 built-in commands. The minimum is 22. The maximum is 100. |
+| `telegram.status_interval_s` | `1.5` | The minimum time between two edits of the tool status message, in seconds. The value must be above 0. The maximum is 2592000. |
+| `telegram.pairing_code_ttl_s` | `3600` | The time until a pairing code of the bot expires, in seconds. `tether pairing` and `tether setup` always use 3600. The minimum is 1. The maximum is 2592000. |
 
 ## mcp
 
@@ -307,6 +436,7 @@ example, `a b` and `a_b`, or `GitHub` and `github`, are not valid together.
 | `mcp.servers.<name>.headers` | `{}` | HTTP headers for an HTTP server, for example an authorization header. |
 | `mcp.servers.<name>.timeout_s` | `120` | The timeout of one tool call, in seconds. |
 | `mcp.servers.<name>.connect_timeout_s` | `60` | The timeout of the connection, in seconds. |
+| `mcp.servers.<name>.max_dial_tries` | `5` | The number of tries to connect to the server. The wait between two tries doubles. The minimum is 1. The maximum is 10. |
 | `mcp.servers.<name>.supports_parallel_tool_calls` | `false` | When `true`, calls to this server can run at the same time. |
 | `mcp.servers.<name>.always_on` | `false` | When `true`, the server starts at startup and stays connected. When `false`, it starts at the first call. |
 | `mcp.servers.<name>.idle_stop_minutes` | `10` | The program stops the server after this number of minutes with no call. |
@@ -328,6 +458,7 @@ empty `modes` get the built-in values. Another id must set `command` and `modes`
 | `acp.idle_timeout_s` | `300` | The program stops an adapter process after this number of seconds with no task. The minimum is 60. The next call resumes the session of the coding agent. |
 | `acp.max_sessions` | `2` | The maximum number of live adapter processes in one Tether Agent process. The gateway and each `tether chat` process have their own limit. The minimum is 1. |
 | `acp.turn_timeout_s` | `1800` | The maximum time of one `acp_delegate` call, in seconds. The `timeout_s` argument of the tool can only make it shorter. The minimum is 60. |
+| `acp.result_max_chars` | `16000` | The maximum length of the text in an `acp_delegate` result, in characters. The end of the text stays. The minimum is 1000. |
 | `acp.workdir_allowlist` | `[]` | The folders where a coding agent can work. Each entry must be an absolute path. A leading `~/` expands to the home folder. With `[]`, the tool refuses each call. |
 | `acp.agents.<name>.enabled` | `true` | When `false`, the program ignores the agent. |
 | `acp.agents.<name>.command` | `[]` | The adapter program and its arguments, for example `[npx, -y, @agentclientprotocol/claude-agent-acp]`. `[]` uses `[claude-agent-acp]` for `claude-code` and `[codex-acp]` for `codex`. When the program is an absolute path, its folder goes first in the `PATH` of the adapter. |
@@ -361,13 +492,19 @@ the program puts one space before the value. Thus the program does not read the 
 | `media.tts.backend` | `command` | The backend of `text_to_speech`: `command`, `endpoint`, or `""`. |
 | `media.tts.command` | `edge-tts --voice en-US-AriaNeural --text {text} --write-media {out}` | The command template of `text_to_speech`. |
 | `media.tts.provider` | `""` | The provider entry for the `endpoint` backend of `text_to_speech`. `""` uses `primary`. |
+| `media.tts.timeout_s` | `0` | The time limit of one `text_to_speech` call, in seconds. `0` uses the default of the backend: 120 for `command` and 60 for `endpoint`. The maximum is 2592000. |
 | `media.stt.backend` | `command` | The backend of `transcribe_audio`: `command`, `endpoint`, or `""`. |
 | `media.stt.command` | `whisper-cli -m ~/models/ggml-base.bin -f {in} -otxt -of {out_base}` | The command template of `transcribe_audio`. |
 | `media.stt.provider` | `""` | The provider entry for the `endpoint` backend of `transcribe_audio`. `""` uses `primary`. |
+| `media.stt.timeout_s` | `0` | The time limit of one `transcribe_audio` call, in seconds. It also applies to a Telegram voice note. `0` uses 120 for both backends. The maximum is 2592000. |
 | `media.image.backend` | `""` | The backend of `generate_image`. `""` hides the tool. |
 | `media.image.command` | `""` | The command template of `generate_image`. |
 | `media.image.provider` | `""` | The provider entry for the `endpoint` backend of `generate_image`. `""` uses `primary`. |
-| `media.cache_retention_days` | `7` | The gateway deletes a file in `cache/media/` and `cache/screenshots/` when its last change is older than this number of days. The check runs at start and each 24 hours. `0` keeps all files. A negative value is a config error. `tether chat` alone deletes no files. |
+| `media.image.timeout_s` | `0` | The time limit of one `generate_image` call, in seconds. `0` uses 120 for both backends. The maximum is 2592000. |
+| `media.vision_max_bytes` | `10485760` | The maximum size of one image for `view_image`, for an inline image, and for a sticker, in bytes. The minimum is 1024. |
+| `media.image_download_timeout_s` | `60` | The time limit of one image download, in seconds. It applies to `view_image` and to the image download of `generate_image`. The minimum is 1. The maximum is 2592000. |
+| `media.image_size` | `1024x1024` | The `{size}` value of the `command` backend of `generate_image`. The form is `<W>x<H>`. The `endpoint` backend sends no size. |
+| `media.cache_retention_days` | `7` | The gateway deletes a file in `cache/media/` and `cache/screenshots/` when its last change is older than this number of days. The check runs at start and each 24 hours (`gateway.housekeeping_interval_s`). `0` keeps all files. A negative value is a config error. `tether chat` alone deletes no files. |
 
 ## pricing
 
@@ -380,6 +517,21 @@ the program puts one space before the value. Thus the program does not read the 
 | `pricing.overrides.<name>.cache_read` | `0` | A manual cache read price for the model `<name>`, in USD for 1M tokens. |
 
 An override applies to a provider when `<name>` is its `price_key` or its `model`.
+
+## update
+
+| Key | Default | Effect |
+|---|---|---|
+| `update.download_timeout_s` | `900` | The time limit of the download of `tether update`, in seconds. The minimum is 1. The maximum is 2592000. |
+| `update.api_timeout_s` | `30` | The time limit of one GitHub API call of `tether update`, in seconds. The minimum is 1. The maximum is 2592000. |
+
+## doctor
+
+| Key | Default | Effect |
+|---|---|---|
+| `doctor.check_timeout_s` | `10` | The time limit of each `tether doctor` check that waits for the network or for a process, in seconds. The minimum is 1. The maximum is 2592000. |
+| `doctor.acp_check_timeout_s` | `30` | The time limit of the `tether doctor` check of one coding agent, in seconds. The minimum is 1. The maximum is 2592000. |
+| `doctor.min_free_bytes` | `1073741824` | `tether doctor` warns when the free disk space is below this number of bytes. The minimum is 1. |
 
 ## log
 
