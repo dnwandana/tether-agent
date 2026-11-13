@@ -44,15 +44,25 @@ const (
 	StatusFail = "fail"
 )
 
-// checkTimeout limits each check that waits for the network or for a process.
+// checkTimeout limits each check that waits for the network or for a process. It is the
+// fallback of doctor.check_timeout_s. The setup wizard always uses it.
 const checkTimeout = 10 * time.Second
 
 // acpCheckTimeout limits the check of one coding agent. A start of claude, or a first npx
-// download, takes longer than checkTimeout.
+// download, takes longer than checkTimeout. It is the fallback of doctor.acp_check_timeout_s.
 const acpCheckTimeout = 30 * time.Second
 
-// minFreeBytes is the free disk space below which the disk check is a warning.
+// minFreeBytes is the free disk space below which the disk check is a warning. It is the
+// fallback of doctor.min_free_bytes.
 const minFreeBytes = 1 << 30
+
+// secondsOr returns n seconds as a duration, or def when n is 0 or less.
+func secondsOr(n int, def time.Duration) time.Duration {
+	if n <= 0 {
+		return def
+	}
+	return time.Duration(n) * time.Second
+}
 
 // Check is the result of one doctor check. Next is the action that fixes a warning or a
 // failure.
@@ -111,12 +121,12 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 		out = append(out, d.checkTelegram(ctx, cfg))
 	}
 	out = append(out, d.checkStateDB(ctx)...)
-	out = append(out, d.checkDataDir(), d.checkMemory())
 	hostCfg := cfg
 	if hostCfg == nil {
 		def := config.Default()
 		hostCfg = &def
 	}
+	out = append(out, d.checkDataDir(), d.checkMemory(hostCfg.Memory.EntryMaxChars))
 	out = append(out, d.HostChecks(hostCfg)...)
 	if c, ok := d.checkUnit(hostCfg.Agent.RestartDrainTimeoutS); ok {
 		out = append(out, c)
@@ -127,9 +137,9 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	if cfg != nil && cfg.ACP.Enabled {
 		out = append(out, d.checkACP(ctx, cfg, dotenv)...)
 	}
-	out = append(out, d.checkDisk())
+	out = append(out, d.checkDisk(uint64(max(hostCfg.Doctor.MinFreeBytes, 0))))
 	// The release check needs no config, so it also runs when the config does not load.
-	out = append(out, d.checkRelease(ctx))
+	out = append(out, d.checkRelease(ctx, secondsOr(hostCfg.Doctor.CheckTimeoutS, checkTimeout)))
 
 	red := app.NewRedactor(dotenv)
 	for i := range out {
@@ -312,7 +322,7 @@ func (d *Doctor) checkProviders(ctx context.Context, cfg *config.Config) []Check
 			out = append(out, c)
 			continue
 		}
-		model, ms, err := TestProvider(ctx, name, pc, d.hc())
+		model, ms, err := TestProvider(ctx, name, pc, d.hc(), secondsOr(cfg.Doctor.CheckTimeoutS, checkTimeout), cfg.Provider.AnthropicMaxTokens)
 		if err != nil {
 			c.Status = StatusFail
 			c.Detail = fmt.Sprintf("the test call to provider %s failed: %v", name, err)
@@ -326,13 +336,17 @@ func (d *Doctor) checkProviders(ctx context.Context, cfg *config.Config) []Check
 }
 
 // TestProvider sends a 1-token test call to the provider entry. It returns the model name
-// and the time of the call in milliseconds.
-func TestProvider(ctx context.Context, name string, pc config.Provider, hc *http.Client) (model string, ms int64, err error) {
-	p, err := provider.New(name, pc, hc)
+// and the time of the call in milliseconds. The timeout limits the call. A timeout of 0 or
+// less gives checkTimeout. The anthropicMaxTokens value goes to provider.NewWith.
+func TestProvider(ctx context.Context, name string, pc config.Provider, hc *http.Client, timeout time.Duration, anthropicMaxTokens int) (model string, ms int64, err error) {
+	p, err := provider.NewWith(name, pc, hc, anthropicMaxTokens)
 	if err != nil {
 		return "", 0, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	if timeout <= 0 {
+		timeout = checkTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	start := time.Now()
 	ch, err := p.Stream(ctx, provider.Request{
@@ -361,7 +375,7 @@ func (d *Doctor) checkTelegram(ctx context.Context, cfg *config.Config) Check {
 		c.Next = "set TELEGRAM_BOT_TOKEN in .env, or run tether setup"
 		return c
 	}
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	ctx, cancel := context.WithTimeout(ctx, secondsOr(cfg.Doctor.CheckTimeoutS, checkTimeout))
 	defer cancel()
 	cl := &telegram.Client{Token: tg.BotToken, BaseURL: d.TelegramBase, HC: d.hc()}
 	me, err := cl.GetMe(ctx)
@@ -527,7 +541,7 @@ func (d *Doctor) checkMCP(ctx context.Context, cfg *config.Config, dotenv map[st
 			continue
 		}
 		next := fmt.Sprintf("check mcp.servers.%s in config.yaml, or set enabled: false", name)
-		cctx, cancel := context.WithTimeout(ctx, checkTimeout)
+		cctx, cancel := context.WithTimeout(ctx, secondsOr(cfg.Doctor.CheckTimeoutS, checkTimeout))
 		cl, err := mcp.Dial(cctx, name, s, os.Environ(), dotenv)
 		if err != nil {
 			cancel()
@@ -570,7 +584,7 @@ func (d *Doctor) checkACP(ctx context.Context, cfg *config.Config, dotenv map[st
 	}
 	for _, id := range ids {
 		a := cfg.ACP.Agents[id]
-		pctx, cancel := context.WithTimeout(ctx, acpCheckTimeout)
+		pctx, cancel := context.WithTimeout(ctx, secondsOr(cfg.Doctor.ACPCheckTimeoutS, acpCheckTimeout))
 		r, err := probe(pctx, id, a, dotenv)
 		cancel()
 		out = append(out, acpAgentChecks(id, a, r, err)...)
@@ -683,8 +697,11 @@ func nodeMajor(v string) int {
 	return n
 }
 
-// checkDisk checks the free disk space of the data folder.
-func (d *Doctor) checkDisk() Check {
+// checkDisk checks the free disk space of the data folder. A minFree of 0 gives minFreeBytes.
+func (d *Doctor) checkDisk(minFree uint64) Check {
+	if minFree == 0 {
+		minFree = minFreeBytes
+	}
 	c := Check{Name: "disk", Status: StatusOK}
 	dir := d.DataDir
 	// The data folder can be missing before the first run. Use the nearest parent.
@@ -704,7 +721,7 @@ func (d *Doctor) checkDisk() Check {
 		return c
 	}
 	c.Detail = fmt.Sprintf("%.1f GB free in %s", float64(n)/(1<<30), dir)
-	if n < minFreeBytes {
+	if n < minFree {
 		c.Status = StatusWarn
 		c.Next = "free some disk space; the logs, the cache, and state.db need room"
 	}
@@ -712,8 +729,10 @@ func (d *Doctor) checkDisk() Check {
 }
 
 // checkMemory lists the entries of memory.md and user_profile.md that the memory threat scan
-// blocks. The prompt shows a BLOCKED line in place of such an entry.
-func (d *Doctor) checkMemory() Check {
+// blocks. The prompt shows a BLOCKED line in place of such an entry. entryMax is
+// memory.entry_max_chars, so the check blocks the same entries as the prompt. A value of 0 or
+// less uses the default limit.
+func (d *Doctor) checkMemory(entryMax int) Check {
 	c := Check{Name: "memory", Status: StatusOK}
 	dir := filepath.Join(d.DataDir, "memory")
 	// Open makes the folder, so look first.
@@ -738,14 +757,14 @@ func (d *Doctor) checkMemory() Check {
 			return c
 		}
 		for _, e := range entries {
-			if _, blocked := tools.MemoryBlockedLine(e); !blocked {
+			if _, blocked := tools.MemoryBlockedLineWithin(e, entryMax); !blocked {
 				continue
 			}
 			id := tools.MemoryEntryID(e)
 			if firstID == "" {
 				firstID = id
 			}
-			items = append(items, t.file+" "+id+" ("+strings.Join(tools.MemoryThreatIDs(e), ", ")+")")
+			items = append(items, t.file+" "+id+" ("+strings.Join(tools.MemoryThreatIDsWithin(e, entryMax), ", ")+")")
 		}
 	}
 	if len(items) == 0 {
@@ -817,13 +836,17 @@ func probeModes(dir string) bool {
 
 // checkRelease compares Version with the newest release on GitHub. A dev build sends no
 // request. A failure is a warning, because doctor must not fail without the network.
-func (d *Doctor) checkRelease(ctx context.Context) Check {
+// A timeout of 0 or less gives checkTimeout.
+func (d *Doctor) checkRelease(ctx context.Context, timeout time.Duration) Check {
+	if timeout <= 0 {
+		timeout = checkTimeout
+	}
 	c := Check{Name: "release", Status: StatusOK}
 	if update.IsDev(d.Version) {
 		c.Detail = "dev build; the release check is off"
 		return c
 	}
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cl := update.Client{HC: d.hc(), APIBase: d.ReleaseAPI, UserAgent: "tether-agent/" + d.Version}
 	rel, err := cl.Latest(ctx)

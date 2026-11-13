@@ -275,7 +275,7 @@ func (w *Wizard) testProvider(ctx context.Context, name string, a providerAnswer
 	if pc.Unusable != "" {
 		return "", 0, errors.New(pc.Unusable)
 	}
-	return TestProvider(ctx, name, pc, w.hc())
+	return TestProvider(ctx, name, pc, w.hc(), checkTimeout, 0)
 }
 
 // currentProvider returns the current values of a provider entry as the defaults.
