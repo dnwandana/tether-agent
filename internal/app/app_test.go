@@ -25,6 +25,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/memory"
+	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/skills"
@@ -650,6 +651,69 @@ func TestAddTelegramWiresStickerInbox(t *testing.T) {
 	vch, err := v.AddTelegram(ctx)
 	if err != nil || vch.Inbox.Describe == nil {
 		t.Fatalf("a vision provider must set Describe: %v", err)
+	}
+}
+
+// clearMediaEnv hides the TETHER_MEDIA_* variables of the test process. An empty value is not set.
+func clearMediaEnv(t *testing.T) {
+	t.Helper()
+	for _, v := range []string{"TETHER_MEDIA_DELIVERY_STRICT", "TETHER_MEDIA_ALLOW_DIRS",
+		"TETHER_MEDIA_TRUST_RECENT_FILES", "TETHER_MEDIA_TRUST_RECENT_SECONDS"} {
+		t.Setenv(v, "")
+	}
+}
+
+func TestAddTelegramUsesConfigLimits(t *testing.T) {
+	clearMediaEnv(t)
+	url, _, _ := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, "telegram:\n  enabled: true\n  bot_token: T\n"+
+		"  api_timeout_s: 70\n  upload_timeout_s: 400\n  rich_media_timeout_s: 90\n"+
+		"  inline_text_max_bytes: 4096\n  sticker_describe_timeout_s: 12\n"+
+		"  voice_convert_timeout_s: 45\n  pairing_code_ttl_s: 600\n"+
+		"agent:\n  tool_preview_chars: 64\n"+
+		"gateway:\n  media_delivery_strict: true\n  media_trust_recent_s: 120\n")
+	ch, err := a.AddTelegram(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.C.CallTimeout != 70*time.Second || ch.C.UploadTimeout != 400*time.Second {
+		t.Fatalf("client call %v, upload %v", ch.C.CallTimeout, ch.C.UploadTimeout)
+	}
+	if ch.Pair.CodeTTL != 10*time.Minute {
+		t.Fatalf("pairing code TTL %v", ch.Pair.CodeTTL)
+	}
+	in := ch.Inbox
+	if in.RichMediaLimit != 90*time.Second || in.InlineTextMaxBytes != 4096 || in.DescribeTimeout != 12*time.Second {
+		t.Fatalf("inbox rich %v, inline %d, describe %v", in.RichMediaLimit, in.InlineTextMaxBytes, in.DescribeTimeout)
+	}
+	if ch.ToolPreviewChars != 64 {
+		t.Fatalf("tool preview chars %d", ch.ToolPreviewChars)
+	}
+	if ch.Out.ConvertVoice == nil {
+		t.Fatal("the sender has no voice converter")
+	}
+	if !ch.Media.Strict || ch.Media.TrustRecent != 2*time.Minute {
+		t.Fatalf("media strict %v, trust recent %v", ch.Media.Strict, ch.Media.TrustRecent)
+	}
+}
+
+func TestAddTelegramKeepsDefaultLimits(t *testing.T) {
+	clearMediaEnv(t)
+	url, _, _ := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, "telegram:\n  enabled: true\n  bot_token: T\n")
+	ch, err := a.AddTelegram(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch.C.CallTimeout != time.Minute || ch.C.UploadTimeout != 5*time.Minute || ch.Pair.CodeTTL != time.Hour {
+		t.Fatalf("client call %v, upload %v, TTL %v", ch.C.CallTimeout, ch.C.UploadTimeout, ch.Pair.CodeTTL)
+	}
+	if ch.Inbox.RichMediaLimit != 2*time.Minute || ch.Inbox.InlineTextMaxBytes != 102400 ||
+		ch.Inbox.DescribeTimeout != 30*time.Second || ch.ToolPreviewChars != 40 {
+		t.Fatalf("inbox %+v, preview %d", ch.Inbox, ch.ToolPreviewChars)
+	}
+	if ch.Media.Strict || ch.Media.TrustRecent != 10*time.Minute {
+		t.Fatalf("media strict %v, trust recent %v", ch.Media.Strict, ch.Media.TrustRecent)
 	}
 }
 
@@ -1479,5 +1543,238 @@ func TestNewTightensNewDatabaseFiles(t *testing.T) {
 		if fi.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("%s mode: %v", name, fi.Mode().Perm())
 		}
+	}
+}
+
+// cronLimitsYAML sets each cron limit to a value that is not the default.
+const cronLimitsYAML = "cron:\n  script_timeout_s: 900\n  agent_timeout_s: 1800\n  script_output_max_chars: 20000\n" +
+	"  script_stderr_tail_lines: 40\n  tick_s: 10\n  grace_min_s: 60\n  grace_max_s: 3600\n" +
+	"gateway:\n  housekeeping_interval_s: 3600\n"
+
+func TestAppSetsCronLimitsFromConfig(t *testing.T) {
+	a := gatewayApp(t, "", cronLimitsYAML)
+	r := a.Sched.Runner
+	if want := (cron.ScriptLimits{Timeout: 900 * time.Second, OutputMaxChars: 20000, StderrTailLines: 40}); r.Script != want {
+		t.Fatalf("script limits %+v, want %+v", r.Script, want)
+	}
+	if r.AgentTimeout != 30*time.Minute {
+		t.Fatalf("agent timeout %s", r.AgentTimeout)
+	}
+	if a.Sched.Tick != 10*time.Second || a.Sched.GraceMin != time.Minute || a.Sched.GraceMax != time.Hour {
+		t.Fatalf("tick %s, grace %s to %s", a.Sched.Tick, a.Sched.GraceMin, a.Sched.GraceMax)
+	}
+	ct, _ := a.Registry.Get("cronjob")
+	tool := ct.(tools.CronJobTool)
+	if tool.Tick != 10*time.Second || tool.GraceMin != time.Minute || tool.GraceMax != time.Hour {
+		t.Fatalf("cronjob tool: tick %s, grace %s to %s", tool.Tick, tool.GraceMin, tool.GraceMax)
+	}
+	if got := a.housekeepingInterval(); got != time.Hour {
+		t.Fatalf("housekeeping interval %s", got)
+	}
+}
+
+func TestAppCronLimitsDefaults(t *testing.T) {
+	a := gatewayApp(t, "", "")
+	r := a.Sched.Runner
+	if want := (cron.ScriptLimits{Timeout: 120 * time.Second, OutputMaxChars: 50000, StderrTailLines: 20}); r.Script != want {
+		t.Fatalf("script limits %+v, want %+v", r.Script, want)
+	}
+	if r.AgentTimeout != 0 || a.Sched.Tick != 30*time.Second || a.Sched.GraceMin != 2*time.Minute || a.Sched.GraceMax != 2*time.Hour {
+		t.Fatalf("agent %s, tick %s, grace %s to %s", r.AgentTimeout, a.Sched.Tick, a.Sched.GraceMin, a.Sched.GraceMax)
+	}
+	if got := a.housekeepingInterval(); got != 24*time.Hour {
+		t.Fatalf("housekeeping interval %s", got)
+	}
+	// The chat role has no scheduler, but its cronjob tool gets the same values.
+	ct, _ := newApp(t).Registry.Get("cronjob")
+	tool := ct.(tools.CronJobTool)
+	if tool.Tick != 30*time.Second || tool.GraceMin != 2*time.Minute || tool.GraceMax != 2*time.Hour {
+		t.Fatalf("chat role cronjob tool: tick %s, grace %s to %s", tool.Tick, tool.GraceMin, tool.GraceMax)
+	}
+}
+
+// coreLimitsYAML sets each core limit to a value that is not the default.
+const coreLimitsYAML = "provider:\n  failure_skip_s: 90\n  model_cache_ttl_s: 600\n  model_list_timeout_s: 20\n" +
+	"memory:\n  entry_max_chars: 8000\n  lock_wait_s: 45\n  read_max_chars: 64000\n  search_max_hits: 12\n" +
+	"goals:\n  gate_timeout_s: 600\n  gate_max_retries: 5\n" +
+	"todo:\n  max_items: 100\n  max_item_chars: 2000\n" +
+	"approvals:\n  smart_timeout_s: 45\n  smart_script_max_chars: 16000\n" +
+	"agent:\n  tool_preview_chars: 10\n"
+
+func TestAppSetsCoreLimitsFromConfig(t *testing.T) {
+	a := gatewayApp(t, "", coreLimitsYAML)
+	if a.Models.TTL != 10*time.Minute || a.Models.ListTimeout != 20*time.Second {
+		t.Fatalf("model cache: ttl %s, list timeout %s", a.Models.TTL, a.Models.ListTimeout)
+	}
+	m := a.Memory
+	if m.EntryMaxChars != 8000 || m.LockWait != 45*time.Second || m.ReadMaxChars != 64000 || m.SearchMaxHits != 12 {
+		t.Fatalf("memory: %d %s %d %d", m.EntryMaxChars, m.LockWait, m.ReadMaxChars, m.SearchMaxHits)
+	}
+	d := a.goalDeps()
+	if d.RetryDelay != 90*time.Second || d.Store.GateTimeoutS != 600 || d.Store.GateMaxRetries != 5 {
+		t.Fatalf("goals: retry %s, gate %d s, %d retries", d.RetryDelay, d.Store.GateTimeoutS, d.Store.GateMaxRetries)
+	}
+	if env := a.NewEnv(nil, "cli"); env.Todo != (tools.TodoLimits{MaxItems: 100, MaxChars: 2000}) {
+		t.Fatalf("todo: %+v", env.Todo)
+	}
+	j, ok := a.Gate.Judge.(security.ProviderJudge)
+	if !ok || j.Timeout != 45*time.Second || a.Gate.SmartScriptMaxChars != 16000 {
+		t.Fatalf("approvals: judge %+v, script cap %d", a.Gate.Judge, a.Gate.SmartScriptMaxChars)
+	}
+	preview := strings.Repeat("x", 60)
+	if got, want := a.Deps().ToolLine("terminal", preview), telegram.ToolLineWithin("all", "terminal", preview, "", 10); got != want {
+		t.Fatalf("tool line %q, want %q", got, want)
+	}
+}
+
+func TestAppCoreLimitsDefaults(t *testing.T) {
+	a := newApp(t)
+	if a.Models.TTL != time.Hour || a.Models.ListTimeout != 10*time.Second {
+		t.Fatalf("model cache: ttl %s, list timeout %s", a.Models.TTL, a.Models.ListTimeout)
+	}
+	if m := a.Memory; m.EntryMaxChars != 4000 || m.LockWait != 30*time.Second || m.ReadMaxChars != 32000 || m.SearchMaxHits != 8 {
+		t.Fatalf("memory: %d %s %d %d", m.EntryMaxChars, m.LockWait, m.ReadMaxChars, m.SearchMaxHits)
+	}
+	if d := a.goalDeps(); d.RetryDelay != time.Minute || d.Store.GateTimeoutS != 300 || d.Store.GateMaxRetries != 3 {
+		t.Fatalf("goals: retry %s, gate %d s, %d retries", d.RetryDelay, d.Store.GateTimeoutS, d.Store.GateMaxRetries)
+	}
+	if env := a.NewEnv(nil, "cli"); env.Todo != (tools.TodoLimits{MaxItems: 256, MaxChars: 4000}) {
+		t.Fatalf("todo: %+v", env.Todo)
+	}
+	if j, ok := a.Gate.Judge.(security.ProviderJudge); !ok || j.Timeout != 30*time.Second || a.Gate.SmartScriptMaxChars != 8000 {
+		t.Fatalf("approvals: judge %+v, script cap %d", a.Gate.Judge, a.Gate.SmartScriptMaxChars)
+	}
+	preview := strings.Repeat("x", 60)
+	if got, want := a.Deps().ToolLine("terminal", preview), telegram.ToolLineWithin("all", "terminal", preview, "", 40); got != want {
+		t.Fatalf("tool line %q, want %q", got, want)
+	}
+}
+
+// limitsConfig sets a non-default value for each tool limit that registerTools wires.
+const limitsConfig = "agent:\n  vision_provider: primary\n" +
+	"web:\n  http_timeout_s: 45\n  search_default_results: 4\n  search_max_results: 12\n" +
+	"browser:\n  action_timeout_s: 40\n  navigate_excerpt_chars: 3000\n  settle_s: 0.25\n" +
+	"files:\n  read_max_lines: 500\n  read_max_line_chars: 300\n  patch_context_lines: 5\n" +
+	"skills:\n  skill_md_max_chars: 50000\n  support_file_max_bytes: 2048\n  view_max_linked_files: 7\n" +
+	"sessions:\n  search_default_results: 3\n  search_max_results: 9\n  scroll_default_window: 4\n  scroll_max_window: 30\n" +
+	"terminal:\n  process_keep_s: 900\n" +
+	"code_execution:\n  max_stderr_chars: 2000\n" +
+	"media:\n  vision_max_bytes: 2048\n  image_download_timeout_s: 90\n"
+
+func TestRegisterToolsUsesConfigLimits(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t), limitsConfig)
+	a, err := New(ctx, Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	get := func(name string) tools.Tool {
+		t.Helper()
+		tl, ok := a.Registry.Get(name)
+		if !ok {
+			t.Fatal("no tool", name)
+		}
+		return tl
+	}
+	if a.WebClient.Timeout != 45*time.Second {
+		t.Fatalf("web client timeout %v", a.WebClient.Timeout)
+	}
+	if ws := get("web_search").(*tools.WebSearchTool); ws.DefaultResults != 4 || ws.MaxResults != 12 {
+		t.Fatalf("web_search %+v", ws)
+	}
+	if ss := get("session_search").(tools.SessionSearchTool); ss.DefaultResults != 3 || ss.MaxResults != 9 ||
+		ss.DefaultWindow != 4 || ss.MaxWindow != 30 {
+		t.Fatalf("session_search %+v", ss)
+	}
+	if rf := get("read_file").(tools.ReadFileTool); rf.MaxLines != 500 || rf.MaxLineChars != 300 {
+		t.Fatalf("read_file %+v", rf)
+	}
+	if p := get("patch").(tools.PatchTool); p.ContextLines != 5 {
+		t.Fatalf("patch %+v", p)
+	}
+	if sv := get("skill_view").(tools.SkillViewTool); sv.MaxLinkedFiles != 7 {
+		t.Fatalf("skill_view %+v", sv)
+	}
+	if m := get("skill_manage").(tools.SkillManageTool).Mgr; m.SkillMDMaxChars != 50000 || m.SupportFileMaxBytes != 2048 {
+		t.Fatalf("skill_manage %+v", m)
+	}
+	// The browser tools are closures. The navigate description shows the excerpt length.
+	if d := get("browser_navigate").Schema().Description; !strings.Contains(d, "the first 3000 characters") {
+		t.Fatalf("browser_navigate description %q", d)
+	}
+	if a.Procs.Keep != 900*time.Second {
+		t.Fatalf("process keep %v", a.Procs.Keep)
+	}
+	if code, ok := a.Registry.Get("execute_code"); ok && code.(tools.ExecuteCodeTool).MaxStderrChars != 2000 {
+		t.Fatalf("execute_code %+v", code)
+	}
+	vt := get("view_image").(tools.VisionTool)
+	if vt.MaxBytes != 2048 || vt.DownloadTimeout != 90*time.Second {
+		t.Fatalf("view_image %+v", vt)
+	}
+	// view_image has its own client, so web.http_timeout_s does not cut the image download.
+	if vt.Client == nil || vt.Client == a.WebClient || vt.Client.Timeout != 90*time.Second {
+		t.Fatalf("view_image client %+v", vt.Client)
+	}
+	if a.Media.Download.Timeout != 90*time.Second {
+		t.Fatalf("media download timeout %v", a.Media.Download.Timeout)
+	}
+}
+
+func TestRegisterToolsKeepsDefaultLimits(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t), "agent:\n  vision_provider: primary\n")
+	a, err := New(ctx, Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.WebClient.Timeout != 30*time.Second || a.Media.Download.Timeout != 60*time.Second || a.Procs.Keep != time.Hour {
+		t.Fatalf("web %v, download %v, keep %v", a.WebClient.Timeout, a.Media.Download.Timeout, a.Procs.Keep)
+	}
+	tl, _ := a.Registry.Get("view_image")
+	if vt := tl.(tools.VisionTool); vt.MaxBytes != 10<<20 || vt.DownloadTimeout != 60*time.Second || vt.Client.Timeout != 60*time.Second {
+		t.Fatalf("view_image %+v", vt)
+	}
+	tl, _ = a.Registry.Get("read_file")
+	if rf := tl.(tools.ReadFileTool); rf.MaxLines != 2000 || rf.MaxLineChars != 2000 {
+		t.Fatalf("read_file %+v", rf)
+	}
+	if _, err := exec.LookPath("python3"); err == nil {
+		tl, _ = a.Registry.Get("execute_code")
+		if tl.(tools.ExecuteCodeTool).MaxStderrChars != 10000 {
+			t.Fatalf("execute_code %+v", tl)
+		}
+	}
+}
+
+// TestTodoRestoreFollowsConfig checks that a restore from history uses todo.max_items. A
+// compaction can restore the list before the first todo_list call of the process.
+func TestTodoRestoreFollowsConfig(t *testing.T) {
+	a := newApp(t)
+	a.Cfg.Todo.MaxItems = 300
+	sess, err := a.Store.Create(ctx, sessions.Session{Key: "cli:todo", Source: "cli", Kind: "chat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	todos := make([]tools.TodoItem, 300)
+	for i := range todos {
+		todos[i] = tools.TodoItem{ID: strconv.Itoa(i + 1), Content: "step " + strconv.Itoa(i+1), Status: "pending"}
+	}
+	body, err := json.Marshal(map[string]any{"todos": todos, "revision": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := provider.Message{Role: provider.RoleAssistant, ToolCalls: []provider.ToolCall{{ID: "c1", Name: "todo_list", Args: "{}"}}}
+	if _, err := a.Store.Append(ctx, sess.ID, call, sessions.MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	res := provider.Message{Role: provider.RoleTool, ToolCallID: "c1", ToolName: "todo_list", Content: string(body)}
+	if _, err := a.Store.Append(ctx, sess.ID, res, sessions.MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.todoItems(ctx, sess.ID); len(got) != 300 {
+		t.Fatalf("the restore keeps the configured 300 items, got %d", len(got))
 	}
 }

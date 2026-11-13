@@ -229,6 +229,8 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 
 	a.HTTP = &http.Client{}
 	a.Models = provider.NewModelCache(a.HTTP)
+	a.Models.TTL = time.Duration(a.Cfg.Provider.ModelCacheTTLS) * time.Second
+	a.Models.ListTimeout = time.Duration(a.Cfg.Provider.ModelListTimeoutS) * time.Second
 	if a.Set, err = provider.FromConfig(a.Cfg, a.HTTP, a.Log); err != nil {
 		return nil, err
 	}
@@ -251,7 +253,12 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.Gate = security.NewGate(a.Cfg.Approvals, a.DB)
 	a.Gate.SudoPasswordSet = a.DotEnv["SUDO_PASSWORD"] != "" || os.Getenv("SUDO_PASSWORD") != ""
 	// The judge runs only in smart mode.
-	a.Gate.Judge = security.ProviderJudge{Prov: a.Prov, Record: a.recordUsage}
+	a.Gate.Judge = security.ProviderJudge{
+		Prov:    a.Prov,
+		Record:  a.recordUsage,
+		Timeout: time.Duration(a.Cfg.Approvals.SmartTimeoutS) * time.Second,
+	}
+	a.Gate.SmartScriptMaxChars = a.Cfg.Approvals.SmartScriptMaxChars
 	a.Gate.Log = a.Log
 	a.Gate.InGateway = opts.Gateway
 	// CLI.Run attaches the prompt to the REPL input. With no CLI, a question gets no answer.
@@ -260,6 +267,10 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if a.Memory, err = memory.Open(filepath.Join(dir, "memory"), a.Cfg.Memory.MemoryCharLimit, a.Cfg.Memory.UserCharLimit); err != nil {
 		return nil, err
 	}
+	a.Memory.EntryMaxChars = a.Cfg.Memory.EntryMaxChars
+	a.Memory.LockWait = time.Duration(a.Cfg.Memory.LockWaitS) * time.Second
+	a.Memory.ReadMaxChars = a.Cfg.Memory.ReadMaxChars
+	a.Memory.SearchMaxHits = a.Cfg.Memory.SearchMaxHits
 	a.Skills = &tools.SkillCatalog{Dir: skillsDir, External: a.Cfg.Skills.ExternalDirs, Guard: a.Cfg.Skills.Guard}
 	mcpServers := make([]string, 0, len(a.Cfg.MCP.Servers))
 	for name := range a.Cfg.MCP.Servers {
@@ -273,6 +284,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.Registry = tools.NewRegistry()
 	a.gatewayRole = opts.Gateway
 	a.Procs = tools.NewProcRegistry()
+	a.Procs.Keep = time.Duration(a.Cfg.Terminal.ProcessKeepS) * time.Second
 	a.registerTools(opts.Gateway)
 	a.startMCP(ctx, cfgPath)
 	if opts.Gateway {
@@ -322,7 +334,13 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 // batches, so the chat role counts no batch.
 func (a *App) goalDeps() goals.Deps {
 	d := goals.Deps{
-		Store:       &goals.Store{DB: a.DB},
+		Store: &goals.Store{
+			DB:             a.DB,
+			GateTimeoutS:   a.Cfg.Goals.GateTimeoutS,
+			GateMaxRetries: a.Cfg.Goals.GateMaxRetries,
+		},
+		// A goal retry waits as long as the chain skips a failed entry.
+		RetryDelay:  time.Duration(a.Cfg.Provider.FailureSkipS) * time.Second,
 		Sessions:    a.Store,
 		Cfg:         func() config.GoalsConfig { return a.Cfg.Goals },
 		ProviderFor: a.Agent.ProviderFor,
@@ -358,12 +376,20 @@ func (a *App) todoItems(ctx context.Context, sessionID string) []tools.TodoItem 
 		a.Log.Warn("todo: cannot read the session of the task list", "session", sessionID, "err", err.Error())
 		return nil
 	}
+	// Set the limits before the restore, because a restore can come before the first
+	// todo_list call of the process.
+	tools.TodoStoreWith(values, a.todoLimits())
 	items, err := tools.LoadTodos(ctx, a.Store, values, sessionID)
 	if err != nil {
 		a.Log.Warn("todo: cannot restore the task list from the history", "session", sessionID, "err", err.Error())
 		return nil
 	}
 	return items
+}
+
+// todoLimits returns the limits of the todo list from todo.max_items and todo.max_item_chars.
+func (a *App) todoLimits() tools.TodoLimits {
+	return tools.TodoLimits{MaxItems: a.Cfg.Todo.MaxItems, MaxChars: a.Cfg.Todo.MaxItemChars}
 }
 
 // todoValues returns the Values map that holds the todo list of a session. A delegate_task
@@ -476,7 +502,16 @@ func (a *App) newScheduler() *cron.Scheduler {
 			Env:        security.ChildEnv(os.Environ(), a.DotEnv, cfg.Terminal.EnvPassthrough),
 			SpillDir:   filepath.Join(a.DataDir, "cache", "spill"),
 			Log:        a.Log,
+			Script: cron.ScriptLimits{
+				Timeout:         time.Duration(cfg.Cron.ScriptTimeoutS) * time.Second,
+				OutputMaxChars:  cfg.Cron.ScriptOutputMaxChars,
+				StderrTailLines: cfg.Cron.ScriptStderrTailLines,
+			},
+			AgentTimeout: time.Duration(cfg.Cron.AgentTimeoutS) * time.Second,
 		},
+		Tick:        time.Duration(cfg.Cron.TickS) * time.Second,
+		GraceMin:    time.Duration(cfg.Cron.GraceMinS) * time.Second,
+		GraceMax:    time.Duration(cfg.Cron.GraceMaxS) * time.Second,
 		Deliver:     &cron.Deliverer{Redact: a.Redactor.Redact, Log: a.Log},
 		MaxParallel: cfg.Cron.MaxParallelJobs,
 		Missed:      cfg.Cron.MissedRuns,
@@ -515,7 +550,9 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 			"Set telegram.bot_token in config.yaml, or set TELEGRAM_BOT_TOKEN in .env")
 	}
 	// One pace for all chats keeps the sends and edits of each chat inside the Telegram limits.
-	c := &telegram.Client{Token: cfg.BotToken, BaseURL: a.telegramBaseURL, Log: a.Log, Pace: telegram.NewChatPace()}
+	c := &telegram.Client{Token: cfg.BotToken, BaseURL: a.telegramBaseURL, Log: a.Log, Pace: telegram.NewChatPace(),
+		CallTimeout:   time.Duration(cfg.APITimeoutS) * time.Second,
+		UploadTimeout: time.Duration(cfg.UploadTimeoutS) * time.Second}
 	me, err := c.GetMe(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("telegram: the bot token check (getMe) failed, so check telegram.bot_token: %w", err)
@@ -527,7 +564,7 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		Cfg:  cfg,
 		C:    c,
 		DB:   a.DB,
-		Pair: &telegram.Pairing{DB: a.DB},
+		Pair: &telegram.Pairing{DB: a.DB, CodeTTL: time.Duration(cfg.PairingCodeTTLS) * time.Second},
 		Inbox: &telegram.Inbox{
 			C:        c,
 			MediaDir: filepath.Join(a.DataDir, "cache", "media"),
@@ -536,13 +573,25 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 			Describe:   describe,
 			Stickers:   &telegram.KVStickers{DB: a.DB, Log: a.Log},
 			Log:        a.Log,
+
+			RichMediaLimit:     time.Duration(cfg.RichMediaTimeoutS) * time.Second,
+			InlineTextMaxBytes: cfg.InlineTextMaxBytes,
+			DescribeTimeout:    time.Duration(cfg.StickerDescribeTimeoutS) * time.Second,
 		},
-		Out: &telegram.Sender{C: c, ConvertVoice: telegram.FFmpegToOpus(ffmpeg)},
+		Out: &telegram.Sender{C: c, ConvertVoice: telegram.FFmpegToOpusWithin(ffmpeg,
+			time.Duration(cfg.VoiceConvertTimeoutS)*time.Second)},
+		ToolPreviewChars: a.Cfg.Agent.ToolPreviewChars,
 		// Media sets the local files that an answer can send (a port of Hermes
-		// validate_media_delivery_path). A nil policy sends no file.
-		Media: telegram.NewMediaPolicy(a.DataDir, security.EnvLookup(a.DotEnv), a.Log),
-		Bot:   me,
-		Log:   a.Log,
+		// validate_media_delivery_path). The gateway.media_* keys set the policy.
+		// A set TETHER_MEDIA_* variable wins. A nil policy sends no file.
+		Media: telegram.NewMediaPolicyWith(a.DataDir, security.EnvLookup(a.DotEnv), telegram.MediaPolicyConfig{
+			Strict:       a.Cfg.Gateway.MediaDeliveryStrict,
+			AllowDirs:    a.Cfg.Gateway.MediaAllowDirs,
+			TrustRecent:  a.Cfg.Gateway.MediaTrustRecentFiles,
+			TrustRecentS: a.Cfg.Gateway.MediaTrustRecentS,
+		}, a.Log),
+		Bot: me,
+		Log: a.Log,
 		// The approval message shows the wait of the gate. Zero config means the gate default.
 		UI: &telegram.Interactions{C: c, Log: a.Log, ApprovalTimeout: approvalWait(a.Cfg.Approvals.TimeoutS)},
 	}
@@ -582,7 +631,7 @@ func (a *App) stickerDescriber() func(ctx context.Context, path, prompt string) 
 		return nil
 	}
 	return func(ctx context.Context, path, prompt string) (string, error) {
-		return tools.DescribeImage(ctx, vp, path, prompt, a.recordUsage)
+		return tools.DescribeImageWithin(ctx, vp, path, prompt, a.recordUsage, int64(a.Cfg.Media.VisionMaxBytes))
 	}
 }
 
@@ -759,7 +808,8 @@ func (a *App) registerTools(gatewayRole bool) {
 	spill := filepath.Join(a.DataDir, "cache", "spill")
 	home, _ := os.UserHomeDir()
 	protected := security.ProtectedPaths(a.DataDir, home)
-	a.WebClient = tools.GuardedClient(cfg.Web.BlockPrivateNetworks, 30*time.Second, 3)
+	a.WebClient = tools.GuardedClient(cfg.Web.BlockPrivateNetworks, time.Duration(cfg.Web.HTTPTimeoutS)*time.Second, 3)
+	imageWait := time.Duration(cfg.Media.ImageDownloadTimeoutS) * time.Second
 	a.terminal = &tools.TerminalTool{
 		DefaultTimeout: time.Duration(cfg.Terminal.DefaultTimeoutS) * time.Second,
 		DotEnv:         a.DotEnv,
@@ -770,20 +820,25 @@ func (a *App) registerTools(gatewayRole bool) {
 		Procs:       a.Procs,
 	}
 	a.RegisterTool(a.terminal)
-	a.RegisterTool(tools.ReadFileTool{})
+	a.RegisterTool(tools.ReadFileTool{MaxLines: cfg.Files.ReadMaxLines, MaxLineChars: cfg.Files.ReadMaxLineChars})
 	// With Protected nil, the file tools refuse the protected paths of env.DataDir.
 	a.RegisterTool(tools.WriteFileTool{})
-	a.RegisterTool(tools.PatchTool{})
+	a.RegisterTool(tools.PatchTool{ContextLines: cfg.Files.PatchContextLines})
 	a.RegisterTool(&tools.WebFetchTool{Client: a.WebClient, MaxURLs: cfg.Web.FetchMaxURLs, MaxBytes: int64(cfg.Web.FetchMaxBytes)})
-	a.RegisterTool(&tools.WebSearchTool{Client: a.WebClient})
+	a.RegisterTool(&tools.WebSearchTool{Client: a.WebClient, DefaultResults: cfg.Web.SearchDefaultResults, MaxResults: cfg.Web.SearchMaxResults})
 	a.RegisterTool(tools.MemoryTool{Store: a.Memory, MaxChars: cfg.Context.ToolOutputMaxChars})
 	a.RegisterTool(tools.ClarifyTool{Timeout: time.Duration(cfg.Approvals.TimeoutS) * time.Second})
-	a.RegisterTool(tools.SessionSearchTool{Store: a.Store, Cron: a.Cron, MaxChars: cfg.Context.ToolOutputMaxChars})
+	a.RegisterTool(tools.SessionSearchTool{
+		Store: a.Store, Cron: a.Cron, MaxChars: cfg.Context.ToolOutputMaxChars,
+		DefaultResults: cfg.Sessions.SearchDefaultResults, MaxResults: cfg.Sessions.SearchMaxResults,
+		DefaultWindow: cfg.Sessions.ScrollDefaultWindow, MaxWindow: cfg.Sessions.ScrollMaxWindow,
+	})
 	// Sessions lets the first call after a restart restore the list from the history.
 	a.RegisterTool(tools.TodoTool{Sessions: a.Store})
-	a.RegisterTool(tools.SkillViewTool{Catalog: a.Skills, EnvStatus: func(names []string) []string { return envStatus(cfg, a.DotEnv, names) }})
+	a.RegisterTool(tools.SkillViewTool{Catalog: a.Skills, MaxLinkedFiles: cfg.Skills.ViewMaxLinkedFiles, EnvStatus: func(names []string) []string { return envStatus(cfg, a.DotEnv, names) }})
 	a.RegisterTool(tools.SkillsListTool{Catalog: a.Skills})
-	a.RegisterTool(tools.SkillManageTool{Mgr: &skills.Manager{Dir: a.Skills.Dir, Guard: cfg.Skills.Guard}, Catalog: a.Skills})
+	a.RegisterTool(tools.SkillManageTool{Mgr: &skills.Manager{Dir: a.Skills.Dir, Guard: cfg.Skills.Guard,
+		SkillMDMaxChars: cfg.Skills.SkillMDMaxChars, SupportFileMaxBytes: cfg.Skills.SupportFileMaxBytes}, Catalog: a.Skills})
 	cfgBrowser := cfg.Browser
 	a.Browser = &browser.Manager{
 		ProfileDir: filepath.Join(a.DataDir, "cache", "chrome-profile"),
@@ -792,8 +847,11 @@ func (a *App) registerTools(gatewayRole bool) {
 	}
 	// New does not look for Chrome. The first browser call does.
 	tools.RegisterBrowserTools(a.Registry, &tools.BrowserTools{
-		M:       a.Browser,
-		ShotDir: filepath.Join(a.DataDir, "cache", "screenshots"),
+		M:             a.Browser,
+		ActionTimeout: time.Duration(cfgBrowser.ActionTimeoutS) * time.Second,
+		ExcerptChars:  cfgBrowser.NavigateExcerptChars,
+		Settle:        time.Duration(cfgBrowser.SettleS * float64(time.Second)),
+		ShotDir:       filepath.Join(a.DataDir, "cache", "screenshots"),
 		DetectErr: sync.OnceValue(func() error {
 			p, err := browser.DetectChrome(cfgBrowser.ChromePath, exec.LookPath, os.Getenv, runtime.GOOS)
 			if err != nil {
@@ -809,7 +867,7 @@ func (a *App) registerTools(gatewayRole bool) {
 		Dir:       filepath.Join(a.DataDir, "cache", "media"),
 		HC:        a.HTTP,
 		// An image URL in an endpoint response comes from the network, so the client is guarded.
-		Download:  tools.GuardedClient(true, 60*time.Second, 3),
+		Download:  tools.GuardedClient(true, imageWait, 3),
 		Env:       security.ChildEnv(os.Environ(), a.DotEnv, cfg.Terminal.EnvPassthrough),
 		Log:       a.Log,
 		Protected: protected,
@@ -829,23 +887,35 @@ func (a *App) registerTools(gatewayRole bool) {
 		Sessions:        a.Store,
 		ScriptsDir:      filepath.Join(a.DataDir, "scripts"),
 		MissedRuns:      cfg.Cron.MissedRuns,
+		Tick:            time.Duration(cfg.Cron.TickS) * time.Second,
+		GraceMin:        time.Duration(cfg.Cron.GraceMinS) * time.Second,
+		GraceMax:        time.Duration(cfg.Cron.GraceMaxS) * time.Second,
 	})
 	// view_image exists only when a vision provider exists.
 	if vp, ok := tools.VisionProvider(cfg, a.Providers); ok {
-		a.RegisterTool(tools.VisionTool{Prov: vp, Client: a.WebClient, MaxBytes: 10 << 20, Record: a.recordUsage, Protected: protected})
+		// The image download has its own client, so web.http_timeout_s does not cut it.
+		a.RegisterTool(tools.VisionTool{
+			Prov:            vp,
+			Client:          tools.GuardedClient(cfg.Web.BlockPrivateNetworks, imageWait, 3),
+			MaxBytes:        int64(cfg.Media.VisionMaxBytes),
+			DownloadTimeout: imageWait,
+			Record:          a.recordUsage,
+			Protected:       protected,
+		})
 	}
 	// execute_code needs python3. Without it, the tool is hidden and doctor reports it.
 	if python, err := exec.LookPath("python3"); err == nil {
 		a.RegisterTool(tools.ExecuteCodeTool{
-			Reg:         a.Registry,
-			ScratchRoot: filepath.Join(a.DataDir, "cache"),
-			TimeoutS:    cfg.CodeExecution.TimeoutS,
-			MaxCalls:    cfg.CodeExecution.MaxToolCalls,
-			MaxStdout:   cfg.CodeExecution.MaxStdoutBytes,
-			Python:      python,
-			DotEnv:      a.DotEnv,
-			Passthrough: func(*tools.Env) []string { return skillPassthrough(cfg) },
-			InGateway:   gatewayRole,
+			Reg:            a.Registry,
+			ScratchRoot:    filepath.Join(a.DataDir, "cache"),
+			TimeoutS:       cfg.CodeExecution.TimeoutS,
+			MaxCalls:       cfg.CodeExecution.MaxToolCalls,
+			MaxStdout:      cfg.CodeExecution.MaxStdoutBytes,
+			Python:         python,
+			DotEnv:         a.DotEnv,
+			Passthrough:    func(*tools.Env) []string { return skillPassthrough(cfg) },
+			InGateway:      gatewayRole,
+			MaxStderrChars: cfg.CodeExecution.MaxStderrChars,
 		})
 	}
 }
@@ -889,6 +959,7 @@ func (a *App) NewTurnEnv(sess *sessions.Session, channel, userID string) *tools.
 		WorkDir: a.WorkDir,
 		DataDir: a.DataDir,
 		Log:     a.Log,
+		Todo:    a.todoLimits(),
 	}
 	gate := tools.GateApprover{Gate: a.Gate}
 	switch {
@@ -953,8 +1024,10 @@ func (a *App) Deps() *gateway.Deps {
 		AfterDelete: a.afterDelete,
 		// /stop, /new, and /reset cancel the background delegation children of the key.
 		CancelKey: a.cancelKey,
-		ToolLine:  func(tool, preview string) string { return telegram.ToolLine("all", tool, preview, "") },
-		Goals:     a.Goals,
+		ToolLine: func(tool, preview string) string {
+			return telegram.ToolLineWithin("all", tool, preview, "", a.Cfg.Agent.ToolPreviewChars)
+		},
+		Goals: a.Goals,
 		// The skill commands read the skill folders at the start of a turn, never in New.
 		Skills: a.Skills.Load,
 		// The skill commands show the status of each env name of a skill.
@@ -1090,8 +1163,17 @@ func (a *App) requestRestart(ctx context.Context, key string, to gateway.Target)
 	}
 }
 
-// housekeepingEvery is the time between two housekeeping runs.
+// housekeepingEvery is the time between two housekeeping runs. It is the fallback of
+// gateway.housekeeping_interval_s.
 const housekeepingEvery = 24 * time.Hour
+
+// housekeepingInterval returns the time between two housekeeping runs.
+func (a *App) housekeepingInterval() time.Duration {
+	if s := a.Cfg.Gateway.HousekeepingIntervalS; s > 0 {
+		return time.Duration(s) * time.Second
+	}
+	return housekeepingEvery
+}
 
 // aliveAtKey is the kv key of the gateway heartbeat, in Unix ms.
 const aliveAtKey = "gateway.alive_at"
@@ -1124,7 +1206,7 @@ func (a *App) WriteAliveAt(ctx context.Context) {
 // Housekeeping removes the spill files that are older than context.spill_retention_days,
 // the media files that are older than media.cache_retention_days, and the automatic
 // sessions that are older than sessions.retention_days. It runs at once,
-// and then each day in a goroutine until ctx ends. At once, it also resumes the turns that
+// and then each `gateway.housekeeping_interval_s` in a goroutine until ctx ends. At once, it also resumes the turns that
 // a restart cut and reports the lost background delegations. Then it writes the gateway
 // heartbeat, and again each heartbeatEvery until ctx ends.
 func (a *App) Housekeeping(ctx context.Context) {
@@ -1168,7 +1250,7 @@ func (a *App) Housekeeping(ctx context.Context) {
 		}
 	}()
 	go func() {
-		t := time.NewTicker(housekeepingEvery)
+		t := time.NewTicker(a.housekeepingInterval())
 		defer t.Stop()
 		for {
 			select {
