@@ -34,6 +34,14 @@ type Redacted struct {
 	ConfigWarnings []string `json:"config_warnings"`
 	StateDB        int      `json:"state_db"`
 	Files          int      `json:"files"`
+	// KeyLikeCells is the count of state.db cells with text that looks like a key. The
+	// backup does not change these cells.
+	KeyLikeCells int `json:"key_like_cells"`
+	// KeyLikeFiles is the count of copied text files with text that looks like a key.
+	KeyLikeFiles int `json:"key_like_files"`
+	// KeyLikePartial is true when the key-like pass stopped at its byte budget, so the two
+	// counts are lower limits.
+	KeyLikePartial bool `json:"key_like_partial,omitempty"`
 }
 
 // Manifest is the content of manifest.json.

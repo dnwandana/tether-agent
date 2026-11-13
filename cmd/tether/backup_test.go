@@ -80,7 +80,7 @@ func TestPrintBackupReport(t *testing.T) {
 				{Path: "skills/b/SKILL.md", Size: 10},
 				{Path: "scripts/x.sh", Size: 10},
 			},
-			Redacted: backup.Redacted{StateDB: 2, Files: 1},
+			Redacted: backup.Redacted{StateDB: 2, Files: 1, KeyLikeCells: 2, KeyLikeFiles: 1},
 		},
 		Stats:    backup.DBStats{Messages: 1204, Sessions: 38},
 		Skipped:  []string{"skills/link"},
@@ -101,6 +101,7 @@ config.yaml   1 value looks like a secret and is in the archive
   Move the secret to .env, and use ${NAME} in config.yaml.
 Masked 2 known secret values in state.db.
 Masked the known secret values in 1 text file.
+Note: 3 stored values hold text that looks like a key. The archive keeps them. Keep it private.
 Skipped skills/link. The backup copies only regular files, and in memory/notes only files with a note name.
 Backup saved: /data/backups/tether-backup-20261028-174210.tar.gz (1.3 MB)
 The archive holds your messages. Keep it private.
@@ -127,5 +128,39 @@ The archive does not hold .env. Copy .env on its own when you move to a new host
 `
 	if got := b.String(); got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestPrintBackupReportKeyNoteAtLimit(t *testing.T) {
+	r := &backup.Result{
+		Path: "-", Size: 2048,
+		Manifest: backup.Manifest{
+			Files:    []backup.FileEntry{{Path: "state.db", Size: 500}},
+			Redacted: backup.Redacted{KeyLikeCells: backup.KeyLikeMax},
+		},
+	}
+	var b bytes.Buffer
+	printBackupReport(&b, r)
+	got := b.String()
+	if !strings.Contains(got, "Note: at least 1000 stored values hold text that looks like a key. The archive keeps them. Keep it private.\n") {
+		t.Fatalf("missing note in:\n%s", got)
+	}
+	if strings.Contains(got, "Note: 1,000") || strings.Contains(got, "Note: 1000") {
+		t.Fatalf("count has no limit text in:\n%s", got)
+	}
+}
+
+func TestPrintBackupReportKeyNotePartialScan(t *testing.T) {
+	r := &backup.Result{
+		Path: "-", Size: 2048,
+		Manifest: backup.Manifest{
+			Files:    []backup.FileEntry{{Path: "state.db", Size: 500}},
+			Redacted: backup.Redacted{KeyLikeCells: 3, KeyLikePartial: true},
+		},
+	}
+	var b bytes.Buffer
+	printBackupReport(&b, r)
+	if got := b.String(); !strings.Contains(got, "Note: at least 3 stored values hold text that looks like a key.") {
+		t.Fatalf("a partial scan must say at least:\n%s", got)
 	}
 }

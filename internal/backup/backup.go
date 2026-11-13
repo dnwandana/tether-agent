@@ -170,11 +170,15 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 	if err := snapshotDB(ctx, live, dbCopy); err != nil {
 		return nil, nil, nil, err
 	}
-	cells, stats, err := prepareDBCopy(ctx, dbCopy, values)
+	// The cell scan and the file scan share one byte budget.
+	budget := newKeyLikeBudget(keyLikeScanLimit)
+	cells, keyCells, stats, err := prepareDBCopy(ctx, dbCopy, values, budget)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 	red.StateDB = cells
+	red.KeyLikeCells = keyCells.n
+	red.KeyLikePartial = keyCells.partial
 	res.Stats = stats
 	items := []item{{Rel: "state.db", Src: dbCopy, Mode: liveInfo.Mode()}}
 
@@ -218,6 +222,12 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 		return nil, nil, nil, err
 	}
 	found = append(found, folders...)
+	keyFiles, partial, err := scanKeyLikeFiles(found, KeyLikeMax-red.KeyLikeCells, budget)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	red.KeyLikeFiles = keyFiles
+	red.KeyLikePartial = red.KeyLikePartial || partial
 	res.Skipped = append(res.Skipped, skipped...)
 	res.Skipped = append(res.Skipped, folderSkipped...)
 	items = append(items, found...)
@@ -240,12 +250,20 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 	return m, items, res, nil
 }
 
-// prepareDBCopy masks the known values in the DB copy at path, checks it, and reads its stats.
+// keyLikeCount is the result of the key-like pass over the cells. partial is true when the
+// pass stopped at its byte budget.
+type keyLikeCount struct {
+	n       int
+	partial bool
+}
+
+// prepareDBCopy masks the known values in the DB copy at path, counts the key-like cells with
+// budget, checks the copy, and reads its stats.
 // It closes the copy before it returns, so the tar step can read the file.
-func prepareDBCopy(ctx context.Context, path string, values []string) (cells int, stats DBStats, err error) {
+func prepareDBCopy(ctx context.Context, path string, values []string, budget *keyLikeBudget) (cells int, keyLike keyLikeCount, stats DBStats, err error) {
 	c, err := db.OpenExisting(path)
 	if err != nil {
-		return 0, DBStats{}, err
+		return 0, keyLikeCount{}, DBStats{}, err
 	}
 	defer func() {
 		if cerr := c.Close(); cerr != nil && err == nil {
@@ -253,15 +271,18 @@ func prepareDBCopy(ctx context.Context, path string, values []string) (cells int
 		}
 	}()
 	if cells, err = maskDB(ctx, c, values); err != nil {
-		return 0, DBStats{}, err
+		return 0, keyLikeCount{}, DBStats{}, err
+	}
+	if keyLike.n, keyLike.partial, err = scanKeyLikeCells(ctx, c, KeyLikeMax, budget); err != nil {
+		return 0, keyLikeCount{}, DBStats{}, err
 	}
 	if err = checkCopy(ctx, c); err != nil {
-		return 0, DBStats{}, err
+		return 0, keyLikeCount{}, DBStats{}, err
 	}
 	if stats, err = readStats(ctx, c); err != nil {
-		return 0, DBStats{}, err
+		return 0, keyLikeCount{}, DBStats{}, err
 	}
-	return cells, stats, nil
+	return cells, keyLike, stats, nil
 }
 
 // prepareConfig writes the archive copy of config.yaml to tmp and records the replacements and

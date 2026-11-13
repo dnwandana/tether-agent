@@ -95,6 +95,17 @@ func printBackupReport(w io.Writer, r *backup.Result) {
 	if n := r.Manifest.Redacted.Files; n > 0 {
 		fmt.Fprintf(w, "Masked the known secret values in %s.\n", countNoun(n, "text file", "text files"))
 	}
+	if n := r.Manifest.Redacted.KeyLikeCells + r.Manifest.Redacted.KeyLikeFiles; n > 0 {
+		count := strconv.Itoa(n)
+		switch {
+		case n >= backup.KeyLikeMax:
+			count = fmt.Sprintf("at least %d", backup.KeyLikeMax)
+		case r.Manifest.Redacted.KeyLikePartial:
+			// The pass stopped at its byte budget, so the count is a lower limit.
+			count = fmt.Sprintf("at least %d", n)
+		}
+		fmt.Fprintf(w, "Note: %s stored values hold text that looks like a key. The archive keeps them. Keep it private.\n", count)
+	}
 	for _, rel := range r.Skipped {
 		fmt.Fprintf(w, "Skipped %s. The backup copies only regular files, and in memory/notes only files with a note name.\n", rel)
 	}

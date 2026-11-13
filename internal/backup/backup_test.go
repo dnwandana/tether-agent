@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -739,5 +740,45 @@ func TestCreateManifestTooLarge(t *testing.T) {
 	}
 	if got := restoreGlob(t, filepath.Join(dir, "backups"), "tether-backup-"); len(got) != 0 {
 		t.Fatal("an archive stays:", got)
+	}
+}
+
+// TestCreateCountsKeyLikeValues: a data folder with no .env. The pass counts, and the
+// archive keeps the data as it is.
+func TestCreateCountsKeyLikeValues(t *testing.T) {
+	dir, live := newDataDir(t)
+	if _, err := live.Exec("INSERT INTO messages(session_id, role, content) VALUES('s1', 'user', ?)",
+		"my key is "+keyLikeSample); err != nil {
+		t.Fatal(err)
+	}
+	write(t, dir, "memory/memory.md", "token: ghp_abc123def456ghi789jkl\n")
+	res, err := Create(ctx, createOpts(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	red := res.Manifest.Redacted
+	if red.KeyLikeCells != 1 || red.KeyLikeFiles != 1 {
+		t.Fatalf("Redacted = %+v", red)
+	}
+	if red.StateDB != 0 || red.Files != 0 {
+		t.Fatalf("the pass must not change data: %+v", red)
+	}
+	data, err := os.ReadFile(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := createReadArchive(t, data)
+	if a.manifest.Redacted.KeyLikeCells != 1 || a.manifest.Redacted.KeyLikeFiles != 1 {
+		t.Fatalf("archive manifest = %+v", a.manifest.Redacted)
+	}
+	m := a.contents[ManifestName]
+	if !regexp.MustCompile(`"key_like_cells":\s*1`).Match(m) || !regexp.MustCompile(`"key_like_files":\s*1`).Match(m) {
+		t.Fatalf("manifest = %s", m)
+	}
+	if !bytes.Contains(a.contents["memory/memory.md"], []byte("ghp_abc123def456ghi789jkl")) {
+		t.Fatal("the archive must keep the file text")
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("Warnings = %v", res.Warnings)
 	}
 }
