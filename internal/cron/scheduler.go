@@ -42,7 +42,8 @@ type markRetry struct {
 }
 
 // Scheduler runs the due jobs of Store in the gateway process. It ticks every Tick.
-// The zero values use the defaults: MaxParallel 2, Missed "skip", Tick 30 s.
+// The zero values use the defaults: MaxParallel 2, Missed "skip", Tick 30 s, GraceMin 2 min,
+// GraceMax 2 h.
 type Scheduler struct {
 	Store   *Store
 	Runner  *Runner
@@ -53,6 +54,10 @@ type Scheduler struct {
 	// "catchup".
 	Missed string
 	Tick   time.Duration
+	// GraceMin and GraceMax bound the grace window of a late recurring run. 0 uses 2 min
+	// and 2 h.
+	GraceMin time.Duration
+	GraceMax time.Duration
 	// Now returns the current time. Nil uses Store.Now, then time.Now.
 	Now func() time.Time
 	Log *slog.Logger
@@ -323,7 +328,7 @@ func (s *Scheduler) applyMissed(ctx context.Context) {
 			s.log().Info("cron: missed run catches up", "job", j.ID, "name", j.Name, "late", late.Round(time.Second))
 			continue
 		}
-		if late <= grace(sched, now) {
+		if late <= s.grace(sched, now) {
 			continue
 		}
 		next := sched.Next(now)
@@ -336,14 +341,21 @@ func (s *Scheduler) applyMissed(ctx context.Context) {
 	}
 }
 
-// grace returns half the period of sched, between minGrace and maxGrace.
-func grace(sched Schedule, now time.Time) time.Duration {
+// grace returns half the period of sched, between the grace minimum and the grace maximum.
+func (s *Scheduler) grace(sched Schedule, now time.Time) time.Duration {
+	lo, hi := s.GraceMin, s.GraceMax
+	if lo <= 0 {
+		lo = minGrace
+	}
+	if hi <= 0 {
+		hi = maxGrace
+	}
 	first := sched.Next(now)
 	second := sched.Next(first)
 	if first.IsZero() || second.IsZero() {
-		return minGrace
+		return lo
 	}
-	return min(max(second.Sub(first)/2, minGrace), maxGrace)
+	return min(max(second.Sub(first)/2, lo), hi)
 }
 
 func (s *Scheduler) now() time.Time {

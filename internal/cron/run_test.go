@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
@@ -378,6 +379,79 @@ func TestTurnErrorAlerts(t *testing.T) {
 	o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "p"})
 	if !o.Send || o.Status != "error" || !strings.HasPrefix(o.Text, "⚠ Cron job digest failed:") ||
 		!strings.Contains(o.Text, "provider down") || o.SessionID == "" {
+		t.Fatal(o)
+	}
+}
+
+func TestScriptTimeoutFromLimits(t *testing.T) {
+	r, _ := runner(t)
+	r.Script = cron.ScriptLimits{Timeout: time.Second}
+	writeScript(t, r, "slow.sh", "sleep 5")
+	start := time.Now()
+	o := r.Run(bg, cron.Job{ID: "j1", Name: "slow", NoAgent: true, Script: "slow.sh"})
+	if time.Since(start) > 4*time.Second {
+		t.Fatal("the limit did not stop the script", time.Since(start))
+	}
+	if !o.Send || o.Status != "error" || !strings.Contains(o.Text, "timed out after 1s") {
+		t.Fatal(o)
+	}
+}
+
+func TestAgentTimeoutSendsAlert(t *testing.T) {
+	r, _ := runner(t)
+	r.AgentTimeout = 50 * time.Millisecond
+	r.Turn = func(ctx context.Context, _ cron.CronTurn) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}
+	o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "p"})
+	if !o.Send || o.Status != "error" || o.SessionID == "" ||
+		o.Text != "⚠ Cron job digest failed (timed out after 50ms)" {
+		t.Fatal(o)
+	}
+}
+
+func TestAgentTimeoutKeepsPartialAnswer(t *testing.T) {
+	r, _ := runner(t)
+	r.AgentTimeout = 50 * time.Millisecond
+	r.Turn = func(ctx context.Context, _ cron.CronTurn) (string, error) {
+		<-ctx.Done()
+		return "partial", ctx.Err()
+	}
+	o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "p"})
+	want := "⚠ Cron job digest failed (timed out after 50ms). The partial answer follows.\n\npartial"
+	if !o.Send || o.Status != "error" || o.Text != want {
+		t.Fatalf("%q", o.Text)
+	}
+	// White space only is no partial answer.
+	r.Turn = func(ctx context.Context, _ cron.CronTurn) (string, error) {
+		<-ctx.Done()
+		return " \n", ctx.Err()
+	}
+	if o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "p"}); o.Text != "⚠ Cron job digest failed (timed out after 50ms)" {
+		t.Fatalf("%q", o.Text)
+	}
+}
+
+func TestAgentErrorKeepsFailedText(t *testing.T) {
+	r, _ := runner(t)
+	r.AgentTimeout = time.Hour
+	r.Turn = func(context.Context, cron.CronTurn) (string, error) { return "half", errors.New("provider down") }
+	o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "p"})
+	if !o.Send || o.Status != "error" || o.Text != "⚠ Cron job digest failed: provider down" {
+		t.Fatalf("%q", o.Text)
+	}
+}
+
+func TestAgentTimeoutZeroIsNoLimit(t *testing.T) {
+	r, _ := runner(t, say("done"))
+	r.Turn = func(ctx context.Context, _ cron.CronTurn) (string, error) {
+		if _, ok := ctx.Deadline(); ok {
+			return "", errors.New("a zero AgentTimeout must set no deadline")
+		}
+		return "done", nil
+	}
+	if o := r.Run(bg, cron.Job{ID: "j1", Name: "n", Prompt: "p"}); o.Status != "ok" || o.Text != "done" {
 		t.Fatal(o)
 	}
 }

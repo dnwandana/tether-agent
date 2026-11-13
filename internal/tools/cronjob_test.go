@@ -271,3 +271,29 @@ func TestCronjobWrappedCreateGetsNote(t *testing.T) {
 		}
 	}
 }
+
+func TestRunTextShowsConfiguredTimes(t *testing.T) {
+	env := tgEnv("cli:user", "primary")
+	runText := func(tool CronJobTool) string {
+		t.Helper()
+		runToolEnv(t, tool, `{"action":"create","schedule":"0 1 * * *","prompt":"p"}`, env)
+		return runToolEnv(t, tool, fmt.Sprintf(`{"action":"run","job_id":%q}`, onlyJob(t, tool).ID), env)
+	}
+	out := runText(cronTool(t))
+	if !strings.Contains(out, "on the next tick (within 30 s). ") ||
+		!strings.Contains(out, "(half the period of the schedule, from 2 min to 2 h)") {
+		t.Fatal("zero fields keep the text of today:", out)
+	}
+	tool := cronTool(t)
+	tool.Tick, tool.GraceMin, tool.GraceMax = 45*time.Second, 5*time.Minute, 3*time.Hour
+	out = runText(tool)
+	if !strings.Contains(out, "(within 45 s)") || !strings.Contains(out, "from 5 min to 3 h)") {
+		t.Fatal(out)
+	}
+	tool = cronTool(t)
+	tool.Tick, tool.GraceMin, tool.GraceMax = 90*time.Second, 150*time.Second, 90*time.Minute
+	out = runText(tool)
+	if !strings.Contains(out, "(within 90 s)") || !strings.Contains(out, "from 150 s to 90 min)") {
+		t.Fatal(out)
+	}
+}

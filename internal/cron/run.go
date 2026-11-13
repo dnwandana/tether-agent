@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/skills"
@@ -22,6 +23,10 @@ const CronPreamble = "[IMPORTANT: You are running as a scheduled cron job. No us
 // cronRemovedTools are the tools that a cron run cannot use: no user is present,
 // and a run cannot create cron jobs.
 var cronRemovedTools = []string{"cronjob", "clarify"}
+
+// errAgentTimeout is the cause of the context of an agent turn that reached AgentTimeout.
+// It tells a time-out from a stop of the gateway.
+var errAgentTimeout = errors.New("cron: the agent turn reached its time limit")
 
 // CronTurn is the input of the agent turn of one cron run.
 type CronTurn struct {
@@ -49,14 +54,20 @@ type Runner struct {
 	ScriptsDir string
 	// Turn runs the agent turn and returns the final text.
 	Turn func(ctx context.Context, t CronTurn) (final string, err error)
+	// AgentTimeout is the total time limit of the agent turn of a job. The skills and the
+	// data script run before the turn and do not count. 0 means no limit.
+	AgentTimeout time.Duration
 	// Skills returns the installed skills. Nil means that no skill is installed.
 	Skills func() ([]skills.Skill, []skills.Warning, error)
 	// Env is the environment of the scripts. Nil gives the process environment without
 	// secrets.
 	Env []string
-	// SpillDir receives the full stdout of a script above ScriptOutputMaxChars. Empty uses
+	// SpillDir receives the full stdout of a script above the output limit of Script. Empty uses
 	// the temporary folder of the system.
 	SpillDir string
+	// Script holds the limits of each script run: the script of a script job and the data
+	// script of an agent job. The zero value uses the defaults.
+	Script ScriptLimits
 	// Log gets the run errors. Nil means slog.Default().
 	Log *slog.Logger
 }
@@ -81,8 +92,8 @@ func (r *Runner) runScriptJob(ctx context.Context, j Job) RunOutcome {
 	if err != nil {
 		return RunOutcome{Text: fmt.Sprintf("⚠ Cron job %s failed: %v", j.Name, err), Send: true, Status: "error"}
 	}
-	res := RunScriptSpill(ctx, path, j.Workdir, r.Env, 0, r.SpillDir)
-	text, send := ScriptJobMessage(j, res)
+	res := RunScriptSpill(ctx, path, j.Workdir, r.Env, r.Script, r.SpillDir)
+	text, send := ScriptJobMessage(j, res, r.Script)
 	status := "ok"
 	if res.TimedOut || res.ExitCode != 0 {
 		status = "error"
@@ -112,7 +123,13 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 	if err != nil {
 		return o, err
 	}
-	final, err := r.Turn(ctx, CronTurn{
+	tctx := ctx
+	if r.AgentTimeout > 0 {
+		var cancel context.CancelFunc
+		tctx, cancel = context.WithTimeoutCause(ctx, r.AgentTimeout, errAgentTimeout)
+		defer cancel()
+	}
+	final, err := r.Turn(tctx, CronTurn{
 		Session:     sess,
 		Text:        text,
 		Toolsets:    j.Toolsets,
@@ -121,6 +138,16 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 		Workdir:     j.Workdir,
 	})
 	if err != nil {
+		if errors.Is(context.Cause(tctx), errAgentTimeout) {
+			r.log().Warn("cron agent turn timed out", "job", j.ID, "name", j.Name,
+				"limit", r.AgentTimeout, "session", sess.ID)
+			o.Text = fmt.Sprintf("⚠ Cron job %s failed (timed out after %s)", j.Name, seconds(r.AgentTimeout))
+			if strings.TrimSpace(final) != "" {
+				o.Text += ". The partial answer follows.\n\n" + final
+			}
+			o.Send, o.Status = true, "error"
+			return o, nil
+		}
 		return o, err
 	}
 	if strings.TrimSpace(final) == "" {
@@ -194,9 +221,9 @@ func (r *Runner) writeScript(ctx context.Context, b *strings.Builder, j Job) {
 		fmt.Fprintf(b, "Script error: the data-collection script did not run. Report this to the user.\n%v\n\n", err)
 		return
 	}
-	res := RunScriptSpill(ctx, path, j.Workdir, r.Env, 0, r.SpillDir)
+	res := RunScriptSpill(ctx, path, j.Workdir, r.Env, r.Script, r.SpillDir)
 	if res.TimedOut || res.ExitCode != 0 {
-		alert, _ := ScriptJobMessage(j, res)
+		alert, _ := ScriptJobMessage(j, res, r.Script)
 		fmt.Fprintf(b, "Script error: the data-collection script failed. Report this to the user.\n%s\n\n", alert)
 		return
 	}

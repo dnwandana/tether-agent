@@ -328,7 +328,7 @@ func TestGrace(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := grace(sched, now); got != want {
+		if got := (&Scheduler{}).grace(sched, now); got != want {
 			t.Fatal(spec, got)
 		}
 	}
@@ -638,4 +638,52 @@ func TestRunNowRefusesAJobThatWaits(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.wg.Wait()
+}
+
+func TestGraceFromFields(t *testing.T) {
+	now := time.Date(2026, 10, 27, 10, 0, 0, 0, time.UTC)
+	s := &Scheduler{GraceMin: 5 * time.Minute, GraceMax: time.Hour}
+	for spec, want := range map[string]time.Duration{
+		"2m": 5 * time.Minute, "30m": 15 * time.Minute, "0 1 * * *": time.Hour,
+	} {
+		sched, err := parse(spec, time.UTC)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := s.grace(sched, now); got != want {
+			t.Fatal(spec, got)
+		}
+	}
+	// A schedule with no second run gets the minimum.
+	once, err := parse("2026-10-27T12:00", time.UTC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.grace(once, now); got != 5*time.Minute {
+		t.Fatal(got)
+	}
+}
+
+// A gateway stop during a cron agent turn with a limit is a stop, not a time-out.
+func TestAgentTimeoutStopIsNotTimeout(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Runner.AgentTimeout = time.Hour
+	started := make(chan struct{}, 1)
+	s.Runner.Turn = func(ctx context.Context, _ CronTurn) (string, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return "partial", ctx.Err()
+	}
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	clk.t = clk.t.Add(31 * time.Minute)
+	c, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() { s.TickOnce(c); close(done) }()
+	<-started
+	cancel()
+	<-done
+	j := mustGet(t, s.Store, id)
+	if j.LastStatus != "stopped" || strings.Contains(j.LastOutput, "timed out") || len(s.sends()) != 0 {
+		t.Fatal(j, s.sends())
+	}
 }

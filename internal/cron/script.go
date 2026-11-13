@@ -34,11 +34,43 @@ const (
 	scriptWaitDelay = 2 * time.Second
 )
 
+// ScriptLimits holds the limits of one script run. A zero field uses the default.
+type ScriptLimits struct {
+	// Timeout is the time limit of the run. 0 uses DefaultScriptTimeout.
+	Timeout time.Duration
+	// OutputMaxChars is the number of stdout characters that the result keeps.
+	// 0 uses ScriptOutputMaxChars.
+	OutputMaxChars int
+	// StderrTailLines is the number of lines in the tail of an alert. 0 uses 20.
+	StderrTailLines int
+}
+
+func (l ScriptLimits) timeout() time.Duration {
+	if l.Timeout <= 0 {
+		return DefaultScriptTimeout
+	}
+	return l.Timeout
+}
+
+func (l ScriptLimits) outputMax() int {
+	if l.OutputMaxChars <= 0 {
+		return ScriptOutputMaxChars
+	}
+	return l.OutputMaxChars
+}
+
+func (l ScriptLimits) tailLines() int {
+	if l.StderrTailLines <= 0 {
+		return scriptTailLines
+	}
+	return l.StderrTailLines
+}
+
 // ScriptResult is the result of one script run.
 type ScriptResult struct {
-	// Stdout is the stdout of the script, cut to ScriptOutputMaxChars.
+	// Stdout is the stdout of the script, cut to the output limit.
 	Stdout string
-	// StderrTail is the last 20 lines of stderr.
+	// StderrTail is the last lines of stderr, up to the tail limit.
 	StderrTail string
 	// ExitCode is the exit status. It is -1 when the script did not start or a signal stopped it.
 	ExitCode int
@@ -92,13 +124,11 @@ func ResolveScript(path, scriptsDir string) (string, error) {
 
 // RunScriptSpill runs the script at path. A .sh or .bash file runs with bash, and other files
 // run with python3. The script runs in workdir, or in its own folder when workdir is empty.
-// A nil env gives the process environment without secrets. A timeout of 0 means 120 s. On
-// timeout, the function kills the full process group. A stdout above ScriptOutputMaxChars goes
+// A nil env gives the process environment without secrets. A zero Timeout means 120 s. On
+// timeout, the function kills the full process group. A stdout above the output limit goes
 // to a spill file in spillDir. An empty spillDir means <temp>/tether-spill.
-func RunScriptSpill(ctx context.Context, path, workdir string, env []string, timeout time.Duration, spillDir string) ScriptResult {
-	if timeout <= 0 {
-		timeout = DefaultScriptTimeout
-	}
+func RunScriptSpill(ctx context.Context, path, workdir string, env []string, lim ScriptLimits, spillDir string) ScriptResult {
+	timeout := lim.timeout()
 	res := ScriptResult{ExitCode: -1, Timeout: timeout}
 	if env == nil {
 		env = security.ChildEnv(os.Environ(), nil, nil)
@@ -144,18 +174,18 @@ func RunScriptSpill(ctx context.Context, path, workdir string, env []string, tim
 	if ctx.Err() != nil {
 		errText += "\ncron: the script run was canceled"
 	}
-	res.StderrTail = lastLines(errText, scriptTailLines)
+	res.StderrTail = lastLines(errText, lim.tailLines())
 
 	out := stdout.String()
 	if stdout.cut {
 		out += fmt.Sprintf("\n[stdout was cut at %d bytes]\n", scriptStdoutMaxBytes)
 	}
-	capped, terr := ctxmgr.Truncate(out, ScriptOutputMaxChars, spillDir)
+	capped, terr := ctxmgr.Truncate(out, lim.outputMax(), spillDir)
 	if terr != nil {
 		// Without a spill file, keep the head only. The marker must not name a file.
 		capped = ctxmgr.SanitizeUTF8(out)
-		if r := []rune(capped); len(r) > ScriptOutputMaxChars {
-			capped = string(r[:ScriptOutputMaxChars]) + "\n[stdout was cut: the spill file could not be written]\n"
+		if r := []rune(capped); len(r) > lim.outputMax() {
+			capped = string(r[:lim.outputMax()]) + "\n[stdout was cut: the spill file could not be written]\n"
 		}
 	}
 	res.Stdout = capped
@@ -165,7 +195,7 @@ func RunScriptSpill(ctx context.Context, path, workdir string, env []string, tim
 // ScriptJobMessage returns the message of a script job. Non-empty stdout goes out word for
 // word. Empty stdout after exit 0 sends nothing. A failure or a timeout always sends an
 // alert with the tail of stderr, or the tail of stdout when stderr is empty.
-func ScriptJobMessage(j Job, r ScriptResult) (text string, send bool) {
+func ScriptJobMessage(j Job, r ScriptResult, lim ScriptLimits) (text string, send bool) {
 	if r.TimedOut || r.ExitCode != 0 {
 		var b strings.Builder
 		if r.TimedOut {
@@ -177,7 +207,7 @@ func ScriptJobMessage(j Job, r ScriptResult) (text string, send bool) {
 		label := "stderr"
 		if strings.TrimSpace(tail) == "" && strings.TrimSpace(r.Stdout) != "" {
 			// With no stderr, the end of stdout is the only clue to the cause.
-			tail, label = strings.TrimRight(lastLines(r.Stdout, scriptTailLines), "\n"), "stdout"
+			tail, label = strings.TrimRight(lastLines(r.Stdout, lim.tailLines()), "\n"), "stdout"
 		}
 		if strings.TrimSpace(tail) != "" {
 			fmt.Fprintf(&b, "\n%s:\n%s", label, tail)

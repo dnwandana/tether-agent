@@ -34,6 +34,22 @@ type CronJobTool struct {
 	// MissedRuns is cron.missed_runs: "skip" (also "") or "catchup". The
 	// result of run without a gateway tells what happens to the run.
 	MissedRuns string
+	// Tick, GraceMin, and GraceMax are the scheduler values that the result of run without
+	// a gateway shows. 0 uses 30 s, 2 min, and 2 h.
+	Tick     time.Duration
+	GraceMin time.Duration
+	GraceMax time.Duration
+}
+
+// cronSpan formats d as "2 h", "2 min", or "30 s".
+func cronSpan(d time.Duration) string {
+	switch {
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%d h", d/time.Hour)
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%d min", d/time.Minute)
+	}
+	return fmt.Sprintf("%d s", d/time.Second)
 }
 
 type cronModelArg struct {
@@ -282,12 +298,24 @@ func (t CronJobTool) run(ctx context.Context, id string) (string, error) {
 	if _, err := t.Store.Update(ctx, id, cron.JobPatch{NextRun: &now}); err != nil {
 		return "", cronErr(err)
 	}
-	out := fmt.Sprintf("job %s (%s) is due now; the gateway runs it on the next tick (within 30 s). ", j.ID, j.Name)
+	tick, graceMin, graceMax := t.Tick, t.GraceMin, t.GraceMax
+	if tick <= 0 {
+		tick = cron.DefaultTick
+	}
+	if graceMin <= 0 {
+		graceMin = 2 * time.Minute
+	}
+	if graceMax <= 0 {
+		graceMax = 2 * time.Hour
+	}
+	out := fmt.Sprintf("job %s (%s) is due now; the gateway runs it on the next tick (within %s). ",
+		j.ID, j.Name, cronSpan(tick))
 	if t.MissedRuns == cron.MissedCatchup || t.oneShot(j) {
 		return out + "When the gateway is not running, the job runs when it starts", nil
 	}
 	return out + "When the gateway is not running, the job runs at the gateway start only if the start " +
-		"is in the grace window (half the period of the schedule, from 2 min to 2 h). After that window, " +
+		"is in the grace window (half the period of the schedule, from " + cronSpan(graceMin) + " to " +
+		cronSpan(graceMax) + "). After that window, " +
 		"cron.missed_runs: skip skips this run, and the job runs at its next scheduled time", nil
 }
 
