@@ -165,11 +165,23 @@ no `session` answer. See [Coding agents (ACP)](#coding-agents-acp).
 The owner sends `/approvals` to see the saved `always` answers. The command is owner-only.
 Each line shows a number, the description of the rule, the date, and an 8-character code.
 The list leaves out the rows of protected path rules, because the gate never reads them.
-With no rows, the reply is `No Always answers. The gate asks for each dangerous command.`
+With no rows, the list part of the reply is
+`No Always answers. The gate asks for each dangerous command.`
 
-- In Telegram, a **Remove N** button removes an answer. The reply has at most 20 buttons.
-- In the CLI, send `/approvals remove <number> <code>`.
-- When the list changed after the reply, the remove stops with
+- In Telegram, a **Remove N** button removes an answer. The list message then shows the result
+  and the rows that are left, with new buttons. The reply has at most 20 **Remove N** buttons.
+- In Telegram, with 2 or more rows, a **🗑 Remove all** button removes all answers in the list.
+  The bot asks first. **Cancel** shows the list again. **🗑 Remove all** removes all answers in
+  the list.
+- In the CLI, send `/approvals remove <number> <code>` to remove one answer. Send
+  `/approvals remove all <list code>` to remove all answers in the list. With 2 or more rows,
+  the last line of the list gives this command with the list code. The CLI asks with `[y/N]`
+  first.
+- When the list changed after the reply, the remove removes nothing and shows the current
+  list. If the answer is already gone, for example after a double tap, the reply starts with
+  `ℹ️ This answer is already removed.` After **🗑 Remove all** on an empty list, it starts with
+  `ℹ️ All answers are already removed.` In other cases, it starts with
+  `⚠️ The list changed. Nothing was removed.` A remove with a missing word gets
   `The list changed. Send /approvals to see it again.`
 - A remove deletes the `always` row and the `session` answers of that rule in the same
   process. The gate then asks again.

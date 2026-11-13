@@ -109,9 +109,14 @@ none. Only an owner can answer it. Refer to [Owners and members](#owners-and-mem
 ### The /approvals command
 
 `/approvals` is an owner-only command. It lists the `always` answers that the gate stores. Each row
-shows the rule, the date, and a short code. On Telegram, each row has a **Remove** button. In the
-CLI, send `/approvals remove <number> <code>`. The gate asks again for that rule after you remove
-its answer. If the list changed, the command removes nothing. It asks you to send `/approvals` again.
+shows the rule, the date, and a short code. On Telegram, each of the first 20 rows has a
+**Remove N** button. After a remove, the message shows the rows that are left. With 2 or more
+rows, a **🗑 Remove all** button removes all answers in the list. The bot asks first. In the CLI,
+send `/approvals remove <number> <code>` or `/approvals remove all <list code>`. The gate asks
+again for each rule after you remove its answer. A remove in the CLI does not clear a `session`
+answer in the gateway. That answer ends with its session. If the list changed, the command removes
+nothing and shows the current list. It tells you when the answer is already removed, for example
+after a double tap.
 
 ### Your answer
 
