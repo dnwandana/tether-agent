@@ -50,7 +50,15 @@ type Store struct {
 	dir       string
 	memLimit  int
 	userLimit int
-	mu        sync.Mutex
+	// EntryMaxChars is the limit in runes of one entry. 0 means maxEntryRunes.
+	EntryMaxChars int
+	// LockWait is the longest wait for the file lock. 0 means the package value lockWait.
+	LockWait time.Duration
+	// ReadMaxChars caps a Read result in runes. 0 means MaxReadChars.
+	ReadMaxChars int
+	// SearchMaxHits is the largest number of hits of a search. 0 means maxSearchHits.
+	SearchMaxHits int
+	mu            sync.Mutex
 	// now gives the time of a note write. Tests set it.
 	now func() time.Time
 }
@@ -88,8 +96,16 @@ type Result struct {
 }
 
 // maxEntryRunes is the limit in characters (runes) of one entry, in both
-// tiers.
+// tiers. It is the fallback when Store.EntryMaxChars is 0.
 const maxEntryRunes = 4000
+
+// EntryLimit returns the limit in runes of one entry.
+func (s *Store) EntryLimit() int {
+	if s.EntryMaxChars > 0 {
+		return s.EntryMaxChars
+	}
+	return maxEntryRunes
+}
 
 // searchHint ends the result of an add to a note. The background review
 // sees only the topic names, so it can save one fact again in other words.
@@ -168,10 +184,10 @@ func (s *Store) Apply(op Op) (Result, error) {
 	if hasSeparatorLine(content) {
 		return Result{}, errors.New("content must not have a line that holds only §, because § separates the entries")
 	}
-	if n := utf8.RuneCountInString(content); op.Action != ActionRemove && n > maxEntryRunes {
+	if n := utf8.RuneCountInString(content); op.Action != ActionRemove && n > s.EntryLimit() {
 		//lint:ignore ST1005 the text is a fixed message for the model with full sentences.
 		return Result{}, fmt.Errorf("the entry has %d characters, and the limit for one entry is %d. "+
-			"Make it shorter, or save it as several entries.", n, maxEntryRunes)
+			"Make it shorter, or save it as several entries.", n, s.EntryLimit())
 	}
 
 	topic := ""
@@ -542,21 +558,26 @@ func (s *Store) file(target string) (string, int, error) {
 	return "", 0, fmt.Errorf("unknown target %q; use memory or user", target)
 }
 
-// lockWait is the maximum time that a change waits for the file lock. Another process
-// holds the lock only for a change or for the copies of a backup.
+// lockWait is the maximum time that a change waits for the file lock. It is the
+// fallback when Store.LockWait is 0. Another process holds the lock only for a
+// change or for the copies of a backup.
 var lockWait = 30 * time.Second
 
 // lockPoll is the time between two tries of the file lock.
 const lockPoll = 50 * time.Millisecond
 
 // lock takes the file lock that serializes writes across processes. A blocked flock
-// cannot stop, so it tries without a wait until lockWait ends.
+// cannot stop, so it tries without a wait until the wait ends.
 func (s *Store) lock() (func(), error) {
 	f, err := os.OpenFile(filepath.Join(s.dir, LockFileName), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the memory lock file: %w", err)
 	}
-	deadline := time.Now().Add(lockWait)
+	wait := s.LockWait
+	if wait <= 0 {
+		wait = lockWait
+	}
+	deadline := time.Now().Add(wait)
 	for {
 		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if err == nil {
@@ -568,7 +589,7 @@ func (s *Store) lock() (func(), error) {
 		}
 		if !time.Now().Before(deadline) {
 			f.Close()
-			return nil, fmt.Errorf("the memory files stayed locked for %s by another process, for example a backup; try again later", lockWait)
+			return nil, fmt.Errorf("the memory files stayed locked for %s by another process, for example a backup; try again later", wait)
 		}
 		time.Sleep(lockPoll)
 	}

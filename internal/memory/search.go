@@ -12,7 +12,8 @@ import (
 	"unicode"
 )
 
-// The limits of a search.
+// The limits of a search. maxSearchHits is the fallback when
+// Store.SearchMaxHits is 0.
 const (
 	maxSearchHits  = 8
 	maxSearchNotes = 2000
@@ -107,8 +108,12 @@ func (s *Store) SearchMasked(query string, mask func(entry string) (string, bool
 		}
 		return strings.Compare(a.name, b.name)
 	})
-	if len(hits) > maxSearchHits {
-		hits = hits[:maxSearchHits]
+	maxHits := s.SearchMaxHits
+	if maxHits <= 0 {
+		maxHits = maxSearchHits
+	}
+	if len(hits) > maxHits {
+		hits = hits[:maxHits]
 	}
 
 	q := strings.TrimSpace(query)

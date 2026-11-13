@@ -310,3 +310,15 @@ func TestSearchMaskedTierOneOnly(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestSearchMaxHitsFromField(t *testing.T) {
+	s := open(t)
+	s.SearchMaxHits = 3
+	for i := range 10 {
+		writeSearchFile(t, s, fmt.Sprintf("n%d.md", i), "quota")
+	}
+	out := mustSearch(t, s, "quota")
+	if !strings.HasPrefix(out, `3 matches for "quota":`) || !strings.Contains(out, "\n3. note ") || strings.Contains(out, "\n4. note ") {
+		t.Fatal(out)
+	}
+}

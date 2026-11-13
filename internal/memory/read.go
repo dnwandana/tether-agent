@@ -10,15 +10,17 @@ import (
 	"unicode/utf8"
 )
 
-// MaxReadChars is the largest result of Read in characters (runes).
+// MaxReadChars is the largest result of Read in characters (runes). It is the
+// fallback when Store.ReadMaxChars is 0.
 const MaxReadChars = 32000
 
 // maxTopics is the largest number of topics that Topics returns.
 const maxTopics = 2000
 
 // Read returns the note topic as a header line and numbered entries, from
-// the entry from. The result has at most min(maxChars, MaxReadChars) runes;
-// maxChars <= 0 means MaxReadChars. It takes no lock.
+// the entry from. The result has at most min(maxChars, Store.ReadMaxChars)
+// runes; maxChars <= 0 means Store.ReadMaxChars, and a ReadMaxChars of 0
+// means MaxReadChars. It takes no lock.
 func (s *Store) Read(topic string, from, maxChars int) (string, error) {
 	if strings.TrimSpace(topic) == "" {
 		return "", errors.New("topic is required for read")
@@ -50,8 +52,11 @@ func (s *Store) Read(topic string, from, maxChars int) (string, error) {
 	}
 
 	count := len(n.Entries)
-	limit := MaxReadChars
-	if maxChars > 0 && maxChars < MaxReadChars {
+	limit := s.ReadMaxChars
+	if limit <= 0 {
+		limit = MaxReadChars
+	}
+	if maxChars > 0 && maxChars < limit {
 		limit = maxChars
 	}
 	var b strings.Builder

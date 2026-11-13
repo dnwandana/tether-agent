@@ -871,3 +871,45 @@ func TestLongTopicRefused(t *testing.T) {
 		t.Fatalf("%+v", res)
 	}
 }
+
+func TestEntryLimitFromField(t *testing.T) {
+	s := open(t)
+	if s.EntryLimit() != 4000 {
+		t.Fatal("0 keeps the const:", s.EntryLimit())
+	}
+	s.EntryMaxChars = 100
+	const want = "the entry has 101 characters, and the limit for one entry is 100. Make it shorter, or save it as several entries."
+	if err := applyErr(t, s, Op{Action: "add", Target: "memory", Content: strings.Repeat("é", 101)}); err != want {
+		t.Fatal(err)
+	}
+	big, err := Open(t.TempDir(), 20000, 1375)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big.EntryMaxChars = 8000
+	if big.EntryLimit() != 8000 {
+		t.Fatal(big.EntryLimit())
+	}
+	apply(t, big, Op{Action: "add", Target: "memory", Content: strings.Repeat("é", 4001)})
+}
+
+func TestLockWaitFromField(t *testing.T) {
+	s := open(t)
+	s.LockWait = 150 * time.Millisecond
+	f, err := os.OpenFile(filepath.Join(s.dir, LockFileName), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	_, err = s.Apply(Op{Action: "add", Target: "memory", Content: "fact"})
+	if err == nil || !strings.Contains(err.Error(), "stayed locked for 150ms") {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d < 150*time.Millisecond || d > 2*time.Second {
+		t.Fatal(d)
+	}
+}

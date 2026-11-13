@@ -316,3 +316,22 @@ func TestReadNeverOverLimit(t *testing.T) {
 		t.Fatalf("%q", out)
 	}
 }
+
+func TestReadMaxCharsFromField(t *testing.T) {
+	s := open(t)
+	s.ReadMaxChars = 5000
+	var es []string
+	for i := range 40 {
+		es = append(es, fmt.Sprintf("%02d", i)+strings.Repeat("b", 998))
+	}
+	writeReadFile(t, s, "big-list.md", strings.Join(es, Separator))
+	for _, max := range []int{0, 50000} {
+		out := mustRead(t, s, "big-list", 1, max)
+		if !strings.Contains(out, "… output cut at 5000 characters after entry ") || utf8.RuneCountInString(out) > 5000 {
+			t.Fatalf("maxChars %d: %d runes", max, utf8.RuneCountInString(out))
+		}
+	}
+	if out := mustRead(t, s, "big-list", 1, 300); !strings.Contains(out, "… output cut at 300 characters") {
+		t.Fatal("a smaller maxChars still wins")
+	}
+}
