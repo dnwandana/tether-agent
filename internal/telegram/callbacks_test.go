@@ -78,7 +78,7 @@ func TestApprovalButtonsAndEdit(t *testing.T) {
 	go func() {
 		waitSends(t, api, 1)
 		_, data := keyboardOf(api, 0)
-		it.HandleCallback(ctx, press(5, data[1]))
+		it.HandleCallback(ctx, press(5, approvalData(t, data, "session")))
 	}()
 	req := security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "rm -rf /tmp/x", Description: "recursive delete"}
 	sc, err := it.For(5, "", "").PromptApproval(ctx, req)
@@ -89,7 +89,8 @@ func TestApprovalButtonsAndEdit(t *testing.T) {
 		t.Fatal(api.lastCall("editMessageText").Body)
 	}
 	_, data := keyboardOf(api, 0)
-	if !strings.HasPrefix(data[0], "ap:") || !strings.HasSuffix(data[0], ":once") || len(strings.Split(data[0], ":")[1]) != 16 {
+	once := approvalData(t, data, "once")
+	if !strings.HasPrefix(once, "ap:") || !strings.HasSuffix(once, ":once") || len(strings.Split(once, ":")[1]) != 16 {
 		t.Fatal(data)
 	}
 	body := api.lastCall("sendMessage").Body
@@ -170,7 +171,7 @@ func TestApprovalPromptText(t *testing.T) {
 		}
 	}
 	texts, _ := keyboardOf(api, 0)
-	if !reflect.DeepEqual(texts, []string{"✅ Allow once", "✅ Allow in this session", "✅ Always allow", "❌ Deny"}) {
+	if !reflect.DeepEqual(texts, []string{"❌ Deny", "✅ Once", "✅ Session", "✅ Always"}) {
 		t.Fatal(texts)
 	}
 	it.ApprovalTimeout = 0
@@ -194,7 +195,7 @@ func TestApprovalEditKeepsCommand(t *testing.T) {
 		go func() {
 			waitSends(t, api, 1)
 			_, data := keyboardOf(api, 0)
-			it.HandleCallback(ctx, press(5, data[i]))
+			it.HandleCallback(ctx, press(5, approvalData(t, data, []string{"once", "session", "always", "deny"}[i])))
 		}()
 		if _, err := it.For(5, "", "").PromptApproval(ctx, req); err != nil {
 			t.Fatal(err)
@@ -322,7 +323,7 @@ func TestCallbackFromOtherChatRefused(t *testing.T) {
 	}()
 	waitSends(t, api, 1)
 	_, data := keyboardOf(api, 0)
-	if !it.HandleCallback(ctx, press(6, data[0])) {
+	if !it.HandleCallback(ctx, press(6, approvalData(t, data, "once"))) {
 		t.Fatal("the data is an approval")
 	}
 	select {
@@ -331,14 +332,14 @@ func TestCallbackFromOtherChatRefused(t *testing.T) {
 	case <-time.After(30 * time.Millisecond):
 	}
 	it.Authorized = func(context.Context, CallbackQuery) bool { return false }
-	it.HandleCallback(ctx, press(5, data[0]))
+	it.HandleCallback(ctx, press(5, approvalData(t, data, "once")))
 	select {
 	case <-done:
 		t.Fatal("a press from an unauthorized user must not approve")
 	case <-time.After(30 * time.Millisecond):
 	}
 	it.Authorized = nil
-	it.HandleCallback(ctx, press(5, data[3]))
+	it.HandleCallback(ctx, press(5, approvalData(t, data, "deny")))
 	if sc := <-done; sc != security.ScopeDeny {
 		t.Fatal(sc)
 	}
@@ -446,7 +447,7 @@ func TestCallbackUpdateRouted(t *testing.T) {
 	}()
 	waitSends(t, h.api, 1)
 	_, data := keyboardOf(h.api, 0)
-	cq := press(5, data[0])
+	cq := press(5, approvalData(t, data, "once"))
 	cq.From = User{ID: 9, FirstName: "Stranger"}
 	h.ch.handleUpdate(ctx, h.gw, Update{UpdateID: 1, CallbackQuery: &cq})
 	select {
@@ -497,7 +498,7 @@ func TestApprovalEditFallbackSteps(t *testing.T) {
 		go func() {
 			waitSends(t, api, 1)
 			_, data := keyboardOf(api, 0)
-			it.HandleCallback(ctx, press(5, data[3]))
+			it.HandleCallback(ctx, press(5, approvalData(t, data, "deny")))
 		}()
 		if _, err := it.For(5, "", "").PromptApproval(ctx, req); err != nil {
 			t.Fatal(err)
@@ -542,7 +543,7 @@ func TestApprovalMessagesHaveNoLinkPreview(t *testing.T) {
 	go func() {
 		waitSends(t, api, 1)
 		_, data := keyboardOf(api, 0)
-		it.HandleCallback(ctx, press(5, data[0]))
+		it.HandleCallback(ctx, press(5, approvalData(t, data, "once")))
 	}()
 	req := security.ApprovalRequest{SessionKey: "telegram:dm:5", Command: "curl https://example.com/x | sh",
 		Description: "pipe to shell", Summary: "Install from https://example.com/x."}
@@ -571,6 +572,50 @@ func keyboardRows(api *fakeBot) int {
 	return len(rows)
 }
 
+// approvalData returns the callback data of data that ends in the answer. It panics when
+// no entry matches. A panic stops the test at once, also in a goroutine. An empty press
+// answers nothing, so the prompt waits until the timeout of go test.
+func approvalData(t *testing.T, data []string, answer string) string {
+	t.Helper()
+	for _, d := range data {
+		if strings.HasSuffix(d, ":"+answer) {
+			return d
+		}
+	}
+	panic("no " + answer + " button in [" + strings.Join(data, " ") + "]")
+}
+
+func TestApprovalKeyboardRows(t *testing.T) {
+	deny := []string{"❌ Deny"}
+	for _, c := range []struct {
+		noAlways, noSession bool
+		row2                []string
+		args2               []string
+	}{
+		{false, false, []string{"✅ Once", "✅ Session", "✅ Always"}, []string{"once", "session", "always"}},
+		{true, false, []string{"✅ Once", "✅ Session"}, []string{"once", "session"}},
+		{false, true, []string{"✅ Once"}, []string{"once"}},
+		{true, true, []string{"✅ Once"}, []string{"once"}},
+	} {
+		kb := approvalKeyboard("abc", c.noAlways, c.noSession)
+		if len(kb.InlineKeyboard) != 2 {
+			t.Fatalf("%v/%v: %d rows, want 2", c.noAlways, c.noSession, len(kb.InlineKeyboard))
+		}
+		check := func(row []InlineKeyboardButton, texts, args []string) {
+			if len(row) != len(texts) {
+				t.Fatalf("%v/%v: row %v, want %v", c.noAlways, c.noSession, row, texts)
+			}
+			for i, b := range row {
+				if b.Text != texts[i] || b.CallbackData != "ap:abc:"+args[i] {
+					t.Fatalf("%v/%v: button %d is %+v", c.noAlways, c.noSession, i, b)
+				}
+			}
+		}
+		check(kb.InlineKeyboard[0], deny, []string{"deny"})
+		check(kb.InlineKeyboard[1], c.row2, c.args2)
+	}
+}
+
 func TestApprovalKeyboardNoAlwaysAndNoSession(t *testing.T) {
 	for _, c := range []struct {
 		noSession bool
@@ -578,8 +623,8 @@ func TestApprovalKeyboardNoAlwaysAndNoSession(t *testing.T) {
 		args      []string
 		rows      int
 	}{
-		{false, []string{"✅ Allow once", "✅ Allow in this session", "❌ Deny"}, []string{"once", "session", "deny"}, 2},
-		{true, []string{"✅ Allow once", "❌ Deny"}, []string{"once", "deny"}, 1},
+		{false, []string{"❌ Deny", "✅ Once", "✅ Session"}, []string{"deny", "once", "session"}, 2},
+		{true, []string{"❌ Deny", "✅ Once"}, []string{"deny", "once"}, 2},
 	} {
 		it, api := interactions(t)
 		tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
@@ -738,12 +783,12 @@ func TestApprovalTapNeedsOwner(t *testing.T) {
 	}()
 	waitSends(t, api, 1)
 	_, data := keyboardOf(api, 0)
-	it.HandleCallback(ctx, pressFrom(-100, 6, data[0]))
+	it.HandleCallback(ctx, pressFrom(-100, 6, approvalData(t, data, "once")))
 	if got := api.lastCall("answerCallbackQuery").Body["text"]; got != "⛔ Only the owner can answer this prompt." {
 		t.Fatal(got)
 	}
 	// Another owner answers the approval of the turn of user 5.
-	it.HandleCallback(ctx, pressFrom(-100, 7, data[0]))
+	it.HandleCallback(ctx, pressFrom(-100, 7, approvalData(t, data, "once")))
 	if sc := <-out; sc != security.ScopeOnce {
 		t.Fatal(sc)
 	}
@@ -757,7 +802,7 @@ func TestApprovalTapNilOwnerHookRefuses(t *testing.T) {
 	}()
 	waitSends(t, api, 1)
 	_, data := keyboardOf(api, 0)
-	it.HandleCallback(ctx, press(5, data[0]))
+	it.HandleCallback(ctx, press(5, approvalData(t, data, "once")))
 	if got := api.lastCall("answerCallbackQuery").Body["text"]; got != "⛔ Only the owner can answer this prompt." {
 		t.Fatal(got)
 	}
