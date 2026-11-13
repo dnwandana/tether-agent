@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
@@ -340,4 +341,50 @@ func TestJudgeScriptPrompt(t *testing.T) {
 		t.Fatal("no provider must be risky", r, err)
 	}
 	var _ ScriptJudge = ProviderJudge{}
+}
+
+// deadlineProvider approves each call and keeps the time that was left on the context.
+type deadlineProvider struct{ left time.Duration }
+
+func (p *deadlineProvider) Name() string  { return "fake" }
+func (p *deadlineProvider) Model() string { return "fake-model" }
+func (p *deadlineProvider) Stream(ctx context.Context, _ provider.Request) (<-chan provider.Event, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		p.left = time.Until(dl)
+	}
+	ch := make(chan provider.Event, 2)
+	ch <- provider.Event{Type: provider.EventText, Delta: "APPROVE: ok"}
+	ch <- provider.Event{Type: provider.EventDone, FinishReason: "stop", Usage: &provider.Usage{}}
+	close(ch)
+	return ch, nil
+}
+
+func TestProviderJudgeTimeoutField(t *testing.T) {
+	p := &deadlineProvider{}
+	if _, err := (ProviderJudge{Prov: p, Timeout: 2 * time.Second}).Judge(ctx, "x", "y", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if p.left <= time.Second || p.left > 2*time.Second {
+		t.Fatal("Timeout 2s:", p.left)
+	}
+	if _, err := (ProviderJudge{Prov: p}).Judge(ctx, "x", "y", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if p.left <= 29*time.Second || p.left > 30*time.Second {
+		t.Fatal("a zero Timeout must give 30s:", p.left)
+	}
+}
+
+func TestGateSmartScriptMaxCharsField(t *testing.T) {
+	g := newGate(t, "smart", "deny")
+	g.SmartScriptMaxChars = 100
+	var calls int
+	g.Judge = scriptJudge{n: &calls}
+	p := &countingPrompter{answer: ScopeOnce}
+	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: strings.Repeat("x", 101)}, p); err != nil || p.n != 1 || calls != 0 {
+		t.Fatal("a script over 100 characters must go to the user", err, p.n, calls)
+	}
+	if err := g.CheckScript(ctx, ApprovalRequest{SessionID: "s", Command: strings.Repeat("é", 100)}, p); err != nil || p.n != 1 || calls != 1 {
+		t.Fatal("a script of 100 characters must go to the judge", err, p.n, calls)
+	}
 }

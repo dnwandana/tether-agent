@@ -118,12 +118,15 @@ const GatewaySelfBlocked = "BLOCKED (gateway): this command stops or restarts th
 // DefaultApprovalTimeout. A nil DB keeps "Always" answers for the session
 // only. A nil Judge makes smart mode ask the user. Log is optional.
 type Gate struct {
-	Mode            string
-	CronMode        string
-	Timeout         time.Duration
-	DB              *db.DB
-	Judge           Judge
-	SudoPasswordSet bool
+	Mode     string
+	CronMode string
+	Timeout  time.Duration
+	DB       *db.DB
+	Judge    Judge
+	// SmartScriptMaxChars is the longest script that goes to the judge. A longer
+	// script goes to the user. 0 uses the const SmartScriptMaxChars.
+	SmartScriptMaxChars int
+	SudoPasswordSet     bool
 	// InGateway is true in the gateway process. The gate then blocks a command
 	// that stops or restarts the gateway, except in a run that cron started.
 	InGateway bool
@@ -256,7 +259,7 @@ func (g *Gate) CheckScript(ctx context.Context, req ApprovalRequest, p Prompter)
 	// A script that uses state.db never goes to the judge, the same as a command.
 	stateDB := literal && IsStateDBPatternID(pat.ID)
 	if sj, ok := g.Judge.(ScriptJudge); ok && g.Mode == "smart" && !stateDB &&
-		utf8.RuneCountInString(req.Command) <= SmartScriptMaxChars {
+		utf8.RuneCountInString(req.Command) <= g.scriptMax() {
 		risky, err := sj.JudgeScript(ctx, req.Command, req.Description, req.SessionID)
 		if err != nil {
 			g.logf("approval: the smart judge failed, so the gate asks the user", "pattern", ScriptPatternID, "err", err)
@@ -266,6 +269,14 @@ func (g *Gate) CheckScript(ctx context.Context, req ApprovalRequest, p Prompter)
 		}
 	}
 	return g.ask(ctx, req, p)
+}
+
+// scriptMax returns the longest script, in runes, that goes to the judge.
+func (g *Gate) scriptMax() int {
+	if g.SmartScriptMaxChars > 0 {
+		return g.SmartScriptMaxChars
+	}
+	return SmartScriptMaxChars
 }
 
 // ask puts the question to the user and applies the answer.

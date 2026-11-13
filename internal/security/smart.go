@@ -63,6 +63,8 @@ type ProviderJudge struct {
 	Prov provider.Provider
 	// Record records the usage of each completed judge call. Nil records nothing.
 	Record provider.RecordUsage
+	// Timeout limits one judge call. 0 uses smartTimeout.
+	Timeout time.Duration
 }
 
 // Judge returns risky=false only when the model gives an APPROVE verdict, for
@@ -83,7 +85,11 @@ func (j ProviderJudge) ask(ctx context.Context, prompt, sessionID string) (bool,
 	if j.Prov == nil {
 		return true, errors.New("smart approval: no provider is set")
 	}
-	ctx, cancel := context.WithTimeout(ctx, smartTimeout)
+	limit := smartTimeout
+	if j.Timeout > 0 {
+		limit = j.Timeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
 	defer cancel()
 	ch, err := j.Prov.Stream(ctx, provider.Request{
 		Messages:  []provider.Message{{Role: provider.RoleUser, Content: prompt}},
