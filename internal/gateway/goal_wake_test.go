@@ -314,3 +314,23 @@ func TestArmChecksAPIDOfAnotherSession(t *testing.T) {
 	alive.Store(false)
 	waitFor(t, func() bool { return len(rec.list()) == 1 })
 }
+
+func TestWakeUsesTheConfiguredBarrierLimit(t *testing.T) {
+	st := sessions.New(openTestDB(t))
+	m := goals.NewManager(goals.Deps{
+		Store: &goals.Store{DB: openTestDB(t)}, Sessions: st,
+		Cfg: func() config.GoalsConfig {
+			g := config.Default().Goals
+			g.MaxBarrierWaitS = 60
+			return g
+		},
+		Procs: tools.NewProcRegistry(), Alive: func(int) bool { return true },
+		Now: time.Now, Log: slog.New(slog.DiscardHandler),
+	})
+	since := time.Now().Add(-60*time.Second + 50*time.Millisecond)
+	sid, s := parkGoal(t, m, st, func(s *goals.State) { s.WaitOnPID(4242, "the build", since) })
+	rec := &fireRec{}
+	w := &GoalWaker{Goals: m, Fire: rec.fire, checkEvery: time.Hour}
+	w.Arm("k1", sid, s)
+	waitFor(t, func() bool { return len(rec.list()) == 1 })
+}

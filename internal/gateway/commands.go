@@ -937,8 +937,18 @@ const helpMember = "📖 **Commands**\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n/todo · see the task list\n\n" +
 	"Only the owner can use the other commands."
 
-// helpSkillsMax is the number of skill commands that /help shows with no argument.
+// helpSkillsMax is the number of skill commands that /help shows with no argument. It is the
+// fallback when gateway.help_max_skills is not set.
 const helpSkillsMax = 10
+
+// helpSkillsLimit returns gateway.help_max_skills, or helpSkillsMax when the key is not set.
+// It accepts a nil Deps and a nil Cfg.
+func (d *Deps) helpSkillsLimit() int {
+	if d != nil && d.Cfg != nil && d.Cfg.Gateway.HelpMaxSkills > 0 {
+		return d.Cfg.Gateway.HelpMaxSkills
+	}
+	return helpSkillsMax
+}
 
 // helpDescMax is the maximum length of a skill description in /help, in runes.
 const helpDescMax = 60
@@ -968,8 +978,9 @@ func cmdHelp(_ context.Context, c *CommandCtx, args string) error {
 		return nil
 	}
 	if len(cmds) > 0 {
-		text += fmt.Sprintf("\n\n⚡ **Skills** (%d)\n", len(cmds)) + strings.Join(lines[:min(len(lines), helpSkillsMax)], "\n")
-		if n := len(cmds) - helpSkillsMax; n > 0 {
+		limit := c.Deps.helpSkillsLimit()
+		text += fmt.Sprintf("\n\n⚡ **Skills** (%d)\n", len(cmds)) + strings.Join(lines[:min(len(lines), limit)], "\n")
+		if n := len(cmds) - limit; n > 0 {
 			text += fmt.Sprintf("\n… and %d more. Send /help skills to see all.", n)
 		}
 	}

@@ -280,3 +280,42 @@ func TestModelListFailureNoModel(t *testing.T) {
 		t.Fatalf("got:\n%s", out)
 	}
 }
+
+func TestModelListPageSizeFromConfig(t *testing.T) {
+	ctx := context.Background()
+	c, _ := interactiveCtx(t)
+	ids := modelIDs(20)
+	serveModels(t, c, "box", "vendor/m02", http.StatusOK, ids...)
+	c.Deps.Cfg.Gateway.ModelPageSize = 4
+	s, err := c.current(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := stampOf(ids)
+	use := func(i int, label string) Button { return Button{Text: label, Data: modelUseAction("box", i, st)} }
+	dot := Button{Text: noAction, Data: noAction}
+	want := [][]Button{
+		{use(1, "m01"), use(2, "✓ m02")},
+		{use(3, "m03"), use(4, "m04")},
+		{dot, {Text: "1 / 5", Data: noAction}, {Text: "Next ▶", Data: "/model box 2"}},
+		modelLastRow("box"),
+	}
+	if r := c.modelListReply(ctx, s, "box", 1, ""); !reflect.DeepEqual(r.Buttons, want) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+	want = [][]Button{
+		{use(17, "m17"), use(18, "m18")},
+		{use(19, "m19"), use(20, "m20")},
+		{{Text: "◀ Prev", Data: "/model box 4"}, {Text: "5 / 5", Data: noAction}, dot},
+		modelLastRow("box"),
+	}
+	if r := c.modelListReply(ctx, s, "box", 5, ""); !reflect.DeepEqual(r.Buttons, want) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+	var nilDeps *Deps
+	for _, d := range []*Deps{nilDeps, {}, {Cfg: &config.Config{}}} {
+		if got := d.modelsPerPage(); got != modelPageSize {
+			t.Fatalf("%+v: %d", d, got)
+		}
+	}
+}

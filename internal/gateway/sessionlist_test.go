@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 )
@@ -433,5 +434,30 @@ func TestSessionsMemberHasNoActionButtons(t *testing.T) {
 	run(t, c, "/sessions")
 	if r := lastSent(t, sent); len(r.Buttons) == 0 || !strings.HasPrefix(r.Buttons[0][0].Data, "/resume ") {
 		t.Fatalf("%+v", r.Buttons)
+	}
+}
+
+func TestListReplyPageSizeFromConfig(t *testing.T) {
+	f := newListFixture(t, 10, true)
+	f.c.Deps.Cfg.Gateway.SessionPageSize = 4
+	r := f.list(t, listSessions, listArgs{})
+	if !strings.HasPrefix(r.Text, "📋 **Your sessions** · 1–4 of 10\n") {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if got := labels(r); !reflect.DeepEqual(got, [][]string{{"1", "2", "3", "4"}, {"·", "1 / 3", "Next ▶"}}) {
+		t.Fatal(got)
+	}
+	r = f.list(t, listSessions, listArgs{Page: 3})
+	if !strings.HasPrefix(r.Text, "📋 **Your sessions** · 9–10 of 10\n") {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if got := labels(r); !reflect.DeepEqual(got, [][]string{{"9", "10"}, {"◀ Prev", "3 / 3", "·"}}) {
+		t.Fatal(got)
+	}
+	var nilDeps *Deps
+	for _, d := range []*Deps{nilDeps, {}, {Cfg: &config.Config{}}} {
+		if got := d.sessionsPerPage(); got != sessionsPageSize {
+			t.Fatalf("%+v: %d", d, got)
+		}
 	}
 }

@@ -17,7 +17,8 @@ import (
 // of one key (senderQueued). Each one keeps its text and its images until its turn. The
 // limit applies only to a new message in acceptMessage. A path that moves or keeps a text
 // that the sender already sent does not check it: flushBusyText, /steer before the start,
-// the text that /now moves, the leftover steer, and the resume path.
+// the text that /now moves, the leftover steer, and the resume path. The const is the
+// fallback when gateway.max_queued_messages is not set.
 const maxQueuedMessages = 20
 
 // The busy texts of Tether Agent, in Markdown. A busy ack is one plain line.
@@ -76,7 +77,8 @@ const (
 	// busyAckEvery is the minimum time between two busy acks of one kind in one session
 	// (Hermes).
 	busyAckEvery = 30 * time.Second
-	// debounceWindow and debounceHardCap merge the busy texts of a key (Hermes).
+	// debounceWindow and debounceHardCap merge the busy texts of a key (Hermes). They are the
+	// fallbacks when gateway.debounce_s and gateway.debounce_max_s are not set.
 	debounceWindow  = 350 * time.Millisecond
 	debounceHardCap = time.Second
 )
@@ -819,6 +821,32 @@ func (g *Gateway) clock() time.Time {
 	return time.Now()
 }
 
+// queueLimit returns gateway.max_queued_messages, or maxQueuedMessages when the key is not
+// set. It accepts a nil Deps and a nil Cfg.
+func (d *Deps) queueLimit() int {
+	if d != nil && d.Cfg != nil && d.Cfg.Gateway.MaxQueuedMessages > 0 {
+		return d.Cfg.Gateway.MaxQueuedMessages
+	}
+	return maxQueuedMessages
+}
+
+// debounceTimes returns the window and the hard cap from gateway.debounce_s and
+// gateway.debounce_max_s. A value that is not set gives debounceWindow or debounceHardCap.
+// It accepts a nil Deps and a nil Cfg.
+func (d *Deps) debounceTimes() (window, hardCap time.Duration) {
+	window, hardCap = debounceWindow, debounceHardCap
+	if d == nil || d.Cfg == nil {
+		return window, hardCap
+	}
+	if f := d.Cfg.Gateway.DebounceS; f > 0 {
+		window = time.Duration(f * float64(time.Second))
+	}
+	if f := d.Cfg.Gateway.DebounceMaxS; f > 0 {
+		hardCap = time.Duration(f * float64(time.Second))
+	}
+	return window, hardCap
+}
+
 func (g *Gateway) debouncer() *Debouncer {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -828,7 +856,7 @@ func (g *Gateway) debouncer() *Debouncer {
 // debouncerLocked is debouncer for a caller that holds g.mu.
 func (g *Gateway) debouncerLocked() *Debouncer {
 	if g.debounce == nil {
-		g.debounce = NewDebouncer(debounceWindow, debounceHardCap)
+		g.debounce = NewDebouncer(g.Deps.debounceTimes())
 	}
 	return g.debounce
 }

@@ -25,14 +25,17 @@ func cmdTodo(ctx context.Context, c *CommandCtx, _ string) error {
 	}
 	// A new map makes LoadTodos read the list from history only.
 	var values map[string]any
+	var lim tools.TodoLimits
 	if c.Deps.NewEnv != nil {
 		if env := c.Deps.NewEnv(s, ""); env != nil {
-			values = env.Values
+			values, lim = env.Values, env.Todo
 		}
 	}
 	if values == nil {
 		values = map[string]any{}
 	}
+	// The restore uses the configured limits, not the defaults.
+	tools.TodoStoreWith(values, lim)
 	if _, err := tools.LoadTodos(ctx, c.store(), values, s.ID); err != nil {
 		return err
 	}

@@ -87,7 +87,7 @@ func (w *GoalWaker) Arm(key, sessionID string, st goals.State) {
 	switch {
 	case st.WaitingOnPID != nil || st.WaitingOnSession != nil:
 		if st.WaitingSince > 0 {
-			deadline = timeOfSecs(st.WaitingSince).Add(goals.MaxBarrierWait)
+			deadline = timeOfSecs(st.WaitingSince).Add(env.BarrierLimit())
 		}
 	default:
 		deadline = timeOfSecs(st.WaitingUntil)

@@ -278,10 +278,19 @@ func approvalTimeout(d *Deps) time.Duration {
 	return time.Duration(s) * time.Second
 }
 
-// gateAddedLine returns the Hermes reply for an added gate.
-func gateAddedLine(command string) string {
+// gateAddedLine returns the Hermes reply for an added gate. It shows the values of the gate.
+func gateAddedLine(g goals.Gate) string {
 	return fmt.Sprintf("⚿ Gate added: $ %s (%d retries, %ds timeout). It must pass before the goal can complete.",
-		EscapeMarkdown(command), goals.GateMaxRetries, int(goals.GateTimeout/time.Second))
+		EscapeMarkdown(g.Command), g.MaxRetries, g.TimeoutSeconds)
+}
+
+// gateValues returns goals.gate_timeout_s and goals.gate_max_retries. A nil Cfg gives 0 and 0,
+// and AddGateWith then uses its default values.
+func gateValues(d *Deps) (timeoutS, maxRetries int) {
+	if d.Cfg == nil {
+		return 0, 0
+	}
+	return d.Cfg.Goals.GateTimeoutS, d.Cfg.Goals.GateMaxRetries
 }
 
 // goalGate lists, adds, removes, or clears the quality gates of the goal, like Hermes _gate.
@@ -382,13 +391,14 @@ func gateAdd(ctx context.Context, c *CommandCtx, sess *sessions.Session, command
 // addGate adds command as a gate of the goal of the session and returns the added line.
 // The goal must be active or paused.
 func addGate(ctx context.Context, d *Deps, sessionID, command string) (Reply, error) {
-	var added string
+	var added goals.Gate
+	timeoutS, maxRetries := gateValues(d)
 	_, err := d.Goals.Update(ctx, sessionID, func(st *goals.State, exists bool) error {
 		if !exists || (st.Status != goals.StatusActive && st.Status != goals.StatusPaused) {
 			return errNoActiveGoal
 		}
-		if n := st.AddGate(command); n > 0 {
-			added = st.Gates[n-1].Command
+		if n := st.AddGateWith(command, timeoutS, maxRetries); n > 0 {
+			added = st.Gates[n-1]
 		}
 		return nil
 	})

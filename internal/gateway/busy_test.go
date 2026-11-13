@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/agent"
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
 
@@ -1421,4 +1422,52 @@ func TestMemberInSharedSessionGetsNoNowButton(t *testing.T) {
 	wantBusyReply(t, r.replies[0], SteerAck, []Button{{Text: "⚡ Do this now", Data: "/now 1"}})
 	// The stop drops the queued media, so the cleanup does not wait for its turn.
 	_ = g.Handle(ctx, inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+}
+
+func TestQueueSizeFromConfig(t *testing.T) {
+	g, _, _, _ := busyGateway(t)
+	g.Deps.Cfg.Gateway.MaxQueuedMessages = 3
+	f := &replyFactory{}
+	for range 3 {
+		g.Submit(context.Background(), media("k"), f.new, nil)
+	}
+	waitFor(t, func() bool { return g.queueLen("k") == 3 })
+	if err := g.Handle(context.Background(), media("k"), f.new); err != nil {
+		t.Fatal(err)
+	}
+	if n := g.queueLen("k"); n != 3 {
+		t.Fatal("a queue of gateway.max_queued_messages must refuse the message:", n)
+	}
+	reps := f.replies()
+	if last := reps[len(reps)-1]; last.Text != QueueFullReply {
+		t.Fatalf("%+v", last)
+	}
+	_ = g.Handle(context.Background(), inb("k", "/stop"), func() Renderer { return &recRenderer{} })
+}
+
+func TestQueueLimitFallsBackToConst(t *testing.T) {
+	var nilDeps *Deps
+	for _, d := range []*Deps{nilDeps, {}, {Cfg: &config.Config{}}} {
+		if got := d.queueLimit(); got != maxQueuedMessages {
+			t.Fatalf("%+v: %d", d, got)
+		}
+	}
+}
+
+func TestDebounceFromConfig(t *testing.T) {
+	cfg := config.Default()
+	cfg.Gateway.DebounceS, cfg.Gateway.DebounceMaxS = 0.05, 0.2
+	d := (&Gateway{Deps: &Deps{Cfg: &cfg}}).debouncer()
+	if d.window != 50*time.Millisecond || d.hardCap != 200*time.Millisecond {
+		t.Fatalf("window %s, hard cap %s", d.window, d.hardCap)
+	}
+	for _, g := range []*Gateway{{}, {Deps: &Deps{}}} {
+		if d := g.debouncer(); d.window != debounceWindow || d.hardCap != debounceHardCap {
+			t.Fatalf("fallback: window %s, hard cap %s", d.window, d.hardCap)
+		}
+	}
+	def := config.Default()
+	if d := (&Gateway{Deps: &Deps{Cfg: &def}}).debouncer(); d.window != 350*time.Millisecond || d.hardCap != time.Second {
+		t.Fatalf("defaults: window %s, hard cap %s", d.window, d.hardCap)
+	}
 }

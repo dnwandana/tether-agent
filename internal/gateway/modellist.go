@@ -12,8 +12,17 @@ import (
 	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
-// modelPageSize is the number of model buttons on one page of a model list.
+// modelPageSize is the number of model buttons on one page of a model list. It is the
+// fallback when gateway.model_page_size is not set.
 const modelPageSize = 8
+
+// modelsPerPage returns gateway.model_page_size, or modelPageSize when the key is not set.
+func (d *Deps) modelsPerPage() int {
+	if d != nil && d.Cfg != nil && d.Cfg.Gateway.ModelPageSize > 0 {
+		return d.Cfg.Gateway.ModelPageSize
+	}
+	return modelPageSize
+}
 
 // modelEntryMaxBytes is the maximum length in bytes of an entry name that gets model
 // buttons. Telegram callback data has a limit of 64 bytes, and the longest action is
@@ -116,12 +125,13 @@ func (c *CommandCtx) modelListReply(ctx context.Context, s *sessions.Session, en
 		return r
 	}
 
-	pages := max((len(ids)+modelPageSize-1)/modelPageSize, 1)
+	size := c.Deps.modelsPerPage()
+	pages := max((len(ids)+size-1)/size, 1)
 	page = min(max(page, 1), pages)
-	first := (page - 1) * modelPageSize
+	first := (page - 1) * size
 	stamp := list.Stamp()
 	var rows [][]Button
-	for i := first; i < min(first+modelPageSize, len(ids)); i++ {
+	for i := first; i < min(first+size, len(ids)); i++ {
 		if (i-first)%modelButtonsPerRow == 0 {
 			rows = append(rows, nil)
 		}

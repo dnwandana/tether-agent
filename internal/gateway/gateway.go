@@ -351,7 +351,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 		g.mu.Unlock()
 		return func() error { return nil }
 	}
-	if senderQueued(ks) >= maxQueuedMessages {
+	if senderQueued(ks) >= g.Deps.queueLimit() {
 		g.mu.Unlock()
 		ackReply(newRenderer(), Reply{Text: QueueFullReply})
 		return func() error { return nil }

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/skills"
 )
 
@@ -143,5 +144,23 @@ func TestHelpOtherArgumentGivesNormalHelp(t *testing.T) {
 	run(t, c, "/help model")
 	if out.String() != plain {
 		t.Fatalf("got:\n%s\nwant:\n%s", out, plain)
+	}
+}
+
+func TestHelpSkillsMaxFromConfig(t *testing.T) {
+	c, out := cmdCtx(t, "cli:t")
+	withSkills(c, manySkills(14)...)
+	c.Deps.Cfg.Gateway.HelpMaxSkills = 3
+	run(t, c, "/help")
+	want := helpCLI + "\n\n⚡ **Skills** (14)\n" + manyLines(1, 3) +
+		"\n… and 11 more. Send /help skills to see all.\n"
+	if out.String() != want {
+		t.Fatalf("got:\n%s", out)
+	}
+	var nilDeps *Deps
+	for _, d := range []*Deps{nilDeps, {}, {Cfg: &config.Config{}}} {
+		if got := d.helpSkillsLimit(); got != helpSkillsMax {
+			t.Fatalf("%+v: %d", d, got)
+		}
 	}
 }

@@ -281,3 +281,23 @@ func TestGoalWaitDropsTheQueuedGoalTurns(t *testing.T) {
 		t.Fatalf("drops %d", rec.drops)
 	}
 }
+
+func TestGoalGateAddUsesTheConfig(t *testing.T) {
+	resetGateConfirms(t)
+	c, rec := goalCtx(t, false)
+	c.Deps.Cfg.Goals.GateTimeoutS, c.Deps.Cfg.Goals.GateMaxRetries = 600, 5
+	setGoal(t, c.Deps, c.Session.ID, "ship it")
+	run(t, c, "/goal gate add make test")
+	if got := rec.lastText(t); got != "⚿ Gate added: $ make test (5 retries, 600s timeout). It must pass before the goal can complete." {
+		t.Fatalf("%q", got)
+	}
+	if g := loadGoal(t, c.Deps, c.Session.ID).Gates[0]; g.TimeoutSeconds != 600 || g.MaxRetries != 5 {
+		t.Fatalf("the new gate must hold the config values: %+v", g)
+	}
+}
+
+func TestGateValuesNilConfig(t *testing.T) {
+	if s, r := gateValues(&Deps{}); s != 0 || r != 0 {
+		t.Fatal("a nil Cfg gives 0, so AddGateWith uses the consts:", s, r)
+	}
+}

@@ -12,8 +12,18 @@ import (
 	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
-// sessionsPageSize is the number of sessions on one page of a session list.
+// sessionsPageSize is the number of sessions on one page of a session list. It is the
+// fallback when gateway.session_page_size is not set.
 const sessionsPageSize = 8
+
+// sessionsPerPage returns gateway.session_page_size, or sessionsPageSize when the key is
+// not set.
+func (d *Deps) sessionsPerPage() int {
+	if d != nil && d.Cfg != nil && d.Cfg.Gateway.SessionPageSize > 0 {
+		return d.Cfg.Gateway.SessionPageSize
+	}
+	return sessionsPageSize
+}
 
 // newSessionTitle is the name of a session that has no title.
 const newSessionTitle = "New session"
@@ -205,21 +215,22 @@ func (c *CommandCtx) listReply(ctx context.Context, mode listMode, a listArgs, n
 	// /sessions and /resume show the current session on a separate top line. A search
 	// shows it as a row when its title matches.
 	topLine := cur != nil && (mode == listSessions || mode == listResume) && a.Search == ""
-	q := sessions.ListQuery{Limit: sessionsPageSize, Search: a.Search, Archived: mode == listArchived}
+	size := c.Deps.sessionsPerPage()
+	q := sessions.ListQuery{Limit: size, Search: a.Search, Archived: mode == listArchived}
 	if topLine {
 		q.Exclude = cur.ID
 	}
 	page := max(a.Page, 1)
-	q.Offset = (page - 1) * sessionsPageSize
+	q.Offset = (page - 1) * size
 	rows, total, err := c.store().ListPage(ctx, c.Key, q)
 	if err != nil {
 		return Reply{}, err
 	}
-	pages := (total + sessionsPageSize - 1) / sessionsPageSize
+	pages := (total + size - 1) / size
 	if total > 0 && page > pages {
 		// A page number after the last page shows the last page.
 		page = pages
-		q.Offset = (page - 1) * sessionsPageSize
+		q.Offset = (page - 1) * size
 		if rows, total, err = c.store().ListPage(ctx, c.Key, q); err != nil {
 			return Reply{}, err
 		}
