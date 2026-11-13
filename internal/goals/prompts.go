@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/dnwandana/tether-agent/internal/config"
 )
 
 // The prompt texts below are copies of the Hermes hermes_cli/goals.py texts. A "{name}"
@@ -196,6 +198,7 @@ const DraftContractSystemPrompt = "You turn a user's plain-language objective in
 const goalAlreadySeenKick = "[Goal set] Continue with the goal you were just given; there is no need to re-read it."
 
 // The judge input cuts, in characters, from Hermes judge_goal and _render_background_block.
+// A cut of 0 in JudgeInput.Chars uses its const here.
 const (
 	judgeGoalChars     = 2000
 	judgeResponseChars = 4000
@@ -229,6 +232,8 @@ type JudgeInput struct {
 	Delegations int
 	TodoBlock   string
 	Now         time.Time
+	// Chars holds the cuts of the judge input. A field of 0 uses its const.
+	Chars config.GoalsJudgeChars
 }
 
 // GateFailure holds the values of the continuation prompt after a failed quality gate.
@@ -268,20 +273,20 @@ func cutRunes(s string, limit int) string {
 
 // oneLine replaces each new line with a space, trims the text, and cuts it for the process
 // block of the judge prompt.
-func oneLine(s string) string {
-	return cutRunes(strings.TrimSpace(strings.ReplaceAll(s, "\n", " ")), judgeProcChars)
+func oneLine(s string, limit int) string {
+	return cutRunes(strings.TrimSpace(strings.ReplaceAll(s, "\n", " ")), limit)
 }
 
 // processBlock is the Hermes _render_background_block. It gives "" when no process has a
 // pid, so the prompt stays the same as the prompt with no process.
-func processBlock(procs []ProcLine) string {
+func processBlock(procs []ProcLine, limit int) string {
 	var lines []string
 	for _, p := range procs {
 		if p.PID <= 0 {
 			continue
 		}
-		line := fmt.Sprintf("- pid %d: %s (running %ds)", p.PID, oneLine(p.Command), int(p.Running.Seconds()))
-		if tail := oneLine(p.Tail); tail != "" {
+		line := fmt.Sprintf("- pid %d: %s (running %ds)", p.PID, oneLine(p.Command, limit), int(p.Running.Seconds()))
+		if tail := oneLine(p.Tail, limit); tail != "" {
 			line += " | recent output: " + tail
 		}
 		lines = append(lines, line)
@@ -296,21 +301,27 @@ func processBlock(procs []ProcLine) string {
 // judge_goal order: the contract, then the subgoals, then the plain template. The todo
 // block of Tether Agent comes after the Hermes process and delegation blocks.
 func JudgeUserPrompt(in JudgeInput) string {
-	background := processBlock(in.Processes)
+	cut := func(n, fallback int) int {
+		if n > 0 {
+			return n
+		}
+		return fallback
+	}
+	background := processBlock(in.Processes, cut(in.Chars.Process, judgeProcChars))
 	if in.Delegations > 0 {
 		background += fill(judgeDelegationsTemplate, "count", strconv.Itoa(in.Delegations))
 	}
 	if strings.TrimSpace(in.TodoBlock) != "" {
-		background += cutRunes(in.TodoBlock, judgeTodoChars) + "\n\n"
+		background += cutRunes(in.TodoBlock, cut(in.Chars.Todo, judgeTodoChars)) + "\n\n"
 	}
 	common := []string{
-		"goal", cutRunes(in.Goal, judgeGoalChars),
-		"response", cutRunes(in.Response, judgeResponseChars),
+		"goal", cutRunes(in.Goal, cut(in.Chars.Goal, judgeGoalChars)),
+		"response", cutRunes(in.Response, cut(in.Chars.Response, judgeResponseChars)),
 		"background_block", background,
 		"current_time", in.Now.Format("2006-01-02 15:04:05 MST"),
 	}
 	if !in.Contract.Empty() {
-		block := cutRunes(in.Contract.Render(in.Subgoals), judgeContractChars)
+		block := cutRunes(in.Contract.Render(in.Subgoals), cut(in.Chars.Contract, judgeContractChars))
 		return fill(judgeUserContractTemplate, append(common, "contract_block", block)...)
 	}
 	var kept []string
@@ -320,7 +331,7 @@ func JudgeUserPrompt(in JudgeInput) string {
 		}
 	}
 	if len(kept) > 0 {
-		block := cutRunes(numbered(kept), judgeSubgoalChars)
+		block := cutRunes(numbered(kept), cut(in.Chars.Subgoal, judgeSubgoalChars))
 		return fill(judgeUserSubgoalsTemplate, append(common, "subgoals_block", block)...)
 	}
 	return fill(judgeUserTemplate, common...)

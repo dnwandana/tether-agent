@@ -146,3 +146,22 @@ func TestPIDAlive(t *testing.T) {
 		t.Fatal("a nil Alive uses PIDAlive")
 	}
 }
+
+func TestBarrierLimitFromField(t *testing.T) {
+	if got := (WaitEnv{}).BarrierLimit(); got != MaxBarrierWait {
+		t.Fatal("0 keeps the const:", got)
+	}
+	env := WaitEnv{Alive: func(int) bool { return true }, Now: waitNow.Add(10 * time.Minute), MaxBarrier: 10 * time.Minute}
+	if got := env.BarrierLimit(); got != 10*time.Minute {
+		t.Fatal(got)
+	}
+	st := waitGoal()
+	st.WaitOnPID(4242, "poller", waitNow)
+	if !st.IsWaiting(env) {
+		t.Fatal("the barrier holds at exactly 10 min")
+	}
+	env.Now = waitNow.Add(10*time.Minute + time.Second)
+	if st.IsWaiting(env) || st.WaitingOnPID != nil {
+		t.Fatal("the barrier ends after 10 min")
+	}
+}

@@ -85,3 +85,20 @@ func TestGateConstants(t *testing.T) {
 		t.Fatal(GateTimeout, GateMaxRetries, GateOutputTail)
 	}
 }
+
+func TestAddGateWithWritesTheValues(t *testing.T) {
+	st := State{Goal: "ship it", Status: StatusActive, MaxTurns: 20, Epoch: 1}
+	if n := st.AddGateWith("  make test  ", 600, 5); n != 1 {
+		t.Fatal(n)
+	}
+	if g := st.Gates[0]; g.Command != "make test" || g.TimeoutSeconds != 600 || g.MaxRetries != 5 {
+		t.Fatalf("%+v", g)
+	}
+	st.AddGateWith("make lint", 0, 0)
+	if g := st.Gates[1]; g.TimeoutSeconds != 300 || g.MaxRetries != 3 {
+		t.Fatalf("0 keeps the consts: %+v", g)
+	}
+	if n := st.AddGateWith("   ", 600, 5); n != 0 || len(st.Gates) != 2 {
+		t.Fatal("an empty command adds no gate")
+	}
+}

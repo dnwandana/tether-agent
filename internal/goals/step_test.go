@@ -590,3 +590,51 @@ func TestStepGateCheckUsesTheDeps(t *testing.T) {
 		}
 	}
 }
+
+func TestStepJudgeLimitsFromConfig(t *testing.T) {
+	cfg := config.GoalsConfig{MaxTurns: 20, JudgeTimeoutS: 30, JudgeMaxTokens: 1024,
+		JudgeMaxParseFailures: 2, JudgeMaxTransportFailures: 2, JudgeChars: config.GoalsJudgeChars{Goal: 4}}
+	f := newStepFix(t, stepState("ship it", 20), "not json at all")
+	f.m.d.Cfg = func() config.GoalsConfig { return cfg }
+	if res := f.step("x"); res.Continuation == nil {
+		t.Fatalf("the first parse failure continues: %+v", res)
+	}
+	req := f.prov.reqs[0]
+	if req.MaxTokens != 1024 || !strings.Contains(req.Messages[0].Content, "Goal:\nship… [truncated]") {
+		t.Fatalf("max tokens %d, prompt:\n%s", req.MaxTokens, req.Messages[0].Content)
+	}
+	res := f.step("x")
+	if len(res.Notices) != 1 || res.Notices[0] != (Notice{Kind: NoticeParseFail, Count: 2, StopButtons: true}) {
+		t.Fatalf("the second parse failure pauses: %+v", res)
+	}
+
+	f = newStepFix(t, stepState("ship it", 20), "ERR")
+	f.m.d.Cfg = func() config.GoalsConfig { return cfg }
+	f.step("x")
+	res = f.step("x")
+	if len(res.Notices) != 1 || res.Notices[0] != (Notice{Kind: NoticeTransportFail, Count: 2, StopButtons: true}) {
+		t.Fatalf("the second API error pauses: %+v", res)
+	}
+}
+
+func TestStepGateTailFromConfig(t *testing.T) {
+	st := stepState("ship it", 20)
+	st.AddGate("exit 1")
+	f := newStepFix(t, st, `{"verdict":"continue","reason":"x"}`)
+	f.exits["exit 1"] = 1
+	f.m.d.Cfg = func() config.GoalsConfig {
+		return config.GoalsConfig{MaxTurns: 20, JudgeTimeoutS: 30, GateOutputTailChars: 5}
+	}
+	f.step("done")
+	if got := f.state(t).Gates[0].LastOutputTail; got != "xit 1" {
+		t.Fatalf("the tail must keep the last 5 runes of %q, got %q", "output of exit 1", got)
+	}
+}
+
+func TestStepRetryDelayFromDeps(t *testing.T) {
+	f := newStepFix(t, stepState("ship it", 20), `{"verdict":"continue","reason":"x"}`)
+	f.m.d.RetryDelay = 5 * time.Second
+	if res := f.failedTurn(errors.New("HTTP 503: the provider is down")); res.RetryAfter != 5*time.Second {
+		t.Fatalf("the retry waits the deps value: %+v", res)
+	}
+}

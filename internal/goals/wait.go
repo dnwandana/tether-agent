@@ -11,8 +11,8 @@ import (
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
-// MaxBarrierWait is the longest time that a pid or a process barrier holds
-// a goal. A process that never exits must not park the goal for ever.
+// MaxBarrierWait is the default for WaitEnv.MaxBarrier. It is the longest time that a pid or a
+// process barrier holds a goal. A process that never exits must not park the goal for ever.
 const MaxBarrierWait = 30 * time.Minute
 
 // WaitEnv gives IsWaiting the live facts that a barrier depends on.
@@ -25,6 +25,17 @@ type WaitEnv struct {
 	Batches func() int
 	// Now is the clock. The zero value uses time.Now.
 	Now time.Time
+	// MaxBarrier is the longest time that a pid or a process barrier holds a goal. 0 means
+	// MaxBarrierWait.
+	MaxBarrier time.Duration
+}
+
+// BarrierLimit returns the longest time that a pid or a process barrier holds a goal.
+func (env WaitEnv) BarrierLimit() time.Duration {
+	if env.MaxBarrier <= 0 {
+		return MaxBarrierWait
+	}
+	return env.MaxBarrier
 }
 
 func (env WaitEnv) alive(pid int) bool {
@@ -92,7 +103,7 @@ func (st *State) WaitFor(seconds float64, delegations int, reason string, now ti
 }
 
 // IsWaiting reports if a barrier still holds the goal. It clears a barrier
-// that lifted. A pid or a process barrier ends after MaxBarrierWait.
+// that lifted. A pid or a process barrier ends after env.BarrierLimit().
 func (st *State) IsWaiting(env WaitEnv) bool {
 	now := env.Now
 	if now.IsZero() {
@@ -115,7 +126,7 @@ func (st *State) IsWaiting(env WaitEnv) bool {
 		return false
 	}
 	// A pid or a process that never exits must not park the goal for ever.
-	if still && st.WaitingSince != 0 && st.WaitingUntil == 0 && nowS-st.WaitingSince > MaxBarrierWait.Seconds() {
+	if still && st.WaitingSince != 0 && st.WaitingUntil == 0 && nowS-st.WaitingSince > env.BarrierLimit().Seconds() {
 		still = false
 	}
 	if !still {

@@ -160,3 +160,28 @@ func TestStoreDeleteAndActive(t *testing.T) {
 		t.Fatalf("a delete of no row is not an error: %v", err)
 	}
 }
+
+func TestStoreGateFillFromFields(t *testing.T) {
+	d := openGoalsDB(t)
+	putRaw(t, d, "bare", `{"goal": "g", "status": "active", "gates": [{"command": "make"}]}`, 1)
+	putRaw(t, d, "kept", `{"goal": "g", "status": "active", "gates": [{"command": "make", "timeout_seconds": 120, "max_retries": 2}]}`, 1)
+	s := &Store{DB: d, GateTimeoutS: 600, GateMaxRetries: 5}
+	ctx := context.Background()
+	bare, _, err := s.Get(ctx, "bare")
+	if err != nil || bare.Gates[0].TimeoutSeconds != 600 || bare.Gates[0].MaxRetries != 5 {
+		t.Fatalf("a gate with 0 gets the store values: %+v %v", bare.Gates, err)
+	}
+	kept, _, err := s.Get(ctx, "kept")
+	if err != nil || kept.Gates[0].TimeoutSeconds != 120 || kept.Gates[0].MaxRetries != 2 {
+		t.Fatalf("a stored gate keeps its value: %+v %v", kept.Gates, err)
+	}
+	act, err := s.Active(ctx)
+	if err != nil || len(act) != 2 {
+		t.Fatal(act, err)
+	}
+	for _, a := range act {
+		if a.SessionID == "bare" && a.State.Gates[0].TimeoutSeconds != 600 {
+			t.Fatalf("Active uses the same fill: %+v", a.State.Gates)
+		}
+	}
+}

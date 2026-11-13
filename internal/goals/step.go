@@ -22,7 +22,8 @@ const (
 )
 
 // RetryDelay is the wait before the one retry after a failed or empty turn. It is the
-// skip time of a failed provider in provider.Health.
+// fallback when Deps.RetryDelay is 0. It matches the skip time of a failed provider in
+// provider.Health.
 const RetryDelay = 60 * time.Second
 
 // Continuation is the next turn of a goal. The caller queues Text as a system turn and drops
@@ -161,7 +162,7 @@ func (m *Manager) AfterTurn(ctx context.Context, out TurnOutcome) StepResult {
 			errText = out.Err.Error()
 		}
 		return m.writeStep(ctx, sid, st, rev, func(s *State, _ bool) StepResult {
-			return applyFailedTurn(s, errText)
+			return applyFailedTurn(s, errText, m.retryDelay())
 		})
 	}
 	run := m.runChecks(ctx, out, cloneState(st), env, now)
@@ -171,13 +172,21 @@ func (m *Manager) AfterTurn(ctx context.Context, out TurnOutcome) StepResult {
 }
 
 // applyFailedTurn counts one failed or empty turn in s.
-func applyFailedTurn(s *State, errText string) StepResult {
+func applyFailedTurn(s *State, errText string, delay time.Duration) StepResult {
 	s.ConsecutiveTurnFailures++
 	if s.ConsecutiveTurnFailures >= 2 {
 		s.SetStatus(StatusPaused, "the last turn failed: "+errText)
 		return StepResult{Ran: true, Notices: []Notice{{Kind: NoticeTurnFailed, Err: errText, StopButtons: true}}}
 	}
-	return StepResult{Ran: true, RetryAfter: RetryDelay}
+	return StepResult{Ran: true, RetryAfter: delay}
+}
+
+// retryDelay returns the wait before the retry of a failed turn.
+func (m *Manager) retryDelay() time.Duration {
+	if m.d.RetryDelay <= 0 {
+		return RetryDelay
+	}
+	return m.d.RetryDelay
 }
 
 // cloneState copies the lists of st, so that a change to the copy does not change st.
@@ -203,9 +212,9 @@ func (m *Manager) runChecks(ctx context.Context, out TurnOutcome, work State, en
 	work.TurnsUsed++
 	var run stepRun
 	if len(work.Gates) > 0 {
-		run.gates = RunGates(ctx, &work, m.execFor(out.Session), func(c string) GateCheck {
+		run.gates = runGates(ctx, &work, m.execFor(out.Session), func(c string) GateCheck {
 			return CheckGateCommand(c, m.d.InGateway, m.d.SudoPasswordSet)
-		})
+		}, m.gateRunLimits())
 		run.gateRuns = work.Gates
 		if run.gates.Failed {
 			return run // a failed gate skips the judge
@@ -327,7 +336,8 @@ func (m *Manager) applyRun(s *State, sid string, run stepRun, env WaitEnv, now t
 	if s.JudgeSessionID == "" {
 		s.JudgeSessionID = run.judgeSession
 	}
-	kind := ApplyCounters(s, v)
+	cfg := m.cfg()
+	kind := applyCounters(s, v, cfg.JudgeMaxParseFailures, cfg.JudgeMaxTransportFailures)
 
 	if v.Kind == VerdictWait {
 		target := ""

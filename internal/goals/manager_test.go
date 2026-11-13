@@ -277,3 +277,14 @@ func TestManagerWaitEnv(t *testing.T) {
 		t.Fatal("a nil registry finds no process")
 	}
 }
+
+func TestManagerWaitEnvBarrierLimit(t *testing.T) {
+	m := NewManager(Deps{Cfg: func() config.GoalsConfig { return config.GoalsConfig{MaxBarrierWaitS: 600} }})
+	if got := m.WaitEnv("k").BarrierLimit(); got != 10*time.Minute {
+		t.Fatal("the config limit:", got)
+	}
+	m = NewManager(Deps{Cfg: func() config.GoalsConfig { return config.GoalsConfig{} }})
+	if got := m.WaitEnv("k").BarrierLimit(); got != MaxBarrierWait {
+		t.Fatal("0 keeps the const:", got)
+	}
+}

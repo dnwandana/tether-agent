@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
 
@@ -206,7 +207,13 @@ func pyTruthy(v any) bool {
 // in the hidden judge session.
 type Judge struct {
 	Timeout time.Duration
-	Record  func(ctx context.Context, prompt string, prov provider.Provider, out provider.Result)
+	// MaxTokens is the output limit of a call. 0 means judgeMaxTokens.
+	MaxTokens int
+	// DraftChars is the rune cut of the objective in DraftContract. 0 means draftObjectiveLimit.
+	DraftChars int
+	// Chars holds the cuts of the judge input. Evaluate uses them when the input has none.
+	Chars  config.GoalsJudgeChars
+	Record func(ctx context.Context, prompt string, prov provider.Provider, out provider.Result)
 }
 
 // Call sends one judge request with the low effort and the Hermes output limit. It sends no
@@ -219,10 +226,14 @@ func (j *Judge) Call(ctx context.Context, prov provider.Provider, system, user s
 		callCtx, cancel = context.WithTimeout(ctx, j.Timeout)
 		defer cancel()
 	}
+	maxTokens := j.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = judgeMaxTokens
+	}
 	ch, err := prov.Stream(callCtx, provider.Request{
 		System:    system,
 		Messages:  []provider.Message{{Role: provider.RoleUser, Content: user}},
-		MaxTokens: judgeMaxTokens,
+		MaxTokens: maxTokens,
 		Effort:    judgeEffort,
 	})
 	if err != nil {
@@ -245,6 +256,9 @@ func (j *Judge) Evaluate(ctx context.Context, prov provider.Provider, in JudgeIn
 	if strings.TrimSpace(in.Response) == "" {
 		return Verdict{Kind: VerdictContinue, Reason: "empty response (nothing to evaluate)"}
 	}
+	if in.Chars == (config.GoalsJudgeChars{}) {
+		in.Chars = j.Chars
+	}
 	res, err := j.Call(ctx, prov, JudgeSystemPrompt, JudgeUserPrompt(in))
 	if err != nil {
 		return Verdict{Kind: VerdictContinue, Reason: "judge error: " + err.Error(), TransportFailed: true}
@@ -257,6 +271,18 @@ func (j *Judge) Evaluate(ctx context.Context, prov provider.Provider, in JudgeIn
 // kind when a counter reaches its limit, else "". It does not change the status, because the
 // after-turn step pauses the goal.
 func ApplyCounters(st *State, v Verdict) (pauseKind string) {
+	return applyCounters(st, v, 0, 0)
+}
+
+// applyCounters is ApplyCounters with the two limits as parameters. A limit of 0 or less uses
+// maxParseFailures or maxTransportFailures.
+func applyCounters(st *State, v Verdict, maxParse, maxTransport int) (pauseKind string) {
+	if maxParse <= 0 {
+		maxParse = maxParseFailures
+	}
+	if maxTransport <= 0 {
+		maxTransport = maxTransportFailures
+	}
 	if v.ParseFailed {
 		st.ConsecutiveParseFailures++
 	} else {
@@ -268,9 +294,9 @@ func ApplyCounters(st *State, v Verdict) (pauseKind string) {
 		st.ConsecutiveTransportFailures = 0
 	}
 	switch {
-	case st.ConsecutiveTransportFailures >= maxTransportFailures:
+	case st.ConsecutiveTransportFailures >= maxTransport:
 		return NoticeTransportFail
-	case st.ConsecutiveParseFailures >= maxParseFailures:
+	case st.ConsecutiveParseFailures >= maxParse:
 		return NoticeParseFail
 	}
 	return ""

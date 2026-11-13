@@ -20,7 +20,11 @@ func DraftContract(ctx context.Context, j *Judge, prov provider.Provider, object
 	if objective == "" {
 		return Contract{}, false
 	}
-	res, err := j.Call(ctx, prov, DraftContractSystemPrompt, "Objective:\n"+cutRunes(objective, draftObjectiveLimit))
+	limit := j.DraftChars
+	if limit <= 0 {
+		limit = draftObjectiveLimit
+	}
+	res, err := j.Call(ctx, prov, DraftContractSystemPrompt, "Objective:\n"+cutRunes(objective, limit))
 	if err != nil {
 		return Contract{}, false
 	}

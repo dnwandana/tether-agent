@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/config"
 )
 
 var promptNow = time.Date(2026, 11, 1, 9, 30, 0, 0, time.UTC)
@@ -147,5 +149,34 @@ func TestKickPrompt(t *testing.T) {
 		if got := KickPrompt(tc.goal, tc.last); got != tc.want {
 			t.Errorf("case %d: %q", i, got)
 		}
+	}
+}
+
+func TestJudgeUserPromptCutsFromConfig(t *testing.T) {
+	chars := config.GoalsJudgeChars{Goal: 10, Response: 20, Contract: 30, Subgoal: 15, Todo: 12, Process: 8}
+	got := JudgeUserPrompt(JudgeInput{Goal: strings.Repeat("g", 11), Response: strings.Repeat("r", 21),
+		TodoBlock: strings.Repeat("t", 13), Now: promptNow, Chars: chars,
+		Processes: []ProcLine{{PID: 7, Command: strings.Repeat("c", 9)}}})
+	for _, part := range []string{
+		"Goal:\n" + strings.Repeat("g", 10) + "… [truncated]\n\n",
+		"response:\n" + strings.Repeat("r", 20) + "… [truncated]\n\n",
+		"\n\n" + strings.Repeat("t", 12) + "… [truncated]\n\nCurrent time:",
+		"- pid 7: " + strings.Repeat("c", 8) + "… [truncated] (running 0s)",
+	} {
+		if !strings.Contains(got, part) {
+			t.Fatalf("missing cut %q in:\n%s", part, got)
+		}
+	}
+	// "- Outcome: " has 11 runes, so a cut at 30 keeps 19 "o".
+	con := JudgeUserPrompt(JudgeInput{Goal: "g", Response: "r", Now: promptNow, Chars: chars,
+		Contract: Contract{Outcome: strings.Repeat("o", 100)}})
+	if !strings.Contains(con, "- Outcome: "+strings.Repeat("o", 19)+"… [truncated]\n\n") {
+		t.Fatal("the contract block must be cut at 30 chars")
+	}
+	// "- 1. " has 5 runes, so a cut at 15 keeps 10 "s".
+	sub := JudgeUserPrompt(JudgeInput{Goal: "g", Response: "r", Now: promptNow, Chars: chars,
+		Subgoals: []string{strings.Repeat("s", 20)}})
+	if !strings.Contains(sub, "- 1. "+strings.Repeat("s", 10)+"… [truncated]\n\n") {
+		t.Fatal("the subgoal block must be cut at 15 chars")
 	}
 }

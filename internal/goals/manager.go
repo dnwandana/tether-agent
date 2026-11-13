@@ -43,6 +43,9 @@ type Deps struct {
 	Alive func(pid int) bool
 	// Now returns the time. Nil uses time.Now.
 	Now func() time.Time
+	// RetryDelay is the wait before the one retry after a failed or empty turn. 0 means the
+	// RetryDelay const.
+	RetryDelay time.Duration
 	// Log receives the warnings. Nil uses slog.Default.
 	Log *slog.Logger
 	// InGateway and SudoPasswordSet feed the gate check before each run, as they feed the
@@ -199,11 +202,12 @@ func (m *Manager) JudgeProvider(sess *sessions.Session) provider.Provider {
 // Judge returns a judge with the timeout of the config. Its Record writes each call to the
 // judge session of st. A failed record logs a warning and does not stop the step.
 func (m *Manager) Judge(sess *sessions.Session, st *State) *Judge {
-	timeout := time.Duration(m.cfg().JudgeTimeoutS) * time.Second
+	cfg := m.cfg()
+	timeout := time.Duration(cfg.JudgeTimeoutS) * time.Second
 	if timeout <= 0 {
 		timeout = defaultJudgeTimeout
 	}
-	j := &Judge{Timeout: timeout}
+	j := &Judge{Timeout: timeout, MaxTokens: cfg.JudgeMaxTokens, DraftChars: cfg.DraftObjectiveChars, Chars: cfg.JudgeChars}
 	if m.d.Sessions != nil {
 		j.Record = func(ctx context.Context, prompt string, prov provider.Provider, out provider.Result) {
 			if err := m.judgeLog.Record(ctx, sess, st, prompt, prov, out); err != nil {
@@ -221,6 +225,8 @@ func (m *Manager) WaitEnv(key string) WaitEnv {
 		Proc:    func(int) (tools.ProcInfo, bool) { return tools.ProcInfo{}, false },
 		Batches: func() int { return 0 },
 		Now:     m.now(),
+
+		MaxBarrier: time.Duration(m.cfg().MaxBarrierWaitS) * time.Second,
 	}
 	if env.Alive == nil {
 		env.Alive = PIDAlive

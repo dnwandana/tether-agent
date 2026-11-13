@@ -26,6 +26,10 @@ const (
 // revision of the row.
 type Store struct {
 	DB *db.DB
+	// GateTimeoutS is the time limit that a stored gate with 0 gets. 0 means defaultGateTimeoutS.
+	GateTimeoutS int
+	// GateMaxRetries is the retry count that a stored gate with 0 gets. 0 means defaultGateMaxRetries.
+	GateMaxRetries int
 }
 
 // ActiveGoal is one active goal and the revision of its row.
@@ -48,7 +52,7 @@ func (s *Store) Get(ctx context.Context, sessionID string) (State, int64, error)
 	if err != nil {
 		return State{}, 0, fmt.Errorf("goals: get the goal of session %s: %w", sessionID, err)
 	}
-	st, err := decodeState(raw)
+	st, err := decodeState(raw, s.GateTimeoutS, s.GateMaxRetries)
 	if err != nil {
 		return State{}, 0, fmt.Errorf("goals: decode the goal of session %s: %w", sessionID, err)
 	}
@@ -120,7 +124,7 @@ func (s *Store) Active(ctx context.Context) ([]ActiveGoal, error) {
 	}
 	var out []ActiveGoal
 	for _, r := range all {
-		st, err := decodeState(r.raw)
+		st, err := decodeState(r.raw, s.GateTimeoutS, s.GateMaxRetries)
 		if err != nil {
 			return nil, fmt.Errorf("goals: decode the goal of session %s: %w", r.id, err)
 		}
@@ -132,8 +136,16 @@ func (s *Store) Active(ctx context.Context) ([]ActiveGoal, error) {
 }
 
 // decodeState decodes a goal row and applies the defaults of Hermes GoalState.from_json and
-// GoalGate.from_dict, so a row from Hermes or from an older program loads.
-func decodeState(raw string) (State, error) {
+// GoalGate.from_dict, so a row from Hermes or from an older program loads. A gate with no
+// time limit or retry count gets gateTimeoutS and gateMaxRetries. A value of 0 or less uses
+// the const.
+func decodeState(raw string, gateTimeoutS, gateMaxRetries int) (State, error) {
+	if gateTimeoutS <= 0 {
+		gateTimeoutS = defaultGateTimeoutS
+	}
+	if gateMaxRetries <= 0 {
+		gateMaxRetries = defaultGateMaxRetries
+	}
 	st := State{Status: StatusActive}
 	if err := json.Unmarshal([]byte(raw), &st); err != nil {
 		return State{}, err
@@ -157,10 +169,10 @@ func decodeState(raw string) (State, error) {
 				continue
 			}
 			if g.TimeoutSeconds <= 0 {
-				g.TimeoutSeconds = defaultGateTimeoutS
+				g.TimeoutSeconds = gateTimeoutS
 			}
 			if g.MaxRetries <= 0 {
-				g.MaxRetries = defaultGateMaxRetries
+				g.MaxRetries = gateMaxRetries
 			}
 			gates = append(gates, g)
 		}

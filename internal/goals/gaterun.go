@@ -29,15 +29,48 @@ type GateOutcome struct {
 // check. A refused command does not run and does not change the gate. A dangerous command
 // still runs.
 func RunGates(ctx context.Context, st *State, exec ExecFunc, check func(command string) GateCheck) GateOutcome {
+	return runGates(ctx, st, exec, check, gateLimits{})
+}
+
+// gateLimits holds the limits of a gate run. A field of 0 uses GateTimeout, GateMaxRetries,
+// or GateOutputTail.
+type gateLimits struct {
+	timeout    time.Duration
+	maxRetries int
+	tail       int
+}
+
+// gateRunLimits returns the gate limits from the goals config.
+func (m *Manager) gateRunLimits() gateLimits {
+	c := m.cfg()
+	return gateLimits{
+		timeout:    time.Duration(c.GateTimeoutS) * time.Second,
+		maxRetries: c.GateMaxRetries,
+		tail:       c.GateOutputTailChars,
+	}
+}
+
+// runGates is RunGates with the limits lim. A gate with a time limit or a retry count of 0
+// or less uses the value of lim.
+func runGates(ctx context.Context, st *State, exec ExecFunc, check func(command string) GateCheck, lim gateLimits) GateOutcome {
+	if lim.timeout <= 0 {
+		lim.timeout = GateTimeout
+	}
+	if lim.maxRetries <= 0 {
+		lim.maxRetries = GateMaxRetries
+	}
+	if lim.tail <= 0 {
+		lim.tail = GateOutputTail
+	}
 	for i := range st.Gates {
 		g := &st.Gates[i]
 		timeout := time.Duration(g.TimeoutSeconds) * time.Second
 		if timeout <= 0 {
-			timeout = GateTimeout
+			timeout = lim.timeout
 		}
 		maxRetries := g.MaxRetries
 		if maxRetries <= 0 {
-			maxRetries = GateMaxRetries
+			maxRetries = lim.maxRetries
 		}
 		if check != nil {
 			if c := check(g.Command); c.Refused {
@@ -50,7 +83,7 @@ func RunGates(ctx context.Context, st *State, exec ExecFunc, check func(command 
 			out = strings.TrimSuffix(out+"\n"+err.Error(), "\n")
 			out = strings.TrimPrefix(out, "\n")
 		}
-		tail := gateTail(out, GateOutputTail)
+		tail := gateTail(out, lim.tail)
 		g.LastExitCode, g.LastOutputTail = &code, tail
 		if code == 0 {
 			g.Attempts = 0

@@ -162,3 +162,25 @@ func TestRunGatesChecksEachGateFirst(t *testing.T) {
 		t.Fatal(out, ran)
 	}
 }
+
+func TestRunGatesLimits(t *testing.T) {
+	var got time.Duration
+	exec := func(_ context.Context, _ string, timeout time.Duration) (string, int, error) {
+		got = timeout
+		return "0123456789", 1, nil
+	}
+	lim := gateLimits{timeout: 10 * time.Second, maxRetries: 1, tail: 4}
+	st := State{Goal: "ship it", Status: StatusActive, MaxTurns: 20, Epoch: 1, Gates: []Gate{{Command: "make test"}}}
+	out := runGates(context.Background(), &st, exec, nil, lim)
+	if got != 10*time.Second || out.Failure.MaxRetries != 1 || out.Failure.Output != "6789" || st.Gates[0].LastOutputTail != "6789" {
+		t.Fatalf("timeout %v, outcome %+v", got, out)
+	}
+	if out := runGates(context.Background(), &st, exec, nil, lim); !out.Exhausted {
+		t.Fatal("the second failure is past one retry")
+	}
+	st = State{Goal: "ship it", Status: StatusActive, MaxTurns: 20, Epoch: 1, Gates: []Gate{{Command: "make test"}}}
+	out = runGates(context.Background(), &st, exec, nil, gateLimits{})
+	if got != GateTimeout || out.Failure.MaxRetries != GateMaxRetries || out.Failure.Output != "0123456789" {
+		t.Fatalf("zero limits keep the consts: timeout %v, outcome %+v", got, out)
+	}
+}

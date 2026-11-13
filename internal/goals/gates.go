@@ -8,13 +8,13 @@ import (
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
-// The limits of a quality gate, copied from Hermes.
+// The limits of a quality gate, copied from Hermes. Each one is the fallback for a value of 0.
 const (
-	// GateTimeout is the run time limit of one gate run.
+	// GateTimeout is the run time limit of one gate run when no other value is set.
 	GateTimeout = 300 * time.Second
-	// GateMaxRetries is the number of failed runs before the goal pauses.
+	// GateMaxRetries is the number of failed runs before the goal pauses when no other value is set.
 	GateMaxRetries = 3
-	// GateOutputTail is the number of output chars that a gate run keeps.
+	// GateOutputTail is the number of output chars that a gate run keeps when no other value is set.
 	GateOutputTail = 3000
 )
 
@@ -57,14 +57,27 @@ func CheckGateCommand(cmd string, inGateway, sudoPasswordSet bool) GateCheck {
 // command adds nothing and returns 0. The epoch stays, so a queued
 // continuation stays valid.
 func (st *State) AddGate(cmd string) int {
+	return st.AddGateWith(cmd, 0, 0)
+}
+
+// AddGateWith appends a gate for cmd with the given time limit in seconds and retry count.
+// A value of 0 or less uses GateTimeout or GateMaxRetries. It returns the 1-based number of
+// the gate, or 0 for an empty command.
+func (st *State) AddGateWith(cmd string, timeoutS, maxRetries int) int {
 	cmd = strings.TrimSpace(cmd)
 	if cmd == "" {
 		return 0
 	}
+	if timeoutS <= 0 {
+		timeoutS = int(GateTimeout / time.Second)
+	}
+	if maxRetries <= 0 {
+		maxRetries = GateMaxRetries
+	}
 	st.Gates = append(st.Gates, Gate{
 		Command:        cmd,
-		TimeoutSeconds: int(GateTimeout / time.Second),
-		MaxRetries:     GateMaxRetries,
+		TimeoutSeconds: timeoutS,
+		MaxRetries:     maxRetries,
 	})
 	return len(st.Gates)
 }

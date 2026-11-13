@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
 
@@ -182,5 +183,32 @@ func TestJudgeEvaluate(t *testing.T) {
 	v = j.Evaluate(context.Background(), empty, in)
 	if v != (Verdict{Kind: VerdictContinue, Reason: "empty response (nothing to evaluate)"}) || empty.calls != 0 {
 		t.Fatalf("an empty reply must not call the judge: %+v, %d calls", v, empty.calls)
+	}
+}
+
+func TestJudgeLimitFields(t *testing.T) {
+	ctx := context.Background()
+	prov := &judgeFakeProv{reply: `{"verdict": "done", "reason": "ok"}`}
+	if _, err := (&Judge{Timeout: time.Second, MaxTokens: 1024}).Call(ctx, prov, "s", "u"); err != nil || prov.last.MaxTokens != 1024 {
+		t.Fatal(prov.last.MaxTokens, err)
+	}
+	prov = &judgeFakeProv{reply: `{"verdict": "done", "reason": "ok"}`}
+	j := &Judge{Timeout: time.Second, Chars: config.GoalsJudgeChars{Goal: 10}}
+	j.Evaluate(ctx, prov, JudgeInput{Goal: strings.Repeat("g", 11), Response: "r", Now: time.Unix(0, 0)})
+	if !strings.Contains(prov.last.Messages[0].Content, "Goal:\n"+strings.Repeat("g", 10)+"… [truncated]") {
+		t.Fatal("Evaluate must use the cuts of the judge")
+	}
+	p := &draftProv{reply: `{"outcome": "x"}`}
+	DraftContract(ctx, &Judge{Timeout: time.Second, DraftChars: 100}, p, strings.Repeat("é", 101))
+	if got, want := p.reqs[0].Messages[0].Content, "Objective:\n"+strings.Repeat("é", 100)+"… [truncated]"; got != want {
+		t.Fatalf("the objective must be cut at 100 chars, got %d chars", len([]rune(got)))
+	}
+	var st State
+	parse := Verdict{Kind: VerdictContinue, ParseFailed: true}
+	if got := applyCounters(&st, parse, 2, 2); got != "" {
+		t.Fatal("the first parse failure must not pause:", got)
+	}
+	if got := applyCounters(&st, parse, 2, 2); got != NoticeParseFail {
+		t.Fatal("the second parse failure must pause with a limit of 2:", got)
 	}
 }
