@@ -16,8 +16,9 @@ import (
 // unitName is the file name of the systemd unit.
 const unitName = "tether.service"
 
-// systemUnitDir is the folder of the system units.
-const systemUnitDir = "/etc/systemd/system"
+// systemUnitDir is the folder of the system units. Tests replace it, so a test never
+// writes /etc.
+var systemUnitDir = "/etc/systemd/system"
 
 // exampleTZ is the time zone in the example unit docs/tether.service.
 const exampleTZ = "UTC"
@@ -111,19 +112,54 @@ func unitPath(system bool) (string, error) {
 	return filepath.Join(home, ".config", "systemd", "user", unitName), nil
 }
 
+// errRootUnit is the refusal for a unit that would run the gateway as root.
+//
+//lint:ignore ST1005 the text is a fixed user message with full sentences.
+var errRootUnit = errors.New("setup: the unit would run the gateway as root. Run setup as your user " +
+	"(with sudo for --system), or add --allow-root to run the gateway as root.")
+
+// sudoUser returns the user who called sudo. It returns an empty string when there is
+// no such user, or when the user is root.
+func sudoUser() string {
+	if u := os.Getenv("SUDO_USER"); u != "root" {
+		return u
+	}
+	return ""
+}
+
+// CheckRootUnit returns the setup refusal when the unit would run the gateway as root.
+// runSetup calls it before the wizard, so a root user does not answer the first steps
+// for nothing.
+func CheckRootUnit(system, allowRoot bool) error {
+	switch {
+	case allowRoot:
+		return nil
+	case system:
+		if geteuid() == 0 && sudoUser() == "" {
+			return errRootUnit
+		}
+	case geteuid() == 0:
+		// The user manager of root also runs the gateway as root.
+		return errRootUnit
+	}
+	return nil
+}
+
 // WriteUnit writes the systemd unit and returns its path. The default is a user unit in
-// ~/.config/systemd/user. With system, it writes a system unit, which needs root. Before
+// ~/.config/systemd/user. With system, it writes a system unit, which needs root. It
+// refuses a unit that would run the gateway as root, unless allowRoot is true. Before
 // it replaces a unit, it copies the old unit to a .bak file.
-func WriteUnit(system bool, binPath, dataDir string, drainS int) (path string, err error) {
+func WriteUnit(system, allowRoot bool, binPath, dataDir string, drainS int) (path string, err error) {
 	user := ""
 	if system {
 		if geteuid() != 0 {
 			return "", errors.New("setup: a system unit needs root; run with sudo, or write a user unit without --system")
 		}
 		// Under sudo, the service runs as the user who called sudo, not as root.
-		if u := os.Getenv("SUDO_USER"); u != "" && u != "root" {
-			user = u
-		}
+		user = sudoUser()
+	}
+	if err := CheckRootUnit(system, allowRoot); err != nil {
+		return "", err
 	}
 	if path, err = unitPath(system); err != nil {
 		return "", err
@@ -183,7 +219,7 @@ func (w *Wizard) serviceStep() error {
 	if n, err := strconv.Atoi(w.cfg.get("agent", "restart_drain_timeout_s")); err == nil && n >= 0 {
 		drainS = n
 	}
-	path, err := WriteUnit(w.System, bin, w.DataDir, drainS)
+	path, err := WriteUnit(w.System, w.AllowRoot, bin, w.DataDir, drainS)
 	if err != nil {
 		return err
 	}

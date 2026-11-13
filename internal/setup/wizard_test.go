@@ -137,6 +137,7 @@ func wizard(t *testing.T, dir string, in *bufio.Reader) (*Wizard, *bytes.Buffer)
 	t.Helper()
 	// The systemd unit goes below HOME.
 	t.Setenv("HOME", t.TempDir())
+	fakeEUID(t, 1000)
 	var out bytes.Buffer
 	return &Wizard{
 		In:       in,

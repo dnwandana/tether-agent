@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -697,6 +699,9 @@ func TestDoctorExitCode(t *testing.T) {
 func TestSetupSubcommand(t *testing.T) {
 	t.Setenv("TETHER_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
+	oldCheck := checkRootUnit
+	checkRootUnit = func(bool, bool) error { return nil }
+	t.Cleanup(func() { checkRootUnit = oldCheck })
 	sse, err := os.ReadFile("../../internal/provider/testdata/openai_text_stream.sse")
 	if err != nil {
 		t.Fatal(err)
@@ -1792,5 +1797,47 @@ func TestSkillsCheckWarnsOnBadConfig(t *testing.T) {
 	}
 	if !strings.HasPrefix(errb.String(), "warning: the config did not load, so the check uses the default git time limit: ") {
 		t.Fatalf("stderr %q", errb.String())
+	}
+}
+
+func TestSetupRefusesRootEarly(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the root check runs only on Linux, where step 5 writes a unit")
+	}
+	refusal := errors.New("setup: the unit would run the gateway as root. Run setup as your user " +
+		"(with sudo for --system), or add --allow-root to run the gateway as root.")
+	var got [][2]bool
+	old := checkRootUnit
+	checkRootUnit = func(system, allowRoot bool) error {
+		got = append(got, [2]bool{system, allowRoot})
+		return refusal
+	}
+	t.Cleanup(func() { checkRootUnit = old })
+	stdin = strings.NewReader("")
+	defer func() { stdin = os.Stdin }()
+	for _, args := range [][]string{{"--allow-root"}, {"--system"}} {
+		var out, errb bytes.Buffer
+		code := run(append([]string{"setup", "--data-dir", t.TempDir()}, args...), &out, &errb)
+		if code != 1 || strings.TrimSpace(errb.String()) != refusal.Error() || out.Len() != 0 {
+			t.Fatalf("%v: exit %d, out %q, err %q", args, code, out.String(), errb.String())
+		}
+	}
+	if want := [][2]bool{{false, true}, {true, false}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("checkRootUnit calls = %v, want %v", got, want)
+	}
+}
+
+func TestGatewayWarnsAsRoot(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "")
+	old := geteuid
+	t.Cleanup(func() { geteuid = old })
+	const warning = "gateway runs as root: each command of the agent runs as root too."
+	geteuid = func() int { return 0 }
+	if got := runGatewayForLog(t, ""); !strings.Contains(got, warning) || !strings.Contains(got, "Host execution") {
+		t.Fatal(got)
+	}
+	geteuid = func() int { return 1000 }
+	if got := runGatewayForLog(t, ""); strings.Contains(got, "gateway runs as root") {
+		t.Fatal(got)
 	}
 }

@@ -54,6 +54,8 @@ type Wizard struct {
 	BinPath string
 	// System writes a system unit instead of a user unit in step 5.
 	System bool
+	// AllowRoot lets step 5 write a unit that runs the gateway as root.
+	AllowRoot bool
 	// GOOS replaces runtime.GOOS. Step 5 runs only on linux.
 	GOOS string
 	// Term is the file of In. When Term is a terminal, the echo is off while the user types

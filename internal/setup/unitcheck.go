@@ -41,6 +41,19 @@ func UnitProblems(text string, drainS int) []string {
 // FindUnit returns the first unit file that exists. Nil paths use the user unit path, then
 // the system unit path.
 func FindUnit(paths []string) (path, text string, ok bool) {
+	units := installedUnits(paths)
+	if len(units) == 0 {
+		return "", "", false
+	}
+	return units[0].path, units[0].text, true
+}
+
+// unitFile is an installed unit file.
+type unitFile struct{ path, text string }
+
+// installedUnits returns each unit file that exists, in the order of paths. Nil paths use the
+// user unit path, then the system unit path.
+func installedUnits(paths []string) []unitFile {
 	if paths == nil {
 		for _, system := range []bool{false, true} {
 			if p, err := unitPath(system); err == nil {
@@ -48,13 +61,13 @@ func FindUnit(paths []string) (path, text string, ok bool) {
 			}
 		}
 	}
+	var out []unitFile
 	for _, p := range paths {
-		b, err := os.ReadFile(p)
-		if err == nil {
-			return p, string(b), true
+		if b, err := os.ReadFile(p); err == nil {
+			out = append(out, unitFile{p, string(b)})
 		}
 	}
-	return "", "", false
+	return out
 }
 
 // UnitNext returns the action that replaces an old unit.
@@ -78,6 +91,45 @@ func (d *Doctor) checkUnit(drainS int) (Check, bool) {
 		c.Status, c.Detail, c.Next = StatusWarn, strings.Join(problems, " "), UnitNext(system)
 	}
 	return c, true
+}
+
+// rootHome is the home folder of root. A user unit under it runs the gateway as root. Tests
+// replace it.
+var rootHome = "/root"
+
+// checkRoot returns the checks of the user that runs the gateway. It reads the installed unit,
+// not the user of doctor, because doctor must check the gateway. It gives one check for each
+// installed unit, so a user unit does not hide a system unit that runs as root.
+func (d *Doctor) checkRoot() []Check {
+	var out []Check
+	for _, u := range installedUnits(d.UnitPaths) {
+		path, text := u.path, u.text
+		c := Check{Name: "gateway user", Status: StatusOK}
+		if filepath.Dir(path) == systemUnitDir {
+			user := serviceKeys(text)["User"]
+			// User=0 is the user ID of root, so it counts like User=root.
+			if user == "" || user == "root" || user == "0" {
+				c.Status = StatusWarn
+				c.Detail = path + " runs the gateway as root"
+			} else {
+				c.Detail = path + " runs the gateway as " + user
+			}
+		} else if strings.HasPrefix(path, rootHome+"/") {
+			c.Status = StatusWarn
+			c.Detail = path + " runs the gateway as root"
+		} else {
+			c.Detail = path + " runs the gateway as your user"
+		}
+		if c.Status == StatusWarn {
+			c.Next = "run tether setup --system with sudo from your user account"
+		}
+		out = append(out, c)
+	}
+	if geteuid() == 0 {
+		out = append(out, Check{Name: "doctor user", Status: StatusWarn,
+			Detail: "tether doctor runs as root", Next: "run tether doctor as the user of the gateway"})
+	}
+	return out
 }
 
 // serviceKeys returns the Key=Value pairs of the [Service] section. The last value wins.

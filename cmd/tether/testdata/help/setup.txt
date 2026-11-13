@@ -16,6 +16,8 @@ Flags:
   --system             Write a system unit to /etc/systemd/system, not a user
                        unit. This needs root. Under sudo, the data folder and
                        its files belong to the user who called sudo.
+  --allow-root         Let the unit run the gateway as root. Without it, setup
+                       stops when the unit would run the gateway as root.
 
 Examples:
   tether setup

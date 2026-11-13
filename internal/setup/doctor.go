@@ -74,9 +74,9 @@ type Check struct {
 }
 
 // Doctor checks the install: the config, .env, the providers, Telegram, state.db, the host
-// programs, the MCP servers, the disk, the data folder mode, the blocked memory entries, and the
-// newest release. It needs no user input, and
-// it does not take the gateway lock, so it can run next to a running gateway.
+// programs, the systemd unit, the user of the gateway, the MCP servers, the disk, the data folder
+// mode, the blocked memory entries, and the newest release. It needs no user input, and it does
+// not take the gateway lock, so it can run next to a running gateway.
 type Doctor struct {
 	DataDir    string
 	ConfigPath string
@@ -131,6 +131,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	if c, ok := d.checkUnit(hostCfg.Agent.RestartDrainTimeoutS); ok {
 		out = append(out, c)
 	}
+	out = append(out, d.checkRoot()...)
 	if cfg != nil {
 		out = append(out, d.checkMCP(ctx, cfg, dotenv)...)
 	}
@@ -430,6 +431,10 @@ func (d *Doctor) checkStateDB(ctx context.Context) []Check {
 	// A failed read does not fail doctor. The check is only information.
 	if l, ok, err := obs.ReadLastAnswer(ctx, sdb); err == nil && ok {
 		out = append(out, lastAnswerCheck(l, time.Since(l.At)))
+	}
+	if rows, err := (&security.Gate{DB: sdb}).ListAlways(ctx); err == nil {
+		out = append(out, Check{Name: "approvals", Status: StatusOK,
+			Detail: fmt.Sprintf("%d Always answers (send /approvals to see them)", len(rows))})
 	}
 	return out
 }

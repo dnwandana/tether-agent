@@ -17,6 +17,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -312,6 +313,9 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		log.Info("telegram is disabled, so a cron job cannot deliver to a chat", "setting", "telegram.enabled")
 	}
 	warnOldUnit(log, a.Cfg)
+	if geteuid() == 0 {
+		log.Warn(gatewayRootWarning)
+	}
 	if addr := os.Getenv("TETHER_PPROF"); addr != "" {
 		srv, err := startPprof(addr)
 		if err != nil {
@@ -416,6 +420,9 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	log.Info("gateway stopped")
 	return restartExitCode(reason, os.Getenv)
 }
+
+// gatewayRootWarning is the start warning of a gateway that runs as root.
+const gatewayRootWarning = `gateway runs as root: each command of the agent runs as root too. See "Host execution" in docs/SECURITY.md.`
 
 // warnOldUnit logs one warning when the gateway runs under systemd with a unit file that
 // is too old for the restart. It does nothing outside systemd or when no unit file exists.
@@ -1401,17 +1408,28 @@ func runDoctor(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// checkRootUnit refuses a unit that runs the gateway as root. Tests replace it.
+var checkRootUnit = setup.CheckRootUnit
+
 // runSetup runs the setup wizard and returns the exit code.
 func runSetup(args []string, stdout, stderr io.Writer) int {
 	fl := flag.NewFlagSet("setup", flag.ContinueOnError)
 	dataFlag := fl.String("data-dir", "", "data folder (default: TETHER_HOME, then ~/.tether)")
 	system := fl.Bool("system", false, "write a system unit instead of a user unit (needs root)")
+	allowRoot := fl.Bool("allow-root", false, "let the unit run the gateway as root")
 	rest, code, ok := parseCommand(fl, args, stdout, stderr)
 	if !ok {
 		return code
 	}
 	if len(rest) > 0 {
 		return usageError(stderr, "setup", "unexpected argument: "+rest[0])
+	}
+	// Step 5 writes a unit only on Linux, so the check applies only there.
+	if runtime.GOOS == "linux" {
+		if err := checkRootUnit(*system, *allowRoot); err != nil {
+			fmt.Fprintf(stderr, "%v\n", err)
+			return 1
+		}
 	}
 	pick := dataDir
 	if *system {
@@ -1445,6 +1463,7 @@ func runSetup(args []string, stdout, stderr io.Writer) int {
 		TelegramBase: telegramBaseURL,
 		BinPath:      bin,
 		System:       *system,
+		AllowRoot:    *allowRoot,
 	}
 	// A real terminal lets the wizard hide the API key and the bot token while the user types.
 	if f, ok := stdin.(*os.File); ok {

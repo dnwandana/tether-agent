@@ -45,9 +45,10 @@ func TestHostTZFromEnv(t *testing.T) {
 
 func TestWriteUserUnitWithBak(t *testing.T) {
 	fixedTZ(t, "UTC")
+	fakeEUID(t, 1000)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	path, err := WriteUnit(false, "/usr/local/bin/tether", "/data/one", 180)
+	path, err := WriteUnit(false, false, "/usr/local/bin/tether", "/data/one", 180)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +57,7 @@ func TestWriteUserUnitWithBak(t *testing.T) {
 		t.Fatal(path)
 	}
 	first, _ := os.ReadFile(path)
-	if _, err := WriteUnit(false, "/usr/local/bin/tether", "/data/two", 180); err != nil {
+	if _, err := WriteUnit(false, false, "/usr/local/bin/tether", "/data/two", 180); err != nil {
 		t.Fatal(err)
 	}
 	bak, err := os.ReadFile(path + ".bak")
@@ -70,10 +71,8 @@ func TestWriteUserUnitWithBak(t *testing.T) {
 }
 
 func TestWriteSystemUnitNeedsRoot(t *testing.T) {
-	old := geteuid
-	geteuid = func() int { return 1000 }
-	t.Cleanup(func() { geteuid = old })
-	if _, err := WriteUnit(true, "/usr/local/bin/tether", "/data", 180); err == nil || !strings.Contains(err.Error(), "run with sudo") {
+	fakeEUID(t, 1000)
+	if _, err := WriteUnit(true, false, "/usr/local/bin/tether", "/data", 180); err == nil || !strings.Contains(err.Error(), "run with sudo") {
 		t.Fatal(err)
 	}
 }
@@ -189,5 +188,105 @@ func TestServiceStepUsesConfigDrain(t *testing.T) {
 				t.Fatal(string(unit), err, out.String())
 			}
 		})
+	}
+}
+
+// fakeEUID makes geteuid return uid for the test.
+func fakeEUID(t *testing.T, uid int) {
+	t.Helper()
+	old := geteuid
+	geteuid = func() int { return uid }
+	t.Cleanup(func() { geteuid = old })
+}
+
+// tempSystemDir makes systemUnitDir a temporary folder for the test and returns it.
+func tempSystemDir(t *testing.T) string {
+	t.Helper()
+	old := systemUnitDir
+	systemUnitDir = t.TempDir()
+	t.Cleanup(func() { systemUnitDir = old })
+	return systemUnitDir
+}
+
+const rootRefusal = "setup: the unit would run the gateway as root. Run setup as your user " +
+	"(with sudo for --system), or add --allow-root to run the gateway as root."
+
+func TestCheckRootUnit(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		system, allowRoot bool
+		euid              int
+		sudoUser          string
+		refused           bool
+	}{
+		{"system as root", true, false, 0, "", true},
+		{"system with SUDO_USER=root", true, false, 0, "root", true},
+		{"system under sudo", true, false, 0, "alice", false},
+		{"system with --allow-root", true, true, 0, "", false},
+		{"system not root", true, false, 1000, "", false},
+		{"user unit as root", false, false, 0, "", true},
+		{"user unit under sudo", false, false, 0, "alice", true},
+		{"user unit with --allow-root", false, true, 0, "", false},
+		{"user unit as a user", false, false, 1000, "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fakeEUID(t, tc.euid)
+			t.Setenv("SUDO_USER", tc.sudoUser)
+			err := CheckRootUnit(tc.system, tc.allowRoot)
+			if tc.refused != (err != nil) || (err != nil && err.Error() != rootRefusal) {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestWriteUnitRefusesRoot(t *testing.T) {
+	fixedTZ(t, "UTC")
+	fakeEUID(t, 0)
+	unit := filepath.Join(tempSystemDir(t), "tether.service")
+	t.Setenv("HOME", t.TempDir())
+	for _, sudoUser := range []string{"", "root"} {
+		t.Setenv("SUDO_USER", sudoUser)
+		if _, err := WriteUnit(true, false, "/usr/local/bin/tether", "/data", 180); err == nil || err.Error() != rootRefusal {
+			t.Fatal(sudoUser, err)
+		}
+		if _, err := os.Stat(unit); err == nil {
+			t.Fatal("the refused unit was written")
+		}
+	}
+	// --allow-root writes the unit with no User= line.
+	path, err := WriteUnit(true, true, "/usr/local/bin/tether", "/data", 180)
+	if b, _ := os.ReadFile(unit); err != nil || path != unit || strings.Contains(string(b), "User=") {
+		t.Fatal(path, err, string(b))
+	}
+	// Under sudo, the unit runs as the user who called sudo.
+	t.Setenv("SUDO_USER", "alice")
+	if _, err := WriteUnit(true, false, "/usr/local/bin/tether", "/data", 180); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(unit); !strings.Contains(string(b), "User=alice\n") {
+		t.Fatal(string(b))
+	}
+	// A user unit as root fails, and passes with allowRoot.
+	t.Setenv("SUDO_USER", "")
+	if _, err := WriteUnit(false, false, "/usr/local/bin/tether", "/data", 180); err == nil || err.Error() != rootRefusal {
+		t.Fatal(err)
+	}
+	if _, err := WriteUnit(false, true, "/usr/local/bin/tether", "/data", 180); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceStepAllowRoot(t *testing.T) {
+	fixedTZ(t, "UTC")
+	prov := newFakeProvider(t)
+	for _, allow := range []bool{false, true} {
+		w, out := wizard(t, t.TempDir(), answers("11", "openai", prov.URL, "sk-test-123", "m", "n", "n", "y"))
+		fakeEUID(t, 0) // after wizard(), which sets 1000
+		w.GOOS, w.AllowRoot = "linux", allow
+		err := w.Run(ctx)
+		if allow != (err == nil) || (err != nil && err.Error() != rootRefusal) {
+			t.Fatal(allow, err, out.String())
+		}
 	}
 }

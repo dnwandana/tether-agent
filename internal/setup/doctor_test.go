@@ -119,6 +119,7 @@ func writeDataDir(t *testing.T, provURL, extra string) string {
 // API, and the LookPath. Telegram is on. Free disk space is 50 GB.
 func doctorWithFakes(t *testing.T, prov, tg *httptest.Server, look func(string) (string, error)) *Doctor {
 	t.Helper()
+	fakeEUID(t, 1000)
 	dir := writeDataDir(t, prov.URL, "telegram:\n  enabled: true\n")
 	return &Doctor{
 		DataDir:      dir,
@@ -1021,4 +1022,104 @@ func slowServer(t *testing.T) *httptest.Server {
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() { close(release) })
 	return srv
+}
+
+func TestDoctorRootCheck(t *testing.T) {
+	fixedTZ(t, "UTC")
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	sys := tempSystemDir(t)
+	oldRoot := rootHome
+	rootHome = t.TempDir()
+	t.Cleanup(func() { rootHome = oldRoot })
+	userHome := t.TempDir()
+	next := "run tether setup --system with sudo from your user account"
+	sysUnit := filepath.Join(sys, "tether.service")
+	rootUnit := filepath.Join(rootHome, ".config", "systemd", "user", "tether.service")
+	userUnit := filepath.Join(userHome, ".config", "systemd", "user", "tether.service")
+	for _, tc := range []struct {
+		name, path, user, status, detail, next string
+	}{
+		{"system unit with no User=", sysUnit, "", StatusWarn, sysUnit + " runs the gateway as root", next},
+		{"system unit with User=root", sysUnit, "root", StatusWarn, sysUnit + " runs the gateway as root", next},
+		{"system unit with User=0", sysUnit, "0", StatusWarn, sysUnit + " runs the gateway as root", next},
+		{"system unit with User=alice", sysUnit, "alice", StatusOK, sysUnit + " runs the gateway as alice", ""},
+		{"user unit of root", rootUnit, "", StatusWarn, rootUnit + " runs the gateway as root", next},
+		{"user unit of a user", userUnit, "", StatusOK, userUnit + " runs the gateway as your user", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.MkdirAll(filepath.Dir(tc.path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(tc.path, []byte(unitText("/bin/tether", "/d", "UTC", tc.user, 180)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			d.UnitPaths = []string{tc.path}
+			c := find(t, d.Run(ctx), "gateway user")
+			if c.Status != tc.status || c.Detail != tc.detail || c.Next != tc.next {
+				t.Fatalf("%+v", c)
+			}
+		})
+	}
+	// No unit gives no line, and a doctor that is not root gives no second line.
+	d.UnitPaths = []string{filepath.Join(t.TempDir(), "missing.service")}
+	for _, c := range d.Run(ctx) {
+		if c.Name == "gateway user" || c.Name == "doctor user" {
+			t.Fatalf("%+v", c)
+		}
+	}
+	// A doctor that runs as root warns about itself.
+	fakeEUID(t, 0)
+	if c := find(t, d.checkRoot(), "doctor user"); c.Status != StatusWarn || c.Detail != "tether doctor runs as root" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestDoctorApprovalsCount(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	seedStateDB(t, d)
+	want := Check{Name: "approvals", Status: StatusOK, Detail: "0 Always answers (send /approvals to see them)"}
+	if got := find(t, d.Run(ctx), "approvals"); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	sdb, err := db.Open(filepath.Join(d.DataDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"recursive_delete", "git_force_push", "protected_path_write_x"} {
+		if _, err := sdb.Exec("INSERT INTO approvals_always(pattern_id, created_at) VALUES (?, 1)", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sdb.Close()
+	want.Detail = "2 Always answers (send /approvals to see them)"
+	if got := find(t, d.Run(ctx), "approvals"); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+// A user unit does not hide a system unit that runs as root. Each unit gives one line.
+func TestDoctorRootCheckEveryUnit(t *testing.T) {
+	sys := tempSystemDir(t)
+	fakeEUID(t, 1000)
+	userUnit := filepath.Join(t.TempDir(), ".config", "systemd", "user", "tether.service")
+	sysUnit := filepath.Join(sys, "tether.service")
+	for _, p := range []string{userUnit, sysUnit} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(unitText("/bin/tether", "/d", "UTC", "", 180)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &Doctor{UnitPaths: []string{userUnit, sysUnit}}
+	got := d.checkRoot()
+	if len(got) != 2 {
+		t.Fatalf("%+v", got)
+	}
+	if got[0].Status != StatusOK || got[0].Detail != userUnit+" runs the gateway as your user" {
+		t.Fatalf("%+v", got[0])
+	}
+	if got[1].Status != StatusWarn || got[1].Detail != sysUnit+" runs the gateway as root" {
+		t.Fatalf("%+v", got[1])
+	}
 }
