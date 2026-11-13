@@ -401,8 +401,9 @@ OS. For example, on Ubuntu:
 On Linux, the wizard asks `Write the systemd unit? [y/N]`. If you answer yes, it writes a
 user unit to `~/.config/systemd/user/tether.service`. With `sudo tether setup --system`, it
 writes a system unit to `/etc/systemd/system/tether.service`. The wizard prints the commands
-that start the service, but it does not run them. Refer to
-[Running as a Service](Running-as-a-Service).
+that start the service, but it does not run them. The wizard refuses a unit that would run the
+gateway as root, for example when you run it as root. Add `--allow-root` to write such a unit.
+Refer to [Running as a Service](Running-as-a-Service).
 
 On macOS, the wizard shows `systemd is only on Linux, so this step does nothing on darwin.`
 

@@ -153,7 +153,7 @@ A remote install needs the `git` program.
 - `--skill NAME` selects one skill when the source has more than one skill.
 - `--ref REF` selects a branch, a tag, or a full commit SHA.
 - `--yes` confirms with no prompt. It is necessary when stdin is not a terminal.
-- `--force` installs a skill again, or passes a `caution` verdict on a community source.
+- `--force` installs a skill again, or passes a `caution` verdict on a community source. A file that the guard cannot scan also gives a `caution` verdict, so it needs `--force`.
 - `--data-dir DIR` selects the data folder.
 
 ### Exit codes of `check`
@@ -234,10 +234,17 @@ in the skill folder, because the author of the skill wrote it.
 
 The guard also scans a file with a NUL byte when bash can run it, that is, when the first line in
 the first 80 bytes has no NUL byte. It skips such a file when the file is under `.git/`, or when
-its type is an image, font, document, archive, audio, video, or model type. The guard deletes each
+it is a real media file: an image, font, PDF, audio, or video file with the correct magic bytes
+for its type. An archive, for example a `.zip` file, is never a media file. The guard deletes each
 NUL byte before the scan, as bash does. A file that the guard reads only by this rule gets no
 check for invisible characters, because random bytes give false findings. `SKILL.md`, the text
 types, and the files under `scripts/` keep the check, also with a NUL byte.
+
+The guard cannot scan some files. Examples are a binary file or an archive that is not a real
+media file. The guard gives such a file the high finding `unscanned_file`. The verdict is
+`caution`, because a program can run the file. The guard gives no finding for a file under `.git/`.
+A file that already has the finding `binary_file` does not also get `unscanned_file`.
+The report lists a file that it did not scan.
 
 ### What the guard does for each source
 
@@ -264,7 +271,7 @@ The trust level comes from the source:
 | Verdict | community | trusted |
 |---|---|---|
 | `safe` | You confirm. | You confirm. |
-| `caution` | Blocked. `--force` passes it to the confirm step. | You confirm. |
+| `caution` | Blocked. `--force` passes it to the confirm step. This includes a file with the finding `unscanned_file`. | You confirm. |
 | `dangerous` | Blocked. Only the owner override passes it. | Blocked. Only the owner override passes it. |
 
 ### The owner override

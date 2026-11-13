@@ -41,6 +41,18 @@ There are two kinds of unit:
 | User unit | `tether setup` | `~/.config/systemd/user/tether.service` | The normal case. No root is necessary. |
 | System unit | `sudo tether setup --system` | `/etc/systemd/system/tether.service` | You want a system service. The unit gets a `User=` line with your user name. |
 
+`tether setup` refuses a unit that would run the gateway as root. This applies to these cases:
+
+- You run `tether setup` as root. The user manager of root runs the unit.
+- You run `tether setup --system` as root, but not through `sudo`.
+
+The command prints `setup: the unit would run the gateway as root. Run setup as your user (with
+sudo for --system), or add --allow-root to run the gateway as root.` The wizard checks this before
+the first question. Add `--allow-root` to write the unit anyway. When the gateway runs as root, it
+prints a warning at the start: `gateway runs as root: each command of the agent runs as root too.`
+`tether doctor` has the check `gateway user`. It reads the installed unit. It warns when the unit
+runs the gateway as root, and it shows `run tether setup --system with sudo from your user account`.
+
 With `--system` under `sudo`, the wizard uses the data dir of the user who called `sudo`, for
 example `/home/you/.tether`. A `--data-dir` flag or `TETHER_HOME` wins over this rule. After
 the wizard, that user owns the data dir and its files, because the system unit runs as that

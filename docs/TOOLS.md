@@ -190,7 +190,7 @@ Return the visible text (innerText) of the current page, or of the first element
 
 ### browser_run_js
 
-Run JavaScript in the current page and return the result as JSON. The value of the last expression is the result. The tool waits for a promise. Use it to read data from the page or to do what the other browser tools cannot do.
+Run JavaScript in the current page and return the result as JSON. The value of the last expression is the result. The tool waits for a promise. Use it to read data from the page or to do what the other browser tools cannot do. A cookie value of 8 or more characters in the result shows as [cookie value].
 
 **Needs:** Chrome or Chromium (browser.chrome_path, CHROME_PATH, or PATH). Without it, the tool returns an error.
 

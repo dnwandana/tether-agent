@@ -162,13 +162,14 @@ These keys are the ones that most users change. The full list is in
 | `context.tool_output_max_chars` | `50000` | A longer tool output keeps its head and tail. The full output goes to a spill file. |
 | `memory.review_interval_turns` | `10` | A background memory review starts after this number of user turns. `0` stops the reviews. |
 | `approvals.mode` | `manual` | The approval mode for dangerous commands: `manual`, `smart`, or `off`. |
-| `approvals.cron_mode` | `deny` | The result for a dangerous command in a cron run: `deny` or `approve`. |
+| `approvals.cron_mode` | `deny` | The result for a dangerous command and for each `execute_code` script in a cron run: `deny` or `approve`. |
 | `cron.script_timeout_s` | `120` | The time limit of one cron script run, in seconds. It applies to a script job and to the data script of an agent job. At the limit, the program stops the script. A script job sends an alert. In an agent job, the failure goes into the prompt, and the model reports it. The minimum is 1. |
 | `cron.agent_timeout_s` | `0` | The time limit of the agent turn of one cron job, in seconds. `0` means no limit. At the limit, the program stops the turn and sends an alert. A partial answer follows the alert. The script of the job does not count. The maximum is 2592000. |
 | `goals.max_turns` | `20` | The turn budget of a new goal. |
 | `goals.judge_provider` | `""` | The provider entry of the goal judge and of `/goal draft`. `""` uses the chain of the session. |
 | `goals.judge_timeout_s` | `30` | The timeout of one judge call or draft call, in seconds. |
 | `toolsets.<channel>` | `[all]` | The toolsets for the channels `cli`, `telegram`, and `cron`. |
+| `toolsets.member` | `[web, ask, todo]` | The toolsets that a member turn can use. A member is a user that only `telegram.group_allowed_chats` admits. An empty list gives no tools. |
 | `telegram.enabled` | `false` | When `true`, the gateway runs the Telegram channel. |
 | `telegram.allowed_users` | `[]` | The Telegram user ids that can use the bot. |
 | `sessions.retention_days` | `90` | The gateway deletes cron, subagent, review, and goal judge sessions after this number of days. Chat sessions always stay. |
@@ -187,6 +188,11 @@ toolsets. Each channel has a list of toolsets:
 The default for each channel is `[all]`. A hidden tool is removed from the request, so the model
 does not see it. A cron job or a child run can make its channel list smaller, but it cannot add a
 toolset.
+
+`toolsets.member` is not a channel. It limits the turns of a member. A member turn gets the
+toolsets of its channel that `toolsets.member` also names. The default is `[web, ask, todo]`. An
+empty list gives no tools. A member never gets `cronjob` or `delegate_task`. An unknown toolset name
+stops the start.
 
 ```yaml
 toolsets:

@@ -212,6 +212,7 @@ restarted. Your session continues." The reply also names each running coding tas
 | `/sethome` | Telegram only | Owner only. Makes this chat or topic the home channel for cron results. |
 | `/approve` | Telegram only | Owner only. Answers only the approvals of the same topic. `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. On a coding agent request, `always` gives `session`, or `once` when the request has no session answer. |
 | `/deny` | Telegram only | Owner only. Answers only the approvals of the same topic. `[all]`. Denies the oldest waiting command, or all of them. |
+| `/approvals` | All channels | Owner only. Lists the `always` answers of the approval gate. `remove <number> <code>` removes one answer. A removed answer makes the gate ask again. |
 | `/restart` | Gateway only | `tether chat` does not have it. |
 | `/exit`, `/quit` | CLI only | Ends the chat. |
 

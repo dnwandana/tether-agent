@@ -91,8 +91,27 @@ Each `execute_code` script needs an approval for the rule `execute_code`, with t
   names the rule, for example `run a Python script on the host (recursive delete)`.
 - A script has no `always` answer.
 - In smart mode, the judge gets at most the first 8000 characters (`approvals.smart_script_max_chars`). A longer script goes to you.
-- In a cron run, a script with no literal match runs. A script with a literal match follows
-  `approvals.cron_mode`.
+- In a cron run, each script follows `approvals.cron_mode`, with or without a literal match. With
+  `deny`, the gate refuses the script. The refusal says to move the code to a cron script, or to
+  set `approvals.cron_mode: approve`. With `approve`, the script runs.
+- A script with a literal match of a protected path never goes to the judge. The gate asks you.
+
+### Protected paths and the judge
+
+A protected-path rule never goes to the smart judge. The gate always asks you. A protected-path
+rule has no `always` answer.
+
+### Member turns
+
+An approval request from a member turn reads no stored `always` or `session` answer. It saves
+none. Only an owner can answer it. Refer to [Owners and members](#owners-and-members).
+
+### The /approvals command
+
+`/approvals` is an owner-only command. It lists the `always` answers that the gate stores. Each row
+shows the rule, the date, and a short code. On Telegram, each row has a **Remove** button. In the
+CLI, send `/approvals remove <number> <code>`. The gate asks again for that rule after you remove
+its answer. If the list changed, the command removes nothing. It asks you to send `/approvals` again.
 
 ### Your answer
 
@@ -387,6 +406,17 @@ gets `⛔ Only the owner can answer this prompt.` Refer to
 [Telegram](Telegram#owners-and-members) for the full rules.
 
 Add each trusted group member to `telegram.group_allowed_users`.
+
+A member turn has less power than an owner turn:
+
+- A member turn can use only the tools of `toolsets.member`, in a shared session and in a member
+  session. The default is `[web, ask, todo]`. A member never gets `cronjob` or `delegate_task`. A call of another tool
+  gets the refusal `This tool is for the owner only. A member can use these tools: <list>.`
+- The system prompt of a member session has no owner memory.
+- A member turn starts no background review, so it cannot write the owner memory or the skills.
+- In a shared session, a member text does not steer an owner turn. It waits in the queue as its
+  own turn. The texts of one member merge into one waiting turn.
+- `/approvals` is an owner-only command.
 
 When other people can talk to the bot, set `gateway.media_delivery_strict: true` in `config.yaml`.
 A `TETHER_MEDIA_DELIVERY_STRICT` line in `.env` wins over the key, so remove an old line. In the

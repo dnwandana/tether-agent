@@ -13,7 +13,8 @@ limits. Read the limits before you give the agent access to a machine that holds
   (`acp_delegate`). It does not check the tools of MCP servers.
 - In manual mode, each `execute_code` script needs one approval for each session. A script with
   a literal dangerous command or a protected path asks each time. The gate cannot find a
-  command that the script builds while it runs.
+  command that the script builds while it runs. In a cron run,
+  the gate blocks each `execute_code` script unless `approvals.cron_mode` is `approve`.
 - A cron script job runs with no approval. Only files in `~/.tether/scripts/` can run as
   cron scripts. The file tools cannot write in that folder, and a shell write to it needs an
   approval.
@@ -24,12 +25,14 @@ limits. Read the limits before you give the agent access to a machine that holds
   folder (see "Files that the bot sends"). Use strict mode for a bot that other people use.
 - The browser tools have no check for private addresses. All sessions share one Chrome profile.
   `browser_cookies` does not return the cookie values.
-- In a chat of `telegram.group_allowed_chats`, each member can talk to the bot. Only an owner
-  can answer an approval and run the owner commands. See
+- In a chat of `telegram.group_allowed_chats`, each member can talk to the bot.
+  A member gets only the toolsets of `toolsets.member` (default `[web, ask, todo]`).
+  Only an owner can answer an approval and run the owner commands. See
   [Owners and members](#owners-and-members).
 - A coding agent of `acp_delegate` runs on the host as the same user. Its permission
-  preset sets which actions it asks for. Tether Agent does not stop a write outside the
-  work folder. A hardline command of the coding agent is refused with no prompt.
+  preset sets which actions it asks for. Tether Agent checks the paths and the commands of the
+  requests that the coding agent sends. The permission preset decides which requests come.
+  A hardline command of the coding agent is refused with no prompt.
 
 ## Approval gate for commands
 
@@ -83,7 +86,9 @@ model call. The gate is a port of the Hermes approval flow.
   The gate permits a low-risk command with no question. For other commands, the gate asks the
   user. When the judge call fails, the gate also asks the user.
   This approval covers this one command only. The next command of the same rule goes to the
-  judge again. A command that names `state.db` never goes to the judge. For an
+  judge again. A command that matches a protected path rule never goes to the judge, and the
+  gate asks the user. This includes each command that names `state.db`. An `execute_code`
+  script with a literal match of a protected path rule also skips the judge. For an
   `execute_code` script, the judge gets a script prompt and at most the first 8000
   characters (`approvals.smart_script_max_chars`). A longer script goes to the user.
 - `off`: the command runs with no question. The hardline list and the sudo guard still apply.
@@ -103,9 +108,16 @@ Two cases apply before `approvals.cron_mode`:
   [The question and the scopes](#the-question-and-the-scopes). A command that names `state.db`
   never has a grant.
 
-In a cron run, an `execute_code` script with no literal dangerous command runs. A script with
-a literal match follows `approvals.cron_mode`. Remove `code_execution` from `toolsets.cron`
-for full control.
+In a cron run, each `execute_code` script follows `approvals.cron_mode`, also a script with no
+literal dangerous command. The text of a script does not show what the script does. With
+`deny`, the gate blocks the script. A script with no literal match gets this text:
+
+`BLOCKED: execute_code runs Python on the host, and cron jobs run without a user present to approve it. Ask the user to move the code to a cron script in <data>/scripts/, or to set approvals.cron_mode: approve in config.yaml.`
+
+A script with a literal match gets the block text that names the rule. With `approve`, the
+script runs. The hardline list and the sudo guard still apply. A cron script job does not
+change. See [Cron scripts](#cron-scripts). Remove `code_execution` from `toolsets.cron` for
+full control.
 
 A child run of a cron job (`delegate_task`) also has no user. It follows
 `approvals.cron_mode` like the cron run. A cron run and its children cannot start a
@@ -132,6 +144,11 @@ The user answers with one of these scopes:
 
 These rules limit the scopes:
 
+- An answer covers only the turns of an owner.
+  A member turn reads no `session` answer and no `always` answer, also in a shared session.
+  Its prompt shows only `once` and `deny`. So an owner's answer to a member prompt does not
+  cover a later turn. This also holds for `execute_code`.
+- The smart judge still runs for a member turn. A judge approval covers that one command only.
 - A protected path rule has no `always` answer. A typed `/approve always` gives `session`.
   A protected path rule reads only the `session` grants. It never reads `approvals_always`, so
   an `always` row that an older version saved does not permit it.
@@ -144,6 +161,22 @@ These rules limit the scopes:
 
 A permission request of a coding agent has no `always` answer. Some requests also have
 no `session` answer. See [Coding agents (ACP)](#coding-agents-acp).
+
+The owner sends `/approvals` to see the saved `always` answers. The command is owner-only.
+Each line shows a number, the description of the rule, the date, and an 8-character code.
+The list leaves out the rows of protected path rules, because the gate never reads them.
+With no rows, the reply is `No Always answers. The gate asks for each dangerous command.`
+
+- In Telegram, a **Remove N** button removes an answer. The reply has at most 20 buttons.
+- In the CLI, send `/approvals remove <number> <code>`.
+- When the list changed after the reply, the remove stops with
+  `The list changed. Send /approvals to see it again.`
+- A remove deletes the `always` row and the `session` answers of that rule in the same
+  process. The gate then asks again.
+- The CLI and the gateway each keep their own `session` answers. A remove in one process
+  does not clear a `session` answer in the other process. That answer ends with its session.
+- `tether doctor` shows the number of `always` answers, for example
+  `approvals: 2 Always answers (send /approvals to see them)`.
 
 ### Goal gates
 
@@ -194,9 +227,12 @@ Each permission request of the coding agent comes to you as an approval message.
 `approvals.mode: off`, Tether Agent asks you. Two rules of the approval gate apply to a
 request of any kind that has a command, not only to an `execute` request:
 
-- **Hardline floor.** A command of the hardline list is refused with no prompt. Tether Agent
-  selects a reject option of the agent. The progress line shows `hardline: <description>`,
-  and the log gets a warning. An earlier `session` answer cannot permit the command.
+- **Floor.** A command of the hardline list is refused with no prompt. The sudo guard and the
+  gateway self-stop check also apply. The sudo guard refuses `sudo -S` also when
+  `SUDO_PASSWORD` is set, because the adapter does not get the password. Tether Agent selects
+  a reject option of the agent. The progress line shows `hardline: <description>`, `sudo -S`,
+  or `gateway self-stop`, and the log gets a warning. An earlier `session` answer cannot
+  permit the command.
 - **Dangerous rules.** A command that matches a dangerous rule asks each time and has no
   `session` answer. The message names the rule, for example
   `claude wants to run a command (dangerous: recursive delete)`.
@@ -204,12 +240,31 @@ request of any kind that has a command, not only to an `execute` request:
 The command text is the `command` field of the request. Tether Agent joins a list of words
 with spaces.
 
+Tether Agent also checks the paths of each request, whatever its kind. It reads the
+locations, the diffs, and the `file_path` and `notebook_path` fields of the raw input. It
+expands a leading `~`, joins a relative path to the work folder, and resolves `..` and the
+symbolic links.
+
+- **A protected path.** The request is refused with no prompt. The progress line shows
+  `blocked: protected path <path>`, and the log gets a warning. This is the rule of
+  `write_file`. See [Protected paths](#protected-paths).
+- **A path outside the work folder.** The message gets the note
+  `(outside the work folder: <path>)`. The request asks each time and has no `session`
+  answer. A link in the work folder to a file outside it counts as outside.
+- **An edit, a delete, or a move with no path.** The message gets the note
+  `(the request names no path)`. The request asks each time and has no `session` answer.
+
+The checks apply only to the requests that the coding agent sends.
+The permission preset decides which requests come.
+With `auto` (the default) and `risky`, Claude Code applies most edits with no request, so the
+checks do not run for them.
+
 - The answers are `once`, `session`, and `deny`. There is no `always` answer. Tether Agent
   never selects an "always" option of the agent, so the agent does not write a durable
   rule into its own settings.
 - `session` permits the same kind of action in the same ACP session of the coding agent.
   For an edit, a read, a fetch, or another kind that is not a command, it permits all
-  requests of that kind. For a command, the rule also holds the program name. So `session`
+  requests of that kind with paths only inside the work folder. For a command, the rule also holds the program name. So `session`
   on `go test ./...` also permits `go build`, but not `rm`. `session` on `rm notes.txt` also
   permits `rm old.txt`. A later `rm -r build` asks, and `rm -rf ~` is refused.
 - These requests have no `session` answer. They ask each time.
@@ -231,6 +286,13 @@ with spaces.
     request of any kind that has a command.
 - No answer in `approvals.timeout_s` refuses the action. `/stop` cancels the open requests.
 - `/new`, `/reset`, and `/delete` remove the `session` answers.
+- Some agents send a request with no allow-once option or no reject-once option. Tether
+  Agent then asks with the options of the agent. The question shows the description, the
+  notes, and the command or the diff in a code fence. The body is cut to 1000 characters, and
+  a hidden character shows as a mark. The text of the request cannot close the fence.
+- In a member turn, a request reads no earlier `session` answer, and the message does not
+  offer a `session` answer. A request with no allow-once or reject-once option is refused,
+  because that question goes to the user of the turn, not to an owner.
 
 ### Permission presets
 
@@ -246,8 +308,9 @@ session again, and the next task starts a new one.
 
 The coding agent works only in a folder inside `acp.workdir_allowlist`. Tether Agent
 resolves the symbolic links of the folder and of each allowlist entry before the check. An
-empty allowlist refuses each call. The agent itself can still write outside the folder. Its
-preset and its own checks apply there.
+empty allowlist refuses each call. An edit request for a path outside the folder asks each
+time and has no `session` answer. The agent can apply an edit with no request when its preset
+permits it. Tether Agent cannot check such an edit.
 
 ### The adapter environment
 
@@ -269,6 +332,7 @@ reads, stores, or sends a login token of the coding agent.
 
 Each tool belongs to one named toolset, for example `terminal`, `file`, or `web`.
 `toolsets.<channel>` gives the toolsets of each channel: `cli`, `telegram`, and `cron`.
+`toolsets.member` is not a channel. It limits the turns of a member.
 
 - The registry removes the hidden tools before it sends the request. The model never sees a
   hidden tool.
@@ -280,6 +344,23 @@ There is one exception. The background review fork gets the same tool schemas as
 the prompt cache hits. The dispatcher permits only the `memory`, `skill_view`, and
 `skill_manage` tools in the fork. A call to another tool gives an error result.
 
+A member turn is a turn of a member. See [Owners and members](#owners-and-members). These
+rules apply to it:
+
+- A member turn gets the toolsets of its channel that `toolsets.member` also names. The
+  default is `[web, ask, todo]`. An empty list gives no tools. `all` gives the channel set.
+- A member never gets `cronjob` or `delegate_task`, also with `all`. A cron job runs as an
+  owner turn with the tools of `toolsets.cron`. `acp_delegate` follows the list.
+- In a member session, the model sees only the member tools.
+- In a shared session, the model sees the tools of the channel. Thus
+  the tool schemas stay the same bytes for each turn, and the prompt cache hits. A member turn
+  can call only the member tools. A call to another tool gives the result
+  `This tool is for the owner only. A member can use these tools: <names>.`
+- An `execute_code` script and a `delegate_task` child of a member turn also get only the
+  member tools.
+- An unknown name in `toolsets.member` stops the start with
+  `config: toolsets.member: unknown toolset "<name>"`.
+
 ## Memory and background review
 
 `memory.md` and `user_profile.md` go into the system prompt of each later session. A skill
@@ -289,11 +370,25 @@ active after `/new`, after a restart, and after a model change.
 - The background review reads the full conversation, also tool results (for example web pages and
   command output) and group messages that were not sent to the agent. The review prompt tells the
   model that this text is data, and that it must not save an instruction from it.
+- A member turn starts no background review: not after the turn, not on a compaction, and
+  not on `/new` or `/reset` in a member session. The review of an owner turn in a shared
+  session still reads the member messages of that session.
+- The prompt of a member session has no MEMORY section, no USER PROFILE section, and no note
+  topic list. Its tool notes and its skills index show only the member tools. A shared session
+  keeps the owner memory in its prompt. Thus
+  each member of a shared session can read the owner memory through the agent.
 - The `memory` tool scans the text of each `add` and `replace` with the memory threat table.
   The table has 25 rules of Hermes `tools/threat_patterns.py`, 4 credential rules of the skill
   guard, and a check for invisible characters and Unicode tag characters. Any finding refuses
   the write. A `remove` is never refused. A text over the limit of 4000 characters for one entry
   (`memory.entry_max_chars`) gets the length error, with no scan.
+  Before the rules, the scan applies Unicode NFKC and folds lookalike letters, for example a
+  Cyrillic І, to the Latin letter. The command gate uses the same fold table.
+- Known limit: the scan finds known phrases. A new wording of the same instruction passes.
+  For members, the control is the member toolsets and the review rule.
+- The topic list of the prompt leaves out each note topic whose name,
+  with each `-` read as a space, has a finding of the memory threat scan.
+  The agent logs a warning for it. The note file stays.
 - The notice of a review write to `memory.md` or `user_profile.md` shows the full saved text,
   for example ``💾 Memory updated: `VPS = ovh` ``. A hidden character shows as a mark, for
   example `<U+200B>`. So the user sees each character that goes into the system prompt. The
@@ -330,8 +425,10 @@ active after `/new`, after a restart, and after a model change.
   chat. The CLI can deliver to any chat.
 - A cron run gets the scope of the chat that made its job.
 
-The memory files and the skills are one set for all users. Do not give the `memory` or `skills`
-toolsets to people whom you do not trust.
+The memory files and the skills are one set for all users. By default, a member cannot use
+`memory`, `skills`, or `cronjob`, because a member turn gets only `toolsets.member`.
+Keep `memory` and `skills` out of `toolsets.member`. Add a person that you trust to
+`telegram.group_allowed_users`. That person is then an owner.
 
 ## Secrets
 
@@ -440,7 +537,7 @@ back in the data folder.
 - The backup replaces a literal key in `providers.<p>.api_key`, `telegram.bot_token`,
   `mcp.servers.<s>.env`, `mcp.servers.<s>.headers`, and `acp.agents.<a>.env` with a
   `${NAME}` reference.
-- The backup masks each known secret value in the messages, the reasoning text of the
+- The backup masks each known secret value of 8 or more characters in the messages, the reasoning text of the
   messages, the memory files and the memory notes, the skills, and the scripts. The list of
   known values is the same list that the redactor uses.
 - The backup replaces each known secret value in the other strings of `config.yaml` with a
@@ -448,6 +545,13 @@ back in the data folder.
   that name.
 - The backup reports other values in `config.yaml` that look like a key. It does not change
   these values.
+- The backup also counts the stored values with text that looks like a key, with the patterns
+  of the redactor. It does not change these values. It reads at most 64 KB of each value and
+  of each file, and it stops at 1000. The report then shows
+  `Note: <n> stored values hold text that looks like a key. The archive keeps them. Keep it private.`
+  A count at the limit shows as `at least 1000`. The manifest keeps the counts as
+  `key_like_cells` and `key_like_files`. The count can include `NAME=value` text and URL query
+  parameters.
 - `tether restore` lists each variable that the restored `config.yaml` needs, and tells you
   which variables are not set. The list includes the key env of each preset entry with no
   `api_key`, when the `base_url` of the entry is empty or the URL of the preset.
@@ -496,14 +600,19 @@ refused on every OS.
 The protected paths limit the writes. Two tools also refuse to read a protected path, because
 they send the bytes to a provider: `view_image` and `transcribe_audio`. The error is
 `<path> is a protected path. The tool does not send it to the provider.` `transcribe_audio`
-also refuses a text file. The `[image: <path>]` markers of inbound media do not get this check.
+also refuses a text file. An `[image: <path>]` marker in the user text
+loads only when its real path is inside the media inbox, `<data>/cache/media/`.
+The program resolves `..` and the symbolic links before the check. A marker outside that
+folder stays in the text, and the image does not load.
 
 ### File tools
 
 The file tools resolve the path before the check:
 
 - They resolve `..` and each symbolic link in the path. A link that points to a protected path
-  is refused.
+  is refused. A `..` applies to the real folder before it, as in the kernel. So `l/../x` goes to
+  the parent of the target of the link `l`, not to the folder of `l`. The coding agent of
+  `acp_delegate` uses the same rule for the paths of its permission requests.
 - A dangling link counts as its target. A write through the link cannot create the protected
   file.
 - They compare the paths after Unicode NFC normalization and case folding. The macOS file
@@ -520,7 +629,19 @@ argument:
 - `sed -i`, `gsed -i`, and `busybox sed -i`
 - `perl -i`, also `perl -pi` and `perl -i.bak`
 - `awk -i inplace` and `gawk -i inplace`
-- `ed`, `ex`, `sponge`, and `sqlite3`
+- `ed`, `ex`, `sponge`, and `sqlite3`. `ed` and `ex` also match after the launcher words `sudo`,
+  `setsid`, `stdbuf`, `busybox`, `env` (with its options and its `NAME=value` words), `nohup`,
+  `command`, `exec`, `nice`, `time`, and `timeout <n>`.
+
+An interpreter with inline code is also a writer: `python`, `python2`, `python3`,
+`python3.N`, `perl`, `ruby`, `node`, `deno`, `bun`, `php`, or `lua` with `-c`, `-e`, `-E`,
+`--eval`, `-r` (php), `-` (stdin), or a heredoc (`<<`). A flag group that ends in `c` or `e`
+also counts, for example `perl -we` or `python3 -Ic`. Options can come before the code flag,
+also `-X` and `-W` with their values, for example `python3 -X utf8 -c`. The interpreter can be
+anywhere in the command, for example `/usr/bin/python3 -c`, `uv run python3 -c`, or
+`setsid python3 -c`. A protected path anywhere after it is a write, also on a later line, for
+example in the body of a heredoc. A protected path rule never reads an `always` answer, so an
+`always` answer for `python3 -c` does not cover it.
 
 - The rules match the absolute path. For a path in the home folder, they also match the `~`,
   `$HOME`, and `${HOME}` forms.
@@ -528,18 +649,43 @@ argument:
   example `<data>/.envrc` or `<data>/config.yaml.bak`.
 - The rules read the text of the command only. They do not resolve a relative path or a
   symbolic link.
+- The protected path rules also match a second form of the command. The second form has no
+  `'`, no `"`, and no `\` before a character. So `sqlite3 ~/.tether/"state".db` and
+  `sqlite3 ~/.tether/state\.db` also match. The other dangerous rules match only the first form.
+- In the second form, a word with `*`, `?`, or `[` becomes each protected path that it
+  matches, as in bash. So `rm ~/.tether/*` matches the rule of each protected file and folder in
+  `~/.tether`. A word matches a protected path when each segment matches. A word for a
+  protected folder matches when its first segments match, for example `~/.ss*` or
+  `~/.teth*/skills/a/x`. The bash forms `[!x]` and `[[:lower:]]` also work. A glob character at
+  the start of a segment does not match a leading `.`. So `rm ~/*` does not match `~/.ssh/`,
+  but `rm ~/.*` matches. A word that is not a valid pattern, for example the `[` of
+  `[ -f x ]`, does not match. A backtick ends a word, as in bash.
 
 Each command that names `<data>/state.db` is dangerous, also a read. The rule matches the same
 path forms as a write rule, and also `state.db-wal`, `state.db-shm`, and `state.db.lock`. Its ID
 is `protected_path_use_<slug>`, and its description is `use of the Tether Agent database`. The
 rule `sqlite_client_state_db` matches `sqlite3`, `sqlite`, `litecli`, or `sqlite-utils` with the
 word `state.db` in the same simple command. It covers `cd ~/.tether && sqlite3 state.db`.
+A glob word whose last segment matches `state.db` counts as `state.db`, so
+`cd ~/.tether && sqlite3 state*` asks. The segment must have a character that is not a glob
+character. So a bare `*`, for example in `sqlite3 app.db "SELECT * FROM t"`, does not count.
 
 A command that names `state.db` asks each time. It has no `session` or `always` answer, and
 the smart judge does not judge it. `state.db` holds the `always` answers and the goal gates,
 so one answer must not open it for later commands. Use `session_search` to read the
 transcripts. The protected path rules come before the other dangerous rules. So a `session`
 answer for `recursive_delete` does not permit `rm -rf build; sqlite3 ~/.tether/state.db x`.
+
+These forms still get past the rules. This is a known limit:
+
+- a relative glob after a `cd` that the gate cannot tie to a protected folder, for example
+  `cd ~; cd .tet*; sqlite3 sta*`
+- brace expansion, for example `stat{e,}.db`, and ANSI-C quotes, for example `$'state'.db`
+- a path that a program builds while it runs, for example
+  `python3 -c "p=os.path.expanduser('~')+'/.teth'+'er/.env'"`
+- `python3 x.py`, and each other interpreter on a file. A script file does not match the
+  interpreter rule, so `python3 <data>/skills/x/scripts/a.py` and `node <data>/scripts/job.js`
+  do not ask.
 
 ## Network access
 
@@ -570,7 +716,10 @@ the Hermes behavior for a local browser.
 - `browser_cookies` with `get` does not return the cookie values. It returns the name, the
   domain, the path, the expiry, the flags, and the length of the value. A tool result goes to the
   model provider and into the transcript, and a cookie value is often a login. A page script,
-  also `browser_run_js`, can still read a cookie that is not `HttpOnly`.
+  also `browser_run_js`, can still read a cookie that is not `HttpOnly`. The result of
+  `browser_run_js` masks the plain cookie values of the current page: a cookie value of 8 or
+  more characters becomes `[cookie value]`. An encoded value, for example a value in base64 or
+  in URL encoding, still passes.
 - Hide the `browser` toolset from a channel with members, or with users that you do not
   trust. See [Owners and members](#owners-and-members).
 
@@ -600,17 +749,30 @@ An owner is a sender that the allowlists admit by user ID:
 A `*` entry in a list counts, because the owner wrote it. A sender that only
 `telegram.group_allowed_chats` admits is a member. A message with no user ID is from a
 member. A DM sender that the bot admits is always an owner. The CLI is always the owner.
+A cron run and a goal turn are owner turns. A resumed turn in a shared session is a member turn.
 
 A member can talk to the bot. A member can run only `/help`, `/new`, `/reset`, `/stop`,
 `/steer`, `/now`, `/todo`, `/sessions`, and `/usage`. Each other command, also a new command,
 is owner-only. A member gets `⛔ Only the owner can use /<word>.` `<word>` is the name of the
 command, for example `reload-mcp`.
 
+A member turn gets only the toolsets of `toolsets.member`, and never `cronjob` or
+`delegate_task`. See [Toolsets](#toolsets).
+The prompt of a member session has no owner memory. See
+[Memory and background review](#memory-and-background-review).
+
 A shared session has no user part in its key: a forum topic with
 `thread_sessions_per_user: false`, an observed chat, or a group with
 `group_sessions_per_user: false`. In a shared session, `/new`, `/reset`, `/stop`, and `/now`
 are owner-only for a member. The reply is `⛔ Only the owner can use /<word> in a shared session.`
-A plain text of a member in a busy shared session still steers the turn.
+In a shared session, a plain text or a `/steer` of a member
+does not steer a running owner turn. The text waits in the queue and runs as its own member
+turn. A member text still steers a running member turn. An owner text steers each turn.
+
+In an observed chat, each message of a user starts with a `[name|id]` line.
+The text of `/steer` and the arguments of a skill command get the same line.
+A line in the text that looks like such a label, or like a group context header, gets a
+leading `\`. So a member cannot forge a message of another user.
 
 - `/usage` from a member shows the `session` form. A range form gets
   `⛔ Only the owner can see the usage of all chats. Send /usage session.`
@@ -620,6 +782,7 @@ A plain text of a member in a busy shared session still steers the turn.
 - `/sethome` needs an owner. A member gets `⛔ Only the owner can use /sethome.`
 - `/approve` and `/deny` need an owner. They answer only the approvals of the same topic.
 - `/start` stays open. A skill slash command is a model turn, and a member can use it.
+  The turn has the member tools only.
 
 These rules apply to the answer of a prompt:
 
@@ -633,7 +796,7 @@ These rules apply to the answer of a prompt:
   left-over texts of more than one sender have no user, so only an owner answers the
   question of such a turn.
 
-A member cannot answer an approval.
+A member cannot answer an approval, and a member turn gets only the member tools.
 So add each trusted group member to `telegram.group_allowed_users`.
 
 ### Unknown users
@@ -739,6 +902,12 @@ of groups are exfiltration, injection, obfuscation, and persistence.
   this bash rule gets no check for invisible characters. `SKILL.md`, the text types, and the
   files under `scripts/` keep the check, also with a NUL byte. Each scanned file counts to the
   1 MB scan limit.
+- A file that the guard does not scan gives a high finding `unscanned_file`:
+  `a file that the guard cannot scan, and that a program can run`. Bash is not the only
+  program that runs a file. `node payload` and `python3 payload` also run a file with a NUL
+  byte in its first line. A high finding gives `caution`. An image, font, document, archive,
+  audio, video, or model file, and a file under a `.git/` folder, give no finding and
+  stay in the `not scanned (binary)` line.
 - The guard does not honor `.skillignore` or `.clawhubignore`. An ignore file in the skill folder
   comes from the author of the skill, so it cannot hide a file from the guard.
 - The guard also scans each logical line that a shell builds from lines that end in `\`, `|`, or
@@ -753,8 +922,10 @@ The owner installs a public skill with `tether skills install <source>`. The loa
 an installed skill again, so the guard scans it once, before the move.
 
 - `tether skills install` and `tether skills update` always scan in strict mode, also when
-  `skills.guard` is `false`. The report lists the files that are not text as
-  `not scanned (binary)`.
+  `skills.guard` is `false`. The report lists the media files and the files under `.git/` that
+  are not text as `not scanned (binary)`. Each other file that the guard cannot scan has an
+  `unscanned_file` finding. So a community skill with such a file needs `--force` for
+  `tether skills install` and for `tether skills update`.
 - If the skill has more than 1 MB of text, the command refuses it. No flag passes this limit.
 - The trust level comes from the source. A GitHub repo in `TRUSTED_REPOS` (`openai/skills`,
   `anthropics/skills`, `huggingface/skills`, and `NVIDIA/skills`) is `trusted`. Every other
@@ -820,6 +991,9 @@ runs. An MCP tool can do anything that its server can do.
   the host in lower case, and the port. A missing port is 80 for `http` and 443 for `https`.
   A redirect to another origin gets no configured header, and the first such request logs a
   warning that names the origin.
+  When a redirect takes the SSE stream to an origin that is not trusted, the program trusts no `endpoint` origin.
+  The requests to that origin then get no configured header, and the log names the origin. A
+  redirect on the same origin, for example from `/sse` to `/sse/`, keeps the rule.
 - The program removes credentials from MCP error text before the model sees it.
 - `/reload-mcp` reads the server list again, restarts the servers, and lists their tools again.
   It adds the tools of new servers, updates changed tools, and removes the tools of disabled or
@@ -840,13 +1014,32 @@ Tether Agent has no container backend in v1. Commands run on the host as the Tet
 with the permissions of that user.
 
 - Run Tether Agent as a user with only the permissions that the agent needs.
-- Do not run Tether Agent as root.
+- Do not run Tether Agent as root. `tether setup` refuses a unit that runs the gateway as
+  root: a system unit with no `User=` line, or a user unit when setup runs as root. The error
+  is:
+  `setup: the unit would run the gateway as root. Run setup as your user (with sudo for --system), or add --allow-root to run the gateway as root.`
+- The gateway logs a warning at start when it runs as root:
+  `gateway runs as root: each command of the agent runs as root too. See "Host execution" in docs/SECURITY.md.`
+- `tether doctor` warns when the installed unit runs the gateway as root: a system unit with
+  no `User=` line or with `User=root`, or a user unit under `/root`. The next step is
+  `run tether setup --system with sudo from your user account`.
 - Keep the approval mode at `manual` or `smart` on a machine with important data.
 - At start, Tether Agent sets mode 0700 on a data folder with group or other permissions. It
   sets mode 0600 on `state.db`, `state.db-wal`, and `state.db-shm` in the same case. Each
   change logs a warning with the old mode. `tether doctor` warns about such a data folder.
 
-The systemd unit of `tether setup` has no containment settings. You can add a drop-in file:
+The systemd unit of `tether setup` has no containment settings.
+Each containment setting breaks a supported use:
+
+- `NoNewPrivileges` and `CapabilityBoundingSet=` stop the sudo path of `SUDO_PASSWORD`.
+- `ProtectSystem=strict` stops `tether update` from the gateway, and host administration.
+- `ProtectHome=read-only` stops an edit of a repository in the home folder.
+- `RestrictNamespaces` and `SystemCallFilter` stop the Chrome sandbox of the browser tools.
+- `RestrictAddressFamilies` without `AF_NETLINK` stops `ip` and `ss` in the terminal.
+- `PrivateTmp` and the `Protect*` settings in a user unit need user namespaces. They also
+  stop sudo.
+
+You can add a drop-in file:
 `/etc/systemd/system/tether.service.d/hardening.conf` for a system unit, or
 `~/.config/systemd/user/tether.service.d/hardening.conf` for a user unit.
 
@@ -878,17 +1071,20 @@ these checks:
    `subprocess` string or a protected path, makes the script ask each time.
 4. A script with no literal match runs when the session has a `session` answer for
    `execute_code`. The saved `always` answers do not apply.
+   A member turn reads no `session` answer, so its script asks each time.
 5. In smart mode, the judge gets a script prompt and at most the first 8000 characters
-   (`approvals.smart_script_max_chars`). A low-risk answer runs this script only. A longer script goes to the user.
+   (`approvals.smart_script_max_chars`). A low-risk answer runs this script only. A longer
+   script goes to the user. A script with a literal match of a protected path rule does not go
+   to the judge.
 6. Else the gate asks the user.
 
 The prompt uses the rule `execute_code` with the description `run a Python script on the host`.
 A literal match adds its description, for example
 `run a Python script on the host (recursive delete)`. The answers are `once`, `session`, and
-`deny`. A `session` answer covers the later scripts of the session with no literal match.
+`deny`. A `session` answer of an owner covers the later scripts of the owner in the session
+with no literal match.
 
-In a cron run, a script with no literal match runs. A script with a literal match follows
-`approvals.cron_mode`.
+In a cron run, each script follows `approvals.cron_mode`. See [Cron runs](#cron-runs).
 
 The gate cannot see a command that the script builds while it runs, for example from parts of
 a string or from decoded data. A Python file that `terminal` runs gets only the shell rules.

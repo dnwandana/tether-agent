@@ -310,10 +310,17 @@ The background memory and skill review.
 
 | Key | Default | Effect |
 |---|---|---|
-| `toolsets.<name>` | `[all]` | The toolsets that the channel `<name>` can use. The channels are `cli`, `telegram`, and `cron`. The value `all` gives every toolset. |
+| `toolsets.<name>` | `[all]` | The toolsets that the channel `<name>` can use. The channels are `cli`, `telegram`, and `cron`. `member` is not a channel: it limits the turns of a member. The value `all` gives every toolset. |
 
-The default is `cli: [all]`, `telegram: [all]`, and `cron: [all]`. A cron job or a child run can
-only make its channel set smaller.
+The default is `cli: [all]`, `telegram: [all]`, `cron: [all]`, and `member: [web, ask, todo]`.
+A cron job or a child run can only make its channel set smaller.
+
+A member is a sender that only `telegram.group_allowed_chats` admits. A member turn gets the
+toolsets of its channel that `toolsets.member` also names. An empty or null `toolsets.member`
+gives no tools. `all` gives the channel set. A member never gets `cronjob` or `delegate_task`,
+also when the list names `cron`, `delegation`, or `all`. An unknown name in a toolset list
+stops the start, for example `config: toolsets.member: unknown toolset "<name>"`. See
+"Toolsets" in [SECURITY.md](SECURITY.md#toolsets).
 
 ## cron
 
@@ -484,8 +491,10 @@ the request to an OpenAI-format endpoint. `""` hides the tool.
 
 The command templates can use the placeholders `{text}`, `{in}`, `{out}`, `{out_base}`,
 `{prompt}`, and `{size}`. The program never runs a template through a shell.
-When a template word is only `{text}` or `{prompt}` and the value starts with `-`,
-the program puts one space before the value. Thus the program does not read the value as an option.
+When a template word starts with `{text}`, `{prompt}`, or `{size}` and the value starts with
+`-`, the program puts one space before the value. Thus the program does not read the value as
+an option. A word such as `--text={text}` does not change, because its value is the value of
+an option.
 
 | Key | Default | Effect |
 |---|---|---|
@@ -503,7 +512,7 @@ the program puts one space before the value. Thus the program does not read the 
 | `media.image.timeout_s` | `0` | The time limit of one `generate_image` call, in seconds. `0` uses 120 for both backends. The maximum is 2592000. |
 | `media.vision_max_bytes` | `10485760` | The maximum size of one image for `view_image`, for an inline image, and for a sticker, in bytes. The minimum is 1024. |
 | `media.image_download_timeout_s` | `60` | The time limit of one image download, in seconds. It applies to `view_image` and to the image download of `generate_image`. The minimum is 1. The maximum is 2592000. |
-| `media.image_size` | `1024x1024` | The `{size}` value of the `command` backend of `generate_image`. The form is `<W>x<H>`. The `endpoint` backend sends no size. |
+| `media.image_size` | `1024x1024` | The `{size}` value of the `command` backend of `generate_image` when the call gives no size. The form is `<W>x<H>`. The `command` backend refuses a size that is not `<W>x<H>`, with 1 to 5 digits on each side. The `endpoint` backend does not use this key: it sends the size of the call, and no size when the call gives none. |
 | `media.cache_retention_days` | `7` | The gateway deletes a file in `cache/media/` and `cache/screenshots/` when its last change is older than this number of days. The check runs at start and each 24 hours (`gateway.housekeeping_interval_s`). `0` keeps all files. A negative value is a config error. `tether chat` alone deletes no files. |
 
 ## pricing

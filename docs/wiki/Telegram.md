@@ -154,8 +154,19 @@ In a shared session, a busy reply to a member has no **⚡ Do this now** button,
 is owner-only there. `/help` for a member in a shared session adds the line
 `In a shared session, only the owner can use /new, /stop, and /now.`
 
-Only an owner can answer an approval and send `/sethome`, `/approve`, or `/deny`.
+Only an owner can answer an approval and send `/sethome`, `/approve`, `/deny`, or `/approvals`.
 Add each trusted group member to `telegram.group_allowed_users`.
+
+A member turn has less power than an owner turn:
+
+- A member turn can use only the tools of `toolsets.member`, in a shared session and in a member
+  session. The default is `[web, ask, todo]`. The tools must also be in the toolsets of the channel. A member never gets
+  `cronjob` or `delegate_task`. A call of another tool gets the refusal
+  `This tool is for the owner only. A member can use these tools: <list>.`
+- The system prompt of a member session has no owner memory.
+- A member turn starts no background review, so it cannot write the owner memory or the skills.
+- In a shared session, a member text does not steer an owner turn. The text waits in the queue as
+  its own turn. The texts of one member merge into one waiting turn.
 
 ## Groups and topics
 
