@@ -160,8 +160,8 @@ func FormatUsage(rows []UsageRow) string {
 		if r.CostKnown {
 			cost = humanCost(r.CostUSD)
 		}
-		table = append(table, []string{r.Model, strconv.Itoa(r.Calls), humanTokens(r.InTok),
-			humanTokens(r.CacheTok), hitText(r.CacheTok, r.InTok, noValue), humanTokens(r.OutTok), tps, cost})
+		table = append(table, []string{r.Model, strconv.Itoa(r.Calls), HumanTokens(r.InTok),
+			HumanTokens(r.CacheTok), hitText(r.CacheTok, r.InTok, noValue), HumanTokens(r.OutTok), tps, cost})
 		cache, in = cache+r.CacheTok, in+r.InTok
 	}
 	widths := make([]int, len(table[0]))
@@ -189,7 +189,7 @@ func FormatUsage(rows []UsageRow) string {
 		}
 	}
 	b.WriteByte('\n')
-	b.WriteString(cacheLine(cache, in, humanTokens, noValue))
+	b.WriteString(cacheLine(cache, in, HumanTokens, noValue))
 	return b.String()
 }
 
@@ -346,9 +346,9 @@ func totalCost(rows []UsageRow) string {
 	return noCell
 }
 
-// humanTokens returns n with a "k", "M", or "B" suffix and three significant digits at
+// HumanTokens returns n with a "k", "M", or "B" suffix and three significant digits at
 // most, for example "188k" or "3.41M".
-func humanTokens(n int) string {
+func HumanTokens(n int) string {
 	if n < 1000 {
 		return strconv.Itoa(n)
 	}

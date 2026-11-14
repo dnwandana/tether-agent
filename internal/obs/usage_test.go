@@ -194,8 +194,8 @@ func TestHumanTokens(t *testing.T) {
 		999999: "1M", 3410000: "3.41M", 25000000: "25M", 123456789: "123M",
 		999_499_999: "999M", 999_949_999: "1B", 1_000_000_000: "1B", 12_300_000_000: "12.3B",
 	} {
-		if got := humanTokens(in); got != want {
-			t.Errorf("humanTokens(%d) = %q, want %q", in, got, want)
+		if got := HumanTokens(in); got != want {
+			t.Errorf("HumanTokens(%d) = %q, want %q", in, got, want)
 		}
 	}
 }
