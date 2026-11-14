@@ -179,6 +179,7 @@ func TestNewKeyDefaults(t *testing.T) {
 	eq(t, c.Context.SummaryMaxTokens, 12000)
 	eq(t, c.Context.CompactMaxFailures, 3)
 	eq(t, c.Context.CompactMaxIneffective, 2)
+	eq(t, c.Context.CompactNotice, true)
 	eq(t, c.Memory.EntryMaxChars, 4000)
 	eq(t, c.Memory.LockWaitS, 30)
 	eq(t, c.Memory.ReadMaxChars, 32000)
@@ -275,6 +276,15 @@ func TestGoalsFromYAML(t *testing.T) {
 	eq(t, c.Goals.MaxTurns, 5)
 	eq(t, c.Goals.JudgeProvider, "judge")
 	eq(t, c.Goals.JudgeTimeoutS, 30) // default kept
+}
+
+func TestCompactNoticeFromYAML(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal+"context:\n  compact_notice: false\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Context.CompactNotice, false)
+	eq(t, c.Context.CompactMaxIneffective, 2) // default kept
 }
 
 func TestValidateGoals(t *testing.T) {

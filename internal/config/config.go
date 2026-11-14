@@ -134,6 +134,8 @@ type ContextConfig struct {
 	CompactMaxFailures int `yaml:"compact_max_failures"`
 	// CompactMaxIneffective is the number of compactions in a row that leave the context over the threshold.
 	CompactMaxIneffective int `yaml:"compact_max_ineffective"`
+	// CompactNotice sends a notice to the user after each automatic compaction.
+	CompactNotice bool `yaml:"compact_notice"`
 }
 
 // SessionsConfig sets the retention of the sessions in state.db.
@@ -524,6 +526,7 @@ func Default() Config {
 			SummaryMaxTokens:      12000,
 			CompactMaxFailures:    3,
 			CompactMaxIneffective: 2,
+			CompactNotice:         true,
 		},
 		Sessions: SessionsConfig{
 			RetentionDays:        90,
