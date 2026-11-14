@@ -12,6 +12,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/goals"
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/obs"
@@ -891,22 +892,22 @@ func cmdCompact(ctx context.Context, c *CommandCtx, _ string) error {
 	if err != nil {
 		return err
 	}
-	n, err := c.Deps.Agent.CompactNow(ctx, s)
-	c.send(compactReply(n, err))
+	res, err := c.Deps.Agent.CompactNow(ctx, s)
+	c.send(compactReply(res, err))
 	return nil
 }
 
-// compactReply returns the reply to /compact after n messages became one summary, or
-// after the error err.
-func compactReply(n int, err error) Reply {
+// compactReply returns the reply to /compact after the compaction res, or after the error err.
+func compactReply(res ctxmgr.Result, err error) Reply {
 	switch {
 	case err != nil:
 		return Reply{Text: fmt.Sprintf("⚠️ **Compaction failed**\n%s. Try again later.",
 			EscapeMarkdown(strings.TrimSuffix(err.Error(), ".")))}
-	case n == 0:
+	case res.Replaced == 0:
 		return Reply{Text: "🗜 **Nothing to compact**\nThis session is still short."}
 	default:
-		return Reply{Text: fmt.Sprintf("🗜 **Compacted**\n%d messages → 1 summary. The session keeps the context.", n)}
+		return Reply{Text: fmt.Sprintf("🗜 **Compacted**\n%d messages → 1 summary. Context: ~%s → ~%s tokens. The session keeps the context.",
+			res.Replaced, obs.HumanTokens(res.TokensBefore), obs.HumanTokens(res.TokensAfter))}
 	}
 }
 

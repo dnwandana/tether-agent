@@ -1,9 +1,11 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
+	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 )
@@ -234,5 +237,116 @@ func TestCanceledCompactionCheckReadsAgain(t *testing.T) {
 	}
 	if n := reads.Load(); n != 1 {
 		t.Fatal("viewOf reads the compaction again:", n)
+	}
+}
+
+// overFixed is a fixed size that keeps the view over the threshold of compactingAgent
+// after each compaction.
+const overFixed = 5000
+
+func TestCompactionNoticeAfterCompaction(t *testing.T) {
+	fp := scripted(text("SUM"))
+	a, sess := compactingAgent(t, fp)
+	stored := messages(t, a, sess.ID)
+	before := ctxmgr.ViewSize(0, 0, 0, ctxmgr.BuildStoredView(stored, nil))
+	sink := &noticeSink{}
+	did, comps, read := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, 0)
+	if !did || comps != nil || read {
+		t.Fatal("the check compacts:", did, comps, read)
+	}
+	view, err := a.Compactor.View(ctx, sess.ID)
+	if err != nil || len(view) != 3+1+20 {
+		t.Fatal(len(view), err)
+	}
+	after := ctxmgr.ViewSize(0, 0, 0, view)
+	want := fmt.Sprintf(NoteCompacted, 57, obs.HumanTokens(before), obs.HumanTokens(after))
+	if len(sink.notices) != 1 || sink.notices[0] != want {
+		t.Fatalf("one notice with the numbers of the result:\ngot  %q\nwant %q", sink.notices, want)
+	}
+	if !strings.HasPrefix(want, "🗜 Context compacted. 57 messages → 1 summary. Context: ~") {
+		t.Fatal(want)
+	}
+	if n := len(messages(t, a, sess.ID)); n != 80 {
+		t.Fatal("the notice is not a stored message:", n)
+	}
+}
+
+func TestNoCompactionNoNotice(t *testing.T) {
+	fp := scripted()
+	a, sess := compactingAgent(t, fp)
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", ContextWindow: 1_000_000, Vision: true}
+	sink := &noticeSink{}
+	did, _, read := a.compact(ctx, Turn{Session: sess}, fp, sink, messages(t, a, sess.ID), 0)
+	if did || !read || len(sink.notices) != 0 || len(fp.requests) != 0 {
+		t.Fatal("a view under the threshold gives no notice:", did, read, sink.notices, len(fp.requests))
+	}
+}
+
+func TestCompactionStopTellsUserOnce(t *testing.T) {
+	fp := scripted(text("SUM"))
+	a, sess := compactingAgent(t, fp)
+	a.Compactor.Cfg.CompactMaxIneffective = 1
+	var logs bytes.Buffer
+	a.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	stored := messages(t, a, sess.ID)
+	sink := &noticeSink{}
+	if did, _, _ := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overFixed); !did {
+		t.Fatal("the first check compacts")
+	}
+	did, comps, read := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overFixed)
+	if did || comps == nil || !read {
+		t.Fatal("the stop keeps the read of the check:", did, comps, read)
+	}
+	if did, _, read := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overFixed); did || !read {
+		t.Fatal("a check after the stop does not compact:", did, read)
+	}
+	if len(sink.notices) != 2 || !strings.HasPrefix(sink.notices[0], "🗜 Context compacted. 57 messages") ||
+		sink.notices[1] != NoteCompactionStoppedOne {
+		t.Fatalf("one success notice and one stop warning: %q", sink.notices)
+	}
+	if strings.Contains(logs.String(), "cannot check the compaction") {
+		t.Fatal("the stop is not a check error:", logs.String())
+	}
+	if len(fp.requests) != 1 {
+		t.Fatal("one summary call:", len(fp.requests))
+	}
+}
+
+func TestCompactionStopWarningUsesTheLimit(t *testing.T) {
+	fp := scripted(text("SUM"), text("SUM2"))
+	a, sess := compactingAgent(t, fp)
+	sink := &noticeSink{}
+	if did, _, _ := a.compact(ctx, Turn{Session: sess}, fp, sink, messages(t, a, sess.ID), overFixed); !did {
+		t.Fatal("the first check compacts")
+	}
+	// New messages give the second compaction a range.
+	seedHistory(t, a, sess.ID, 40)
+	stored := messages(t, a, sess.ID)
+	if did, _, _ := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overFixed); !did {
+		t.Fatal("one strike is under the limit of 2, so the second check compacts")
+	}
+	if did, comps, read := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overFixed); did || comps == nil || !read {
+		t.Fatal("the second strike stops:", did, comps, read)
+	}
+	if len(sink.notices) != 3 || sink.notices[2] != fmt.Sprintf(NoteCompactionStopped, 2) {
+		t.Fatalf("two success notices and the stop warning for 2: %q", sink.notices)
+	}
+}
+
+func TestCompactNoticeOffKeepsTheStopWarning(t *testing.T) {
+	fp := scripted(text("SUM"))
+	a, sess := compactingAgent(t, fp)
+	a.Cfg.Context.CompactNotice = false
+	a.Compactor.Cfg.CompactMaxIneffective = 1
+	stored := messages(t, a, sess.ID)
+	sink := &noticeSink{}
+	if did, _, _ := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overFixed); !did {
+		t.Fatal("the first check compacts")
+	}
+	if did, _, read := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overFixed); did || !read {
+		t.Fatal("the second check stops:", did, read)
+	}
+	if len(sink.notices) != 1 || sink.notices[0] != NoteCompactionStoppedOne {
+		t.Fatalf("no success notice, but the stop warning: %q", sink.notices)
 	}
 }

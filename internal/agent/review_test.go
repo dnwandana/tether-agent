@@ -805,25 +805,71 @@ func TestCompactNowForcesAndCounts(t *testing.T) {
 	a, sess := newAgent(t, fp, echoTool{})
 	a.Compactor = &ctxmgr.Compactor{Store: a.Store, DB: a.DB, Cfg: a.Cfg.Context}
 	seedHistory(t, a, sess.ID, 10)
-	if n, err := a.CompactNow(ctx, sess); err != nil || n != 0 {
-		t.Fatal("too short:", n, err)
+	if res, err := a.CompactNow(ctx, sess); err != nil || res != (ctxmgr.Result{}) {
+		t.Fatal("too short:", res, err)
 	}
 	seedHistory(t, a, sess.ID, 20) // 30 messages, far below the threshold
-	n, err := a.CompactNow(ctx, sess)
-	if err != nil || n != 7 {
-		t.Fatal(n, err)
+	// The last turn of the session remembered its prompt shape, so the sizes count the
+	// system prompt.
+	system := strings.Repeat("s", 4000)
+	a.Reviews.remember(sess.ID, system, nil, nil, nil)
+	fixed := ctxmgr.EstimateFixed(system, nil)
+	before, err := a.Compactor.View(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := a.CompactNow(ctx, sess)
+	if err != nil || res.Replaced != 7 {
+		t.Fatal(res, err)
 	}
 	if v, _ := a.View(ctx, sess.ID); len(v) != 3+1+20 {
 		t.Fatal(len(v))
 	}
-	fp.script = []step{{err: errors.New("boom")}}
-	seedHistory(t, a, sess.ID, 4)
-	if _, err := a.CompactNow(ctx, sess); err == nil {
-		t.Fatal("a failed summary must be an error")
+	after, err := a.Compactor.View(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := ctxmgr.ViewSize(0, 0, fixed, before); res.TokensBefore != want {
+		t.Fatalf("TokensBefore %d, want %d", res.TokensBefore, want)
+	}
+	if want := ctxmgr.ViewSize(0, 0, fixed, after); res.TokensAfter != want {
+		t.Fatalf("TokensAfter %d, want %d", res.TokensAfter, want)
+	}
+	// With no remembered shape (a new session after a restart), fixed is 0.
+	other, err := a.Store.Create(ctx, sessions.Session{Key: "cli:other", Source: "cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedHistory(t, a, other.ID, 30)
+	view, err := a.Compactor.View(ctx, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp.script = []step{text("SUM")}
+	if res, err := a.CompactNow(ctx, other); err != nil || res.TokensBefore != ctxmgr.ViewSize(0, 0, 0, view) {
+		t.Fatal(res, err)
 	}
 	a.Compactor = nil
-	if _, err := a.CompactNow(ctx, sess); err == nil {
-		t.Fatal("no compactor")
+	if _, err := a.CompactNow(ctx, sess); !errors.Is(err, ErrNoCompactor) {
+		t.Fatal("no compactor:", err)
+	}
+}
+
+// A forced compaction whose summary fails below context.compact_max_failures gives no
+// compaction and no error from the compactor. CompactNow must not report it as "Nothing to
+// compact".
+func TestCompactNowFailedSummaryDidNotComplete(t *testing.T) {
+	fp := scripted(step{err: errors.New("boom")})
+	a, sess := newAgent(t, fp, echoTool{})
+	a.Compactor = &ctxmgr.Compactor{Store: a.Store, DB: a.DB, Cfg: a.Cfg.Context}
+	a.Compactor.Cfg.CompactMaxFailures = 3
+	seedHistory(t, a, sess.ID, 30)
+	res, err := a.CompactNow(ctx, sess)
+	if err == nil || err.Error() != "agent: the compaction did not complete. The log has the cause" {
+		t.Fatal("a failed summary must be an error:", err)
+	}
+	if res != (ctxmgr.Result{}) {
+		t.Fatalf("%+v", res)
 	}
 }
 

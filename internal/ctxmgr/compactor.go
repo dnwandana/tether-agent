@@ -64,6 +64,12 @@ const summaryTimeout = 5 * time.Minute
 // compactions in a row (maxFailures when the key is 0).
 var ErrCompactionFailed = errors.New("compaction failed")
 
+// ErrCompactionStopped is the error of Maybe in the automatic check where
+// context.compact_max_ineffective compactions in a row (2 when the key is 0) left the view
+// over the threshold. Automatic compaction then stops until the view is under the
+// threshold again.
+var ErrCompactionStopped = errors.New("automatic compaction stopped")
+
 // SummaryPrompt is the system prompt of the summary call. It follows the
 // structure of the Hermes context compressor.
 const SummaryPrompt = `You make a context checkpoint for an agent conversation. The turns that you get are the source material. The agent continues the conversation with your summary in place of these turns.
@@ -114,6 +120,13 @@ type Compaction struct {
 	CreatedAt                    time.Time
 }
 
+// Result tells what one compaction did. It is the zero value when no compaction ran.
+type Result struct {
+	Replaced     int // the messages of the model view that the summary replaced
+	TokensBefore int // the size of the view before the compaction
+	TokensAfter  int // the size of the new view, as the next check measures it
+}
+
 // Compactor replaces the middle of a long conversation with a summary. It
 // never changes the stored messages. It is safe for concurrent use.
 type Compactor struct {
@@ -153,29 +166,32 @@ type thrashState struct {
 }
 
 // allowAuto records the result over of an automatic check of the session. It reports
-// whether the check can compact. A view under the threshold clears the state.
-func (c *Compactor) allowAuto(sessionID string, over bool) bool {
+// whether the check can compact. stopped is true only in the check where the strikes reach
+// the limit, so the caller tells the user one time for each stop. A view under the
+// threshold clears the state.
+func (c *Compactor) allowAuto(sessionID string, over bool) (allow, stopped bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !over {
 		delete(c.thrash, sessionID)
-		return true
+		return true, false
 	}
 	st := c.thrash[sessionID]
 	if st == nil {
-		return true
+		return true, false
 	}
-	limit := c.ineffectiveLimit()
+	limit := c.IneffectiveLimit()
 	if st.verify {
 		st.verify = false
 		st.strikes++
 		if st.strikes == limit {
+			stopped = true
 			c.logger().Warn(fmt.Sprintf("compaction did not bring the view under the threshold %s in a row; "+
 				"automatic compaction stops until the view is under the threshold again. The system prompt "+
 				"and the tool schemas can be too large for the context window", timesText(limit)), "session", sessionID)
 		}
 	}
-	return st.strikes < limit
+	return st.strikes < limit, stopped
 }
 
 // compactedNow marks that a compaction of the session ran, so the next check judges it. A
@@ -195,10 +211,11 @@ func (c *Compactor) compactedNow(sessionID string, force bool) {
 }
 
 // Maybe compacts the session when its model view is above Cfg.CompactThreshold of window,
-// or when force is true. It uses prov for the summary. A failed summary call returns
-// false and a nil error, and the next call tries again. At the failure number
-// context.compact_max_failures in a row (3 when the key is 0), the
-// error wraps ErrCompactionFailed, so the caller can tell the user.
+// or when force is true. It uses prov for the summary. compacted is true when a compaction
+// ran. A failed summary call returns false and a nil error, and the next call tries again.
+// At the failure number context.compact_max_failures in a row (3 when the key is 0), the
+// error wraps ErrCompactionFailed, so the caller can tell the user. In the automatic check
+// that stops automatic compaction, the error wraps ErrCompactionStopped.
 func (c *Compactor) Maybe(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool) (compacted bool, err error) {
 	stored, err := c.Store.Messages(ctx, s.ID)
 	if err != nil {
@@ -212,26 +229,35 @@ func (c *Compactor) Maybe(ctx context.Context, s *sessions.Session, prov provide
 // after the compaction. fixed is the token estimate of the system prompt and the tool
 // schemas of the next request (EstimateFixed). The check uses it when no provider count
 // is available, for example after a compaction or with a provider that gives no usage.
+// MaybeStored passes up the error of MaybeStoredView.
 func (c *Compactor) MaybeStored(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool, stored []sessions.StoredMessage, fixed int) (compacted bool, err error) {
-	compacted, _, err = c.MaybeStoredView(ctx, s, prov, window, force, stored, fixed)
-	return compacted, err
+	res, _, err := c.MaybeStoredView(ctx, s, prov, window, force, stored, fixed)
+	return res.Replaced > 0, err
 }
 
-// MaybeStoredView is MaybeStored, and it also returns the compactions that the check read
-// with LatestCompaction. comps is nil when the read failed. comps is also nil when
-// compacted is true, because the new compaction row makes the read old.
-func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool, stored []sessions.StoredMessage, fixed int) (compacted bool, comps []Compaction, err error) {
+// MaybeStoredView is MaybeStored, and it also returns the result of the compaction and the
+// compactions that the check read with LatestCompaction. A compaction ran when
+// res.Replaced is more than 0. Else res is the zero value. comps is nil when the read
+// failed. comps is also nil when a compaction ran, because the new compaction row makes
+// the read old. In the check that stops automatic compaction, the error wraps
+// ErrCompactionStopped, res is the zero value, and comps is the valid read.
+func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool, stored []sessions.StoredMessage, fixed int) (res Result, comps []Compaction, err error) {
 	comps, err = LatestCompaction(ctx, c.DB, s.ID)
 	if err != nil {
-		return false, nil, err
+		return Result{}, nil, err
 	}
 	view := BuildStoredView(stored, comps)
 	trigger := int(c.Cfg.CompactThreshold * float64(window))
+	last, at := lastPrompt(stored, comps)
+	before := ViewSize(last, at, fixed, view)
 	if !force {
-		last, at := lastPrompt(stored, comps)
-		over := OverThreshold(ViewSize(last, at, fixed, view), window, c.Cfg.CompactThreshold)
-		if !c.allowAuto(s.ID, over) || !over {
-			return false, comps, nil
+		over := OverThreshold(before, window, c.Cfg.CompactThreshold)
+		allow, stopped := c.allowAuto(s.ID, over)
+		if stopped {
+			return Result{}, comps, fmt.Errorf("%w: %d compactions in a row left the view over the threshold", ErrCompactionStopped, c.IneffectiveLimit())
+		}
+		if !allow || !over {
+			return Result{}, comps, nil
 		}
 	}
 	msgs := make([]provider.Message, len(view))
@@ -240,7 +266,7 @@ func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, pr
 	}
 	start, end, ok := SelectRange(msgs, c.Cfg.ProtectFirstN, c.Cfg.ProtectLastN)
 	if !ok {
-		return false, comps, nil
+		return Result{}, comps, nil
 	}
 	// The previous summary goes into the new summary, so the view keeps one summary.
 	prevIdx := summaryIndex(view)
@@ -248,18 +274,18 @@ func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, pr
 		start = prevIdx
 	}
 	if prevIdx >= end {
-		return false, comps, nil
+		return Result{}, comps, nil
 	}
 	from, upto := rangeIDs(view[start:end], comps)
 	if from == 0 || upto == 0 {
-		return false, comps, nil
+		return Result{}, comps, nil
 	}
 	summary, err := c.summarize(ctx, prov, s.ID, msgs[start:end], trigger)
 	if err != nil {
 		if ctx.Err() != nil {
-			return false, comps, nil
+			return Result{}, comps, nil
 		}
-		return false, comps, c.fail(s.ID, err)
+		return Result{}, comps, c.fail(s.ID, err)
 	}
 	// A summary model can copy the old snapshot, and the summary must keep one snapshot.
 	// The snapshot is part of the stored summary, so each later request has the same bytes.
@@ -272,20 +298,32 @@ func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, pr
 	if _, err := c.DB.ExecContext(context.WithoutCancel(ctx), `INSERT INTO compactions
 		(session_id, from_message_id, upto_message_id, summary, created_at) VALUES (?, ?, ?, ?, ?)`,
 		s.ID, from, upto, summary, time.Now().UnixMilli()); err != nil {
-		return false, comps, c.fail(s.ID, fmt.Errorf("save the summary: %w", err))
+		return Result{}, comps, c.fail(s.ID, fmt.Errorf("save the summary: %w", err))
 	}
 	c.mu.Lock()
 	delete(c.failures, s.ID)
 	c.mu.Unlock()
 	c.compactedNow(s.ID, force)
-	c.logger().Info("compaction done", "session", s.ID, "from", from, "upto", upto, "messages", end-start)
+	after := make([]StoredView, 0, len(view)-(end-start)+1)
+	after = append(after, view[:start]...)
+	after = append(after, summaryView(Compaction{Summary: summary}))
+	after = append(after, view[end:]...)
+	// With no fixed, for example in the first /compact after a restart, a provider count in
+	// before includes the system prompt and the tools. The same parts then go into after.
+	afterFixed := fixed
+	if afterFixed <= 0 && last > 0 {
+		afterFixed = fixedFromCount(last, at, view)
+	}
+	res = Result{Replaced: end - start, TokensBefore: before, TokensAfter: ViewSize(0, 0, afterFixed, after)}
+	c.logger().Info("compaction done", "session", s.ID, "from", from, "upto", upto, "messages", end-start,
+		"tokens_before", res.TokensBefore, "tokens_after", res.TokensAfter)
 	// The hook runs only after the save, so each saved compaction gets one review of the
 	// range that it replaces. The call is in this goroutine, so the hook reads the state of
 	// the turn before the turn continues.
 	if c.OnCompact != nil {
 		c.OnCompact(context.WithoutCancel(ctx), s, msgs, start, end)
 	}
-	return true, nil, nil
+	return res, nil, nil
 }
 
 // View returns the model view of the session: the stored messages with the latest
@@ -365,9 +403,9 @@ func (c *Compactor) failureLimit() int {
 	return maxFailures
 }
 
-// ineffectiveLimit returns the ineffective compactions in a row that stop the automatic
-// compaction.
-func (c *Compactor) ineffectiveLimit() int {
+// IneffectiveLimit returns the ineffective compactions in a row that stop the automatic
+// compaction (context.compact_max_ineffective, or 2 when the key is 0).
+func (c *Compactor) IneffectiveLimit() int {
 	if c.Cfg.CompactMaxIneffective > 0 {
 		return c.Cfg.CompactMaxIneffective
 	}
@@ -476,6 +514,19 @@ func lastPrompt(stored []sessions.StoredMessage, comps []Compaction) (tokens int
 		}
 	}
 	return 0, 0
+}
+
+// fixedFromCount estimates the size of the system prompt and the tools from the provider
+// count tokens of the prompt that held the messages of view up to the id atMessage. The
+// summary message has id 0, so it counts as a message of that prompt.
+func fixedFromCount(tokens int, atMessage int64, view []StoredView) int {
+	var sent []provider.Message
+	for _, v := range view {
+		if v.ID <= atMessage {
+			sent = append(sent, v.Msg)
+		}
+	}
+	return max(tokens-EstimateChars(sent), 0)
 }
 
 // summaryIndex returns the index of the summary message in view, or -1.

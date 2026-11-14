@@ -19,6 +19,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/memory"
+	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/pricing"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
@@ -36,6 +37,17 @@ const NoteSummaryRequest = "You've reached the maximum number of tool-calling it
 
 // NoteLimitNotice is the notice to the user before the summary call. %d is the limit.
 const NoteLimitNotice = "⚠️ This turn used all %d tool rounds. The model now writes a summary."
+
+// NoteCompacted is the notice to the user after an automatic compaction. The values are
+// the replaced message count and the context size before and after, from obs.HumanTokens.
+const NoteCompacted = "🗜 Context compacted. %d messages → 1 summary. Context: ~%s → ~%s tokens."
+
+// NoteCompactionStopped is the warning to the user when automatic compaction stops. %d is
+// the effective limit of context.compact_max_ineffective.
+const NoteCompactionStopped = "⚠️ Automatic compaction stopped. After %d compactions in a row, the context is still over the threshold. The system prompt and the tools can be too large for this model. Automatic compaction starts again when the context is under the threshold. Send /new to start a new session."
+
+// NoteCompactionStoppedOne is NoteCompactionStopped for the limit 1.
+const NoteCompactionStoppedOne = "⚠️ Automatic compaction stopped. After 1 compaction, the context is still over the threshold. The system prompt and the tools can be too large for this model. Automatic compaction starts again when the context is under the threshold. Send /new to start a new session."
 
 // NoteNoSummary is the final text after two empty summary answers. %d is the limit.
 const NoteNoSummary = "I used all %d tool rounds of this turn, and I could not write a summary. Send \"continue\" to go on, or increase `agent.max_turns` in the config."
@@ -549,16 +561,6 @@ func (a *Agent) View(ctx context.Context, sessionID string) ([]provider.Message,
 	return plain(withObserved(stored, lastAddressed(stored))), nil
 }
 
-// storedView returns the messages of viewStored without the observed block. The
-// compactor counts these messages.
-func (a *Agent) storedView(ctx context.Context, sessionID string) ([]provider.Message, error) {
-	stored, err := a.viewStored(ctx, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return plain(stored), nil
-}
-
 func plain(stored []sessions.StoredMessage) []provider.Message {
 	out := make([]provider.Message, len(stored))
 	for i, m := range stored {
@@ -612,19 +614,31 @@ func (a *Agent) viewOf(ctx context.Context, sessionID string, msgs []sessions.St
 
 // compact runs the compactor before a model call. did is true when the session was
 // compacted. When read is true, comps is the latest compaction of the session that the
-// check read. A failure does not stop the turn. After the third failure in a row, the sink
-// tells the user.
+// check read. A failure does not stop the turn. After a compaction, the sink gets a notice
+// with the numbers when context.compact_notice is true. When automatic compaction stops,
+// the sink gets a warning. After the third failure in a row, the sink tells the user.
 func (a *Agent) compact(ctx context.Context, t Turn, prov provider.Provider, sink Sink, stored []sessions.StoredMessage, fixed int) (did bool, comps []ctxmgr.Compaction, read bool) {
 	// A review run reads a copy of the parent view, so it does not compact.
 	if a.Compactor == nil || t.review != nil {
 		return false, nil, false
 	}
-	did, comps, err := a.Compactor.MaybeStoredView(ctx, t.Session, prov, a.contextWindow(prov), false, stored, fixed)
+	res, comps, err := a.Compactor.MaybeStoredView(ctx, t.Session, prov, a.contextWindow(prov), false, stored, fixed)
+	did = res.Replaced > 0
 	switch {
+	case errors.Is(err, ctxmgr.ErrCompactionStopped):
+		// context.compact_notice does not stop this warning. The comps of the check are valid.
+		text := fmt.Sprintf(NoteCompactionStopped, a.Compactor.IneffectiveLimit())
+		if a.Compactor.IneffectiveLimit() == 1 {
+			text = NoteCompactionStoppedOne
+		}
+		sink.Notice(text)
+		return false, comps, true
 	case errors.Is(err, ctxmgr.ErrCompactionFailed):
 		sink.Notice("⚠️ " + err.Error())
 	case err != nil:
 		a.logger().Warn("agent: cannot check the compaction", "session", t.Session.ID, "err", err.Error())
+	case did && a.config().Context.CompactNotice:
+		sink.Notice(fmt.Sprintf(NoteCompacted, res.Replaced, obs.HumanTokens(res.TokensBefore), obs.HumanTokens(res.TokensAfter)))
 	}
 	// After an error, the read can be absent. After a compaction, the new row makes the
 	// read old.
@@ -638,34 +652,40 @@ func (a *Agent) compact(ctx context.Context, t Turn, prov provider.Provider, sin
 var ErrNoCompactor = errors.New("agent: compaction is not configured")
 
 // CompactNow compacts the session now, below the threshold too (the /compact command). It
-// returns the number of messages that the summary replaced, or 0 when the session is too
-// short to compact. A failed summary call is an error.
-func (a *Agent) CompactNow(ctx context.Context, s *sessions.Session) (int, error) {
+// returns what the compaction did. The result is the zero value and the error is nil when
+// the session is too short to compact. A summary call that fails is an error.
+func (a *Agent) CompactNow(ctx context.Context, s *sessions.Session) (ctxmgr.Result, error) {
 	if a.Compactor == nil {
-		return 0, ErrNoCompactor
+		return ctxmgr.Result{}, ErrNoCompactor
 	}
-	before, err := a.storedView(ctx, s.ID)
+	stored, err := a.Store.Messages(ctx, s.ID)
 	if err != nil {
-		return 0, err
+		return ctxmgr.Result{}, fmt.Errorf("agent: read the history: %w", err)
+	}
+	view, err := a.viewOf(ctx, s.ID, stored, nil)
+	if err != nil {
+		return ctxmgr.Result{}, err
 	}
 	cfg := a.Compactor.Cfg
-	if _, _, ok := ctxmgr.SelectRange(before, cfg.ProtectFirstN, cfg.ProtectLastN); !ok {
-		return 0, nil
+	if _, _, ok := ctxmgr.SelectRange(plain(view), cfg.ProtectFirstN, cfg.ProtectLastN); !ok {
+		return ctxmgr.Result{}, nil
+	}
+	// The shape that the last turn of the session remembered gives the size of the system
+	// prompt and the tools. With no shape, for example after a restart, fixed is 0.
+	fixed := 0
+	if sh := a.Reviews.shape(s.ID); sh.haveShape {
+		fixed = ctxmgr.EstimateFixed(sh.system, sh.schemas)
 	}
 	prov := a.providerFor(s)
-	did, err := a.Compactor.Maybe(ctx, s, prov, a.contextWindow(prov), true)
+	res, _, err := a.Compactor.MaybeStoredView(ctx, s, prov, a.contextWindow(prov), true, stored, fixed)
 	if err != nil {
-		return 0, err
+		return ctxmgr.Result{}, err
 	}
-	if !did {
-		// Maybe logs the cause of a failed summary call and returns no error for it.
-		return 0, errors.New("agent: the compaction did not complete. The log has the cause")
+	if res.Replaced == 0 {
+		// MaybeStoredView logs the cause of a failed summary call and returns no error for it.
+		return ctxmgr.Result{}, errors.New("agent: the compaction did not complete. The log has the cause")
 	}
-	after, err := a.storedView(ctx, s.ID)
-	if err != nil {
-		return 0, err
-	}
-	return len(before) - len(after) + 1, nil
+	return res, nil
 }
 
 // DefaultModel returns the model of the default provider and its context window. When the

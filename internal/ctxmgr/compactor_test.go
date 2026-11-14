@@ -511,8 +511,8 @@ func TestMaybeStoredViewReturnsTheCompactionsThatItRead(t *testing.T) {
 				t.Fatal(err)
 			}
 			for range tt.before {
-				if did, _, err := c.MaybeStoredView(ctx, sess, fp, tt.window, tt.force, stored, 0); did || err != nil {
-					t.Fatal("a failure before the limit:", did, err)
+				if res, _, err := c.MaybeStoredView(ctx, sess, fp, tt.window, tt.force, stored, 0); res != (Result{}) || err != nil {
+					t.Fatal("a failure before the limit:", res, err)
 				}
 			}
 			cctx := ctx
@@ -521,9 +521,12 @@ func TestMaybeStoredViewReturnsTheCompactionsThatItRead(t *testing.T) {
 				cctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			did, comps, err := c.MaybeStoredView(cctx, sess, fp, tt.window, tt.force, stored, 0)
-			if did != tt.wantDid || (err != nil) != tt.wantErr {
-				t.Fatal(did, err)
+			res, comps, err := c.MaybeStoredView(cctx, sess, fp, tt.window, tt.force, stored, 0)
+			if did := res.Replaced > 0; did != tt.wantDid || (err != nil) != tt.wantErr {
+				t.Fatal(res, err)
+			}
+			if !tt.wantDid && res != (Result{}) {
+				t.Fatalf("no compaction must give the zero result: %+v", res)
 			}
 			if tt.wantErr && !tt.cancel && !errors.Is(err, ErrCompactionFailed) {
 				t.Fatal(err)
@@ -542,6 +545,94 @@ func TestMaybeStoredViewReturnsTheCompactionsThatItRead(t *testing.T) {
 				t.Fatalf("got %+v, want %+v", comps, want)
 			}
 		})
+	}
+}
+
+// The result of a compaction tells the replaced messages and the view size before and after.
+// TokensAfter is the size that the next automatic check measures for the new view.
+func TestMaybeStoredViewReturnsTheResult(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		prior  bool // compact one time before the check, so the old summary is in the range
+		window int
+		force  bool
+	}{
+		{name: "automatic", window: 2000},
+		{name: "forced", window: 1_000_000, force: true},
+		{name: "automatic after a prior compaction", prior: true, window: 2000},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c, sess, fp := compactorWithSession(t, 80)
+			c.Todo = func(context.Context, string) string { return testSnap }
+			if tt.prior {
+				if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+					t.Fatal("the prior compaction:", did, err)
+				}
+				appendPlain(t, c.Store, sess.ID, 80, 40)
+			}
+			const fixed = 300
+			stored, err := c.Store.Messages(ctx, sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldComps, err := LatestCompaction(ctx, c.DB, sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldView := BuildStoredView(stored, oldComps)
+			res, comps, err := c.MaybeStoredView(ctx, sess, fp, tt.window, tt.force, stored, fixed)
+			if err != nil || comps != nil {
+				t.Fatal(res, comps, err)
+			}
+			newComps, err := LatestCompaction(ctx, c.DB, sess.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			newView := BuildStoredView(stored, newComps)
+			want := Result{
+				Replaced:     len(oldView) - len(newView) + 1,
+				TokensBefore: ViewSize(0, 0, fixed, oldView),
+				TokensAfter:  ViewSize(0, 0, fixed, newView),
+			}
+			if res != want || res.Replaced < 2 || res.TokensAfter >= res.TokensBefore {
+				t.Fatalf("got %+v, want %+v", res, want)
+			}
+		})
+	}
+}
+
+func TestMaybeStoredViewEstimatesFixedFromTheProviderCount(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 79)
+	stored, err := c.Store.Messages(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := make([]provider.Message, len(stored))
+	for i, m := range stored {
+		sent[i] = m.Msg
+	}
+	// The provider count holds the 79 messages and a system prompt and tools of 5000 tokens.
+	const fixed = 5000
+	last := EstimateChars(sent) + fixed
+	if _, err := c.Store.Append(ctx, sess.ID, provider.Message{Role: provider.RoleAssistant, Content: "answer"},
+		sessions.MessageMeta{Usage: provider.Usage{InputTokens: last}}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = c.Store.Messages(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// With no remembered prompt shape, /compact gives fixed 0.
+	res, _, err := c.MaybeStoredView(ctx, sess, fp, 1_000_000, true, stored, 0)
+	if err != nil || res.Replaced == 0 {
+		t.Fatal(res, err)
+	}
+	comps, err := LatestCompaction(ctx, c.DB, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := ViewSize(0, 0, fixed, BuildStoredView(stored, comps)); res.TokensAfter != want {
+		t.Fatalf("after = %d, want %d with the estimated system prompt and tools", res.TokensAfter, want)
 	}
 }
 
@@ -624,8 +715,9 @@ func TestStripTodoSnapshot(t *testing.T) {
 }
 
 // A compaction that leaves the view over the threshold counts one strike. At two strikes in
-// a row, the automatic check stops. A forced compaction still runs, and a view under the
-// threshold clears the strikes.
+// a row, the automatic check stops, and only that check returns ErrCompactionStopped. A
+// forced compaction still runs, and a view under the threshold clears the strikes, so a
+// later stop gives a new error.
 func TestCompactionStopsAfterTwoIneffectiveCompactions(t *testing.T) {
 	c, sess, fp := compactorWithSession(t, 80)
 	next := 80
@@ -633,43 +725,62 @@ func TestCompactionStopsAfterTwoIneffectiveCompactions(t *testing.T) {
 		appendPlain(t, c.Store, sess.ID, next, 40)
 		next += 40
 	}
-	check := func(fixed int, force bool) bool {
+	// check reports whether a compaction ran, and whether the check returned the stop error.
+	check := func(fixed int, force bool) (did, stopped bool) {
 		t.Helper()
 		stored, err := c.Store.Messages(ctx, sess.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		did, err := c.MaybeStored(ctx, sess, fp, 4000, force, stored, fixed)
+		res, comps, err := c.MaybeStoredView(ctx, sess, fp, 4000, force, stored, fixed)
+		if errors.Is(err, ErrCompactionStopped) {
+			want, lerr := LatestCompaction(ctx, c.DB, sess.ID)
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			if res != (Result{}) || len(comps) != 1 || !reflect.DeepEqual(comps, want) {
+				t.Fatalf("the stop must give a zero result and the comps that it read: %+v %+v", res, comps)
+			}
+			return false, true
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
-		return did
+		return res.Replaced > 0, false
 	}
 	// The fixed part alone (3000 tokens) is over the threshold of 2000, so no compaction
 	// can bring the view under it.
-	if !check(3000, false) {
+	if did, stopped := check(3000, false); !did || stopped {
 		t.Fatal("the first compaction must run")
 	}
 	more()
-	if !check(3000, false) {
+	if did, stopped := check(3000, false); !did || stopped {
 		t.Fatal("one strike must not stop the compaction")
 	}
 	more()
-	if check(3000, false) {
-		t.Fatal("two strikes in a row must stop the automatic compaction")
+	if did, stopped := check(3000, false); did || !stopped {
+		t.Fatal("two strikes in a row must stop the automatic compaction with ErrCompactionStopped")
 	}
-	if check(3000, false) {
-		t.Fatal("the stop must stay")
+	if did, stopped := check(3000, false); did || stopped {
+		t.Fatal("the stop must stay, and the check after the stop must return no error")
 	}
-	if !check(3000, true) {
+	if did, stopped := check(3000, true); !did || stopped {
 		t.Fatal("a forced compaction must still run")
 	}
-	if check(0, false) {
+	if did, stopped := check(0, false); did || stopped {
 		t.Fatal("the view is under the threshold")
 	}
 	more()
-	if !check(3000, false) {
+	if did, stopped := check(3000, false); !did || stopped {
 		t.Fatal("a view under the threshold must clear the strikes")
+	}
+	more()
+	if did, stopped := check(3000, false); !did || stopped {
+		t.Fatal("one strike after the clear must not stop the compaction")
+	}
+	more()
+	if did, stopped := check(3000, false); did || !stopped {
+		t.Fatal("a later stop must give a new ErrCompactionStopped")
 	}
 }
 
@@ -748,27 +859,39 @@ func TestCompactionMaxIneffectiveFromConfig(t *testing.T) {
 	c.Cfg.CompactMaxIneffective = 1
 	var logs bytes.Buffer
 	c.Log = slog.New(slog.NewTextHandler(&logs, nil))
-	check := func() bool {
+	check := func() (bool, error) {
 		t.Helper()
 		stored, err := c.Store.Messages(ctx, sess.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		did, err := c.MaybeStored(ctx, sess, fp, 4000, false, stored, 3000)
-		if err != nil {
+		if err != nil && !errors.Is(err, ErrCompactionStopped) {
 			t.Fatal(err)
 		}
-		return did
+		return did, err
 	}
-	if !check() {
-		t.Fatal("the first compaction must run")
+	if did, err := check(); !did || err != nil {
+		t.Fatal("the first compaction must run", did, err)
 	}
 	appendPlain(t, c.Store, sess.ID, 80, 40)
-	if check() {
-		t.Fatal("one strike must stop the automatic compaction with a limit of 1")
+	if did, err := check(); did || !errors.Is(err, ErrCompactionStopped) {
+		t.Fatal("one strike must stop the automatic compaction with a limit of 1", did, err)
 	}
 	if !strings.Contains(logs.String(), "under the threshold one time in a row") {
 		t.Fatal(logs.String())
+	}
+	if did, err := check(); did || err != nil {
+		t.Fatal("the stop error must come one time", did, err)
+	}
+}
+
+func TestIneffectiveLimit(t *testing.T) {
+	for set, want := range map[int]int{0: 2, 1: 1, 3: 3} {
+		c := &Compactor{Cfg: config.ContextConfig{CompactMaxIneffective: set}}
+		if got := c.IneffectiveLimit(); got != want {
+			t.Errorf("compact_max_ineffective %d: IneffectiveLimit() = %d, want %d", set, got, want)
+		}
 	}
 }
 

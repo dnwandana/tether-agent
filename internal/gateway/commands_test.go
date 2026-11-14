@@ -507,10 +507,20 @@ func TestCompactCommand(t *testing.T) {
 		t.Fatal(out)
 	}
 	seedTurns(t, c.Deps.Store, c.Session.ID, 15)
+	before, err := c.Deps.Agent.Compactor.View(context.Background(), c.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	out.Reset()
 	run(t, c, "/compact")
-	if out.String() != "🗜 **Compacted**\n7 messages → 1 summary. The session keeps the context.\n" {
-		t.Fatal(out)
+	after, err := c.Deps.Agent.Compactor.View(context.Background(), c.Session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("🗜 **Compacted**\n7 messages → 1 summary. Context: ~%s → ~%s tokens. The session keeps the context.\n",
+		obs.HumanTokens(ctxmgr.ViewSize(0, 0, 0, before)), obs.HumanTokens(ctxmgr.ViewSize(0, 0, 0, after)))
+	if out.String() != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", out, want)
 	}
 }
 
@@ -1264,16 +1274,19 @@ func TestPromptReplies(t *testing.T) {
 
 func TestCompactReplies(t *testing.T) {
 	for _, tc := range []struct {
-		n    int
+		res  ctxmgr.Result
 		err  error
 		want string
 	}{
-		{42, nil, "🗜 **Compacted**\n42 messages → 1 summary. The session keeps the context."},
-		{0, nil, "🗜 **Nothing to compact**\nThis session is still short."},
-		{0, errors.New("provider timeout"), "⚠️ **Compaction failed**\nprovider timeout. Try again later."},
-		{0, errors.New("agent: the compaction did not complete. The log has the cause."), "⚠️ **Compaction failed**\nagent: the compaction did not complete. The log has the cause. Try again later."},
+		{ctxmgr.Result{Replaced: 2954, TokensBefore: 210_000, TokensAfter: 38_000}, nil,
+			"🗜 **Compacted**\n2954 messages → 1 summary. Context: ~210k → ~38k tokens. The session keeps the context."},
+		{ctxmgr.Result{Replaced: 42, TokensBefore: 950, TokensAfter: 3_410_000}, nil,
+			"🗜 **Compacted**\n42 messages → 1 summary. Context: ~950 → ~3.41M tokens. The session keeps the context."},
+		{ctxmgr.Result{}, nil, "🗜 **Nothing to compact**\nThis session is still short."},
+		{ctxmgr.Result{}, errors.New("provider timeout"), "⚠️ **Compaction failed**\nprovider timeout. Try again later."},
+		{ctxmgr.Result{}, errors.New("agent: the compaction did not complete. The log has the cause"), "⚠️ **Compaction failed**\nagent: the compaction did not complete. The log has the cause. Try again later."},
 	} {
-		if got := compactReply(tc.n, tc.err); got.Text != tc.want || got.Buttons != nil {
+		if got := compactReply(tc.res, tc.err); got.Text != tc.want || got.Buttons != nil {
 			t.Fatalf("got:\n%s\nwant:\n%s", got.Text, tc.want)
 		}
 	}

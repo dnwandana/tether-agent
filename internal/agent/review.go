@@ -578,11 +578,15 @@ func (c *ReviewCounters) remember(id, system string, schemas []provider.ToolSche
 	}
 }
 
-// shape returns a copy of the data of the session.
+// shape returns a copy of the data of the session. It adds no entry for an unknown
+// session, because /compact can read a session that has no turn in this process.
 func (c *ReviewCounters) shape(id string) reviewState {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return *c.state(id)
+	if st := c.m[id]; st != nil {
+		return *st
+	}
+	return reviewState{}
 }
 
 // reset sets both counters of the session to 0, because a full review starts.
