@@ -57,6 +57,8 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 - It keeps the system prompt, the first 3 messages, and the last 20 messages.
 - A summary from the same model replaces the messages between them.
 - The stored transcript does not change. The `/compact` command starts compaction at once.
+- After each automatic compaction, the user sees a notice with the number of replaced messages and the context size. `context.compact_notice: false` turns it off.
+- When 2 compactions in a row (`context.compact_max_ineffective`) leave the context over the threshold, automatic compaction stops, and the user sees a warning. It starts again when the context is under the threshold. `/compact` still runs, but it does not help when the system prompt and the tools are too large. `context.compact_notice` does not turn off this warning.
 - An open task list of `todo_list` stays after a compaction.
 - Write important facts into memory or a skill. A summary can lose details.
 

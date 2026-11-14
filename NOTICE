@@ -19,7 +19,8 @@ copied from Hermes Agent. These parts include:
   summary at the tool-round limit (internal/agent/, internal/ctxmgr/).
 - The rule that stops automatic compaction after two compactions in a row that
   leave the request over the threshold (internal/ctxmgr/compactor.go, from
-  agent/context_compressor.py).
+  agent/context_compressor.py), and its warning to the user (from
+  agent/conversation_compression.py).
 - The Telegram message format, stream, group gate, incoming media notes, sticker
   cache, and media delivery rules (internal/telegram/, from gateway/).
 - The rich message reader: the plain text, the addressing text, and the Markdown

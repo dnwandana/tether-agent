@@ -150,7 +150,9 @@ On the next start, the gateway continues each reply that it cut, if the cut is r
 (`agent.resume_freshness_s`, default 3600 seconds; `0` turns this off). It never runs an old
 tool call again. Photos and files in a waiting message are lost, and the agent gets a note
 about the loss. After 3 resumes in a row, the gateway stops the automatic resume and tells
-you.
+you. After a restart, a continued reply, a waiting message, a goal turn, and a batch result
+send their notices as separate messages, for example the compaction notice and the tool-round
+limit notice.
 
 An active goal continues when the gateway was down for less than `agent.resume_freshness_s`.
 Else it pauses, and the chat gets a notice with Resume and Clear buttons.

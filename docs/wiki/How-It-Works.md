@@ -554,10 +554,14 @@ smaller.
   `todo_list` goes at the end of the summary.
 - **Storage:** the stored messages never change. A row in the `compactions` table replaces a
   range of messages with the summary in the view that goes to the model.
+- **Notice:** after each automatic compaction, you see
+  `🗜 Context compacted. <N> messages → 1 summary. Context: ~<before> → ~<after> tokens.`
+  `context.compact_notice: false` stops this notice. The warnings below still go out. A cron
+  job sends no compaction notice.
 - **Failures:** after 3 failures in a row (`context.compact_max_failures`), you see a warning.
 - **No loop:** compaction cannot make the system prompt and the tool schemas smaller. When two
   compactions in a row (`context.compact_max_ineffective`) leave the request over the threshold,
-  automatic compaction stops, and the log gets a warning. It starts again when the request is under
+  automatic compaction stops, and you see a warning. It starts again when the request is under
   the threshold. `/compact` still runs.
 
 ### Long tool output

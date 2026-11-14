@@ -151,7 +151,8 @@ These keys apply to all entries of `providers`.
 | `context.summary_min_tokens` | `2000` | The lowest token budget of a compaction summary. It must not be more than `context.summary_max_tokens`. The minimum is 100. |
 | `context.summary_max_tokens` | `12000` | The highest token budget of a compaction summary. The minimum is 100. |
 | `context.compact_max_failures` | `3` | After this number of failed compactions in a row, the program tells the user. The minimum is 1. |
-| `context.compact_max_ineffective` | `2` | After this number of compactions in a row that leave the context over the threshold, the automatic compaction stops until the context is under the threshold again. The minimum is 1. |
+| `context.compact_max_ineffective` | `2` | After this number of compactions in a row that leave the context over the threshold, the automatic compaction stops until the context is under the threshold again, and the program tells the user. The minimum is 1. |
+| `context.compact_notice` | `true` | After each automatic compaction, the program sends a notice with the number of replaced messages and the context size before and after. `false` stops this notice. The failure notice and the stop warning still go out. |
 
 ## sessions
 

@@ -398,6 +398,8 @@ The final answer has these rules:
 - A tool round splits the answer into separate messages.
 - When a turn uses all its tool rounds, a ⚠️ notice comes first. Then the summary of the work
   follows as the answer. See [One turn, step by step](How-It-Works#one-turn-step-by-step).
+- After an automatic compaction, a 🗜 notice shows the number of replaced messages and the
+  context size. It is a separate message. See [Compaction](How-It-Works#compaction).
 
 ### Approval buttons
 

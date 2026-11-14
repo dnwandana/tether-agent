@@ -212,6 +212,14 @@ Install Chrome or Chromium so that the browser tools are available.
 
 **Fix:** send `/new` to start a new session.
 
+### `⚠️ Automatic compaction stopped`
+
+**Cause:** the system prompt, the tool schemas, and the protected messages are over
+`context.compact_threshold` of the context window. Compaction cannot make them smaller.
+
+**Fix:** send `/new`. If it comes again in a new session, use fewer toolsets, or check the
+context window of the model (`providers.<name>.context_window`, see [Providers](Providers)).
+
 ### The agent does not use a new memory entry
 
 **Cause:** the system prompt of a session does not change after it is made. This keeps the

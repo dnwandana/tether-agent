@@ -73,7 +73,7 @@ task runs.
 | `/effort` | `[<level>]` or `default` | Sets the reasoning effort for this session. See [/model and /effort](#model-and-effort). | `default` and the seven levels. After a change, ↺ Use the default. | no |
 | `/prompt` | `set <text>`, `show`, or `clear` | Replaces the base prompt for this session only. | 🧹 Use the base prompt | no |
 | `/fork` | `[title]` | Copies the session and changes to the copy. An active goal of the current session pauses. | `↩️ Back to "<title>"` | no |
-| `/compact` | | Summarizes the older messages now. | | no |
+| `/compact` | | Summarizes the older messages now. The reply shows the number of replaced messages and the context size before and after. | | no |
 | `/reload-mcp` | | Reloads the MCP servers. The next request does not use the prompt cache. | | no |
 | `/usage` | `[today\|7d\|30d\|all\|session]` | Shows the tokens, the cached input tokens, the cache hit rate, and the cost for each model. The default range is `today`. A range counts all chats and all groups, and the header says "all chats". `all` shows all stored usage. `session` counts the current session and its subagents, reviews, goal judge calls, and side calls (compaction, `view_image`, and smart approval). A fork counts only the calls after the fork. `session` also shows the number of compactions. In the terminal, the last line shows the ranges. A member gets the `session` form. See [Owners and members](#owners-and-members). | Today, 7 days, and 30 days in the first row. All and Session in the second row. | yes |
 | `/help` | `[skills]` | Shows the main commands and the first 10 skill commands (`gateway.help_max_skills`). `/help skills` shows all skill commands. For a member, it lists only the member commands and the skill commands. | | yes |
