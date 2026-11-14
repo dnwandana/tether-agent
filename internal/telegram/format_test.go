@@ -430,3 +430,16 @@ func TestCutMarkdownV2(t *testing.T) {
 		t.Fatalf("the cut keeps a part of the link: %q", got)
 	}
 }
+
+// A compaction notice has a single "~" before each token number. MarkdownV2 escapes it,
+// and the plain fallback keeps the numbers.
+func TestFormatCompactionNotice(t *testing.T) {
+	const notice = "🗜 Context compacted. 2954 messages → 1 summary. Context: ~210k → ~38k tokens."
+	got := ToMarkdownV2(notice)
+	if want := `🗜 Context compacted\. 2954 messages → 1 summary\. Context: \~210k → \~38k tokens\.`; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if plain, want := StripMarkdownV2(got), "🗜 Context compacted. 2954 messages → 1 summary. Context: 210k → 38k tokens."; plain != want {
+		t.Fatalf("got %q, want %q", plain, want)
+	}
+}

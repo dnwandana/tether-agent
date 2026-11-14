@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"slices"
@@ -263,5 +264,40 @@ func TestSendRendererEscapesGoalLine(t *testing.T) {
 		}
 	default:
 		t.Fatal("the goal line must go out")
+	}
+}
+
+// A turn with no status bubble sends each notice as its own message, for example the
+// compaction notice after a restart. An empty notice sends nothing.
+func TestSendRendererSendsNotice(t *testing.T) {
+	ch := &recChannel{sent: make(chan Outbound, 2)}
+	to := Target{Source: "telegram", ChatID: "42"}
+	s := &sendRenderer{ctx: context.Background(), ch: ch, to: to, log: slog.New(slog.DiscardHandler)}
+	const notice = "🗜 Context compacted. 2954 messages → 1 summary. Context: ~210k → ~38k tokens."
+	s.Notice(notice)
+	select {
+	case m := <-ch.sent:
+		if m.Text != notice || ch.to != to {
+			t.Fatalf("%+v %+v", m, ch.to)
+		}
+	default:
+		t.Fatal("the notice must go out")
+	}
+	s.Notice("")
+	s.Notice(" \n ")
+	select {
+	case m := <-ch.sent:
+		t.Fatalf("an empty notice must send nothing: %q", m.Text)
+	default:
+	}
+}
+
+// send also sends notices now, so its log text names a message, not an answer.
+func TestSendRendererLogsFailedNotice(t *testing.T) {
+	var buf bytes.Buffer
+	s := &sendRenderer{ctx: context.Background(), ch: &failFirstChannel{}, log: slog.New(slog.NewTextHandler(&buf, nil))}
+	s.Notice("⚠️ notice")
+	if !strings.Contains(buf.String(), "gateway: cannot send the message") {
+		t.Fatal(buf.String())
 	}
 }

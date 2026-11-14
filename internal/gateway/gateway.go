@@ -1039,7 +1039,7 @@ func (g *Gateway) logger() *slog.Logger {
 	return g.Deps.logger()
 }
 
-// sendRenderer sends the final text of a turn as one message, and each Ack at once.
+// sendRenderer sends the final text of a turn as one message, and each Ack and each notice at once.
 type sendRenderer struct {
 	ctx context.Context
 	ch  Channel
@@ -1051,9 +1051,10 @@ func (s *sendRenderer) Delta(string)             {}
 func (s *sendRenderer) ToolStart(string, string) {}
 func (s *sendRenderer) ToolEnd(string, bool)     {}
 func (s *sendRenderer) Boundary()                {}
-func (s *sendRenderer) Notice(string)            {}
 
 func (s *sendRenderer) Ack(text string) { s.send(text) }
+
+func (s *sendRenderer) Notice(text string) { s.send(text) }
 
 // GoalLine sends the line as its own message. The turn has no status bubble, so the line
 // goes out before the answer. The line can hold model text, and the channel reads Markdown,
@@ -1072,6 +1073,6 @@ func (s *sendRenderer) send(text string) {
 		return
 	}
 	if err := s.ch.Send(context.WithoutCancel(s.ctx), s.to, Outbound{Text: text}); err != nil {
-		s.log.Error("gateway: cannot send the answer", "source", s.to.Source, "chat", s.to.ChatID, "err", err.Error())
+		s.log.Error("gateway: cannot send the message", "source", s.to.Source, "chat", s.to.ChatID, "err", err.Error())
 	}
 }
