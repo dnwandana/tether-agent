@@ -377,6 +377,64 @@ func TestMigrationReasoningEffortFrom002(t *testing.T) {
 	}
 }
 
+// A database at schema version 6 gains the cron_runs table and cron_jobs.fail_streak. An old
+// job reads fail_streak as 0.
+func TestMigrationCronRunsFrom006(t *testing.T) {
+	ctx := context.Background()
+	p := filepath.Join(t.TempDir(), "state.db")
+	sdb, err := sql.Open("sqlite", p+dsnParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdb.SetMaxOpenConns(1)
+	old := &DB{DB: sdb}
+	if _, err := old.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.version <= 6 {
+			if err := old.apply(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := old.ExecContext(ctx, `INSERT INTO cron_jobs (id, schedule) VALUES ('j1', 'every 1h')`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	d, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	var streak int
+	if err := d.QueryRowContext(ctx, `SELECT fail_streak FROM cron_jobs WHERE id = 'j1'`).Scan(&streak); err != nil || streak != 0 {
+		t.Fatal("an old job must read fail_streak as 0:", streak, err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO cron_runs (job_id, started_at, finished_at, status, delivery)
+		VALUES ('j1', 1763276400000, 1763276438000, 'ok', 'sent')`); err != nil {
+		t.Fatal(err)
+	}
+	var output, deliveryErr, sessionID string
+	if err := d.QueryRowContext(ctx, `SELECT output, delivery_error, session_id FROM cron_runs WHERE job_id = 'j1'`).
+		Scan(&output, &deliveryErr, &sessionID); err != nil || output != "" || deliveryErr != "" || sessionID != "" {
+		t.Fatal("the text columns must default to '':", output, deliveryErr, sessionID, err)
+	}
+	var n int
+	if err := d.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'cron_runs_job'`).Scan(&n); err != nil || n != 1 {
+		t.Fatal("missing index cron_runs_job:", n, err)
+	}
+	if v, err := d.SchemaVersion(ctx); err != nil || v != 7 || v != LatestVersion() {
+		t.Fatal(v, LatestVersion(), err)
+	}
+}
+
 func TestACPSessionsKeyIsSessionAndAgent(t *testing.T) {
 	d, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

@@ -287,3 +287,20 @@ func TestMaskDBMasksGoalState(t *testing.T) {
 		t.Fatal(id, err)
 	}
 }
+
+func TestMaskDBMasksCronRuns(t *testing.T) {
+	d := maskOpenDB(t)
+	maskExec(t, d, `INSERT INTO cron_runs (job_id, started_at, finished_at, status, delivery, output, delivery_error, session_id)
+		VALUES ('j1', 1, 2, 'error', 'failed', ?, ?, 's1')`,
+		"curl -H "+maskSecret+" failed", "send failed: "+maskSecret)
+	n, err := maskDB(context.Background(), d, []string{maskSecret})
+	if err != nil || n != 2 {
+		t.Fatal(n, err)
+	}
+	maskAssertNoCell(t, d, maskSecret)
+	var job, status, delivery, sid string
+	if err := d.QueryRow(`SELECT job_id, status, delivery, session_id FROM cron_runs`).
+		Scan(&job, &status, &delivery, &sid); err != nil || job != "j1" || status != "error" || delivery != "failed" || sid != "s1" {
+		t.Fatal("the state columns must stay unchanged:", job, status, delivery, sid, err)
+	}
+}
