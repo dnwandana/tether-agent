@@ -168,6 +168,8 @@ func TestNewKeyDefaults(t *testing.T) {
 	eq(t, c.Cron.TickS, 30)
 	eq(t, c.Cron.GraceMinS, 120)
 	eq(t, c.Cron.GraceMaxS, 7200)
+	eq(t, c.Cron.RunHistory, 50)
+	eq(t, c.Cron.FailStreakLimit, 10)
 	eq(t, c.Agent.StreamIdleTimeoutS, 300)
 	eq(t, c.Agent.MaxSameToolFailures, 3)
 	eq(t, c.Agent.ToolPreviewChars, 40)

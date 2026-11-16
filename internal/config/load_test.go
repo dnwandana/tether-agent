@@ -439,6 +439,24 @@ func TestMediaCacheRetentionDays(t *testing.T) {
 	}
 }
 
+// TestCronHistoryKeysLoad checks that a file without the keys keeps the defaults, and that an
+// explicit 0 stays 0.
+func TestCronHistoryKeysLoad(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Cron.RunHistory, 50)
+	eq(t, c.Cron.FailStreakLimit, 10)
+	c, err = Load(writeTemp(t, minimal+"cron:\n  run_history: 0\n  fail_streak_limit: 0\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatalf("0 turns each feature off and is valid: %v", err)
+	}
+	eq(t, c.Cron.RunHistory, 0)
+	eq(t, c.Cron.FailStreakLimit, 0)
+	eq(t, c.Cron.MaxParallelJobs, 2) // the other cron defaults stay
+}
+
 // validBase returns the defaults with a primary entry, so that Validate checks only the
 // changed key.
 func validBase() Config {
@@ -468,6 +486,8 @@ func newIntKeys() []intKey {
 		{"cron.tick_s", 1, maxS, func(c *Config, v int) { c.Cron.TickS = v }},
 		{"cron.grace_min_s", 1, maxS, func(c *Config, v int) { c.Cron.GraceMinS = v; c.Cron.GraceMaxS = maxS }},
 		{"cron.grace_max_s", 1, maxS, func(c *Config, v int) { c.Cron.GraceMaxS = v; c.Cron.GraceMinS = 1 }},
+		{"cron.run_history", 0, 1000, func(c *Config, v int) { c.Cron.RunHistory = v }},
+		{"cron.fail_streak_limit", 0, 10000, func(c *Config, v int) { c.Cron.FailStreakLimit = v }},
 		{"agent.stream_idle_timeout_s", 1, maxS, func(c *Config, v int) { c.Agent.StreamIdleTimeoutS = v }},
 		{"agent.max_same_tool_failures", 1, i32, func(c *Config, v int) { c.Agent.MaxSameToolFailures = v }},
 		{"agent.tool_preview_chars", 4, i32, func(c *Config, v int) { c.Agent.ToolPreviewChars = v }},

@@ -416,6 +416,8 @@ func (c *Config) checkLimits() []error {
 	add(intRange("cron.grace_min_s", c.Cron.GraceMinS, 1, maxSeconds))
 	add(intRange("cron.grace_max_s", c.Cron.GraceMaxS, 1, maxSeconds))
 	add(orderedInt("cron.grace_min_s", c.Cron.GraceMinS, "cron.grace_max_s", c.Cron.GraceMaxS))
+	add(intRange("cron.run_history", c.Cron.RunHistory, 0, 1000))
+	add(intRange("cron.fail_streak_limit", c.Cron.FailStreakLimit, 0, 10000))
 	add(intRange("agent.stream_idle_timeout_s", c.Agent.StreamIdleTimeoutS, 1, maxSeconds))
 	add(intRange("agent.max_same_tool_failures", c.Agent.MaxSameToolFailures, 1, i32))
 	add(intRange("agent.tool_preview_chars", c.Agent.ToolPreviewChars, 4, i32))

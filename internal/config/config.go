@@ -320,6 +320,10 @@ type CronConfig struct {
 	// GraceMinS and GraceMaxS bound the grace window of a late recurring run, in seconds.
 	GraceMinS int `yaml:"grace_min_s"`
 	GraceMaxS int `yaml:"grace_max_s"`
+	// RunHistory is the number of runs that cron_runs keeps for each job. 0 keeps none.
+	RunHistory int `yaml:"run_history"`
+	// FailStreakLimit is the number of failed runs in a row that pause a job. 0 turns the pause off.
+	FailStreakLimit int `yaml:"fail_streak_limit"`
 }
 
 // GatewayConfig sets the gateway: the message queue, the command lists, the housekeeping, and
@@ -624,6 +628,8 @@ func Default() Config {
 			TickS:                 30,
 			GraceMinS:             120,
 			GraceMaxS:             7200,
+			RunHistory:            50,
+			FailStreakLimit:       10,
 		},
 		Gateway: GatewayConfig{
 			MaxQueuedMessages:     20,

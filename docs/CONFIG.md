@@ -336,6 +336,8 @@ stops the start, for example `config: toolsets.member: unknown toolset "<name>"`
 | `cron.tick_s` | `30` | The time between two checks for due cron jobs, in seconds. The minimum is 1. The maximum is 2592000. |
 | `cron.grace_min_s` | `120` | The minimum grace window of a late recurring run, in seconds. It must not be more than `cron.grace_max_s`. The minimum is 1. The maximum is 2592000. |
 | `cron.grace_max_s` | `7200` | The maximum grace window of a late recurring run, in seconds. The minimum is 1. The maximum is 2592000. |
+| `cron.run_history` | `50` | The number of runs that `state.db` keeps for each cron job, in the table `cron_runs`. The scheduler deletes the oldest runs of a job when it records a new run of that job. A lower value applies to each job at its next run. `0` keeps no runs. The maximum is 1000. |
+| `cron.fail_streak_limit` | `10` | The number of failed runs in a row after which a cron job pauses itself. The last alert tells why. A good run, a resume, or an edit of the task (prompt, script, skills, model, toolsets, workdir, or schedule) sets the count to 0. When the last alert cannot be sent, the job does not pause, and the next failure tries again. A delivery failure alone does not count as a failed run. A stopped run does not change the count. `0` turns the pause off. The maximum is 10000. |
 
 One run of an agent job can last `cron.script_timeout_s` plus `cron.agent_timeout_s`. For that time,
 the run holds one slot of `cron.max_parallel_jobs`.
