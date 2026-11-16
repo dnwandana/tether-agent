@@ -71,6 +71,9 @@ type cronArgs struct {
 	NoAgent  *bool         `json:"no_agent"`
 	Toolsets *[]string     `json:"toolsets"`
 	Workdir  *string       `json:"workdir"`
+	Limit    *int          `json:"limit"`
+	Offset   *int          `json:"offset"`
+	RunID    *int64        `json:"run_id"`
 }
 
 // Name returns "cronjob".
@@ -83,7 +86,7 @@ func (CronJobTool) Toolset() string { return SetCron }
 func (CronJobTool) ParallelSafe() bool { return false }
 
 // Schema returns the tool schema for the model. The text is ported from
-// Hermes tools/cronjob_tools.py, without [SILENT] and context_from.
+// Hermes tools/cronjob_tools.py, without context_from.
 func (CronJobTool) Schema() provider.ToolSchema {
 	return provider.ToolSchema{
 		Name: "cronjob",
@@ -92,6 +95,7 @@ func (CronJobTool) Schema() provider.ToolSchema {
 Use action='create' to schedule a new job from a prompt or one or more skills.
 Use action='list' to inspect jobs.
 Use action='update', 'pause', 'resume', 'remove', or 'run' to manage an existing job.
+Use action='runs' with job_id to see the last runs of a job: the status, the delivery, the duration, and the output.
 
 To stop a job the user no longer wants: first action='list' to find the job_id, then action='remove' with that job_id. Never guess job IDs — always list first.
 
@@ -99,9 +103,7 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
 If skills are provided on create, the future cron run loads those skills in order, then follows the prompt as the task instruction.
 On update, passing skills=[] clears attached skills.
 
-NOTE: The agent's final response is auto-delivered to the target on every run. Put the primary
-user-facing content in the final response. Cron jobs run autonomously with no user
-present — they cannot ask questions or request clarification.
+NOTE: The agent's final response is auto-delivered to the target. When a run finds nothing new, the agent answers [SILENT], and nothing is sent. A failed run always sends an alert, except with deliver='local'. Put the primary user-facing content in the final response. Cron jobs run autonomously with no user present — they cannot ask questions or request clarification.
 
 SCRIPT JOBS (no_agent=true): the scheduler runs the script with no model call and sends its stdout word for word. Empty stdout sends nothing, so make the script quiet when there is nothing to report. A failure (non-zero exit or timeout) always alerts.
 
@@ -109,8 +111,8 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
-    "action": {"type": "string", "enum": ["create", "list", "update", "pause", "resume", "remove", "run"], "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' field and a 'prompt' (or no_agent with a script) are REQUIRED."},
-    "job_id": {"type": "string", "description": "Required for update/pause/resume/remove/run. Take it from action='list'."},
+    "action": {"type": "string", "enum": ["create", "list", "update", "pause", "resume", "remove", "run", "runs"], "description": "One of: create, list, update, pause, resume, remove, run, runs. When action=create, the 'schedule' field and a 'prompt' (or no_agent with a script) are REQUIRED."},
+    "job_id": {"type": "string", "description": "Required for update/pause/resume/remove/run/runs. Take it from action='list'."},
     "prompt": {"type": "string", "description": "For create: the full self-contained prompt. If skills are also provided, this becomes the task instruction paired with those skills."},
     "schedule": {"type": "string", "description": "REQUIRED for action=create. For create/update: '30m', 'every 2h', '0 9 * * *', or ISO timestamp. Examples: '30m' (every 30 minutes), 'every 2h' (every 2 hours), '0 9 * * *' (daily at 9am), '2026-06-01T09:00:00' (one-shot). The time zone is the host time zone."},
     "name": {"type": "string", "description": "Optional human-friendly name"},
@@ -129,7 +131,10 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
     "script": {"type": "string", "description": "Optional path to a script. A relative path resolves under ~/.tether/scripts/. .sh and .bash files run with bash, other files with python3. In an agent job, the script runs first and its stdout goes into the prompt as data. With no_agent=true, the script IS the job: empty stdout sends nothing; a failure always alerts. On update, pass an empty string to clear."},
     "no_agent": {"type": "boolean", "description": "Default false: the agent runs the prompt each tick. Set true to skip the model: the scheduler runs the script and delivers its stdout word for word, with zero tokens. Requires script."},
     "toolsets": {"type": "array", "items": {"type": "string"}, "description": "Optional list of toolset names to restrict the job's agent to (e.g. [\"web\", \"terminal\", \"file\"]). On update, pass an empty array to clear."},
-    "workdir": {"type": "string", "description": "Optional absolute path of an existing folder to run the job from. On update, pass an empty string to clear."}
+    "workdir": {"type": "string", "description": "Optional absolute path of an existing folder to run the job from. On update, pass an empty string to clear."},
+    "limit": {"type": "integer", "description": "For runs: the number of runs to show, newest first. Default 10, maximum 50."},
+    "offset": {"type": "integer", "description": "For runs: the number of newest runs to skip. Use it to see older runs. Default 0."},
+    "run_id": {"type": "integer", "description": "For runs: one run id from the runs list. The result shows the full stored output of that run."}
   },
   "required": ["action"]
 }`),
@@ -164,12 +169,12 @@ func (t CronJobTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (st
 	}
 	if a.JobID == "" {
 		switch a.Action {
-		case "update", "pause", "resume", "remove", "run":
+		case "update", "pause", "resume", "remove", "run", "runs":
 			return "", toolErr("job_id is required for %s; call action='list' to get the job ids", a.Action)
 		}
 	}
 	switch a.Action {
-	case "update", "pause", "resume", "remove", "run":
+	case "update", "pause", "resume", "remove", "run", "runs":
 		j, err := t.Store.Get(ctx, a.JobID)
 		if err == nil && !sc.Has(j.Origin.SessionKey) {
 			// A job of another chat gives the same error as a job that does not exist.
@@ -206,8 +211,10 @@ func (t CronJobTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (st
 		return fmt.Sprintf("removed job %s (%s)", j.ID, j.Name), nil
 	case "run":
 		return t.run(ctx, a.JobID)
+	case "runs":
+		return t.runs(ctx, a)
 	}
-	return "", toolErr("unknown action %q; use create, list, update, pause, resume, remove, or run", a.Action)
+	return "", toolErr("unknown action %q; use create, list, update, pause, resume, remove, run, or runs", a.Action)
 }
 
 func (t CronJobTool) create(ctx context.Context, a cronArgs, env *Env) (string, error) {
@@ -286,7 +293,7 @@ func (t CronJobTool) run(ctx context.Context, id string) (string, error) {
 		if err := t.RunNow(ctx, id); err != nil {
 			return "", toolErr("cannot run job %s: %v", id, err)
 		}
-		return fmt.Sprintf("started job %s (%s); the result goes to its delivery target", j.ID, j.Name), nil
+		return fmt.Sprintf("started job %s (%s); the result goes to its delivery target, unless the run answers [SILENT]", j.ID, j.Name), nil
 	}
 	if !j.Enabled {
 		return "", toolErr("job %s is paused; resume it first", id)
@@ -317,6 +324,89 @@ func (t CronJobTool) run(ctx context.Context, id string) (string, error) {
 		"is in the grace window (half the period of the schedule, from " + cronSpan(graceMin) + " to " +
 		cronSpan(graceMax) + "). After that window, " +
 		"cron.missed_runs: skip skips this run, and the job runs at its next scheduled time", nil
+}
+
+// Limits of the runs action.
+const (
+	cronRunsDefaultLimit = 10
+	cronRunsMaxLimit     = 50
+	cronRunsListRunes    = 300
+)
+
+// runs returns the last runs of the job, newest first, or the one run of run_id with its full output.
+func (t CronJobTool) runs(ctx context.Context, a cronArgs) (string, error) {
+	j, err := t.Store.Get(ctx, a.JobID)
+	if err != nil {
+		return "", cronErr(err)
+	}
+	if a.RunID != nil {
+		r, err := t.Store.Run(ctx, j.ID, *a.RunID)
+		if err != nil {
+			return "", cronErr(err)
+		}
+		return t.runText(r, r.Output), nil
+	}
+	limit := cronRunsDefaultLimit
+	if a.Limit != nil && *a.Limit > 0 {
+		limit = min(*a.Limit, cronRunsMaxLimit)
+	}
+	offset := 0
+	if a.Offset != nil && *a.Offset > 0 {
+		offset = *a.Offset
+	}
+	// One row more than the limit tells whether older runs exist.
+	rs, err := t.Store.Runs(ctx, j.ID, limit+1, offset)
+	if err != nil {
+		return "", cronErr(err)
+	}
+	if len(rs) == 0 {
+		out := fmt.Sprintf("no runs recorded for job %s (%s)", j.ID, j.Name)
+		if t.Store.RunHistory == 0 {
+			out += "; cron.run_history is 0, so no runs are kept"
+		}
+		return out, nil
+	}
+	more := len(rs) > limit
+	if more {
+		rs = rs[:limit]
+	}
+	var b strings.Builder
+	// The header names the offset, not a run id, so the model does not take it for a run_id.
+	fmt.Fprintf(&b, "%d runs of job %s (%s), newest first", len(rs), j.ID, j.Name)
+	if offset > 0 {
+		fmt.Fprintf(&b, ", after the newest %d", offset)
+	}
+	b.WriteString(":\n")
+	for _, r := range rs {
+		b.WriteString(t.runText(r, cron.TruncateRunes(r.Output, cronRunsListRunes)))
+		b.WriteByte('\n')
+	}
+	if more {
+		fmt.Fprintf(&b, "More runs exist: use offset %d.", offset+len(rs))
+	}
+	return strings.TrimSuffix(b.String(), "\n"), nil
+}
+
+// runText returns the head line of r and then the output, with an indent of two spaces on each line.
+// The session id is the full id, so the model can pass it to session_search.
+func (t CronJobTool) runText(r cron.Run, output string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "- run %d · %s · %s · %s · %s", r.ID, t.timeText(r.StartedAt), r.Status, r.Delivery,
+		r.FinishedAt.Sub(r.StartedAt).Round(time.Second))
+	if r.SessionID != "" {
+		fmt.Fprintf(&b, " · session %s", r.SessionID)
+	}
+	if r.Delivery == cron.DeliveryFailed {
+		fmt.Fprintf(&b, " · delivery error: %s", r.DeliveryErr)
+	}
+	if output == "" {
+		output = "(no output)"
+	}
+	for line := range strings.SplitSeq(output, "\n") {
+		b.WriteString("\n  ")
+		b.WriteString(line)
+	}
+	return b.String()
 }
 
 // oneShot reports whether the schedule of j runs one time only. A one-shot run
@@ -353,6 +443,12 @@ func (t CronJobTool) jobLine(j cron.Job) string {
 	state := "enabled"
 	if !j.Enabled {
 		state = "paused"
+	}
+	switch {
+	case j.FailStreak == 1:
+		state += " (1 failure in a row)"
+	case j.FailStreak > 1:
+		state += fmt.Sprintf(" (%d failures in a row)", j.FailStreak)
 	}
 	kind := "agent"
 	if j.NoAgent {

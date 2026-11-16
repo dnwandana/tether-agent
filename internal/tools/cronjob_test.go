@@ -29,7 +29,7 @@ func cronTool(t *testing.T) CronJobTool {
 	}
 	t.Cleanup(func() { d.Close() })
 	return CronJobTool{
-		Store: &cron.Store{DB: d, Loc: time.UTC, Now: func() time.Time { return cronNow },
+		Store: &cron.Store{DB: d, Loc: time.UTC, Now: func() time.Time { return cronNow }, RunHistory: 50,
 			ValidToolset: func(s string) bool { return ValidToolset(s, nil) }},
 		CurrentProvider: func(env *Env) string {
 			p, _ := env.Values["test_provider"].(string)
@@ -111,6 +111,40 @@ func TestListShowsIDsScheduleNextRun(t *testing.T) {
 	for _, w := range []string{j.ID, "digest", "0 1 * * *", "2026-10-28 01:00 UTC", "enabled"} {
 		if !strings.Contains(out, w) {
 			t.Fatalf("list has no %q: %s", w, out)
+		}
+	}
+}
+
+func TestJobLineShowsFailStreak(t *testing.T) {
+	tool := cronTool(t)
+	env := tgEnv("cli:user", "primary")
+	runToolEnv(t, tool, `{"action":"create","name":"digest","schedule":"every 1h","prompt":"p"}`, env)
+	id := onlyJob(t, tool).ID
+	for _, c := range []struct {
+		enabled bool
+		streak  int
+		want    string
+	}{
+		{true, 0, "enabled"},
+		{true, 1, "enabled (1 failure in a row)"},
+		{true, 10, "enabled (10 failures in a row)"},
+		{false, 0, "paused"},
+		{false, 1, "paused (1 failure in a row)"},
+		{false, 10, "paused (10 failures in a row)"},
+	} {
+		if _, err := tool.Store.DB.ExecContext(context.Background(),
+			`UPDATE cron_jobs SET enabled=?, fail_streak=? WHERE id=?`, c.enabled, c.streak, id); err != nil {
+			t.Fatal(err)
+		}
+		j := onlyJob(t, tool)
+		if j.FailStreak != c.streak {
+			t.Fatalf("FailStreak %d, want %d", j.FailStreak, c.streak)
+		}
+		if line := tool.jobLine(j); !strings.Contains(line, " · digest · "+c.want+" · agent · ") {
+			t.Errorf("enabled %v, streak %d: %s", c.enabled, c.streak, line)
+		}
+		if out := runToolEnv(t, tool, `{"action":"list"}`, env); !strings.Contains(out, " · digest · "+c.want+" · agent · ") {
+			t.Errorf("list, enabled %v, streak %d: %s", c.enabled, c.streak, out)
 		}
 	}
 }
@@ -200,9 +234,11 @@ func TestRunWithGatewayCallsRunNow(t *testing.T) {
 	env := tgEnv("cli:user", "primary")
 	runToolEnv(t, tool, `{"action":"create","schedule":"0 1 * * *","prompt":"p"}`, env)
 	id := onlyJob(t, tool).ID
-	runToolEnv(t, tool, fmt.Sprintf(`{"action":"run","job_id":%q}`, id), env)
-	if got != id {
-		t.Fatal(got)
+	out := runToolEnv(t, tool, fmt.Sprintf(`{"action":"run","job_id":%q}`, id), env)
+	want := fmt.Sprintf("started job %s (%s); the result goes to its delivery target, unless the run answers [SILENT]",
+		id, onlyJob(t, tool).Name)
+	if got != id || out != want {
+		t.Fatalf("RunNow got %q; reply %q, want %q", got, out, want)
 	}
 	tool.RunNow = func(context.Context, string) error { return errors.New("busy") }
 	if out := runToolEnvErr(t, tool, fmt.Sprintf(`{"action":"run","job_id":%q}`, id), env); !strings.Contains(out, "busy") {
@@ -242,9 +278,16 @@ func TestScriptPathChecked(t *testing.T) {
 	}
 }
 
-func TestDescriptionHasNoSilent(t *testing.T) {
+func TestDescriptionHasSilentNote(t *testing.T) {
 	d := CronJobTool{}.Schema().Description
-	if strings.Contains(d, "SILENT") || strings.Contains(d, "context_from") {
+	const note = "NOTE: The agent's final response is auto-delivered to the target. When a run finds nothing new, " +
+		"the agent answers [SILENT], and nothing is sent. A failed run always sends an alert, except with " +
+		"deliver='local'. Put the primary user-facing content in the final response. Cron jobs run autonomously " +
+		"with no user present — they cannot ask questions or request clarification."
+	if !strings.Contains(d, note) || !strings.Contains(d, "[SILENT]") {
+		t.Fatal("the description has no [SILENT] NOTE:", d)
+	}
+	if strings.Contains(d, "context_from") || strings.Contains(d, "on every run") {
 		t.Fatal(d)
 	}
 	for _, w := range []string{"Never guess job IDs", "self-contained", "empty stdout sends nothing", "always alerts"} {
@@ -294,6 +337,216 @@ func TestRunTextShowsConfiguredTimes(t *testing.T) {
 	tool.Tick, tool.GraceMin, tool.GraceMax = 90*time.Second, 150*time.Second, 90*time.Minute
 	out = runText(tool)
 	if !strings.Contains(out, "(within 90 s)") || !strings.Contains(out, "from 150 s to 90 min)") {
+		t.Fatal(out)
+	}
+}
+
+// newRunsJob creates an agent job with the name as the local owner and returns its id.
+func newRunsJob(t *testing.T, tool CronJobTool, name string) string {
+	t.Helper()
+	out := runToolEnv(t, tool, fmt.Sprintf(`{"action":"create","name":%q,"schedule":"every 1h","prompt":"p"}`, name),
+		tgEnv("cli:user", "primary"))
+	return strings.Fields(strings.SplitN(out, "\n", 2)[0])[2]
+}
+
+// seedRun records one run of the job through Store.MarkRun. An empty LastStatus copies Status.
+func seedRun(t *testing.T, tool CronJobTool, id string, rec cron.RunRecord) {
+	t.Helper()
+	if rec.LastStatus == "" {
+		rec.LastStatus = rec.Status
+	}
+	if err := tool.Store.MarkRun(context.Background(), id, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedRuns records n good runs with the outputs "out 1" to "out n". The run ids are 1 to n
+// when the job is the first job with runs.
+func seedRuns(t *testing.T, tool CronJobTool, id string, n int) {
+	t.Helper()
+	for i := 1; i <= n; i++ {
+		at := cronNow.Add(time.Duration(i-n) * time.Minute)
+		seedRun(t, tool, id, cron.RunRecord{Status: "ok", Delivery: cron.DeliverySent,
+			Output: fmt.Sprintf("out %d", i), RanAt: at, FinishedAt: at.Add(time.Second)})
+	}
+}
+
+// runsText calls the runs action as the local owner. extra is more JSON fields, each with a comma first.
+func runsText(t *testing.T, tool CronJobTool, id, extra string) string {
+	t.Helper()
+	out := runToolEnv(t, tool, fmt.Sprintf(`{"action":"runs","job_id":%q%s}`, id, extra), tgEnv("cli:user", "primary"))
+	return strings.TrimRight(out, "\n")
+}
+
+func TestCronRunsList(t *testing.T) {
+	tool := cronTool(t)
+	id := newRunsJob(t, tool, "disk")
+	at := func(h, m int) time.Time { return time.Date(2026, 10, 27, h, m, 0, 0, time.UTC) }
+	seedRun(t, tool, id, cron.RunRecord{Status: "error", LastStatus: "delivery_failed", Delivery: cron.DeliveryFailed,
+		DeliveryErr: "chat not found", Output: "⚠ Cron job disk failed", RanAt: at(7, 0), FinishedAt: at(7, 2)})
+	seedRun(t, tool, id, cron.RunRecord{Status: "ok", Delivery: cron.DeliverySilent, Output: "[SILENT]",
+		SessionID: "19a8bd8a3c09f1e2d80", RanAt: at(8, 0), FinishedAt: at(8, 0).Add(21 * time.Second)})
+	seedRun(t, tool, id, cron.RunRecord{Status: "ok", Delivery: cron.DeliverySent, Output: "line one\nline two",
+		SessionID: "19a8c4f0e10a2b7c41d", RanAt: at(9, 0), FinishedAt: at(9, 0).Add(38*time.Second + 400*time.Millisecond)})
+	// A script job has no session and can have no output. 1.5 s rounds to 2 s.
+	seedRun(t, tool, id, cron.RunRecord{Status: "ok", Delivery: cron.DeliveryNone,
+		RanAt: at(9, 30), FinishedAt: at(9, 30).Add(1500 * time.Millisecond)})
+	want := "4 runs of job " + id + " (disk), newest first:\n" +
+		"- run 4 · 2026-10-27 09:30 UTC · ok · none · 2s\n" +
+		"  (no output)\n" +
+		"- run 3 · 2026-10-27 09:00 UTC · ok · sent · 38s · session 19a8c4f0e10a2b7c41d\n" +
+		"  line one\n" +
+		"  line two\n" +
+		"- run 2 · 2026-10-27 08:00 UTC · ok · silent · 21s · session 19a8bd8a3c09f1e2d80\n" +
+		"  [SILENT]\n" +
+		"- run 1 · 2026-10-27 07:00 UTC · error · failed · 2m0s · delivery error: chat not found\n" +
+		"  ⚠ Cron job disk failed"
+	if got := runsText(t, tool, id, ""); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestCronRunsLimitAndOffset(t *testing.T) {
+	tool := cronTool(t)
+	tool.Store.RunHistory = 60
+	id := newRunsJob(t, tool, "disk")
+	seedRuns(t, tool, id, 51)
+	// The header names the offset, not a run id, so the model does not take it for a run_id.
+	head := func(n, from int) string {
+		if from == 1 {
+			return fmt.Sprintf("%d runs of job %s (disk), newest first:\n", n, id)
+		}
+		return fmt.Sprintf("%d runs of job %s (disk), newest first, after the newest %d:\n", n, id, from-1)
+	}
+	for _, c := range []struct {
+		extra, head, first, last, more string
+	}{
+		{"", head(10, 1), "- run 51 · ", "- run 42 · ", "More runs exist: use offset 10."},
+		{`,"limit":0`, head(10, 1), "- run 51 · ", "- run 42 · ", "More runs exist: use offset 10."},
+		{`,"limit":-3`, head(10, 1), "- run 51 · ", "- run 42 · ", "More runs exist: use offset 10."},
+		{`,"limit":100`, head(50, 1), "- run 51 · ", "- run 2 · ", "More runs exist: use offset 50."},
+		{`,"limit":2`, head(2, 1), "- run 51 · ", "- run 50 · ", "More runs exist: use offset 2."},
+		{`,"offset":-5`, head(10, 1), "- run 51 · ", "- run 42 · ", "More runs exist: use offset 10."},
+		{`,"offset":10,"limit":1`, head(1, 11), "- run 41 · ", "- run 41 · ", "More runs exist: use offset 11."},
+		{`,"offset":49`, head(2, 50), "- run 2 · ", "- run 1 · ", ""},
+	} {
+		got := runsText(t, tool, id, c.extra)
+		if !strings.HasPrefix(got, c.head+c.first) || !strings.Contains(got, c.last) {
+			t.Errorf("%s: %s", c.extra, got)
+		}
+		if c.more != "" && !strings.HasSuffix(got, "\n"+c.more) {
+			t.Errorf("%s: no %q at the end: %s", c.extra, c.more, got)
+		}
+		if c.more == "" && strings.Contains(got, "More runs exist") {
+			t.Errorf("%s: %s", c.extra, got)
+		}
+	}
+	if got := runsText(t, tool, id, `,"offset":51`); got != "no runs recorded for job "+id+" (disk)" {
+		t.Fatal(got)
+	}
+}
+
+func TestCronRunsOutputCut(t *testing.T) {
+	tool := cronTool(t)
+	id := newRunsJob(t, tool, "disk")
+	long, huge := strings.Repeat("a", 400), strings.Repeat("b", 5000)
+	seedRun(t, tool, id, cron.RunRecord{Status: "ok", Delivery: cron.DeliverySent, Output: long, RanAt: cronNow, FinishedAt: cronNow})
+	seedRun(t, tool, id, cron.RunRecord{Status: "ok", Delivery: cron.DeliverySent, Output: huge, RanAt: cronNow, FinishedAt: cronNow})
+	list := runsText(t, tool, id, "")
+	if !strings.Contains(list, "\n  "+strings.Repeat("a", 300)+"…") || strings.Contains(list, strings.Repeat("a", 301)) {
+		t.Fatal("the list cuts each output to 300 runes:", list)
+	}
+	// With run_id, the result has the full stored output.
+	one := runsText(t, tool, id, `,"run_id":1`)
+	if !strings.HasPrefix(one, "- run 1 · ") || !strings.Contains(one, "\n  "+long) || strings.Contains(one, "runs of job") {
+		t.Fatal(one)
+	}
+	if two := runsText(t, tool, id, `,"run_id":2`); !strings.Contains(two, "\n  "+cron.TruncateRunes(huge, cron.RunOutputMaxRunes)) {
+		t.Fatal("run_id shows the stored output, cut to 4000 runes:", len(two))
+	}
+}
+
+func TestCronRunIDErrors(t *testing.T) {
+	tool := cronTool(t)
+	env := tgEnv("cli:user", "primary")
+	id := newRunsJob(t, tool, "disk")
+	other := newRunsJob(t, tool, "other")
+	seedRuns(t, tool, id, 1)    // run 1
+	seedRuns(t, tool, other, 1) // run 2
+	for _, runID := range []string{"0", "2", "999"} {
+		out := runToolEnvErr(t, tool, fmt.Sprintf(`{"action":"runs","job_id":%q,"run_id":%s}`, id, runID), env)
+		if !strings.Contains(out, cron.ErrRunNotFound.Error()) {
+			t.Errorf("run_id %s: %s", runID, out)
+		}
+	}
+	if out := runToolEnvErr(t, tool, `{"action":"runs"}`, env); !strings.Contains(out, "job_id is required for runs") {
+		t.Fatal(out)
+	}
+}
+
+func TestCronRunsNone(t *testing.T) {
+	tool := cronTool(t)
+	id := newRunsJob(t, tool, "disk")
+	if got := runsText(t, tool, id, ""); got != "no runs recorded for job "+id+" (disk)" {
+		t.Fatal(got)
+	}
+	tool.Store.RunHistory = 0
+	want := "no runs recorded for job " + id + " (disk); cron.run_history is 0, so no runs are kept"
+	if got := runsText(t, tool, id, ""); got != want {
+		t.Fatal(got)
+	}
+}
+
+func TestCronRunsOtherChat(t *testing.T) {
+	f := newScopeFixture(t)
+	f.jobs.RunHistory = 50
+	tool := CronJobTool{Store: f.jobs, Sessions: f.store}
+	created := runToolEnv(t, tool, `{"action":"create","name":"alice job","prompt":"p","schedule":"every 1h"}`, f.aliceEnv)
+	id := strings.Fields(strings.SplitN(created, "\n", 2)[0])[2]
+	now := time.Now()
+	if err := f.jobs.MarkRun(context.Background(), id, cron.RunRecord{Status: "ok", LastStatus: "ok",
+		Delivery: cron.DeliverySent, Output: "alice secret", RanAt: now, FinishedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	// A job of another chat gives the same error as a job that does not exist.
+	for _, args := range []string{`{"action":"runs","job_id":"` + id + `"}`, `{"action":"runs","job_id":"` + id + `","run_id":1}`} {
+		out := runToolEnvErr(t, tool, args, f.bobEnv)
+		if !strings.Contains(out, "cron: job not found") || strings.Contains(out, "alice secret") {
+			t.Fatal(args, out)
+		}
+	}
+	for _, env := range []*Env{f.aliceEnv, f.localEnv} {
+		if out := runToolEnv(t, tool, `{"action":"runs","job_id":"`+id+`"}`, env); !strings.Contains(out, "alice secret") {
+			t.Fatal(env.SessionKey, out)
+		}
+	}
+}
+
+func TestCronjobSchemaHasRuns(t *testing.T) {
+	s := CronJobTool{}.Schema()
+	if !json.Valid(s.Parameters) {
+		t.Fatal("the parameters are not valid JSON")
+	}
+	p := string(s.Parameters)
+	for _, w := range []string{`"remove", "run", "runs"]`, "One of: create, list, update, pause, resume, remove, run, runs.",
+		"Required for update/pause/resume/remove/run/runs.", `"limit": {"type": "integer"`,
+		`"offset": {"type": "integer"`, `"run_id": {"type": "integer"`} {
+		if !strings.Contains(p, w) {
+			t.Errorf("the parameters have no %q", w)
+		}
+	}
+	// The new arguments come after workdir, so the known arguments still start with action, job_id, prompt, schedule.
+	if w, l, o, r := strings.Index(p, `"workdir"`), strings.Index(p, `"limit"`), strings.Index(p, `"offset"`), strings.Index(p, `"run_id"`); w >= l || l >= o || o >= r {
+		t.Fatal("limit, offset, and run_id must follow workdir:", p)
+	}
+	const lines = "Use action='update', 'pause', 'resume', 'remove', or 'run' to manage an existing job.\n" +
+		"Use action='runs' with job_id to see the last runs of a job: the status, the delivery, the duration, and the output.\n"
+	if !strings.Contains(s.Description, lines) {
+		t.Fatal(s.Description)
+	}
+	tool := cronTool(t)
+	if out := runToolEnvErr(t, tool, `{"action":"nope"}`, tgEnv("cli:user", "primary")); !strings.Contains(out,
+		"use create, list, update, pause, resume, remove, run, or runs") {
 		t.Fatal(out)
 	}
 }

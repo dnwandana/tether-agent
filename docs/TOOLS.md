@@ -274,6 +274,7 @@ Manage scheduled cron jobs with a single compressed tool.
 Use action='create' to schedule a new job from a prompt or one or more skills.
 Use action='list' to inspect jobs.
 Use action='update', 'pause', 'resume', 'remove', or 'run' to manage an existing job.
+Use action='runs' with job_id to see the last runs of a job: the status, the delivery, the duration, and the output.
 
 To stop a job the user no longer wants: first action='list' to find the job_id, then action='remove' with that job_id. Never guess job IDs — always list first.
 
@@ -281,9 +282,7 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
 If skills are provided on create, the future cron run loads those skills in order, then follows the prompt as the task instruction.
 On update, passing skills=[] clears attached skills.
 
-NOTE: The agent's final response is auto-delivered to the target on every run. Put the primary
-user-facing content in the final response. Cron jobs run autonomously with no user
-present — they cannot ask questions or request clarification.
+NOTE: The agent's final response is auto-delivered to the target. When a run finds nothing new, the agent answers [SILENT], and nothing is sent. A failed run always sends an alert, except with deliver='local'. Put the primary user-facing content in the final response. Cron jobs run autonomously with no user present — they cannot ask questions or request clarification.
 
 SCRIPT JOBS (no_agent=true): the scheduler runs the script with no model call and sends its stdout word for word. Empty stdout sends nothing, so make the script quiet when there is nothing to report. A failure (non-zero exit or timeout) always alerts.
 
@@ -302,13 +301,14 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
         "pause",
         "resume",
         "remove",
-        "run"
+        "run",
+        "runs"
       ],
-      "description": "One of: create, list, update, pause, resume, remove, run. When action=create, the 'schedule' field and a 'prompt' (or no_agent with a script) are REQUIRED."
+      "description": "One of: create, list, update, pause, resume, remove, run, runs. When action=create, the 'schedule' field and a 'prompt' (or no_agent with a script) are REQUIRED."
     },
     "job_id": {
       "type": "string",
-      "description": "Required for update/pause/resume/remove/run. Take it from action='list'."
+      "description": "Required for update/pause/resume/remove/run/runs. Take it from action='list'."
     },
     "prompt": {
       "type": "string",
@@ -372,6 +372,18 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
     "workdir": {
       "type": "string",
       "description": "Optional absolute path of an existing folder to run the job from. On update, pass an empty string to clear."
+    },
+    "limit": {
+      "type": "integer",
+      "description": "For runs: the number of runs to show, newest first. Default 10, maximum 50."
+    },
+    "offset": {
+      "type": "integer",
+      "description": "For runs: the number of newest runs to skip. Use it to see older runs. Default 0."
+    },
+    "run_id": {
+      "type": "integer",
+      "description": "For runs: one run id from the runs list. The result shows the full stored output of that run."
     }
   },
   "required": [
