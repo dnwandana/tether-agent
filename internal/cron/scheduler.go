@@ -241,6 +241,8 @@ func (s *Scheduler) release(j Job) {
 func (s *Scheduler) runJob(ctx context.Context, j Job) {
 	ranAt := s.now()
 	o := s.run(ctx, j)
+	// The duration ends before the delivery, so the wait of the Telegram pace budget is not in it.
+	finishedAt := s.now()
 	// The writes use a context without cancel, so a shutdown still records the run.
 	wctx := context.WithoutCancel(ctx)
 	if ctx.Err() != nil {
@@ -250,16 +252,54 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 		// restart. A stopped run that follows a stopped run counts as a run.
 		o.Text = fmt.Sprintf("⚠ Cron job %s stopped: the gateway shut down before the run ended.", j.Name)
 		s.log().Warn("cron job stopped by shutdown", "job", j.ID, "name", j.Name)
-		s.noteMark(j.ID, s.Store.MarkStopped(wctx, j.ID, o.Text, ranAt))
+		s.noteMark(j.ID, s.Store.MarkStopped(wctx, j.ID, RunRecord{Status: StatusStopped, LastStatus: StatusStopped,
+			Delivery: DeliveryNone, Output: o.Text, SessionID: o.SessionID, RanAt: ranAt, FinishedAt: finishedAt}))
 		return
 	}
-	status := o.Status
+	// The pause is decided before the delivery, so the alert can tell the owner.
+	runText, n := o.Text, j.FailStreak+1
+	if s.willPause(j, o) {
+		o.Pause = true
+		o.Text += "\n\n" + pauseLine(j, n)
+	}
+	delivery, lastStatus, deliveryErr := DeliveryNone, o.Status, ""
 	if s.Deliver != nil {
-		if err := s.Deliver.Deliver(ctx, j, o); err != nil {
-			status = "delivery_failed"
+		var err error
+		if delivery, err = s.Deliver.Deliver(ctx, j, o); err != nil {
+			lastStatus, deliveryErr = "delivery_failed", err.Error()
 		}
 	}
-	s.noteMark(j.ID, s.Store.MarkRun(wctx, j.ID, status, o.Text, ranAt))
+	// A pause alert that did not go out does not pause the job. The streak goes on, and the
+	// next failed run sends the alert and pauses again.
+	pause := o.Pause && delivery != DeliveryFailed
+	rec := RunRecord{Status: o.Status, LastStatus: lastStatus, Delivery: delivery, DeliveryErr: deliveryErr,
+		Output: o.Text, SessionID: o.SessionID, RanAt: ranAt, FinishedAt: finishedAt, Pause: pause}
+	if o.Pause && !pause {
+		rec.Output = runText
+	}
+	if pause {
+		rec.Streak = n
+		s.log().Warn("cron job paused after failed runs in a row", "job", j.ID, "name", j.Name, "failures", n)
+	}
+	s.noteMark(j.ID, s.Store.MarkRun(wctx, j.ID, rec))
+}
+
+// willPause reports whether the outcome o of the job j pauses the job: the run failed, and
+// the failures in a row reach Store.FailStreakLimit. A one-shot job and a job on its last
+// repeat stop after this run, so they do not pause.
+func (s *Scheduler) willPause(j Job, o RunOutcome) bool {
+	if o.Status != "error" || s.Store.FailStreakLimit <= 0 || j.FailStreak+1 < s.Store.FailStreakLimit || j.RepeatLeft == 1 {
+		return false
+	}
+	sch, err := parse(j.Schedule, s.Store.loc())
+	return err == nil && !sch.OneShot()
+}
+
+// pauseLine returns the paragraph that tells the owner that the job j paused after n
+// failures in a row.
+func pauseLine(j Job, n int) string {
+	return fmt.Sprintf("⏸ The job %s (%s) is paused: it failed %d runs in a row. Fix the cause. Then ask me to resume the job.",
+		j.Name, j.ID, n)
 }
 
 // noteMark keeps the result err of the run record of the job id. A failed write leaves the

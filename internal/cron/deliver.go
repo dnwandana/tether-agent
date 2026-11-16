@@ -17,12 +17,26 @@ type Target struct {
 	Source, ChatID, ThreadID string
 }
 
-// RunOutcome is the result of one job run. Send false means that the run delivers nothing.
+// The delivery values of a run. The scheduler writes one in each cron_runs row.
+const (
+	DeliverySent   = "sent"   // Send was true, and the send succeeded.
+	DeliverySilent = "silent" // The agent answered with a silence marker.
+	DeliveryNone   = "none"   // Send was false for another reason, or the scheduler has no Deliverer.
+	DeliveryLocal  = "local"  // The job saves only. Also a pause alert of a local job with no home channel.
+	DeliveryFailed = "failed" // The send returned an error.
+)
+
+// RunOutcome is the result of one job run. Deliver sends Text only when Send is true and
+// Silent is false.
 type RunOutcome struct {
 	Text      string
 	Send      bool
-	Status    string
+	Status    string // "ok" | "error" (Runner); "stopped" (scheduler)
 	SessionID string
+	// Silent is true when the agent answered with a silence marker. Send is then false.
+	Silent bool
+	// Pause is true when this run pauses the job. Deliver then also sends for a local job.
+	Pause bool
 }
 
 // Deliverer sends the outcome of a job run. internal/app sets the function fields, so cron
@@ -70,39 +84,56 @@ func resolveTarget(ctx context.Context, j Job, home func(context.Context, bool) 
 	}
 }
 
-// Deliver sends o.Text for the job j. It does nothing when o.Send is false or the job is
-// local. A failure is logged and returned, so the caller can save last_status
+// Deliver sends o.Text for the job j and returns the delivery value. A silent outcome gives
+// DeliverySilent, and an outcome with Send false gives DeliveryNone. A local job gives
+// DeliveryLocal and sends nothing, except a pause alert: that goes to the home channel. A
+// failure is logged and returned with DeliveryFailed, so the caller can save last_status
 // 'delivery_failed'. Deliver never panics.
-func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (err error) {
+func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (delivery string, err error) {
+	if o.Silent {
+		return DeliverySilent, nil
+	}
 	if !o.Send {
-		return nil
+		return DeliveryNone, nil
 	}
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("cron: deliver job %s: send failed: %v", j.ID, r)
 		}
 		if err != nil {
+			delivery = DeliveryFailed
 			d.log().Error("cron delivery failed", "job", j.ID, "name", j.Name, "err", err)
 		}
 	}()
 	t, local, err := resolveTarget(ctx, j, d.Home)
 	if err != nil {
-		return fmt.Errorf("cron: deliver job %s: %w", j.ID, err)
+		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: %w", j.ID, err)
 	}
 	if local {
-		return nil
+		// resolveTarget returns local before it calls Home, so the pause alert asks Home here.
+		if !o.Pause || d.Home == nil || d.Send == nil {
+			return DeliveryLocal, nil
+		}
+		h, ok := d.Home(ctx, true)
+		if !ok || h.ChatID == "" {
+			return DeliveryLocal, nil
+		}
+		if h.Source == "" {
+			h.Source = "telegram"
+		}
+		t = h
 	}
 	if d.Send == nil {
-		return fmt.Errorf("cron: deliver job %s: no send function is set", j.ID)
+		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: no send function is set", j.ID)
 	}
 	text := o.Text
 	if d.Redact != nil {
 		text = d.Redact(text)
 	}
 	if err := d.Send(ctx, t, text, nil); err != nil {
-		return fmt.Errorf("cron: deliver job %s to %s:%s: %w", j.ID, t.Source, t.ChatID, err)
+		return DeliveryFailed, fmt.Errorf("cron: deliver job %s to %s:%s: %w", j.ID, t.Source, t.ChatID, err)
 	}
-	return nil
+	return DeliverySent, nil
 }
 
 func (d *Deliverer) log() *slog.Logger {

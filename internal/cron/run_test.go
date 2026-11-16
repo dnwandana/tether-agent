@@ -217,24 +217,29 @@ func writeScript(t *testing.T, r *cron.Runner, name, body string) {
 	}
 }
 
-func TestAgentJobAlwaysDelivers(t *testing.T) {
+// silentRule is the SILENT text of the Hermes cron hint (cron/scheduler_prompt.py).
+const silentRule = `SILENT: If there is genuinely nothing new to report, respond with exactly "[SILENT]" ` +
+	`(nothing else) to suppress delivery. [SILENT] is a literal ASCII control token — never translate or ` +
+	`rephrase it, whatever language the rest of your answer uses. Never combine [SILENT] with content — ` +
+	`either report your findings normally, or say [SILENT] and nothing more.`
+
+func TestAgentJobDeliversReport(t *testing.T) {
 	r, fp := runner(t, say("Nothing new today."))
 	o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "GitHub trending digest"})
-	if !o.Send || o.Text != "Nothing new today." || o.Status != "ok" || o.SessionID == "" {
+	if !o.Send || o.Silent || o.Text != "Nothing new today." || o.Status != "ok" || o.SessionID == "" {
 		t.Fatal(o)
 	}
+	if !strings.Contains(cron.CronPreamble, "handles the rest. "+silentRule+"]") {
+		t.Fatalf("the SILENT rule must follow the DELIVERY sentence: %q", cron.CronPreamble)
+	}
 	reqs := fp.reqs()
-	for _, m := range reqs[0].Messages {
-		if strings.Contains(m.Content, "[SILENT]") {
-			t.Fatal("no SILENT rule")
-		}
+	u := firstUser(t, reqs[0])
+	if !strings.Contains(u, "GitHub trending digest") || !strings.Contains(u, cron.CronPreamble) ||
+		!strings.Contains(u, silentRule) {
+		t.Fatalf("%q", u)
 	}
 	if strings.Contains(reqs[0].System, "[SILENT]") {
-		t.Fatal("no SILENT rule in the system prompt")
-	}
-	u := firstUser(t, reqs[0])
-	if !strings.Contains(u, "GitHub trending digest") || !strings.Contains(u, cron.CronPreamble) {
-		t.Fatalf("%q", u)
+		t.Fatal("the SILENT rule must not be in the system prompt")
 	}
 }
 
@@ -453,5 +458,49 @@ func TestAgentTimeoutZeroIsNoLimit(t *testing.T) {
 	}
 	if o := r.Run(bg, cron.Job{ID: "j1", Name: "n", Prompt: "p"}); o.Status != "ok" || o.Text != "done" {
 		t.Fatal(o)
+	}
+}
+
+func TestAgentJobSilentAnswer(t *testing.T) {
+	r, _ := runner(t, say("[SILENT]"))
+	o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "p"})
+	if o.Send || !o.Silent || o.Status != "ok" || o.Text != "[SILENT]" || o.SessionID == "" {
+		t.Fatal(o)
+	}
+}
+
+// A failed run always delivers its alert, also when the partial answer is a silence marker.
+func TestAgentTimeoutSilentPartialDelivers(t *testing.T) {
+	r, _ := runner(t)
+	r.AgentTimeout = 50 * time.Millisecond
+	r.Turn = func(ctx context.Context, _ cron.CronTurn) (string, error) {
+		<-ctx.Done()
+		return "[SILENT]", ctx.Err()
+	}
+	o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "p"})
+	want := "⚠ Cron job digest failed (timed out after 50ms). The partial answer follows.\n\n[SILENT]"
+	if !o.Send || o.Silent || o.Status != "error" || o.Text != want {
+		t.Fatalf("%+v", o)
+	}
+}
+
+// The model must report a failed data script, so a silence marker does not stop the delivery.
+func TestPreScriptFailureSilentDelivers(t *testing.T) {
+	for name, script := range map[string]string{"exit 3": "bad.sh", "missing": "missing.sh"} {
+		r, _ := runner(t, say("[SILENT]"))
+		writeScript(t, r, "bad.sh", "exit 3")
+		o := r.Run(bg, cron.Job{ID: "j1", Name: "n", Prompt: "p", Script: script})
+		if !o.Send || o.Silent || o.Status != "ok" || o.Text != "[SILENT]" {
+			t.Fatalf("%s: %+v", name, o)
+		}
+	}
+}
+
+func TestAgentJobEmptyAnswerIsError(t *testing.T) {
+	r, _ := runner(t)
+	r.Turn = func(context.Context, cron.CronTurn) (string, error) { return " \n", nil }
+	o := r.Run(bg, cron.Job{ID: "j1", Name: "digest", Prompt: "p"})
+	if !o.Send || o.Silent || o.Status != "error" || o.Text != "⚠ Cron job digest finished, but the model gave no text." {
+		t.Fatalf("%+v", o)
 	}
 }

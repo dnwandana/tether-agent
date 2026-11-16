@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -31,6 +32,31 @@ const StatusStopped = "stopped"
 // stoppedTwiceLine is the output line of a job that a second stop in a row used up. The
 // gateway is in its shutdown and sends no alert, so the cronjob list shows the line.
 const stoppedTwiceLine = "The job does not run again: two shutdowns in a row stopped it."
+
+// RunRecord is the result of one run that the store writes.
+type RunRecord struct {
+	Status      string // the run status: ok | error | stopped
+	LastStatus  string // the cron_jobs.last_status value: Status, or delivery_failed
+	Delivery    string // sent | silent | none | local | failed
+	DeliveryErr string
+	Output      string // the run text (o.Text), before redaction
+	SessionID   string
+	RanAt       time.Time
+	FinishedAt  time.Time
+	Pause       bool // the scheduler decided to pause the job
+	Streak      int  // with Pause: the N of the pause line, written as fail_streak
+}
+
+// RunOutputMaxRunes is the length limit of cron_runs.output, in runes.
+const RunOutputMaxRunes = 4000
+
+// TruncateRunes returns the first n runes of s. It adds "…" when the cut removes text.
+func TruncateRunes(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n]) + "…"
+}
 
 // ModelPin sets the provider and the model for the runs of one job.
 type ModelPin struct {
@@ -64,6 +90,8 @@ type Job struct {
 	LastRun, NextRun time.Time
 	LastStatus       string
 	LastOutput       string
+	// FailStreak is the number of runs in a row with status error.
+	FailStreak int
 }
 
 // JobPatch holds the fields that Update changes. A nil field stays the same.
@@ -93,15 +121,30 @@ type Store struct {
 	Now func() time.Time
 	// ValidToolset reports whether a toolset name is valid. Nil accepts all names.
 	ValidToolset func(string) bool
+	// RunHistory is cron.run_history: the runs that cron_runs keeps for each job. 0 keeps none.
+	RunHistory int
+	// FailStreakLimit is cron.fail_streak_limit: the failures in a row that pause a job. 0 is off.
+	FailStreakLimit int
+	// Redact removes secrets from the output of a run before cron_runs keeps it. The store
+	// masks before it cuts, because a cut can split a secret that the redactor then misses.
+	// Nil keeps the text as it is.
+	Redact func(string) string
 }
 
 const jobColumns = `id, name, schedule, prompt, script, no_agent, deliver, skills, model, toolsets, workdir,
-	repeat_left, enabled, origin, created_by_session, last_run, next_run, last_status, last_output`
+	repeat_left, enabled, origin, created_by_session, last_run, next_run, last_status, last_output, fail_streak`
 
 var (
 	telegramChatRE   = regexp.MustCompile(`^(-?\d+|@[A-Za-z0-9_]+)$`)
 	telegramThreadRE = regexp.MustCompile(`^\d+$`)
 )
+
+func (s *Store) redact(text string) string {
+	if s.Redact == nil {
+		return text
+	}
+	return s.Redact(text)
+}
 
 func (s *Store) now() time.Time {
 	if s.Now != nil {
@@ -139,6 +182,7 @@ func (s *Store) Create(ctx context.Context, j Job) (Job, error) {
 	}
 	j.NextRun = sched.Next(now)
 	j.LastRun, j.LastStatus, j.LastOutput = time.Time{}, "", ""
+	j.FailStreak = 0
 	for range 5 {
 		j.ID, err = newID()
 		if err != nil {
@@ -161,7 +205,7 @@ func (s *Store) insert(ctx context.Context, j Job, now time.Time) error {
 		return err
 	}
 	_, err = s.DB.ExecContext(ctx, `INSERT INTO cron_jobs(`+jobColumns+`, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append(args, now.UnixMilli())...)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append(args, now.UnixMilli())...)
 	return err
 }
 
@@ -191,6 +235,9 @@ func (s *Store) Update(ctx context.Context, id string, patch JobPatch) (Job, err
 			if patch.RepeatLeft == nil && (oerr != nil || oldSched.OneShot() != sched.OneShot()) {
 				j.RepeatLeft = defaultRepeat(sched)
 			}
+		}
+		if taskChanged(old, j) {
+			j.FailStreak = 0
 		}
 		if patch.RepeatLeft != nil && j.RepeatLeft <= 0 {
 			j.RepeatLeft = -1
@@ -254,6 +301,7 @@ func (s *Store) prepareResume(j *Job, now time.Time) error {
 	if j.LastStatus == StatusStopped {
 		j.LastStatus = ""
 	}
+	j.FailStreak = 0
 	if j.RepeatLeft == 0 {
 		j.RepeatLeft = defaultRepeat(sched)
 	}
@@ -267,16 +315,86 @@ func (s *Store) prepareResume(j *Job, now time.Time) error {
 	return nil
 }
 
-// Remove deletes the job id.
+// Remove deletes the job id and its runs. When the job exists, it also deletes the runs of
+// jobs that do not exist.
 func (s *Store) Remove(ctx context.Context, id string) error {
-	res, err := s.DB.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id=?`, id)
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cron_runs WHERE job_id=?`, id); err != nil {
+			return fmt.Errorf("cron: remove job %s: %w", id, err)
+		}
+		res, err := tx.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id=?`, id)
+		if err != nil {
+			return fmt.Errorf("cron: remove job %s: %w", id, err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("%w: %s", ErrNotFound, id)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM cron_runs WHERE job_id NOT IN (SELECT id FROM cron_jobs)`); err != nil {
+			return fmt.Errorf("cron: remove job %s: %w", id, err)
+		}
+		return nil
+	})
+}
+
+// ErrRunNotFound is the error for a run id that is not in cron_runs for the job.
+var ErrRunNotFound = errors.New("cron: run not found. Use action='runs' with the job_id to see the run ids")
+
+// Run is one row of cron_runs.
+type Run struct {
+	ID                             int64
+	JobID                          string
+	StartedAt, FinishedAt          time.Time
+	Status, Delivery               string
+	Output, DeliveryErr, SessionID string
+}
+
+const runColumns = "id, job_id, started_at, finished_at, status, delivery, output, delivery_error, session_id"
+
+func (s *Store) scanRun(r scanner) (Run, error) {
+	var run Run
+	var started, finished int64
+	if err := r.Scan(&run.ID, &run.JobID, &started, &finished, &run.Status, &run.Delivery,
+		&run.Output, &run.DeliveryErr, &run.SessionID); err != nil {
+		return Run{}, err
+	}
+	run.StartedAt = time.UnixMilli(started).In(s.loc())
+	run.FinishedAt = time.UnixMilli(finished).In(s.loc())
+	return run, nil
+}
+
+// Runs returns limit runs of the job id after the newest offset runs, newest first.
+func (s *Store) Runs(ctx context.Context, jobID string, limit, offset int) ([]Run, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+runColumns+` FROM cron_runs WHERE job_id=?
+		ORDER BY id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
-		return fmt.Errorf("cron: remove job %s: %w", id, err)
+		return nil, fmt.Errorf("cron: read runs of job %s: %w", jobID, err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("%w: %s", ErrNotFound, id)
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		run, err := s.scanRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("cron: read runs of job %s: %w", jobID, err)
+		}
+		out = append(out, run)
 	}
-	return nil
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cron: read runs of job %s: %w", jobID, err)
+	}
+	return out, nil
+}
+
+// Run returns the run id of the job jobID, or an error that wraps ErrRunNotFound.
+func (s *Store) Run(ctx context.Context, jobID string, id int64) (Run, error) {
+	run, err := s.scanRun(s.DB.QueryRowContext(ctx, `SELECT `+runColumns+` FROM cron_runs
+		WHERE job_id=? AND id=?`, jobID, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, fmt.Errorf("%w: job %s, run %d", ErrRunNotFound, jobID, id)
+	}
+	if err != nil {
+		return Run{}, fmt.Errorf("cron: read runs of job %s: %w", jobID, err)
+	}
+	return run, nil
 }
 
 // Due returns the enabled jobs with NextRun at or before now, in NextRun order.
@@ -285,26 +403,30 @@ func (s *Store) Due(ctx context.Context, now time.Time) ([]Job, error) {
 		WHERE enabled=1 AND next_run IS NOT NULL AND next_run<=? ORDER BY next_run, id`, now.UnixMilli())
 }
 
-// MarkRun records a run that started at ranAt. It computes NextRun from the schedule, but
-// never earlier than now. It decrements RepeatLeft, and it disables the job when RepeatLeft
-// reaches 0 or when the schedule has no further run. When the stored schedule cannot be
-// parsed, MarkRun disables the job, writes the cause as the last output, and returns an
-// error that wraps errBadSchedule.
-func (s *Store) MarkRun(ctx context.Context, id string, status, output string, ranAt time.Time) error {
-	return s.markRun(ctx, id, status, output, ranAt, false)
+// MarkRun records the run rec. It computes NextRun from the schedule, but never earlier
+// than now. It decrements RepeatLeft, and it disables the job when RepeatLeft reaches 0 or
+// when the schedule has no further run. It updates FailStreak from rec.Status: an error adds
+// 1, and ok sets 0. With rec.Pause, it disables the job after the repeat step and writes
+// rec.Streak as the count. In the same transaction, it adds a cron_runs row and deletes the
+// rows of the job above RunHistory. When the stored schedule cannot be parsed, MarkRun
+// disables the job, writes the cause as the last output, and returns an error that wraps
+// errBadSchedule.
+func (s *Store) MarkRun(ctx context.Context, id string, rec RunRecord) error {
+	return s.markRun(ctx, id, rec, false)
 }
 
-// MarkStopped records a run that started at ranAt and that a shutdown stopped before it
-// ended. It always writes StatusStopped as the status. A recurring job with more repeats
-// left moves to its next run, and RepeatLeft stays the same. A one-shot job, or a job on
-// its last repeat, stays due now, so it runs again after the restart. A stopped run that
-// follows a stopped run counts as a run: the job is used up, and the output gets a line
-// that tells why.
-func (s *Store) MarkStopped(ctx context.Context, id string, output string, ranAt time.Time) error {
-	return s.markRun(ctx, id, StatusStopped, output, ranAt, true)
+// MarkStopped records a run that a shutdown stopped before it ended. It always writes
+// StatusStopped as the status and DeliveryNone as the delivery, and it never pauses the job.
+// A recurring job with more repeats left moves to its next run, and RepeatLeft stays the
+// same. A one-shot job, or a job on its last repeat, stays due now, so it runs again after
+// the restart. A stopped run that follows a stopped run counts as a run: the job is used up,
+// and the output gets a line that tells why. The fail streak does not change.
+func (s *Store) MarkStopped(ctx context.Context, id string, rec RunRecord) error {
+	rec.Status, rec.LastStatus, rec.Delivery, rec.Pause = StatusStopped, StatusStopped, DeliveryNone, false
+	return s.markRun(ctx, id, rec, true)
 }
 
-func (s *Store) markRun(ctx context.Context, id string, status, output string, ranAt time.Time, stopped bool) error {
+func (s *Store) markRun(ctx context.Context, id string, rec RunRecord, stopped bool) error {
 	now := s.now()
 	var bad error
 	err := s.inTx(ctx, func(tx *sql.Tx) error {
@@ -313,7 +435,13 @@ func (s *Store) markRun(ctx context.Context, id string, status, output string, r
 			return err
 		}
 		prev := j.LastStatus
-		j.LastRun, j.LastStatus, j.LastOutput = ranAt, status, output
+		j.LastRun, j.LastStatus, j.LastOutput = rec.RanAt, rec.LastStatus, rec.Output
+		switch rec.Status { // the count uses only the run status
+		case "error":
+			j.FailStreak++
+		case "ok":
+			j.FailStreak = 0
+		}
 		sched, err := parse(j.Schedule, s.loc())
 		if err != nil {
 			// The job has no next run. Disable it, so it does not run on each tick.
@@ -321,9 +449,9 @@ func (s *Store) markRun(ctx context.Context, id string, status, output string, r
 			j.Enabled, j.NextRun, j.LastStatus = false, time.Time{}, "error"
 			j.LastOutput = fmt.Sprintf("⚠ Cron job %s is paused: its stored schedule %q is not valid. "+
 				"Update the schedule, then resume the job.", j.Name, j.Schedule)
-			return s.write(ctx, tx, j)
+			return s.record(ctx, tx, j, rec)
 		}
-		next := sched.Next(ranAt)
+		next := sched.Next(rec.RanAt)
 		if !next.IsZero() && !next.After(now) {
 			next = sched.Next(now)
 		}
@@ -331,12 +459,12 @@ func (s *Store) markRun(ctx context.Context, id string, status, output string, r
 		if stopped {
 			if !next.IsZero() && j.RepeatLeft != 1 {
 				// A recurring job with repeats left moves to its next run. The stop does not count.
-				return s.write(ctx, tx, j)
+				return s.record(ctx, tx, j, rec)
 			}
 			if prev != StatusStopped {
 				// The first stop keeps the job due now, so it runs again after the restart.
 				j.NextRun = now
-				return s.write(ctx, tx, j)
+				return s.record(ctx, tx, j, rec)
 			}
 			// A second stop in a row counts as the run, so a job that restarts the gateway
 			// cannot run with no end.
@@ -348,15 +476,40 @@ func (s *Store) markRun(ctx context.Context, id string, status, output string, r
 			j.Enabled = false
 			j.NextRun = time.Time{}
 			if stopped {
-				j.LastOutput = output + "\n" + stoppedTwiceLine
+				j.LastOutput = rec.Output + "\n" + stoppedTwiceLine
 			}
 		}
-		return s.write(ctx, tx, j)
+		if rec.Pause {
+			j.Enabled, j.NextRun, j.FailStreak = false, time.Time{}, rec.Streak
+		}
+		return s.record(ctx, tx, j, rec)
 	})
 	if err != nil {
 		return err
 	}
 	return bad
+}
+
+// record writes the job row, adds the cron_runs row of the run, and deletes the rows of the
+// job above RunHistory. With RunHistory 0, it deletes all rows of the job.
+func (s *Store) record(ctx context.Context, tx *sql.Tx, j Job, rec RunRecord) error {
+	if err := s.write(ctx, tx, j); err != nil {
+		return err
+	}
+	keep := max(s.RunHistory, 0) // SQLite reads a negative LIMIT as no limit
+	if keep > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO cron_runs(job_id, started_at, finished_at, status,
+			delivery, output, delivery_error, session_id) VALUES(?,?,?,?,?,?,?,?)`,
+			j.ID, rec.RanAt.UnixMilli(), rec.FinishedAt.UnixMilli(), rec.Status, rec.Delivery,
+			TruncateRunes(s.redact(j.LastOutput), RunOutputMaxRunes), rec.DeliveryErr, rec.SessionID); err != nil {
+			return fmt.Errorf("cron: record run of job %s: %w", j.ID, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM cron_runs WHERE job_id=? AND id NOT IN
+		(SELECT id FROM cron_runs WHERE job_id=? ORDER BY id DESC LIMIT ?)`, j.ID, j.ID, keep); err != nil {
+		return fmt.Errorf("cron: record run of job %s: %w", j.ID, err)
+	}
+	return nil
 }
 
 // validate checks a job before the store saves it. It checks the schedule, the prompt or
@@ -473,6 +626,20 @@ func applyPatch(j *Job, p JobPatch) {
 	}
 }
 
+// taskChanged reports whether the edit changes what the job does. Such an edit starts a new
+// count of failures in a row. The name, the target, and the repeat count are not part of the task.
+func taskChanged(old, j Job) bool {
+	samePin := func(a, b *ModelPin) bool {
+		if a == nil || b == nil {
+			return a == b
+		}
+		return *a == *b
+	}
+	return j.Prompt != old.Prompt || j.Script != old.Script || j.NoAgent != old.NoAgent ||
+		!slices.Equal(j.Skills, old.Skills) || !samePin(j.Model, old.Model) ||
+		!slices.Equal(j.Toolsets, old.Toolsets) || j.Workdir != old.Workdir || j.Schedule != old.Schedule
+}
+
 func defaultRepeat(s Schedule) int {
 	if s.OneShot() {
 		return 1
@@ -558,7 +725,7 @@ func (s *Store) write(ctx context.Context, tx *sql.Tx, j Job) error {
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE cron_jobs SET name=?, schedule=?, prompt=?, script=?, no_agent=?, deliver=?,
 		skills=?, model=?, toolsets=?, workdir=?, repeat_left=?, enabled=?, origin=?, created_by_session=?,
-		last_run=?, next_run=?, last_status=?, last_output=? WHERE id=?`, append(args[1:], j.ID)...)
+		last_run=?, next_run=?, last_status=?, last_output=?, fail_streak=? WHERE id=?`, append(args[1:], j.ID)...)
 	if err != nil {
 		return fmt.Errorf("cron: write job %s: %w", j.ID, err)
 	}
@@ -589,7 +756,7 @@ func rowArgs(j Job) ([]any, error) {
 	}
 	return []any{j.ID, j.Name, j.Schedule, j.Prompt, j.Script, boolInt(j.NoAgent), j.Deliver, skills, model, toolsets,
 		j.Workdir, j.RepeatLeft, boolInt(j.Enabled), string(origin), j.CreatedBySession,
-		msOrNil(j.LastRun), msOrNil(j.NextRun), j.LastStatus, j.LastOutput}, nil
+		msOrNil(j.LastRun), msOrNil(j.NextRun), j.LastStatus, j.LastOutput, j.FailStreak}, nil
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -603,7 +770,7 @@ func (s *Store) scan(r scanner) (Job, error) {
 	)
 	if err := r.Scan(&j.ID, &j.Name, &j.Schedule, &j.Prompt, &j.Script, &noAgent, &j.Deliver, &skills, &model,
 		&toolsets, &j.Workdir, &j.RepeatLeft, &enabled, &origin, &j.CreatedBySession, &lastRun, &nextRun,
-		&j.LastStatus, &j.LastOutput); err != nil {
+		&j.LastStatus, &j.LastOutput, &j.FailStreak); err != nil {
 		return Job{}, err
 	}
 	j.NoAgent, j.Enabled = noAgent != 0, enabled != 0

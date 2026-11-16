@@ -13,12 +13,17 @@ import (
 )
 
 // CronPreamble tells the model how a cron run works. It is the Hermes cron hint
-// (cron/scheduler.py) without the [SILENT] rule, because an agent job always delivers.
+// (cron/scheduler_prompt.py) with the DELIVERY and SILENT rules. It goes in the user message
+// of the run, so the system prompt of a chat session does not change.
 const CronPreamble = "[IMPORTANT: You are running as a scheduled cron job. No user is present, " +
 	"so you cannot ask the user questions or get approval for dangerous commands. " +
 	"DELIVERY: Your final response will be automatically delivered to the user — do NOT " +
 	"try to deliver the output yourself. Just produce your report/output as your final " +
-	"response and the system handles the rest.]"
+	"response and the system handles the rest. " +
+	"SILENT: If there is genuinely nothing new to report, respond with exactly \"[SILENT]\" " +
+	"(nothing else) to suppress delivery. [SILENT] is a literal ASCII control token — never " +
+	"translate or rephrase it, whatever language the rest of your answer uses. Never combine " +
+	"[SILENT] with content — either report your findings normally, or say [SILENT] and nothing more.]"
 
 // cronRemovedTools are the tools that a cron run cannot use: no user is present,
 // and a run cannot create cron jobs.
@@ -73,8 +78,9 @@ type Runner struct {
 }
 
 // Run runs the job j once and returns the outcome. A script job (NoAgent) makes no model
-// call and creates no session. An agent job creates a fresh session and always delivers.
-// A failure gives Status "error" and an alert text that is always sent.
+// call and creates no session. An agent job creates a fresh session. Its answer is not sent
+// when it is a silence marker (IsSilent). A failure gives Status "error" and an alert text
+// that is always sent.
 func (r *Runner) Run(ctx context.Context, j Job) RunOutcome {
 	if j.NoAgent {
 		return r.runScriptJob(ctx, j)
@@ -119,7 +125,7 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 		return RunOutcome{}, err
 	}
 	o := RunOutcome{SessionID: sess.ID}
-	text, err := r.buildText(ctx, j)
+	text, scriptFailed, err := r.buildText(ctx, j)
 	if err != nil {
 		return o, err
 	}
@@ -151,26 +157,35 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 		return o, err
 	}
 	if strings.TrimSpace(final) == "" {
-		final = fmt.Sprintf("⚠ Cron job %s finished, but the model gave no text.", j.Name)
+		// An empty answer is a fault of the model or the provider, so it counts as a failure (Hermes).
+		o.Text = fmt.Sprintf("⚠ Cron job %s finished, but the model gave no text.", j.Name)
+		o.Send, o.Status = true, "error"
+		return o, nil
+	}
+	// The model must report a failed data script, so that run skips the silence check.
+	if !scriptFailed && IsSilent(final) {
+		r.log().Info("cron job answered [SILENT]; no delivery", "job", j.ID, "name", j.Name)
+		o.Text, o.Send, o.Status, o.Silent = final, false, "ok", true
+		return o, nil
 	}
 	o.Text, o.Send, o.Status = final, true, "ok"
 	return o, nil
 }
 
 // buildText returns the user message of an agent job: the skills in order, the script
-// output, the prompt, and CronPreamble.
-func (r *Runner) buildText(ctx context.Context, j Job) (string, error) {
+// output, the prompt, and CronPreamble. scriptFailed is true when the data script failed.
+func (r *Runner) buildText(ctx context.Context, j Job) (text string, scriptFailed bool, err error) {
 	var b strings.Builder
 	if err := r.writeSkills(&b, j); err != nil {
-		return "", err
+		return "", false, err
 	}
 	if j.Script != "" {
-		r.writeScript(ctx, &b, j)
+		scriptFailed = r.writeScript(ctx, &b, j)
 	}
 	b.WriteString(j.Prompt)
 	b.WriteString("\n\n")
 	b.WriteString(CronPreamble)
-	return b.String(), nil
+	return b.String(), scriptFailed, nil
 }
 
 // writeSkills writes each skill of the job as "[Skill: <name>]\n<body>\n". A skill that is
@@ -214,24 +229,26 @@ func (r *Runner) writeSkills(b *strings.Builder, j Job) error {
 }
 
 // writeScript runs the script of an agent job and writes its stdout as data. A failure
-// goes into the prompt too, so that the model reports it (Hermes).
-func (r *Runner) writeScript(ctx context.Context, b *strings.Builder, j Job) {
+// goes into the prompt too, so that the model reports it (Hermes). It returns true when it
+// wrote a "Script error:" block.
+func (r *Runner) writeScript(ctx context.Context, b *strings.Builder, j Job) (failed bool) {
 	path, err := ResolveScript(j.Script, r.ScriptsDir)
 	if err != nil {
 		fmt.Fprintf(b, "Script error: the data-collection script did not run. Report this to the user.\n%v\n\n", err)
-		return
+		return true
 	}
 	res := RunScriptSpill(ctx, path, j.Workdir, r.Env, r.Script, r.SpillDir)
 	if res.TimedOut || res.ExitCode != 0 {
 		alert, _ := ScriptJobMessage(j, res, r.Script)
 		fmt.Fprintf(b, "Script error: the data-collection script failed. Report this to the user.\n%s\n\n", alert)
-		return
+		return true
 	}
 	out := strings.TrimRight(res.Stdout, "\n")
 	if strings.TrimSpace(out) == "" {
 		out = "(the script printed nothing)"
 	}
 	fmt.Fprintf(b, "Script output:\n%s\n\n", out)
+	return false
 }
 
 // modelOverride returns the session model override for a pin: "<provider>[:<model>]".

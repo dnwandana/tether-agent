@@ -687,3 +687,181 @@ func TestAgentTimeoutStopIsNotTimeout(t *testing.T) {
 		t.Fatal(j, s.sends())
 	}
 }
+
+// failTurn is an agent turn that always fails.
+func failTurn(context.Context, CronTurn) (string, error) { return "", errors.New("provider down") }
+
+// failTicks moves the clock past the next run of a "30m" job and runs one tick, n times.
+func failTicks(s *schedFixture, clk *clock, n int) {
+	for range n {
+		clk.t = clk.t.Add(31 * time.Minute)
+		s.TickOnce(ctx)
+	}
+}
+
+// wantPause is the pause paragraph that the scheduler adds to the alert of the job a.
+func wantPause(id string, n int) string {
+	return fmt.Sprintf("\n\n⏸ The job a (%s) is paused: it failed %d runs in a row. Fix the cause. "+
+		"Then ask me to resume the job.", id, n)
+}
+
+// schedRunRow is one row of cron_runs.
+type schedRunRow struct {
+	status, delivery, output, deliveryErr string
+	startedAt, finishedAt                 int64
+}
+
+// newestRunRow returns the newest cron_runs row of the job id.
+func newestRunRow(t *testing.T, s *Store, id string) schedRunRow {
+	t.Helper()
+	var r schedRunRow
+	if err := s.DB.QueryRowContext(ctx, `SELECT status, delivery, output, delivery_error, started_at, finished_at
+		FROM cron_runs WHERE job_id=? ORDER BY id DESC LIMIT 1`, id).Scan(
+		&r.status, &r.delivery, &r.output, &r.deliveryErr, &r.startedAt, &r.finishedAt); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func TestTenthFailurePausesJob(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = failTurn
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 9)
+	if j := mustGet(t, s.Store, id); !j.Enabled || j.FailStreak != 9 || strings.Contains(j.LastOutput, "⏸") {
+		t.Fatalf("%+v", j)
+	}
+	failTicks(s, clk, 1)
+	sends := s.sends()
+	if len(sends) != 10 || strings.Contains(sends[8], "⏸") ||
+		sends[9] != "⚠ Cron job a failed: provider down"+wantPause(id, 10) {
+		t.Fatalf("%q", sends)
+	}
+	j := mustGet(t, s.Store, id)
+	if j.Enabled || !j.NextRun.IsZero() || j.FailStreak != 10 || j.LastStatus != "error" ||
+		!strings.HasSuffix(j.LastOutput, wantPause(id, 10)) {
+		t.Fatalf("%+v", j)
+	}
+	if r := newestRunRow(t, s.Store, id); r.status != "error" || r.delivery != DeliverySent ||
+		!strings.HasSuffix(r.output, wantPause(id, 10)) {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// A one-shot job and a job on its last repeat stop after the run, so they get no pause line.
+func TestLastRunGetsNoPauseLine(t *testing.T) {
+	for name, job := range map[string]Job{
+		"one-shot":    {Name: "a", Schedule: "2026-10-27T10:30", Prompt: "x", RepeatLeft: 3, Enabled: true},
+		"last repeat": {Name: "a", Schedule: "30m", Prompt: "x", RepeatLeft: 1, Enabled: true},
+	} {
+		s, clk := scheduler(t)
+		s.Store.RunHistory, s.Store.FailStreakLimit = 50, 1
+		s.Runner.Turn = failTurn
+		id := mustCreate(t, s.Store, job)
+		failTicks(s, clk, 1)
+		sends := s.sends()
+		j := mustGet(t, s.Store, id)
+		if len(sends) != 1 || strings.Contains(sends[0], "⏸") || strings.Contains(j.LastOutput, "⏸") || j.FailStreak != 1 {
+			t.Fatalf("%s: %q %+v", name, sends, j)
+		}
+	}
+}
+
+// A pause alert that cannot be sent does not pause the job. The next failure tries again.
+func TestPauseAlertSendFailureDoesNotPause(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = failTurn
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 9)
+	s.mu.Lock()
+	s.sendErr = errors.New("telegram down")
+	s.mu.Unlock()
+	failTicks(s, clk, 1)
+	j := mustGet(t, s.Store, id)
+	if !j.Enabled || j.FailStreak != 10 || j.LastStatus != "delivery_failed" ||
+		j.LastOutput != "⚠ Cron job a failed: provider down" {
+		t.Fatalf("%+v", j)
+	}
+	if r := newestRunRow(t, s.Store, id); r.status != "error" || r.delivery != DeliveryFailed ||
+		strings.Contains(r.output, "⏸") || !strings.Contains(r.deliveryErr, "telegram down") {
+		t.Fatalf("%+v", r)
+	}
+	s.mu.Lock()
+	s.sendErr = nil
+	s.mu.Unlock()
+	failTicks(s, clk, 1)
+	j = mustGet(t, s.Store, id)
+	sends := s.sends()
+	if j.Enabled || j.FailStreak != 11 || !strings.HasSuffix(j.LastOutput, wantPause(id, 11)) ||
+		len(sends) != 10 || !strings.HasSuffix(sends[9], wantPause(id, 11)) {
+		t.Fatalf("%+v %q", j, sends)
+	}
+}
+
+// A local job with no home channel can never send, so it pauses with the line in its output.
+func TestLocalJobWithoutHomePauses(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 1
+	s.Runner.Turn = failTurn
+	s.Deliver.Home = noHome
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Deliver: "local", Enabled: true})
+	failTicks(s, clk, 1)
+	j := mustGet(t, s.Store, id)
+	if j.Enabled || j.FailStreak != 1 || !strings.HasSuffix(j.LastOutput, wantPause(id, 1)) || len(s.sends()) != 0 {
+		t.Fatalf("%+v %q", j, s.sends())
+	}
+	if r := newestRunRow(t, s.Store, id); r.delivery != DeliveryLocal {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestSilentRunRecordsDeliverySilent(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = func(context.Context, CronTurn) (string, error) { return "[SILENT]", nil }
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 1)
+	j := mustGet(t, s.Store, id)
+	if len(s.sends()) != 0 || j.LastStatus != "ok" || j.FailStreak != 0 {
+		t.Fatalf("%+v %q", j, s.sends())
+	}
+	if r := newestRunRow(t, s.Store, id); r.status != "ok" || r.delivery != DeliverySilent || r.output != "[SILENT]" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// A delivery error does not hide the run status: a failed run still adds to the streak.
+func TestDeliveryErrorStillCountsFailure(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = failTurn
+	s.sendErr = errors.New("telegram down")
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Deliver: "telegram:123", Enabled: true})
+	failTicks(s, clk, 2)
+	if j := mustGet(t, s.Store, id); !j.Enabled || j.FailStreak != 2 || j.LastStatus != "delivery_failed" {
+		t.Fatalf("%+v", j)
+	}
+	if r := newestRunRow(t, s.Store, id); r.status != "error" || r.delivery != DeliveryFailed {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// The duration of a run ends before the delivery, so a slow send does not make it longer.
+func TestRunDurationEndsBeforeDelivery(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory = 50
+	s.Deliver.Send = func(context.Context, Target, string, []string) error {
+		clk.t = clk.t.Add(time.Minute) // a slow send
+		return nil
+	}
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	clk.t = clk.t.Add(31 * time.Minute)
+	ranAt := clk.t
+	s.TickOnce(ctx)
+	r := newestRunRow(t, s.Store, id)
+	if r.delivery != DeliverySent || r.startedAt != ranAt.UnixMilli() || r.finishedAt != ranAt.UnixMilli() {
+		t.Fatalf("%+v, ran at %d", r, ranAt.UnixMilli())
+	}
+}
