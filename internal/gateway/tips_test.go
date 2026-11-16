@@ -20,7 +20,7 @@ func TestFormatContext(t *testing.T) {
 }
 
 func TestTipsAreCopiedFromSpec(t *testing.T) {
-	if len(Tips) != 20 {
+	if len(Tips) != 40 {
 		t.Fatal(len(Tips))
 	}
 	if Tips[0] != "/fork copies this session, so you can try a different idea and keep the original." {
@@ -34,6 +34,9 @@ func TestTipsAreCopiedFromSpec(t *testing.T) {
 	}
 	if Tips[19] != "Run `tether update` in a terminal to install the newest release." {
 		t.Fatal(Tips[19])
+	}
+	if Tips[20] != "/goal gives the agent a task that can need many turns. The agent works on it until the goal is done." {
+		t.Fatal(Tips[20])
 	}
 	for _, tip := range Tips {
 		if strings.Contains(tip, "/resume brings it back") {
