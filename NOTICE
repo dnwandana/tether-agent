@@ -42,6 +42,9 @@ tools/skills_hub.py, tools/skills_guard.py, and hermes_cli/skills_hub.py).
   (internal/skills/command.go, internal/tools/skills.go, internal/gateway/,
   internal/telegram/poll.go, from agent/skill_commands.py,
   agent/skill_preprocessing.py, and hermes_cli/commands_platforms.py).
+- The cron silence rule: the [SILENT] prompt text and the silence matcher
+  (internal/cron/run.go, internal/cron/silence.go, from
+  cron/scheduler_prompt.py and gateway/response_filters.py).
 - Test cases from the Hermes Agent test suite.
 
 Comments in the source code that name "Hermes" point to the origin of a rule
