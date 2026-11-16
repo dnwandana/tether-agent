@@ -431,8 +431,8 @@ active after `/new`, after a restart, and after a model change.
 - A Telegram chat sees only its own sessions, the forks of those sessions, and the runs of its own
   cron jobs. A DM also sees the topics of the same DM. A group with one session for each user
   (`telegram.group_sessions_per_user`) gives each user only their own sessions.
-- A Telegram chat can list, change, pause, run, and remove only the cron jobs that it made. A job
-  of another chat gives the same error as a job that does not exist.
+- A Telegram chat can list, change, pause, run, and remove only the cron jobs that it made, and
+  read only their runs. A job of another chat gives the same error as a job that does not exist.
 - From a Telegram chat, `deliver` can be `origin`, `local`, or `telegram:<chat_id>` of the same
   chat. The CLI can deliver to any chat.
 - A cron run gets the scope of the chat that made its job.
@@ -490,7 +490,8 @@ To give a secret to a child, put its name in `terminal.env_passthrough`.
 ### Redaction
 
 The redactor is a port of Hermes `agent/redact.py`. It masks API keys, tokens, and credentials in
-the logs, in tool output, in error text, and in the text that goes to the model.
+the logs, in tool output, in error text, in the text that goes to the model, and in the cron
+run output that `state.db` keeps.
 
 - A token of fewer than 18 characters becomes `***`.
 - A longer token keeps its first 6 and its last 4 characters.

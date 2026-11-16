@@ -20,6 +20,7 @@ Example requests:
 - "Every 2 hours, check the disk space on this server and tell me if it is above 80%."
 - "Remind me in this topic at 2026-11-01T09:00 to renew the domain."
 - "List my cron jobs."
+- "Show the last runs of the disk job."
 - "Pause the Hacker News job."
 - "Remove the disk job."
 
@@ -39,6 +40,7 @@ that contains all the information that the job needs.
 | `resume` | Starts a paused job again. |
 | `remove` | Deletes a job. |
 | `run` | Runs a job now. |
+| `runs` | Shows the last runs of a job: the status, the delivery, the duration, and the output. Ask for older runs, and the agent pages back. |
 
 ## Job fields
 
@@ -69,12 +71,13 @@ from the host.
 
 ## Delivery
 
-The final answer of each run goes to the `deliver` target:
+The final answer of a run goes to the `deliver` target. A `[SILENT]` answer sends nothing. See
+[What a run does](#what-a-run-does).
 
 | Value | Target |
 |---|---|
 | empty or `origin` | The chat and topic where you made the job. |
-| `local` | No message. The result stays in the database. |
+| `local` | No message. The result stays in the database. A pause after too many failures goes to the home channel. See [Failures in a row](#failures-in-a-row). |
 | `telegram:<chat>` | That chat. |
 | `telegram:<chat>:<thread>` | That topic in that chat. |
 
@@ -84,7 +87,8 @@ A job that you make in `tether chat` has no Telegram origin. It goes to the home
 
 If a job has no target, the job still runs, and an agent job still uses tokens. Only the
 delivery fails. The job gets the status `delivery_failed`, and the error tells you to run
-`/sethome` or to set `deliver`.
+`/sethome` or to set `deliver`. A delivery failure alone does not count as a failed run. See
+[Failures in a row](#failures-in-a-row).
 
 > **Note:** `telegram:<chat>` without `:<thread>` does not go to a topic. Add the thread id for a
 > forum topic.
@@ -95,10 +99,15 @@ An agent run has these rules:
 
 - Each run is a fresh session with the key `cron:<job id>`.
 - The run cannot use the `cronjob` tool or the `clarify` tool. No user is present to answer.
-- The final answer always goes to the target.
+- The final answer goes to the target. When the run finds nothing new, the agent answers
+  `[SILENT]`, and no message goes out. The run is still recorded.
 - A failure sends "⚠ Cron job X failed: …". A time-out sends "⚠ Cron job X failed (timed out
   after Ns)". When the model wrote a part of its answer before the time-out, the part follows
   the alert.
+- A failed run always sends its alert to the target, also when the answer has `[SILENT]`. A
+  `local` job has no target.
+- When the data script fails, the run always delivers. The model reports the failure.
+- An empty answer is a failure. It sends "⚠ Cron job X finished, but the model gave no text."
 - An agent run has no time limit by default. Set `cron.agent_timeout_s` to stop a run that takes
   too long. The data script does not count.
 - The toolsets come from `toolsets.cron`. The `toolsets` field of a job can only make that list
@@ -187,6 +196,24 @@ In an agent job, a `script` runs first, and its stdout goes into the prompt as d
   job id.
 - When the stored schedule of a job is not valid, the gateway pauses the job after its run. The
   job list shows the cause. Update the schedule, then resume the job.
+- The `cron_runs` table of `state.db` keeps the last 50 runs of each job (`cron.run_history`):
+  the status, the delivery, the duration, the output (up to 4000 characters), and the session.
+  The redactor masks the secrets in the output before the table keeps it.
+  Ask the agent for the runs of a job. The `runs` action shows them.
+
+### Failures in a row
+
+A job that fails 10 runs in a row (`cron.fail_streak_limit`) pauses itself. The alert of the 10th
+failure ends with "⏸ The job X (id) is paused: it failed 10 runs in a row. Fix the cause. Then ask
+me to resume the job."
+
+A good run sets the count to 0. A resume or an edit of the task (the prompt, the script, the
+skills, the model, the toolsets, the workdir, or the schedule) also sets it to 0. When the alert
+cannot be sent, the job does not pause. The next failure tries the alert again. A delivery failure
+alone does not count. A stopped run does not change the count.
+
+A one-shot job and a job on its last repeat do not pause, because they stop after the run. The job
+list shows the count, for example "paused (10 failures in a row)".
 
 ### Missed runs
 

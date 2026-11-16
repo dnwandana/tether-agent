@@ -80,7 +80,7 @@ To restart the gateway, send `/restart` in a chat, or run `systemctl --user relo
 | `approvals` | The approval mode for dangerous commands, in chats and in cron runs. |
 | `goals` | The `/goal` loop: the turn budget, the judge, the gates, and the waits. |
 | `toolsets` | The toolsets that each channel can use. |
-| `cron` | Parallel cron jobs, the time limits of a run, and the rule for missed runs. |
+| `cron` | Parallel cron jobs, the time limits of a run, the rule for missed runs, the run history, and the limit of failures in a row. |
 | `gateway` | The message queue, the debounce wait, the page sizes of `/model` and `/sessions`, the skill count of `/help`, the cleanup interval, and the files that an answer can send. |
 | `telegram` | The bot: who can use it, group rules, home chat, streaming, status lines, the Bot API timeouts, the media limits, the menu size, and the pairing code time. |
 | `mcp` | The MCP servers and the dial tries of each server. |

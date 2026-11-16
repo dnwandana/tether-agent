@@ -583,6 +583,8 @@ in name order when the program opens the database:
 - `003_reasoning_effort.sql` adds `messages.reasoning` and `sessions.effort`.
 - `004_goals.sql` adds the `goals` table and `turn_markers.in_step`.
 - `005_acp_sessions.sql` adds the `acp_sessions` table.
+- `006_batch_owner.sql` adds `delegation_batches.owner`.
+- `007_cron_runs.sql` adds the `cron_runs` table and `cron_jobs.fail_streak`.
 
 Do not run a second query while the rows of a query are open. The database has one connection,
 so the second query waits for ever.
@@ -594,6 +596,7 @@ so the second query waits for ever.
 | `messages_fts` | The full text index for `session_search`. |
 | `compactions` | The summaries that replace ranges of messages. |
 | `cron_jobs` | The scheduled jobs. |
+| `cron_runs` | The last runs of each cron job. |
 | `approvals_always` | The commands that you approved with "always". |
 | `pairing` | Telegram pairing codes and approved users. |
 | `active_session` | The current session of each session key. |

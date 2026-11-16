@@ -220,8 +220,9 @@ Two keys add the user to the key:
 
 ## The home channel
 
-Cron jobs that you create from the CLI send their results to the home channel. To set it, send
-`/sethome` in the chat or topic that you want. The command saves the chat in `state.db`.
+Cron jobs that you create from the CLI send their results to the home channel. The pause alert of
+a `local` cron job also goes to the home channel. See [Cron](Cron#failures-in-a-row). To set it,
+send `/sethome` in the chat or topic that you want. The command saves the chat in `state.db`.
 Only an owner can send `/sethome`. A member gets `⛔ Only the owner can use /sethome.`
 
 You can also set a first value in the config:
