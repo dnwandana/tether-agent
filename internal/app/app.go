@@ -287,7 +287,9 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 			}
 		}
 	}
-	a.Cron = &cron.Store{DB: a.DB, Loc: time.Local, ValidToolset: func(s string) bool { return tools.ValidToolset(s, mcpServers) }}
+	a.Cron = &cron.Store{DB: a.DB, Loc: time.Local,
+		RunHistory: a.Cfg.Cron.RunHistory, FailStreakLimit: a.Cfg.Cron.FailStreakLimit, Redact: a.Redactor.Redact,
+		ValidToolset: func(s string) bool { return tools.ValidToolset(s, mcpServers) }}
 	if opts.Gateway {
 		a.Sched = a.newScheduler()
 	}

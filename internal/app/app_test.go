@@ -1597,6 +1597,7 @@ func TestNewTightensNewDatabaseFiles(t *testing.T) {
 // cronLimitsYAML sets each cron limit to a value that is not the default.
 const cronLimitsYAML = "cron:\n  script_timeout_s: 900\n  agent_timeout_s: 1800\n  script_output_max_chars: 20000\n" +
 	"  script_stderr_tail_lines: 40\n  tick_s: 10\n  grace_min_s: 60\n  grace_max_s: 3600\n" +
+	"  run_history: 7\n  fail_streak_limit: 3\n" +
 	"gateway:\n  housekeeping_interval_s: 3600\n"
 
 func TestAppSetsCronLimitsFromConfig(t *testing.T) {
@@ -1610,6 +1611,9 @@ func TestAppSetsCronLimitsFromConfig(t *testing.T) {
 	}
 	if a.Sched.Tick != 10*time.Second || a.Sched.GraceMin != time.Minute || a.Sched.GraceMax != time.Hour {
 		t.Fatalf("tick %s, grace %s to %s", a.Sched.Tick, a.Sched.GraceMin, a.Sched.GraceMax)
+	}
+	if a.Cron.RunHistory != 7 || a.Cron.FailStreakLimit != 3 {
+		t.Fatalf("cron store: run history %d, fail streak limit %d", a.Cron.RunHistory, a.Cron.FailStreakLimit)
 	}
 	ct, _ := a.Registry.Get("cronjob")
 	tool := ct.(tools.CronJobTool)
@@ -1630,14 +1634,24 @@ func TestAppCronLimitsDefaults(t *testing.T) {
 	if r.AgentTimeout != 0 || a.Sched.Tick != 30*time.Second || a.Sched.GraceMin != 2*time.Minute || a.Sched.GraceMax != 2*time.Hour {
 		t.Fatalf("agent %s, tick %s, grace %s to %s", r.AgentTimeout, a.Sched.Tick, a.Sched.GraceMin, a.Sched.GraceMax)
 	}
+	if a.Cron.RunHistory != 50 || a.Cron.FailStreakLimit != 10 {
+		t.Fatalf("cron store: run history %d, fail streak limit %d", a.Cron.RunHistory, a.Cron.FailStreakLimit)
+	}
+	if a.Cron.Redact == nil {
+		t.Fatal("cron store: no redactor, so cron_runs keeps secrets")
+	}
 	if got := a.housekeepingInterval(); got != 24*time.Hour {
 		t.Fatalf("housekeeping interval %s", got)
 	}
-	// The chat role has no scheduler, but its cronjob tool gets the same values.
-	ct, _ := newApp(t).Registry.Get("cronjob")
+	// The chat role has no scheduler, but its cronjob tool and its store get the same values.
+	chat := newApp(t)
+	ct, _ := chat.Registry.Get("cronjob")
 	tool := ct.(tools.CronJobTool)
 	if tool.Tick != 30*time.Second || tool.GraceMin != 2*time.Minute || tool.GraceMax != 2*time.Hour {
 		t.Fatalf("chat role cronjob tool: tick %s, grace %s to %s", tool.Tick, tool.GraceMin, tool.GraceMax)
+	}
+	if chat.Cron.RunHistory != 50 || chat.Cron.FailStreakLimit != 10 {
+		t.Fatalf("chat role cron store: run history %d, fail streak limit %d", chat.Cron.RunHistory, chat.Cron.FailStreakLimit)
 	}
 }
 
