@@ -23,6 +23,8 @@ var freeTextColumns = map[string][]string{
 	"delegation_batches": {"tasks", "results"},
 	"turn_markers":       {"queued"},
 	"goals":              {"state"},
+	"approval_log":       {"preview"},
+	"approval_grants":    {"preview"},
 }
 
 // stateColumns lists every other TEXT column of the schema. maskDB never masks these columns.
@@ -36,8 +38,9 @@ var stateColumns = map[string][]string{
 	"compactions": {"session_id"},
 	"cron_jobs": {"id", "name", "schedule", "script", "deliver", "skills", "model", "toolsets",
 		"workdir", "origin", "created_by_session", "last_status"},
-	"cron_runs":          {"job_id", "status", "delivery", "session_id"},
-	"approvals_always":   {"pattern_id"},
+	"cron_runs": {"job_id", "status", "delivery", "session_id"},
+	"approval_grants": {"id", "pattern_id", "content_sha256", "workdir", "via", "programs", "server",
+		"tool_name"},
 	"pairing":            {"platform", "user_id", "user_name", "code", "status"},
 	"active_session":     {"session_key", "session_id"},
 	"turn_markers":       {"session_key", "session_id"},
@@ -46,6 +49,9 @@ var stateColumns = map[string][]string{
 	"schema_version":     {"name"},
 	"goals":              {"session_id"},
 	"acp_sessions":       {"session_id", "agent", "acp_session_id", "cwd"},
+	"approval_log": {"session_id", "scope", "kind", "tool", "server", "tool_name", "rule", "class",
+		"decision", "source", "answer", "content_sha256"},
+	"chat_modes": {"scope", "mode"},
 }
 
 // maskCell is one cell that maskDB changes.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -57,8 +58,8 @@ func TestOpenCreatesSchemaAndWAL(t *testing.T) {
 		t.Fatal(mode)
 	}
 	for _, tbl := range []string{"sessions", "messages", "messages_fts", "compactions", "cron_jobs",
-		"approvals_always", "pairing", "active_session", "delegation_batches", "kv", "schema_version", "goals",
-		"acp_sessions"} {
+		"approval_grants", "pairing", "active_session", "delegation_batches", "kv", "schema_version", "goals",
+		"acp_sessions", "chat_modes", "approval_log"} {
 		var n int
 		if err := d.QueryRow("SELECT count(*) FROM sqlite_master WHERE name=?", tbl).Scan(&n); err != nil {
 			t.Fatal(err)
@@ -430,7 +431,78 @@ func TestMigrationCronRunsFrom006(t *testing.T) {
 	if err := d.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'cron_runs_job'`).Scan(&n); err != nil || n != 1 {
 		t.Fatal("missing index cron_runs_job:", n, err)
 	}
-	if v, err := d.SchemaVersion(ctx); err != nil || v != 7 || v != LatestVersion() {
+	if v, err := d.SchemaVersion(ctx); err != nil || v != 9 || v != LatestVersion() {
+		t.Fatal(v, LatestVersion(), err)
+	}
+}
+
+// A database at schema version 7 gains the chat_modes and approval_log tables. The text
+// columns of a new row default to ”.
+func TestMigrationChatModesLogFrom007(t *testing.T) {
+	ctx := context.Background()
+	p := filepath.Join(t.TempDir(), "state.db")
+	sdb, err := sql.Open("sqlite", p+dsnParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdb.SetMaxOpenConns(1)
+	old := &DB{DB: sdb}
+	if _, err := old.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.version <= 7 {
+			if err := old.apply(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	old.Close()
+
+	d, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	// chat_modes: the scope is the key, and set_at defaults to 0.
+	if _, err := d.ExecContext(ctx, `INSERT INTO chat_modes (scope, mode) VALUES ('telegram:-1001:5', 'read-only')`); err != nil {
+		t.Fatal(err)
+	}
+	var setAt int64
+	if err := d.QueryRowContext(ctx, `SELECT set_at FROM chat_modes WHERE scope = 'telegram:-1001:5'`).Scan(&setAt); err != nil || setAt != 0 {
+		t.Fatal("set_at must default to 0:", setAt, err)
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO chat_modes (scope, mode) VALUES ('telegram:-1001:5', 'full')`); err == nil {
+		t.Fatal("a second row for one scope must fail")
+	}
+
+	// approval_log: only at, decision, and source are required.
+	if _, err := d.ExecContext(ctx, `INSERT INTO approval_log (at, decision, source) VALUES (1763276400000, 'allowed', 'owner')`); err != nil {
+		t.Fatal(err)
+	}
+	var sessionID, scope, kind, tool, rule, class, answer, sum, preview string
+	if err := d.QueryRowContext(ctx, `SELECT session_id, scope, kind, tool, rule, class, answer, content_sha256, preview
+		FROM approval_log`).Scan(&sessionID, &scope, &kind, &tool, &rule, &class, &answer, &sum, &preview); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{sessionID, scope, kind, tool, rule, class, answer, sum, preview} {
+		if s != "" {
+			t.Fatalf("a text column of approval_log must default to '': %q", s)
+		}
+	}
+	for _, idx := range []string{"approval_log_scope_at", "approval_log_at"} {
+		var n int
+		if err := d.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, idx).Scan(&n); err != nil || n != 1 {
+			t.Fatal("missing index", idx, n, err)
+		}
+	}
+	if v, err := d.SchemaVersion(ctx); err != nil || v != LatestVersion() || v < 8 {
 		t.Fatal(v, LatestVersion(), err)
 	}
 }
@@ -466,5 +538,85 @@ func TestBatchOwnerColumn(t *testing.T) {
 	var owner int
 	if err := d.QueryRow(`SELECT owner FROM delegation_batches WHERE id = 'b1'`).Scan(&owner); err != nil || owner != 1 {
 		t.Fatal("a row with no owner value is an owner row:", owner, err)
+	}
+}
+
+// A database at schema version 8 loses approvals_always. kv keeps the count of the rows that
+// /approvals showed, so the owner gets one notice.
+func TestMigrationGrantsFrom008(t *testing.T) {
+	for _, tc := range []struct {
+		ids    []string
+		want   string
+		wantOK bool
+	}{
+		{[]string{"recursive_delete", "git_force_push", "protected_path_write_x", "sqlite_client_state_db"}, "2", true},
+		{[]string{"protected_path_write_x"}, "", false},
+		{nil, "", false},
+	} {
+		ctx := context.Background()
+		p := filepath.Join(t.TempDir(), "state.db")
+		sdb, err := sql.Open("sqlite", p+dsnParams)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sdb.SetMaxOpenConns(1)
+		old := &DB{DB: sdb}
+		if _, err := old.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER PRIMARY KEY,
+			name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
+			t.Fatal(err)
+		}
+		ms, err := loadMigrations()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range ms {
+			if m.version <= 8 {
+				if err := old.apply(ctx, m); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		for _, id := range tc.ids {
+			if _, err := old.ExecContext(ctx, `INSERT INTO approvals_always(pattern_id, created_at) VALUES (?, 1)`, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		old.Close()
+
+		d, err := Open(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v, ok, err := d.KVGet(ctx, "approvals_always_removed"); err != nil || ok != tc.wantOK || v != tc.want {
+			t.Fatal(tc.ids, v, ok, err)
+		}
+		// An old binary fails closed: its query of approvals_always gives an error.
+		var n int
+		if err := d.QueryRowContext(ctx, `SELECT COUNT(*) FROM approvals_always`).Scan(&n); err == nil {
+			t.Fatal("approvals_always still exists")
+		}
+		var cols []string
+		rows, err := d.QueryContext(ctx, `SELECT name FROM pragma_table_info('approval_grants') ORDER BY cid`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var c string
+			if err := rows.Scan(&c); err != nil {
+				t.Fatal(err)
+			}
+			cols = append(cols, c)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+		if got := strings.Join(cols, ","); got != "id,pattern_id,content_sha256,workdir,via,programs,preview,server,tool_name,created_at" {
+			t.Fatal(got)
+		}
+		if v, err := d.SchemaVersion(ctx); err != nil || v != 9 || v != LatestVersion() {
+			t.Fatal(v, LatestVersion(), err)
+		}
+		d.Close()
 	}
 }
