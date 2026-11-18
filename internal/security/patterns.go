@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"unicode"
@@ -205,9 +206,26 @@ func MatchGatewaySelf(cmd string) (Pattern, bool) {
 	return matchFirst(GatewaySelfPatterns, prepare(cmd))
 }
 
-// MatchHardline returns the first hardline rule that matches cmd.
+// MatchHardline returns the first hardline rule that matches cmd. It reads cmd as
+// bash does and also checks each inner command.
 func MatchHardline(cmd string) (Pattern, bool) {
-	return matchFirst(HardlinePatterns, prepare(cmd))
+	return MatchHardlineParsed(cmd, ReadCommand(cmd))
+}
+
+// MatchHardlineParsed returns the first hardline rule, in list order, that matches the raw
+// text or the rule line of a simple command of p.
+func MatchHardlineParsed(raw string, p Parsed) (Pattern, bool) {
+	texts := make([]string, 0, len(p.Cmds)+1)
+	texts = append(texts, prepare(raw))
+	for _, c := range p.Cmds {
+		texts = append(texts, prepare(c.RuleLine()))
+	}
+	for _, pat := range HardlinePatterns {
+		if slices.ContainsFunc(texts, pat.matches) {
+			return pat, true
+		}
+	}
+	return Pattern{}, false
 }
 
 // MatchSudoStdin reports whether cmd pipes a password to "sudo -S" while no
@@ -240,16 +258,43 @@ func MatchDangerous(cmd string) (Pattern, bool) {
 // protected rules also match the second form of the command: no quotes, no
 // escapes, and the protected paths in place of each glob word that matches
 // them. A second form that is the same as the first form is not matched again.
+// It reads cmd as bash does and also checks each inner command.
 func MatchAllDangerous(cmd string) []Pattern {
-	s := prepare(cmd)
+	return MatchAllDangerousParsed(cmd, ReadCommand(cmd))
+}
+
+// MatchAllDangerousParsed returns each dangerous rule that matches, one time for each ID, in
+// the order of MatchDangerous. A protected rule reads the raw text, its second form, and the
+// rule lines. Another rule reads the rule lines and the command view, and reads the raw
+// text only when the reader could not read the command.
+func MatchAllDangerousParsed(raw string, p Parsed) []Pattern {
+	s := prepare(raw)
 	protectedMu.RLock()
 	extra, paths := protectedPatterns, protectedPaths
 	protectedMu.RUnlock()
 	s2 := secondForm(s, paths)
+	lines := make([]string, 0, len(p.Cmds))
+	for _, c := range p.Cmds {
+		lines = append(lines, prepare(c.RuleLine()))
+	}
+	view := s
+	if p.Read && p.View != "" {
+		view = prepare(p.View)
+	}
+	hit := func(pat Pattern) bool {
+		if IsProtectedPatternID(pat.ID) {
+			if pat.matches(s) || (s2 != s && pat.matches(s2)) {
+				return true
+			}
+		} else if pat.matches(view) {
+			return true
+		}
+		return slices.ContainsFunc(lines, pat.matches)
+	}
 	var out []Pattern
 	seen := map[string]bool{}
 	add := func(p Pattern) {
-		if !seen[p.ID] && (p.matches(s) || (s2 != s && IsProtectedPatternID(p.ID) && p.matches(s2))) {
+		if !seen[p.ID] && hit(p) {
 			seen[p.ID] = true
 			out = append(out, p)
 		}

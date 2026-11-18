@@ -13,17 +13,6 @@ import (
 // process substitutions "<(" and ">(".
 var compoundMarks = []string{"&", "|", ";", "$(", "`", "<", ">", "\n", "\r"}
 
-// wrapperPrograms run another program. Their name does not say what runs.
-var wrapperPrograms = map[string]bool{
-	"sudo": true, "env": true, "sh": true, "bash": true, "zsh": true,
-	"xargs": true, "nohup": true, "timeout": true, "nice": true,
-	"exec": true, "eval": true, "command": true, "builtin": true, "time": true,
-	"setsid": true, "doas": true, "su": true, "runuser": true, "stdbuf": true,
-	"ionice": true, "chroot": true, "unshare": true, "nsenter": true, "flock": true,
-	"dash": true, "ksh": true, "fish": true, "csh": true, "tcsh": true, "busybox": true,
-	"pkexec": true, "watch": true, "script": true, "strace": true, "taskset": true, "chrt": true,
-}
-
 // assignRe matches a leading NAME=value word of a command.
 var assignRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
@@ -35,8 +24,9 @@ var plainProgramRe = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
 // session id, so a new ACP session starts with no "this session" grants. For an execute
 // request, the id ends with the base name of the program. noSession is true when the id
 // does not tell exactly what runs, so the user must answer each time. This is the case for
-// a compound command, a wrapper program, a program word with a path, and a command that
-// starts with NAME=value words. A path can point to any file, so "./ls" is not always ls.
+// a compound command, a wrapper program of the shared table of security, a program word with a path, and a command that
+// starts with NAME=value words. A command that the gate cannot read, and a command with an
+// inner command, also set noSession. A path can point to any file, so "./ls" is not always ls.
 // A NAME=value word such as LD_PRELOAD or PATH can change what the program runs. A command
 // that matches a dangerous rule also sets noSession, so a grant never covers it. This holds
 // for a request of any kind that has such a command, so one "this session" answer to an
@@ -65,11 +55,14 @@ func patternID(agentID, acpSessionID, kind, command string) (id string, noSessio
 	if _, ok := security.MatchDangerous(command); ok {
 		noSession = true
 	}
+	if p := security.ReadCommand(command); !p.Read || len(p.Cmds) > 1 {
+		noSession = true
+	}
 	program, indirect := commandProgram(command)
 	if program == "" {
 		return id, true
 	}
-	if indirect || wrapperPrograms[program] || !plainProgramRe.MatchString(program) {
+	if _, wrapper := security.LookupWrapper(program); indirect || wrapper || !plainProgramRe.MatchString(program) {
 		noSession = true
 	}
 	return id + ":" + program, noSession

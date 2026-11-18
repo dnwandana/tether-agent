@@ -241,10 +241,20 @@ var tetherDiffs = map[string]string{
 	"chmod --recursive \\\n777 /var": "world/other-writable permissions",
 }
 
+// tetherHardlineDiffs lists the commands where Tether Agent finds a hardline
+// rule and Hermes does not. The command reader reads the substitutions in an
+// unquoted heredoc body, and bash runs them.
+var tetherHardlineDiffs = map[string]string{
+	"ruby <<RUBY\n`rm -rf /`\nRUBY": "recursive delete of root filesystem",
+}
+
 func TestHermesCommandCases(t *testing.T) {
 	for _, c := range hermesCommandCases {
 		if d, ok := tetherDiffs[c.cmd]; ok {
 			c.dangerous = d
+		}
+		if h, ok := tetherHardlineDiffs[c.cmd]; ok {
+			c.hardline = h
 		}
 		desc := ""
 		if p, ok := MatchHardline(c.cmd); ok {

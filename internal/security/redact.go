@@ -108,6 +108,18 @@ var (
 	// dbConnRe is Hermes _DB_CONNSTR_RE.
 	dbConnRe = regexp.MustCompile(`(?i)((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:]+:)([^@]+)(@)`)
 
+	// urlUserinfoRe is not in Hermes. It finds the password in the userinfo of an
+	// http or https URL. dbConnRe covers the database schemes.
+	urlUserinfoRe = regexp.MustCompile(`(?i)\b(https?://[^\s:/?#@]+:)([^\s@/?#]+)(@)`)
+
+	// basicAuthRe is not in Hermes. It finds the value of an Authorization: Basic
+	// header. The value stops at a quote, so the quote of the shell word stays.
+	basicAuthRe = regexp.MustCompile(`(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=._~-]+)`)
+
+	// flagSecretRe is not in Hermes. It finds the value of --password and --token,
+	// in the forms "--password X" and "--password=X". A quoted value is one value.
+	flagSecretRe = regexp.MustCompile(`(?i)((?:^|[\s"'])--(?:password|token)(?:=|\s+))('[^']*'|"[^"]*"|[^\s'"]\S*)`)
+
 	// jwtRe is Hermes _JWT_RE.
 	jwtRe = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_=-]{4,}){0,2}`)
 
@@ -187,6 +199,28 @@ func LooksLikeSecret(s string) bool {
 // Redact returns s with the secrets masked. Text with no secrets comes back
 // unchanged.
 func (r *Redactor) Redact(s string) string {
+	return r.redact(s, true)
+}
+
+// redactExceptFlags is Redact without the --password and --token form.
+func (r *Redactor) redactExceptFlags(s string) string {
+	return r.redact(s, false)
+}
+
+// redactFlags applies only the --password and --token form.
+func redactFlags(s string) string {
+	if !strings.Contains(s, "--") {
+		return s
+	}
+	return replaceSubmatch(flagSecretRe, s, func(s string, m []int) string {
+		if isMasked(s[m[4]:m[5]]) {
+			return s[m[0]:m[1]]
+		}
+		return s[m[2]:m[3]] + "***"
+	})
+}
+
+func (r *Redactor) redact(s string, flags bool) string {
 	if s == "" {
 		return s
 	}
@@ -206,6 +240,12 @@ func (r *Redactor) Redact(s string) string {
 	}
 	s = replaceSubmatch(authHeaderRe, s, func(s string, m []int) string {
 		return s[m[2]:m[3]] + Mask(s[m[4]:m[5]])
+	})
+	s = replaceSubmatch(basicAuthRe, s, func(s string, m []int) string {
+		if isMasked(s[m[4]:m[5]]) {
+			return s[m[0]:m[1]]
+		}
+		return s[m[2]:m[3]] + "***"
 	})
 	s = replaceSubmatch(bearerRe, s, func(s string, m []int) string {
 		tok := s[m[4]:m[5]]
@@ -231,8 +271,19 @@ func (r *Redactor) Redact(s string) string {
 			return s[m[2]:m[3]] + "***" + s[m[6]:m[7]]
 		})
 	}
+	if strings.Contains(s, "://") {
+		s = replaceSubmatch(urlUserinfoRe, s, func(s string, m []int) string {
+			if isMasked(s[m[4]:m[5]]) {
+				return s[m[0]:m[1]]
+			}
+			return s[m[2]:m[3]] + "***" + s[m[6]:m[7]]
+		})
+	}
 	if strings.Contains(s, "eyJ") {
 		s = jwtRe.ReplaceAllStringFunc(s, Mask)
+	}
+	if flags {
+		s = redactFlags(s)
 	}
 	// Hermes turned off the query parameter redaction. Tether Agent keeps it
 	// on.
@@ -254,6 +305,12 @@ func (r *Redactor) Redact(s string) string {
 		s = redactFormBody(s)
 	}
 	return s
+}
+
+// isMasked reports whether a value is already "***", bare or in one pair of
+// quotes. The redactor leaves such a value as it is.
+func isMasked(v string) bool {
+	return v == "***" || v == `"***"` || v == `'***'`
 }
 
 // replaceTokens masks group 1 of each prefixRe match. It restarts the scan

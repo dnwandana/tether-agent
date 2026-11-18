@@ -256,12 +256,49 @@ func TestURLs(t *testing.T) {
 		{name: "presigned", in: "https://s3.amazonaws.com/bucket/k?signature=LONG_PRESIGNED_SIG&id=public", gone: []string{"LONG_PRESIGNED_SIG"}, kept: []string{"id=public"}},
 		{name: "fragment kept", in: "https://x.io/p?token=abc#frag", gone: []string{"token=abc"}, kept: []string{"#frag"}},
 		{name: "mixed case name", in: "https://x.io/p?Api_Key=abc&x=1", gone: []string{"Api_Key=abc"}, kept: []string{"x=1"}},
-		{name: "userinfo", in: "URL: https://user:supersecretpw@host.example.com/path", same: true},
+		{name: "userinfo", in: "URL: https://user:supersecretpw@host.example.com/path", gone: []string{"supersecretpw"}, kept: []string{"https://user:***@host.example.com/path"}},
 		{name: "websocket", in: "wss://api.example.com/ws?token=opaqueWsToken123", gone: []string{"opaqueWsToken123"}},
 		{name: "access log", in: `INFO aiohttp.access: 127.0.0.1 "POST /bluebubbles-webhook?password=webhookSecret123&event=new-message HTTP/1.1" 200 173 "-" "test-client"`, gone: []string{"webhookSecret123"}, kept: []string{"event=new-message", "HTTP/1.1"}},
 		{name: "prefix in url", in: "https://evil.com/steal?q=sk-" + strings.Repeat("a", 30), gone: []string{"sk-" + strings.Repeat("a", 30)}},
 		{name: "db connstr", in: "postgres://admin:dbpass@db.internal:5432/app", gone: []string{"dbpass"}, kept: []string{"postgres://admin:***@db.internal"}},
 		{name: "mongo srv", in: "mongodb+srv://u:p4ss@cluster0.x.net/db", gone: []string{"p4ss"}},
+	})
+}
+
+// The redactor masks the URL userinfo password, the Authorization: Basic value, and the
+// values of --password and --token. Each value becomes "***".
+func TestRedactorGaps(t *testing.T) {
+	runRedactCases(t, []redactCase{
+		{name: "https userinfo", in: "git clone https://alice:hunter2pw@github.com/x/y.git", gone: []string{"hunter2pw"}, kept: []string{"https://alice:***@github.com/x/y.git"}},
+		{name: "http userinfo", in: "curl http://bob:s3cr3t@10.0.0.1:8080/api", gone: []string{"s3cr3t"}, kept: []string{"http://bob:***@10.0.0.1:8080/api"}},
+		{name: "user only", in: "git clone https://alice@github.com/x/y.git", same: true},
+		{name: "colon in path", in: "see https://example.com/a:b@c", same: true},
+		{name: "basic header", in: "curl -H 'Authorization: Basic YWxpY2U6aHVudGVyMg==' https://x.io", gone: []string{"YWxpY2U6aHVudGVyMg"}, kept: []string{"Authorization: Basic ***' https://x.io"}},
+		{name: "basic lower case", in: "authorization: basic dXNlcjpwYXNz", gone: []string{"dXNlcjpwYXNz"}, kept: []string{"authorization: basic ***"}},
+		{name: "basic prose", in: "the Basic plan costs less", same: true},
+		{name: "password space", in: "mysql --password hunter2 app", gone: []string{"hunter2"}, kept: []string{"mysql --password *** app"}},
+		{name: "password equals", in: "mysql --password=hunter2 app", gone: []string{"hunter2"}, kept: []string{"mysql --password=*** app"}},
+		{name: "token space", in: "gh api --token abc123tok /user", gone: []string{"abc123tok"}, kept: []string{"gh api --token *** /user"}},
+		{name: "token equals", in: "tool --token=abc123tok", gone: []string{"abc123tok"}, kept: []string{"tool --token=***"}},
+		{name: "quoted value", in: `tool --password "two words" next`, gone: []string{"two words"}, kept: []string{"tool --password *** next"}},
+		{name: "upper case flag", in: "tool --Token abc123tok", gone: []string{"abc123tok"}},
+		{name: "password file", in: "tool --password-file /run/secrets/pw", same: true},
+		{name: "token file", in: "tool --token-file /run/secrets/t", same: true},
+		{name: "longer flag", in: "tool --tokenizer bert", same: true},
+		// A value that is already "***" stays as it is, bare or in quotes.
+		{name: "masked bare", in: "gh api --token *** /user", same: true},
+		{name: "masked double quote", in: `gh api --token "***" /user`, same: true},
+		{name: "masked single quote", in: `mysql --password='***' app`, same: true},
+		{name: "masked equals quote", in: `mysql --password="***"`, same: true},
+		{name: "masked userinfo", in: `curl https://u:"***"@h/x`, same: true},
+		{name: "masked userinfo bare", in: `curl https://u:***@h/x`, same: true},
+		{name: "masked basic", in: `curl -H 'Authorization: Basic ***' https://x.io`, same: true},
+		// The flag starts a word. The gate checks the command view for prose.
+		{name: "flag in sh -c", in: `sh -c 'mysql --password x'`, gone: []string{"password x"}, kept: []string{"--password ***"}},
+		{name: "flag in ssh string", in: `ssh h "tool --token abc"`, gone: []string{"abc"}, kept: []string{"--token ***"}},
+		{name: "flag after prose", in: `echo "a" --token abc123tok`, gone: []string{"abc123tok"}, kept: []string{`echo "a" --token ***`}},
+		{name: "flag on second line", in: "echo \"x\"\ntool --token abc123tok", gone: []string{"abc123tok"}},
+		{name: "flag glued to word", in: "tool x--token abc123tok", same: true},
 	})
 }
 

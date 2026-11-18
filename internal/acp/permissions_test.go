@@ -81,6 +81,13 @@ func TestPatternID(t *testing.T) {
 		{"execute", "strace rm x", base + "execute:strace", true},
 		{"execute", "taskset 1 rm x", base + "execute:taskset", true},
 		{"execute", "chrt 1 rm x", base + "execute:chrt", true},
+		// The shared wrapper table and the command reader.
+		{"execute", "ssh prod ls", base + "execute:ssh", true},
+		{"execute", "docker exec web ls", base + "execute:docker", true},
+		{"execute", "docker ps", base + "execute:docker", true},
+		{"execute", "kubectl exec api-0 -- ls", base + "execute:kubectl", true},
+		{"execute", "ash x.sh", base + "execute:ash", true},
+		{"execute", "ls 'x", base + "execute:ls", true},
 		{"execute", "go-task build", base + "execute:go-task", false},
 		{"execute", "g++ -o x x.cc", base + "execute:g++", false},
 		{"", "", base + "other", false},
@@ -104,6 +111,20 @@ func TestPatternIDBindsACPSession(t *testing.T) {
 	b, _ := patternID("claude-code", "s2", "execute", "go test")
 	if a == b {
 		t.Fatalf("two ACP sessions share the pattern id %q", a)
+	}
+}
+
+// Each name of the ACP wrapper list before the shared table is still a wrapper.
+func TestACPWrappersInSharedTable(t *testing.T) {
+	for _, name := range []string{
+		"sudo", "env", "sh", "bash", "zsh", "xargs", "nohup", "timeout", "nice",
+		"exec", "eval", "command", "builtin", "time", "setsid", "doas", "su", "runuser", "stdbuf",
+		"ionice", "chroot", "unshare", "nsenter", "flock", "dash", "ksh", "fish", "csh", "tcsh", "busybox",
+		"pkexec", "watch", "script", "strace", "taskset", "chrt",
+	} {
+		if _, ok := security.LookupWrapper(name); !ok {
+			t.Errorf("%s is not a wrapper of the shared table", name)
+		}
 	}
 }
 
