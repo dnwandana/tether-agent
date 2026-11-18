@@ -254,6 +254,10 @@ func (d *Doctor) checkConfig(dotenv map[string]string, envCheck Check) (*config.
 	} else {
 		c.Detail = "loaded " + path
 	}
+	if err := security.CheckHumanOnly(cfg.Approvals.HumanOnly); err != nil {
+		c.Status, c.Detail = StatusFail, err.Error()
+		c.Next = "correct approvals.human_only in " + path + ", then run tether doctor again"
+	}
 	return cfg, c
 }
 
@@ -432,9 +436,22 @@ func (d *Doctor) checkStateDB(ctx context.Context) []Check {
 	if l, ok, err := obs.ReadLastAnswer(ctx, sdb); err == nil && ok {
 		out = append(out, lastAnswerCheck(l, time.Since(l.At)))
 	}
-	if rows, err := (&security.Gate{DB: sdb}).ListAlways(ctx); err == nil {
+	g := &security.Gate{DB: sdb}
+	rows, listErr := g.ListAlways(ctx)
+	if off, cause := g.GrantsOff(); off {
+		out = append(out, Check{Name: "approvals", Status: StatusWarn,
+			Detail: "Saved answers are off, because the answer store is damaged: " + cause + ".",
+			Next:   "repair the approval_grants table in state.db, then restart the gateway"})
+	} else if listErr == nil {
 		out = append(out, Check{Name: "approvals", Status: StatusOK,
 			Detail: fmt.Sprintf("%d Always answers (send /approvals to see them)", len(rows))})
+	}
+	if n, err := g.RemovedAlwaysCount(ctx); err == nil && n > 0 {
+		detail := fmt.Sprintf("%d old Always answers were removed by the update. The gate asks again once for each command.", n)
+		if n == 1 {
+			detail = "1 old Always answer was removed by the update. The gate asks again once for each command."
+		}
+		out = append(out, Check{Name: "approvals notice", Status: StatusWarn, Detail: detail})
 	}
 	return out
 }
@@ -565,12 +582,31 @@ func (d *Doctor) checkMCP(ctx context.Context, cfg *config.Config, dotenv map[st
 		if err != nil {
 			c.Status, c.Detail, c.Next = StatusFail, "starts, but cannot list its tools: "+err.Error(), next
 		} else {
-			c.Detail = fmt.Sprintf("starts and lists %d tools", len(defs))
+			c = mcpListCheck(c, name, s, defs)
 		}
 		out = append(out, c)
 	}
 	closes.Wait()
 	return out
+}
+
+// mcpListCheck sets the detail of a server that lists its tools. It adds the count of tools
+// that tools.include and tools.exclude hide, and a warning for each filter entry that is wrong.
+func mcpListCheck(c Check, name string, s config.MCPServer, defs []mcp.ToolDef) Check {
+	c.Detail = fmt.Sprintf("starts and lists %d tools", len(defs))
+	if len(s.Tools.Include) == 0 && len(s.Tools.Exclude) == 0 {
+		return c
+	}
+	_, hidden, warnings := mcp.CheckFilter(s, defs)
+	c.Detail += fmt.Sprintf("; %d hidden by tools.include or tools.exclude", hidden)
+	for _, w := range warnings {
+		c.Detail += "; " + w
+	}
+	if len(warnings) > 0 {
+		c.Status = StatusWarn
+		c.Next = fmt.Sprintf("check mcp.servers.%s.tools in config.yaml", name)
+	}
+	return c
 }
 
 // checkACP probes each enabled coding agent and checks acp.workdir_allowlist. The

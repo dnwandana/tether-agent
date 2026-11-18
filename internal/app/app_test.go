@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/cron"
+	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/memory"
@@ -1870,7 +1873,7 @@ func TestApprovalsCommandRegistered(t *testing.T) {
 		t.Fatalf("/approvals: %+v %v", cmd, ok)
 	}
 	// The command reads the gate of the app.
-	if _, err := a.DB.ExecContext(ctx, "INSERT INTO approvals_always(pattern_id, created_at) VALUES ('recursive_delete', 1)"); err != nil {
+	if _, err := a.DB.ExecContext(ctx, "INSERT INTO approval_grants(id, pattern_id, content_sha256, created_at) VALUES (?, 'recursive_delete', 'x', 1)", fmt.Sprintf("%x", sha256.Sum256([]byte("recursive_delete")))); err != nil {
 		t.Fatal(err)
 	}
 	var out string
@@ -1886,5 +1889,141 @@ func TestAgentMediaInbox(t *testing.T) {
 	a := newApp(t)
 	if want := filepath.Join(a.DataDir, "cache", "media"); a.Agent.MediaInbox != want {
 		t.Fatalf("%q, want %q", a.Agent.MediaInbox, want)
+	}
+}
+
+func TestNewWiresRedactorAndLogsRemovedAlways(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t))
+	d, err := db.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.KVSet(ctx, "approvals_always_removed", "4"); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	var logs bytes.Buffer
+	a, err := New(ctx, Options{DataDir: dir, LogStderr: true, LogWriter: &logs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if a.Gate.Redactor == nil || a.Gate.Redactor != a.Redactor {
+		t.Fatal("the gate must use the app redactor")
+	}
+	if !strings.Contains(logs.String(), `"count":4`) {
+		t.Fatal(logs.String())
+	}
+	// app.New keeps the key for /approvals and tether doctor.
+	if n, err := a.Gate.RemovedAlwaysCount(ctx); err != nil || n != 4 {
+		t.Fatal(n, err)
+	}
+}
+
+func TestNewChecksHumanOnlyRules(t *testing.T) {
+	t.Cleanup(func() { security.SetHumanOnlyRules(nil) })
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t), "approvals:\n  human_only: [recursive_delete_root_filesystem]\n")
+	if _, err := New(ctx, Options{DataDir: dir}); err == nil || !strings.Contains(err.Error(), "hardline rules are already blocked") {
+		t.Fatal(err)
+	}
+	dir = t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t), "approvals:\n  human_only: [git_force_push]\n")
+	a, err := New(ctx, Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if !security.IsHumanOnlyRaised("git_force_push") {
+		t.Fatal("app.New did not set the raise list")
+	}
+}
+
+func TestHousekeepingPrunesApprovalLog(t *testing.T) {
+	a := newApp(t)
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	a.clock = func() time.Time { return now }
+	day := 24 * time.Hour
+	for _, age := range []time.Duration{181 * day, 179 * day} {
+		if _, err := a.DB.ExecContext(ctx, `INSERT INTO approval_log(at, decision, source) VALUES (?, 'blocked', 'hardline')`,
+			now.Add(-age).UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.Housekeeping(hctx)
+	var n int
+	if err := a.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM approval_log`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("the row older than 180 days must go, the other must stay: %d %v", n, err)
+	}
+}
+
+func TestHousekeepingLogRetentionZeroKeepsAll(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t), "approvals:\n  log_retention_days: 0\n")
+	a, err := New(ctx, Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	if _, err := a.DB.ExecContext(ctx, `INSERT INTO approval_log(at, decision, source) VALUES (0, 'blocked', 'hardline')`); err != nil {
+		t.Fatal(err)
+	}
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	a.Housekeeping(hctx)
+	var n int
+	if err := a.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM approval_log`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("log_retention_days 0 must keep all rows: %d %v", n, err)
+	}
+}
+
+func TestCronLogScope(t *testing.T) {
+	a := gatewayApp(t, "", "")
+	topic, err := a.Cron.Create(ctx, cron.Job{Schedule: "every 2h", Prompt: "p",
+		Origin: cron.Origin{Source: "telegram", ChatID: "-100", ThreadID: "7"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dm, err := a.Cron.Create(ctx, cron.Job{Schedule: "every 2h", Prompt: "p",
+		Origin: cron.Origin{Source: "telegram", ChatID: "5"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	none, err := a.Cron.Create(ctx, cron.Job{Schedule: "every 2h", Prompt: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range map[string]string{
+		"cron:" + topic.ID: "telegram:-100:7",
+		"cron:" + dm.ID:    "telegram:5:0",
+		"cron:" + none.ID:  "",
+		"cron:no-such-job": "",
+		"cli:t":            "",
+	} {
+		if got := a.cronLogScope(ctx, &sessions.Session{Key: key, Source: "cron", Kind: "cron"}); got != want {
+			t.Errorf("cronLogScope(%q) = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestModeCommandRegistered(t *testing.T) {
+	keepCommandTable(t)
+	a := newApp(t)
+	cmd, ok := gateway.Commands()["mode"]
+	if !ok || cmd.MemberOK || !cmd.WhileBusy {
+		t.Fatalf("/mode: %+v %v", cmd, ok)
+	}
+	d := a.Deps()
+	if d.ModeOf == nil {
+		t.Fatal("Deps.ModeOf is nil")
+	}
+	if err := a.Gate.SetMode(ctx, "cli", security.ModeFull); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.ModeOf(ctx, "cli"); got != security.ModeFull {
+		t.Fatal(got)
 	}
 }

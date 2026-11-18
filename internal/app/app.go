@@ -196,6 +196,11 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if a.Cfg, err = config.Load(cfgPath, security.EnvLookup(a.DotEnv)); err != nil {
 		return nil, err
 	}
+	if err := security.CheckHumanOnly(a.Cfg.Approvals.HumanOnly); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
+	}
+	// The gate, the goal gates, and the MCP manager read the raise list.
+	security.SetHumanOnlyRules(a.Cfg.Approvals.HumanOnly)
 	for _, d := range dataDirs {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			return nil, fmt.Errorf("app: cannot make the folder %s: %w", d, err)
@@ -260,10 +265,17 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	}
 	a.Gate.SmartScriptMaxChars = a.Cfg.Approvals.SmartScriptMaxChars
 	a.Gate.Log = a.Log
+	a.Gate.Redactor = a.Redactor
+	if n, err := a.Gate.RemovedAlwaysCount(ctx); err != nil {
+		a.Log.Warn("approvals: cannot read the count of the removed Always answers", "err", err.Error())
+	} else if n > 0 {
+		a.Log.Info("approvals: the update removed the old Always answers; the gate asks again once for each command", "count", n)
+	}
 	a.Gate.InGateway = opts.Gateway
 	a.Gate.ScriptsDir = filepath.Join(dir, "scripts")
 	// The command reads and removes the Always answers of the gate of this process.
 	gateway.Register(gateway.ApprovalsCommand(a.Gate))
+	gateway.Register(gateway.ModeCommand(a.Gate))
 	// CLI.Run attaches the prompt to the REPL input. With no CLI, a question gets no answer.
 	a.CLIAsk = &gateway.CLIAsk{}
 	a.Prices = pricing.NewService(a.Cfg, filepath.Join(dir, "cache"), a.HTTP, a.DB, a.Log)
@@ -538,6 +550,8 @@ func (a *App) newScheduler() *cron.Scheduler {
 func (a *App) cronTurn(ctx context.Context, t cron.CronTurn) (string, error) {
 	env := a.NewEnv(t.Session, "cron")
 	env.Kind = "cron"
+	// Only the log row gets the scope of the origin chat. A cron run follows cron_mode, not the mode of that topic.
+	env.LogScope = a.cronLogScope(ctx, t.Session)
 	if t.Workdir != "" {
 		env.WorkDir = t.Workdir
 	}
@@ -1046,6 +1060,7 @@ func (a *App) Deps() *gateway.Deps {
 		Skills: a.Skills.Load,
 		// The skill commands show the status of each env name of a skill.
 		EnvStatus: func(names []string) []string { return envStatus(a.Cfg, a.DotEnv, names) },
+		ModeOf:    a.Gate.ModeOf,
 	}
 	// A goal notice with no turn goes to Telegram with its buttons. AddTelegram sets
 	// a.Telegram before its first call of Gateway, so the gateway gets this path.
@@ -1066,6 +1081,10 @@ func (a *App) Deps() *gateway.Deps {
 // takes the prompt and the tool context of the session before the call returns, so the
 // state of the session can go after it.
 func (a *App) beforeNew(ctx context.Context, old *sessions.Session) {
+	// A read-only topic starts no review, also after a restart.
+	if a.Gate.ModeOf(ctx, gateway.ModeScope(old)) == security.ModeReadOnly {
+		ctx = agent.WithNoReview(ctx)
+	}
 	a.Agent.ReviewBeforeNew(ctx, old)
 	a.ForgetSession(old.ID)
 	// Close returns at once, so the reply to /new does not wait.
@@ -1234,6 +1253,7 @@ func (a *App) Housekeeping(ctx context.Context) {
 	a.cleanSpill()
 	a.cleanMedia()
 	a.pruneSessions(ctx)
+	a.pruneLog(ctx)
 	// Read the heartbeat of the last gateway before this process writes its first one.
 	cut, _ := a.AliveAt(ctx)
 	// The cut turns resume before the lost batches are reported. The turn of a lost-batch
@@ -1281,6 +1301,7 @@ func (a *App) Housekeeping(ctx context.Context) {
 				a.cleanSpill()
 				a.cleanMedia()
 				a.pruneSessions(ctx)
+				a.pruneLog(ctx)
 			}
 		}
 	}()
@@ -1307,6 +1328,43 @@ func (a *App) pruneSessions(ctx context.Context) {
 	if len(ids) > 0 {
 		a.Log.Info("housekeeping: old automatic sessions deleted", "count", len(ids), "retention_days", days)
 	}
+}
+
+// pruneLog deletes the approval log rows that are older than approvals.log_retention_days.
+// 0 keeps all rows.
+func (a *App) pruneLog(ctx context.Context) {
+	days := a.Cfg.Approvals.LogRetentionDays
+	if days <= 0 || a.Gate == nil {
+		return
+	}
+	now := time.Now
+	if a.clock != nil {
+		now = a.clock
+	}
+	n, err := a.Gate.PruneLog(ctx, now().Add(-time.Duration(days)*24*time.Hour))
+	if err != nil {
+		a.Log.Warn("housekeeping: cannot delete the old approval log rows; the next run tries again", "err", err.Error())
+	}
+	if n > 0 {
+		a.Log.Info("housekeeping: old approval log rows deleted", "count", n, "retention_days", days)
+	}
+}
+
+// cronLogScope returns the log scope of a cron run: the scope of the origin chat of its job.
+// A job with no origin chat, and a session that is not a cron run, give "".
+func (a *App) cronLogScope(ctx context.Context, sess *sessions.Session) string {
+	id, ok := strings.CutPrefix(sess.Key, "cron:")
+	if !ok || a.Cron == nil {
+		return ""
+	}
+	j, err := a.Cron.Get(ctx, id)
+	if err != nil {
+		return ""
+	}
+	if j.Origin.Source == "telegram" && j.Origin.ChatID != "" {
+		return gateway.ScopeFor("telegram", j.Origin.ChatID, j.Origin.ThreadID)
+	}
+	return ""
 }
 
 // cleanSpill removes the old spill files and logs the result.

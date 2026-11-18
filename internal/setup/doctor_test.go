@@ -18,6 +18,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/hostos"
+	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/tools"
@@ -1086,7 +1087,7 @@ func TestDoctorApprovalsCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"recursive_delete", "git_force_push", "protected_path_write_x"} {
-		if _, err := sdb.Exec("INSERT INTO approvals_always(pattern_id, created_at) VALUES (?, 1)", id); err != nil {
+		if _, err := sdb.Exec("INSERT INTO approval_grants(id, pattern_id, content_sha256, created_at) VALUES (?, ?, 'x', 1)", id, id); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1121,5 +1122,72 @@ func TestDoctorRootCheckEveryUnit(t *testing.T) {
 	}
 	if got[1].Status != StatusWarn || got[1].Detail != sysUnit+" runs the gateway as root" {
 		t.Fatalf("%+v", got[1])
+	}
+}
+
+func TestDoctorApprovalsNoticeAndLatch(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	seedStateDB(t, d)
+	sdb, err := db.Open(filepath.Join(d.DataDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sdb.KVSet(ctx, "approvals_always_removed", "2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sdb.Exec(`INSERT INTO approval_grants(id, pattern_id, content_sha256, programs, created_at)
+		VALUES ('broken', 'recursive_delete', 'x', 'not json', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	sdb.Close()
+	checks := d.Run(ctx)
+	want := Check{Name: "approvals notice", Status: StatusWarn,
+		Detail: "2 old Always answers were removed by the update. The gate asks again once for each command."}
+	if got := find(t, checks, "approvals notice"); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	c := find(t, checks, "approvals")
+	if c.Status != StatusWarn || !strings.HasPrefix(c.Detail, "Saved answers are off, because the answer store is damaged: ") ||
+		!strings.Contains(c.Detail, "programs") || c.Next == "" {
+		t.Fatalf("%+v", c)
+	}
+	// tether doctor does not delete the key.
+	sdb, err = db.Open(filepath.Join(d.DataDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sdb.Close()
+	if _, ok, err := sdb.KVGet(ctx, "approvals_always_removed"); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+}
+
+func TestDoctorConfigChecksHumanOnly(t *testing.T) {
+	prov := okProvider(t)
+	dir := writeDataDir(t, prov.URL, "approvals:\n  human_only: [no_such_rule]\n")
+	d := &Doctor{DataDir: dir, ConfigPath: filepath.Join(dir, "config.yaml"), HC: prov.Client(), LookPath: allPrograms,
+		Getenv: func(string) string { return "" }, UnitPaths: []string{filepath.Join(dir, "no-unit.service")}}
+	if c := find(t, d.Run(ctx), "config"); c.Status != StatusFail || !strings.Contains(c.Detail, "no_such_rule") || c.Next == "" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestMCPListCheckFilter(t *testing.T) {
+	defs := []mcp.ToolDef{{Name: "search"}, {Name: "old_list"}, {Name: "create_issue"}}
+	c := mcpListCheck(Check{Name: "mcp gh", Status: StatusOK}, "gh", config.DefaultMCPServer(), defs)
+	if c.Status != StatusOK || c.Detail != "starts and lists 3 tools" || c.Next != "" {
+		t.Fatalf("no filter: %+v", c)
+	}
+	s := config.DefaultMCPServer()
+	s.Tools.Exclude = []string{"old_*"}
+	c = mcpListCheck(Check{Name: "mcp gh", Status: StatusOK}, "gh", s, defs)
+	if c.Status != StatusOK || c.Detail != "starts and lists 3 tools; 1 hidden by tools.include or tools.exclude" || c.Next != "" {
+		t.Fatalf("filter: %+v", c)
+	}
+	s.Tools.Exclude = []string{"old_*", "nomatch"}
+	c = mcpListCheck(Check{Name: "mcp gh", Status: StatusOK}, "gh", s, defs)
+	want := `starts and lists 3 tools; 1 hidden by tools.include or tools.exclude; tools.exclude entry "nomatch" matches no tool`
+	if c.Status != StatusWarn || c.Detail != want || c.Next != "check mcp.servers.gh.tools in config.yaml" {
+		t.Fatalf("warning: %+v", c)
 	}
 }
