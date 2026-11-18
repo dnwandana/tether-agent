@@ -210,9 +210,10 @@ restarted. Your session continues." The reply also names each running coding tas
 |---|---|---|
 | `/start` | Telegram only | Shows a welcome message with 📋 Sessions, 🧠 Model, and 📊 Usage buttons. |
 | `/sethome` | Telegram only | Owner only. Makes this chat or topic the home channel for cron results. |
-| `/approve` | Telegram only | Owner only. Answers only the approvals of the same topic. `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. On a coding agent request, `always` gives `session`, or `once` when the request has no session answer. |
+| `/approve` | Telegram only | Owner only. Answers only the approvals of the same topic. `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. `all` leaves the human-only requests open, and the reply says "N human-only requests still wait for a tap." On a coding agent request, `always` gives `session`, or `once` when the request has no session answer. |
 | `/deny` | Telegram only | Owner only. Answers only the approvals of the same topic. `[all]`. Denies the oldest waiting command, or all of them. |
-| `/approvals` | All channels | Owner only. Lists the `always` answers of the approval gate. `remove <number> <code>` removes one answer. `remove all <list code>` removes all answers in the list. It asks first, unless the last word is `confirm`. A removed answer makes the gate ask again. |
+| `/mode` | All channels | Owner only. Works while a task runs. Shows the mode of this chat or topic and three buttons. `/mode read-only` and `/mode guarded` set the mode at once. `/mode full` asks for a confirm tap first. In the CLI, it asks a y/N question, or you send `/mode full confirm`. See [Security](Security#modes-for-a-chat-or-a-topic). |
+| `/approvals` | All channels | Owner only. Lists the `always` answers of the approval gate. Each row shows the rule, the date, the code, and the command preview with its workdir. A group shows no preview and no workdir. The text shows the newest 20 rows. `log [all]` shows the last 15 approval decisions of this topic, or of all topics in a private chat or the CLI. `remove <number> <code>` removes one answer. `remove all <list code>` removes all answers in the list. It asks first, unless the last word is `confirm`. A removed answer makes the gate ask again. |
 | `/restart` | Gateway only | `tether chat` does not have it. |
 | `/exit`, `/quit` | CLI only | Ends the chat. |
 

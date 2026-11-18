@@ -47,7 +47,10 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   5. `tools.Registry.Dispatch` runs the tool calls. The `terminal` tool goes through
      `security.Gate.Check` (the approval gate). The script text of `execute_code` goes through
      `security.Gate.CheckScript` (through `tools.ScriptApprover`). The permission
-     requests of the coding agent of `acp_delegate` go through `security.Gate.AskACP`.
+     requests of the coding agent of `acp_delegate` go through `security.Gate.AskACP`. An MCP tool
+     call that is not `read` goes through `security.Gate.CheckMCP` (through
+     `tools.MCPApprover`). In read-only mode, `Registry.Dispatch` refuses each call that the
+     read-only allow list does not allow.
   6. `provider` streams the answer (`openai`, `anthropic`, or `responses` wire format). Each
      model call goes through a `provider.Chain` from `provider.Set.ChainFor`. The chain order
      is the pinned entry, `primary`, and then `agent.fallback`. The chain goes to the next
@@ -57,7 +60,9 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
 - State: the data dir is `--data-dir`, else `TETHER_HOME`, else `~/.tether`. `state.db` is
   pure-Go SQLite (`modernc.org/sqlite`) with one connection. Do not run a second query while
   rows are open, because it deadlocks. Migrations are `internal/db/migrations/NNN_*.sql`
-  (embedded, applied in name order). The gateway holds a `flock` on `gateway.lock`.
+  (embedded, applied in name order). `approval_grants` holds the Always answers, `chat_modes`
+  holds the `/mode` value of each scope, and `approval_log` holds the decisions. `Gate.ModeOf`
+  queries `chat_modes` at each decision, so close all rows first. The gateway holds a `flock` on `gateway.lock`.
 - Import rules: `tools` cannot import `agent` (`tools.ChildSpecLite` mirrors
   `agent.ChildSpec`), and `gateway` cannot import `app` (`app` builds `gateway.Deps`).
   `goals` cannot import `gateway`, `agent`, or `app`. `app` gives it the provider, cost, and
@@ -72,7 +77,7 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
 
 - Keep the system prompt of a session byte-stable. The provider prompt cache needs the same
   bytes. `agent.PromptCache` keys a prompt by session, model override, prompt override,
-  compaction count, and MCP generation. Memory and skill edits do not change a prompt that already exists.
+  compaction count, MCP generation, and mode. Memory and skill edits do not change a prompt that already exists.
 - A new tool implements `tools.Tool` and registers in `App.registerTools` (or
   `registerDelegation`). Then do these steps:
   1. Put the tool in a toolset from `internal/tools/toolsets.go`. A new set also goes into
@@ -80,7 +85,10 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   2. Check the allow lists and block lists: `agent.ChildBlockedTools`,
      `agent.ReviewAllowedTools`, `tools.ScriptCallableTools`, and `toolNeeds` in
      `internal/tools/doc.go`.
-  3. Generate `docs/TOOLS.md` again. `TestGeneratedDocIsCurrent` fails when it is out of date.
+  3. Put the tool in the read-only allow list or the deny list of `internal/tools/readonly.go`,
+     or give it a `ReadOnlyCall` method. `TestEachToolIsInOneReadOnlyList` in `internal/tools`
+     fails until the tool is in one list.
+  4. Generate `docs/TOOLS.md` again. `TestGeneratedDocIsCurrent` fails when it is out of date.
 - A new config key goes into the structs and `Default()` in `internal/config/config.go`. Add
   its row to `docs/CONFIG.md`. `internal/config/docs_test.go` compares each yaml key and its
   default with that table.
@@ -111,8 +119,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
      waits for the group window.
   3. A status or preview message uses `queueClient` or `interimClient`. A full budget gives a
      `*paceHold` at once. A hold is not a flood and not a try.
-- Tests reset global state: `security.AddProtectedPathPatterns(nil)`, the command table of
-  `gateway.Register`, and `gateway.pickTip` and `gateway.nowFunc`.
+- Tests reset global state: `security.AddProtectedPathPatterns(nil)`, `security.SetHumanOnlyRules(nil)`,
+  the command table of `gateway.Register`, and `gateway.pickTip` and `gateway.nowFunc`.
 - `internal/skills/testdata/guard_golden.json` is the output of the Hermes threat patterns.
   No tool regenerates it.
 

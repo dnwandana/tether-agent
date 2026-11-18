@@ -54,7 +54,9 @@ toolsets:
 - A call to a hidden tool returns an error.
 - A cron job or a `delegate_task` call can give its own `toolsets` list. That list can only make the
   set of the channel smaller. It cannot add a toolset.
-- There is no slash command that changes the toolsets. Edit `config.yaml`, then restart.
+- `/mode read-only` hides the tools that change things in a chat or a topic. It also refuses them at
+  each call. See [Security](Security#modes-for-a-chat-or-a-topic).
+- To change the toolsets themselves, edit `config.yaml`, then restart.
 
 ## Web
 
@@ -179,6 +181,51 @@ An idle server costs nothing:
 
 Set `always_on: true` to keep a server connected all the time.
 
+### Filter the tools
+
+Use `tools.include` and `tools.exclude` to limit the tools of one server.
+
+```yaml
+mcp:
+  servers:
+    github:
+      command: [npx, -y, some-mcp-server]
+      tools:
+        include: [list_*, get_*, create_draft]
+        exclude: [delete_*]
+```
+
+- Each entry is a raw MCP tool name, or a pattern with `*`. It is not the `mcp_<server>_<tool>` name.
+- An empty `include` keeps all tools. A non-empty `include` keeps only the tools that match.
+- An exclude wins over an include.
+- A hidden tool is not in the prompt. A call to it fails.
+- `/reload-mcp` shows "N tools hidden by tools.include or tools.exclude" for each server that hides tools.
+- `/reload-mcp` and `tether doctor` warn about an entry that matches no tool.
+
+### Tool classes
+
+The gate gives each MCP tool one class. It reads the tool name and the hints of the server.
+
+| Class | Example | What the gate does |
+|---|---|---|
+| `read` | `list_issues` | Runs with no question. |
+| `write` | `create_draft` | Follows the approval gate. |
+| `send` | `send_message` | Follows the approval gate. |
+| `human-only` | `create_payment` | Asks the owner each time. No Always answer covers it. |
+
+- A `read` tool runs with no question. The other classes follow the approval gate.
+- Set `tools.class` to give a tool the class `read`, `write`, or `send`. It cannot change a human-only
+  tool.
+- In `/mode read-only`, only `read` tools run.
+
+```yaml
+tools:
+  class:
+    create_draft: write
+```
+
+See [Security](Security#mcp-tool-classes).
+
 ### Reload the servers
 
 Send `/reload-mcp` to read the server list again. In the Telegram menu, the command is
@@ -186,8 +233,8 @@ Send `/reload-mcp` to read the server list again. In the Telegram menu, the comm
 restart the gateway. The changes apply from the next message.
 
 > [!WARNING]
-> Enable only MCP servers that you trust. The approval gate does not check MCP tools, because
-> Tether Agent cannot see what a server runs.
+> Enable only MCP servers that you trust. The approval gate uses the class of the tool name. It
+> cannot see what the server does with a call.
 
 ## Media
 

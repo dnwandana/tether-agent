@@ -64,8 +64,10 @@ flowchart LR
    plain text goes into the running turn as a **steer**. Other messages, for example photos, wait
    in a queue. See [Commands](Commands#while-the-agent-is-busy).
 3. `agent.RunTurn` runs the loop. It saves each message as soon as the message exists.
-4. The tool registry runs the tool calls. The `terminal` tool and the script text of
-   `execute_code` go through the approval gate. See [Security](Security).
+4. The tool registry runs the tool calls. The `terminal` tool, the script text of
+   `execute_code`, and the MCP tool calls that are not reads go through the approval gate. In a
+   read-only chat or topic, the registry refuses the tools that change things.
+   See [Security](Security).
 5. The provider streams the answer back to the channel. The fallback chain goes to the next
    entry only when an entry fails before the first byte. See
    [The provider layer](#the-provider-layer).
@@ -370,13 +372,14 @@ The prompt cache of Tether Agent keys a prompt by these values:
 - the prompt override
 - the compaction count
 - the MCP generation
+- the mode of the chat or topic (`/mode`)
 
 Nothing else builds the prompt again. The reasoning effort and the fallback state are not part
 of the key. An edit to memory or skills does not change a prompt that already exists. The edit
 shows in these cases:
 
 - a new session (`/new`)
-- after a `/model` or `/prompt` change, because both are part of the key
+- after a `/model`, `/prompt`, or `/mode` change, because each one is part of the key
 - after a restart of the process, because the cache is only in memory
 - after a compaction
 - after `/reload-mcp`
@@ -585,6 +588,8 @@ in name order when the program opens the database:
 - `005_acp_sessions.sql` adds the `acp_sessions` table.
 - `006_batch_owner.sql` adds `delegation_batches.owner`.
 - `007_cron_runs.sql` adds the `cron_runs` table and `cron_jobs.fail_streak`.
+- `008_chat_modes_log.sql` adds the `chat_modes` and `approval_log` tables.
+- `009_approval_grants.sql` adds the `approval_grants` table. It removes the old Always table.
 
 Do not run a second query while the rows of a query are open. The database has one connection,
 so the second query waits for ever.
@@ -597,7 +602,9 @@ so the second query waits for ever.
 | `compactions` | The summaries that replace ranges of messages. |
 | `cron_jobs` | The scheduled jobs. |
 | `cron_runs` | The last runs of each cron job. |
-| `approvals_always` | The commands that you approved with "always". |
+| `approval_grants` | The Always answers of the approval gate: one rule, one command text, one workdir, and the same programs. |
+| `chat_modes` | The `/mode` value of each chat or topic. No row means guarded. |
+| `approval_log` | One row for each decision of the approval gate on a request that matched a rule. The gateway deletes old rows. |
 | `pairing` | Telegram pairing codes and approved users. |
 | `active_session` | The current session of each session key. |
 | `delegation_batches` | Background `delegate_task` batches. |

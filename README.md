@@ -179,8 +179,8 @@ tether skills check
 - Each agent run is a goroutine: a chat turn, a cron run, a child task, or a review.
 - A run calls a provider (OpenAI, Anthropic, or Responses wire format) with the tools of its
   toolsets.
-- An approval gate checks dangerous shell commands before they run. A goal gate is checked
-  when you add it and again before each run.
+- An approval gate checks dangerous shell commands and MCP tool calls before they run. A goal
+  gate is checked when you add it and again before each run.
 - The browser, MCP servers, media programs, and the adapters of the coding agents start on the
   first call and stop when idle.
 

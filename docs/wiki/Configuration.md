@@ -163,6 +163,8 @@ These keys are the ones that most users change. The full list is in
 | `memory.review_interval_turns` | `10` | A background memory review starts after this number of user turns. `0` stops the reviews. |
 | `approvals.mode` | `manual` | The approval mode for dangerous commands: `manual`, `smart`, or `off`. |
 | `approvals.cron_mode` | `deny` | The result for a dangerous command and for each `execute_code` script in a cron run: `deny` or `approve`. |
+| `approvals.human_only` | `[]` | More rules that need the owner to tap Approve each time. Each entry is a rule ID, for example `git_force_push`, or an MCP tool as `mcp:<server>.<tool>`. The list can only raise a rule. The built-in human-only rules always apply. |
+| `approvals.log_retention_days` | `180` | The gateway deletes an approval log row when it is older than this number of days. `0` keeps all rows. |
 | `cron.script_timeout_s` | `120` | The time limit of one cron script run, in seconds. It applies to a script job and to the data script of an agent job. At the limit, the program stops the script. A script job sends an alert. In an agent job, the failure goes into the prompt, and the model reports it. The minimum is 1. |
 | `cron.agent_timeout_s` | `0` | The time limit of the agent turn of one cron job, in seconds. `0` means no limit. At the limit, the program stops the turn and sends an alert. A partial answer follows the alert. The script of the job does not count. The maximum is 2592000. |
 | `goals.max_turns` | `20` | The turn budget of a new goal. |
@@ -220,8 +222,8 @@ agent:
 
 ### Turn on smart approvals
 
-In `smart` mode, the primary model judges each dangerous command. It approves a safe command. It
-sends a risky command to you. See [Security](Security#the-approval-gate).
+In `smart` mode, the default fallback chain, which starts at `primary`, judges each dangerous
+command. It approves a safe command. It sends a risky command to you. See [Security](Security#the-approval-gate).
 
 ```yaml
 approvals:
@@ -244,10 +246,20 @@ mcp:
       command: [npx, -y, some-mcp-server]
       env:
         GITHUB_TOKEN: ${GITHUB_TOKEN}
+      tools:
+        exclude: [delete_*]
+        class:
+          create_draft: write
 ```
 
 The tools of this server have the names `mcp_github_<tool>`. The server starts at the first call
 and stops when it is idle. See [Tools](Tools#mcp-servers).
+
+- `tools.include` and `tools.exclude` take raw MCP tool names or patterns with `*`. An exclude
+  wins.
+- `tools.class` sets `read`, `write`, or `send`. It cannot change a human-only tool. See
+  [Tools](Tools#tool-classes).
+- Send `/reload-mcp` after a change.
 
 ### Give coding tasks to Claude Code
 

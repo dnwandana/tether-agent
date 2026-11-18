@@ -35,7 +35,9 @@ approval flow.
 1. **Normalize.** The gate applies Unicode NFKC, removes ANSI escape sequences and zero-width
    characters, and changes the command to lower case. Hidden characters then cannot get past the
    rules.
-2. **Hardline rules.** These commands are always blocked. No mode and no answer permits them:
+2. **Read the command.** The gate reads the command as bash does. It finds each simple command,
+   also the commands inside wrappers such as `sudo` and `bash -c`.
+3. **Hardline rules.** These commands are always blocked. No mode and no answer permits them:
    - a recursive delete of `/`, of a system folder, or of the home folder
    - `mkfs`
    - `dd` or a redirection to a raw block device
@@ -43,21 +45,68 @@ approval flow.
    - `kill -1`
    - shutdown and reboot commands
    - `tether skills install`, `tether skills update`, and `tether skills uninstall`
-3. **Sudo guard.** The gate blocks `sudo -S` when `SUDO_PASSWORD` is not set in `.env` or in
+4. **Sudo guard.** The gate blocks `sudo -S` when `SUDO_PASSWORD` is not set in `.env` or in
    the process environment. Without a password, the model guesses it.
-4. **Gateway self-stop.** In the gateway only, the gate blocks a command that stops or restarts
+5. **Gateway self-stop.** In the gateway only, the gate blocks a command that stops or restarts
    the gateway itself. Such a command can never finish, because the stop waits for the running
    turn. The agent tells you to send `/restart` instead. A run that cron started does not get
    this block.
-5. **Dangerous rules.** A command that matches one of the 56 dangerous rules needs an approval.
+6. **Human-only rules.** A command that matches a human-only rule needs you to tap ✅ Once each
+   time. See [Human-only actions](#human-only-actions).
+7. **Dangerous rules.** A command that matches one of the 56 dangerous rules needs an approval.
    Examples are `rm -r`, `chmod 777`, `curl … | sh`, `git push --force`, `git reset --hard`, and
    SQL `DROP`. A shell write to a protected path is also dangerous.
    A command that names `state.db` is dangerous, also a read. The `state.db` rules come first,
    then the other protected path rules, then the other rules. The gate looks at all the rules
    that match. The command runs with no question only when each matched protected rule has a
    grant and the first general rule has a grant. Else the gate asks with the first rule that has
-   no grant.
-6. **No match.** The command runs.
+   no grant. The hardline and protected path rules read the raw text and each simple command.
+   The other rules read the command view: the command with the comments and the plain text of
+   `echo`, `printf`, `cat`, and `tee` removed.
+8. **No match.** The command runs.
+9. **Could not read.** A command that the gate cannot read asks each time, with no grant and no
+   judge. See [Commands that the gate cannot read](#commands-that-the-gate-cannot-read).
+10. **Live mode.** The mode of the topic (`/mode`) applies. The topic mode `full` counts as
+    `approvals.mode: off`.
+11. **Grants.** An earlier answer can cover the command.
+12. **Cron, smart judge, and the question.** Then come the cron setting, the smart judge, and the
+    question to you.
+13. **Check again.** After your tap, the gate reads the topic mode again. If the mode is now
+    `read-only`, the command does not run. The model gets "The mode of this topic changed to
+    read-only while the approval waited."
+
+### Human-only actions
+
+A human-only action needs you to tap ✅ Once each time. There is no ✅ Session, no ✅ Always, no
+grant, and no smart judge. `approvals.mode: off`, `/mode full`, and `approvals.cron_mode: approve`
+do not lower this level. The gate blocks the action in a cron run and in a member turn. `/approve
+all` leaves the prompt open.
+
+The built-in shell rules are a password change, an account creation, a new credential access
+(for example `gh auth login` or a write to `authorized_keys`), and a permanent deletion (for
+example `shred`). An MCP tool is human-only when its name has a payment, account, credential,
+password, purge, or bulk delete word. `approvals.human_only` raises more rules. An entry is the ID
+of a dangerous rule, for example `git_force_push`, or `mcp:<server>.<tool>`. See the
+[full rule list](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#human-only-actions).
+
+### Commands that the gate cannot read
+
+The gate cannot read a command that is longer than 32 KB, has a syntax error, nests too deep,
+starts more than 4 new parses, has more than 16 wrappers, or builds a program name at run time.
+It also cannot read a command with a glob in a program name, a wrapper option that it does not
+know, or more than 256 words from brace expansion.
+Such a command gets the rule `could_not_read`. It asks each time, with no grant and no judge. A
+cron run blocks it, also with `approvals.cron_mode: approve`. `approvals.mode: off` and `/mode
+full` run it. The text for the model adds "Use write_file for large content." See the
+[details](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#commands-that-the-gate-cannot-read).
+
+### Wrappers
+
+A wrapper is a program that runs another command, for example `sudo`, `env`, `bash -c`, `ssh`, or
+`docker exec`. The gate reads through the wrapper and checks the inner command. A privilege or host
+wrapper (`sudo`, `ssh <host>`, `docker exec`) has its own grant key, so an answer for `rm -r x`
+does not cover `sudo rm -r x`. The question shows the wrapper, for example
+`recursive delete (inside sudo)`. See the [wrapper table](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#wrappers).
 
 ### Approval modes
 
@@ -67,7 +116,24 @@ approval flow.
 |---|---|
 | `manual` (default) | The gate asks you. |
 | `smart` | The default fallback chain, which starts at the primary provider, judges the command first. It has 30 seconds (`approvals.smart_timeout_s`). On `APPROVE`, this one command runs. The next command of the same rule goes to the judge again. On `ESCALATE` or on an error, the gate asks you. A command that names `state.db` never goes to the judge. |
-| `off` | The command runs with no question. The hardline rules and the sudo guard still apply. In the gateway, the block on a stop or a restart of the gateway also still applies. |
+| `off` | The command runs with no question. The hardline rules, the sudo guard, and the human-only rules still apply. In the gateway, the block on a stop or a restart of the gateway also still applies. |
+
+`approvals.mode` is the default for the whole process. The `/mode` of a chat or a topic wins over
+it in that topic.
+
+### Modes for a chat or a topic
+
+The owner sends `/mode` to set the approval mode of the chat or the topic where the owner writes.
+
+| Mode | Result |
+|---|---|
+| `read-only` | The agent reads, searches, and answers. It cannot write files, run commands, or change memory, skills, or cron jobs. |
+| `guarded` (default) | The gate follows `approvals.mode`. |
+| `full` | The gate asks no question for a dangerous command. The hardline rules, the sudo guard, and the human-only rules still apply. |
+
+`/mode full` asks for a confirm. The mode survives `/new` and a restart. All users of a topic
+share one mode. A cron run has no mode. A child agent copies the mode of its parent. A read-only
+topic starts no background review. See the [full rules](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#modes-for-a-chat-or-a-topic).
 
 ### Cron runs
 
@@ -79,14 +145,16 @@ a cron run:
 
 Two cases come first. When `approvals.mode` is `off`, the command runs. When each matched rule
 has a grant, the command runs. A child agent of a cron job follows the same rules.
+A cron run always blocks a human-only command and a command that the gate cannot read, also with
+`approve`. It also blocks an MCP `write` or `send` call under `deny`.
 
 ### Scripts of execute_code
 
 Each `execute_code` script needs an approval for the rule `execute_code`, with the description
 `run a Python script on the host`.
 
-- In manual mode, the gate asks one time. A `session` answer covers the later scripts of the
-  session.
+- In manual mode, each new script asks. A `session` answer covers only the same script bytes.
+  Use smart mode to let the judge review a new script first.
 - A script with a literal dangerous command or a protected path asks each time. The question
   names the rule, for example `run a Python script on the host (recursive delete)`.
 - A script has no `always` answer.
@@ -104,19 +172,36 @@ rule has no `always` answer.
 ### Member turns
 
 An approval request from a member turn reads no stored `always` or `session` answer. It saves
-none. Only an owner can answer it. Refer to [Owners and members](#owners-and-members).
+none. Only an owner can answer it. Refer to [Owners and members](#owners-and-members). A
+human-only request of a member turn is blocked.
 
 ### The /approvals command
 
 `/approvals` is an owner-only command. It lists the `always` answers that the gate stores. Each row
-shows the rule, the date, and a short code. On Telegram, each of the first 20 rows has a
-**Remove N** button. After a remove, the message shows the rows that are left. With 2 or more
-rows, a **🗑 Remove all** button removes all answers in the list. The bot asks first. In the CLI,
-send `/approvals remove <number> <code>` or `/approvals remove all <list code>`. The gate asks
-again for each rule after you remove its answer. A remove in the CLI does not clear a `session`
-answer in the gateway. That answer ends with its session. If the list changed, the command removes
-nothing and shows the current list. It tells you when the answer is already removed, for example
-after a double tap.
+shows the rule, the date, and a short code. A row of a command also shows a short preview of the
+command and its workdir. A group chat shows no preview and no workdir. The list shows the newest 20
+rows. On Telegram, each of these rows has a **Remove N** button. After a remove, the message shows
+the rows that are left. With 2 or more rows, a **🗑 Remove all** button removes all answers in
+the list. The bot asks first. In the CLI, send `/approvals remove <number> <code>` or
+`/approvals remove all <list code>`. The gate asks again for each rule after you remove its
+answer. A remove in the CLI does not clear a `session` answer in the gateway. That answer ends
+with its session. If the list changed, the command removes nothing and shows the current list. It
+tells you when the answer is already removed, for example after a double tap.
+
+### Approval log
+
+The gate writes a row to the `approval_log` table for each decision on a request that matched a
+rule, and for each MCP call that is not a read. A row shows the time, the decision, the source, the
+answer, the rule, and a redacted preview of at most 300 characters. A command with no match writes
+no row. A failed write never changes a decision.
+
+- `/approvals log` shows the last 15 decisions of this chat or topic.
+- `/approvals log all` shows the last 15 decisions of all chats. It works only in the CLI and in a
+  private chat.
+- `approvals.log_retention_days` (default `180`) sets the age at which the gateway deletes a row.
+  `0` keeps all rows.
+
+See the [full rules](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#approval-log).
 
 ### Your answer
 
@@ -127,7 +212,7 @@ is a denial.
 |---|---|
 | `once` | Permits this command only. |
 | `session` | Permits the same rule for the rest of the session. |
-| `always` | Permits the same rule from now on. The program saves it in `state.db`. |
+| `always` | Permits the same rule for the same command from now on. The row binds the command, the workdir, and the programs. The program saves it in `state.db`. |
 | `deny` | Refuses the command. The model gets `BLOCKED by user: <pattern name>` and an instruction to stop and wait for you. |
 
 Some commands do not have all answers:
@@ -135,6 +220,10 @@ Some commands do not have all answers:
 - A protected path rule and an `execute_code` script have no `always` answer. A protected path
   rule reads only the `session` answers. An `Always` row that an older version saved does not
   permit it.
+- A command has no `always` answer when the gate could not read it, when a program did not
+  resolve, when the command has run-time text such as `$VAR`, or when the command changes `PATH`.
+  A command with a credential in it has only `once` and `deny`.
+- A human-only request has only `once` and `deny`.
 - A grant covers one rule. A grant for a protected path does not cover another dangerous rule
   in the same command.
 - A command that names `state.db` has only `once` and `deny`. It asks each time.
@@ -151,7 +240,9 @@ Some commands do not have all answers:
 ```
 
 The summary is the `description` that the agent gives with the command. With no `description`,
-the CLI shows the pattern name and one line of the command.
+the CLI shows the pattern name and one line of the command. A human-only request has the first
+line `🔒 Human-only action` and the choices `[o]nce / [d]eny`. An MCP `send` call has the first
+line `📤 Send on your behalf?`.
 
 When a child agent asks, the question also shows `(from subagent N)`. Ctrl-D is a denial.
 
@@ -172,6 +263,17 @@ one, the reason for the flag, and the command. The message has four buttons:
 - Second row: ✅ Once, ✅ Session, ✅ Always
 
 ❌ Deny is alone on the first row. The allow buttons share the second row.
+
+The first line of the message shows the kind of request:
+
+- **🛡 Approval needed** for a dangerous command, a script, or an MCP `write` call.
+- **🔒 Human-only action** for a human-only request. The flagged line adds "No mode, grant, or
+  judge can approve this. Tap each time." The keyboard has two buttons: ❌ Deny and ✅ Once.
+- **📤 Send on your behalf?** for an MCP `send` call. The keyboard has ❌ Deny and ✅ Once.
+
+When the match is inside a wrapper, the flagged line names it, for example
+`recursive delete (inside sudo)`. A prompt for an MCP call shows one `key: value` line for each
+argument.
 
 A permission request of a coding agent has three buttons: ❌ Deny, ✅ Once, and ✅ Session. A
 request with no session answer has two buttons: ❌ Deny and ✅ Once. A command with no `always`
@@ -194,6 +296,30 @@ These commands also work while a turn waits for the answer.
 
 On a coding agent request, `/approve always` gives `session`. When the request has no session
 answer, it gives `once`.
+
+### MCP tool classes
+
+Each MCP tool has a class. The gate reads the class from the tool name and the hints of the
+server.
+
+| Class | Check |
+|---|---|
+| `read` | The call runs. The gate writes no log row. |
+| `write` | The gate asks. ✅ Once, ✅ Session, and ✅ Always are possible. |
+| `send` | The gate asks each time, with ❌ Deny and ✅ Once. The header is "📤 Send on your behalf?". |
+| `human-only` | You tap ✅ Once each time. See [Human-only actions](#human-only-actions). |
+
+- `mcp.servers.<name>.tools.include` and `tools.exclude` hide tools from the model. An exclude
+  wins over an include.
+- `tools.class` sets the class of one tool to `read`, `write`, or `send`. It cannot change a
+  human-only tool.
+- `approvals.human_only` can raise a tool with the entry `mcp:<server>.<tool>`.
+- The gate has no smart judge for MCP calls. A call that is not `read` fails when no gate is
+  present.
+- A `write`, `send`, or `human-only` call is never sent again after a broken connection. The model
+  gets "The mcp_<server>_<tool> call may have run. Do not send it again."
+
+See the [classifier rules and the grant key](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#mcp-tool-classes).
 
 ## Coding agents
 
@@ -347,6 +473,8 @@ and in the text that goes to the model.
 
 - A token of fewer than 18 characters becomes `***`.
 - A longer token keeps its first 6 and its last 4 characters.
+- The redactor masks the password in an `http` or `https` URL, the value of `Authorization: Basic`,
+  and the values of `--password` and `--token`. These values become `***`.
 - The redactor also masks the exact values from `.env` and the values of the secret names in the
   process environment. It ignores values of fewer than 8 characters. This rule also covers each
   provider key.
@@ -442,17 +570,20 @@ itself. Refer to [Skills](Skills#the-skill-guard).
 ## Known limits
 
 - **No sandbox.** Commands run on the host, as the Tether Agent user.
-- **MCP tools are not checked.** The approval gate cannot see what an MCP server runs. Enable only
-  the servers that you trust.
+- **The gate cannot see what an MCP server does.** It cannot see the effect of an MCP call. It
+  uses the class of the tool name: `read`, `write`, `send`, or `human-only`. A wrong name gives a
+  wrong class. Enable only the servers that you trust, and hide tools with `tools.exclude`. See
+  [MCP tool classes](#mcp-tool-classes).
 - **The browser has no check for private addresses.** `web.block_private_networks` applies to the
   web tools only. A browser page can open a local address, for example the page of a router.
 - **One browser profile.** All sessions share the cookies and the logins. `browser_cookies` does
   not return the cookie values.
 - **Memory and skills are shared.** All users of the bot use one memory and one skill set. A
   Telegram chat sees only its own sessions and cron jobs in `session_search` and `cronjob`.
-- **Scripts can build commands.** Each `execute_code` script needs an approval, but the gate
-  cannot see a command that the script builds while it runs. A Python file that `terminal` runs
-  gets only the shell rules.
+- **Scripts can build commands.** Each new `execute_code` script asks in manual mode, but the
+  gate cannot see a command that the script builds while it runs. A Python file that `terminal`
+  runs gets only the shell rules. A command that one step writes and a later step runs, for
+  example `echo 'rm -rf x' > s.sh && sh s.sh`, does not ask at `echo`.
 - **The fallback chain sends the conversation to other providers.** When an entry fails before
   the first byte, the next entry gets the full request. Put only the providers that you trust in
   `agent.fallback`.
@@ -477,13 +608,17 @@ itself. Refer to [Skills](Skills#the-skill-guard).
    `telegram.group_allowed_chats`.
 9. Set `gateway.media_delivery_strict: true` in `config.yaml` when other users can talk to the bot.
    Make sure that `.env` has no `TETHER_MEDIA_DELIVERY_STRICT=0` line.
-10. Enable only the MCP servers that you trust.
+10. Enable only the MCP servers that you trust. Hide the tools that the agent does not need with
+    `tools.exclude`.
+11. Send `/mode read-only` in a group topic that members use. The agent then only reads and
+    answers there.
 
 ```yaml
 approvals:
   mode: smart
   cron_mode: deny
   timeout_s: 600
+  human_only: [git_force_push]
 web:
   block_private_networks: true
 toolsets:
