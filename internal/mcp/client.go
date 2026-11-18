@@ -44,6 +44,10 @@ type ToolDef struct {
 	Name        string
 	Description string
 	InputSchema json.RawMessage
+	// ReadOnly and Destructive are the hints of the server. The classifier trusts ReadOnly
+	// only for a server that the owner configured.
+	ReadOnly    bool
+	Destructive *bool
 }
 
 // Client is one connection to one MCP server. It is safe for concurrent use.
@@ -162,7 +166,15 @@ func (c *Client) ListTools(ctx context.Context) ([]ToolDef, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mcp %s: tool %s: bad input schema: %w", c.name, t.Name, err)
 		}
-		defs = append(defs, ToolDef{Name: t.Name, Description: t.Description, InputSchema: schema})
+		def := ToolDef{Name: t.Name, Description: t.Description, InputSchema: schema}
+		if a := t.Annotations; a != nil {
+			def.ReadOnly = a.ReadOnlyHint
+			if a.DestructiveHint != nil {
+				d := *a.DestructiveHint
+				def.Destructive = &d
+			}
+		}
+		defs = append(defs, def)
 	}
 	return defs, nil
 }
@@ -229,12 +241,26 @@ func (c *Client) cleanup() {
 	}
 }
 
-// callErr turns a failed request into an error with the credentials masked.
+// callError is a failed request. Its text has the credentials masked. Unwrap gives the
+// go-sdk error, so errors.Is and errors.As work.
+type callError struct {
+	msg string
+	err error
+}
+
+func (e *callError) Error() string { return e.msg }
+func (e *callError) Unwrap() error { return e.err }
+
+// callErr turns a failed request into an error with the credentials masked. The error
+// keeps the cause in its chain.
 func (c *Client) callErr(ctx context.Context, what string, err error) error {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return fmt.Errorf("mcp %s: %s timed out after %s", c.name, what, seconds(c.srv.TimeoutS, defaultCallTimeout))
+		return &callError{
+			msg: fmt.Sprintf("mcp %s: %s timed out after %s", c.name, what, seconds(c.srv.TimeoutS, defaultCallTimeout)),
+			err: ctx.Err(),
+		}
 	}
-	return fmt.Errorf("mcp %s: %s: %s", c.name, what, c.red.Redact(err.Error()))
+	return &callError{msg: fmt.Sprintf("mcp %s: %s: %s", c.name, what, c.red.Redact(err.Error())), err: err}
 }
 
 // withStderr adds the last stderr lines of a stdio server to msg.

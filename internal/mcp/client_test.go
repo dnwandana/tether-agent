@@ -25,6 +25,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 
 // ctx is the context for the client calls in the tests.
@@ -659,5 +660,99 @@ func TestHeaderTransportNoHeadersNoWarning(t *testing.T) {
 	resp.Body.Close()
 	if buf.Len() != 0 {
 		t.Fatalf("want no log for a server without headers, got: %s", buf.String())
+	}
+}
+
+// hintServer starts an in-process MCP server over HTTP. Its tools have these hints: lookup is
+// read-only, wipe is destructive, and plain has no annotations.
+func hintServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	yes := true
+	s := sdk.NewServer(&sdk.Implementation{Name: "hints", Version: "v0.0.1"}, nil)
+	ok := func(context.Context, *sdk.CallToolRequest, none) (*sdk.CallToolResult, any, error) {
+		return &sdk.CallToolResult{Content: []sdk.Content{&sdk.TextContent{Text: "ok"}}}, nil, nil
+	}
+	sdk.AddTool(s, &sdk.Tool{Name: "lookup", Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true}}, ok)
+	sdk.AddTool(s, &sdk.Tool{Name: "wipe", Annotations: &sdk.ToolAnnotations{DestructiveHint: &yes}}, ok)
+	sdk.AddTool(s, &sdk.Tool{Name: "plain"}, ok)
+	srv := httptest.NewServer(sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return s }, nil))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestListToolsKeepsHints(t *testing.T) {
+	s := config.DefaultMCPServer()
+	s.URL = hintServer(t).URL
+	defs, err := dial(t, s, nil).ListTools(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]ToolDef{}
+	for _, d := range defs {
+		got[d.Name] = d
+	}
+	if d := got["lookup"]; !d.ReadOnly || d.Destructive != nil {
+		t.Fatalf("lookup: %+v", d)
+	}
+	if d := got["wipe"]; d.ReadOnly || d.Destructive == nil || !*d.Destructive {
+		t.Fatalf("wipe: %+v", d)
+	}
+	if d := got["plain"]; d.ReadOnly || d.Destructive != nil {
+		t.Fatalf("plain: %+v", d)
+	}
+}
+
+func TestCallKeepsErrorChain(t *testing.T) {
+	srv, _ := httpServer(t, false)
+	s := config.DefaultMCPServer()
+	s.URL = srv.URL
+	c := dial(t, s, nil)
+	_, err := c.Call(ctx, "nope", nil)
+	var we *jsonrpc.Error
+	if !errors.As(err, &we) || we.Code != jsonrpc.CodeInvalidParams ||
+		!strings.HasPrefix(err.Error(), "mcp test: call nope: ") || !strings.Contains(err.Error(), "unknown tool") {
+		t.Fatal(err)
+	}
+	st := stdioServer(t)
+	st.TimeoutS = 1
+	c2 := dial(t, st, nil)
+	_, err = c2.Call(ctx, "sleep", json.RawMessage(`{"seconds":3}`))
+	if !errors.Is(err, context.DeadlineExceeded) || err.Error() != "mcp test: call sleep timed out after 1s" {
+		t.Fatal(err)
+	}
+}
+
+// TestRejectedCallKeepsCause checks the real error chain of a streamable HTTP call when the
+// server closes the connection after it reads the request. The SDK wraps the cause in a
+// "rejected by transport" error. The cause must decide the fault, not the wrapper.
+func TestRejectedCallKeepsCause(t *testing.T) {
+	h := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server { return newTestServer() }, nil)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if bytes.Contains(body, []byte(`"tools/call"`)) {
+			// The server got the request. The connection closes before the response.
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err == nil {
+				conn.Close()
+			}
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		h.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	s := config.DefaultMCPServer()
+	s.URL = srv.URL
+	c := dial(t, s, nil)
+	_, err := c.Call(ctx, "echo", json.RawMessage(`{"text":"hi"}`))
+	var we *jsonrpc.Error
+	if err == nil || !errors.As(err, &we) || we.Code != -32005 || !errors.Is(err, io.EOF) {
+		t.Fatalf("%v (%T)", err, err)
+	}
+	if f := callFault("test", "echo", ClassWrite, err); f != faultBroken {
+		t.Fatal("write:", f)
+	}
+	if f := callFault("test", "echo", ClassRead, err); f != faultBroken {
+		t.Fatal("read:", f)
 	}
 }

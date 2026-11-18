@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"os"
@@ -13,11 +14,15 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/tools"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // The reconnect limits: maxDialTries is the number of dial tries of a cold call when
@@ -93,6 +98,8 @@ type serverState struct {
 	// that are in the registry.
 	defs       []ToolDef
 	registered map[string]bool
+	// filtered holds the raw names of the tools that the filter hides.
+	filtered map[string]bool
 }
 
 // Init loads the tool list of each enabled server and registers one tool per entry in
@@ -161,8 +168,11 @@ func (m *Manager) initServer(ctx context.Context, st *serverState) error {
 // apply makes the MCP tools in reg match the tool lists of the enabled servers, in one
 // registry change: it removes each tool of m from reg, and it adds one tool for each entry
 // of an enabled server. A tool whose name is already in reg is skipped with a warning. It
-// returns the count of MCP tools in reg and the skipped names.
-func (m *Manager) apply(reg *tools.Registry) (count int, skipped []string) {
+// returns the count of MCP tools in reg, the skipped names, the count of tools that the
+// filter hides, and the filter warnings.
+func (m *Manager) apply(reg *tools.Registry) applyResult {
+	var skipped []string
+	var res applyResult
 	var remove []string
 	for _, t := range reg.All() {
 		if mt, ok := t.(*mcpTool); ok && mt.m == m {
@@ -174,8 +184,30 @@ func (m *Manager) apply(reg *tools.Registry) (count int, skipped []string) {
 	for _, st := range m.states() {
 		st.mu.Lock()
 		st.registered = map[string]bool{}
+		st.filtered = map[string]bool{}
 		if !st.disabled {
+			kept, hidden, warns := CheckFilter(st.cfg, st.defs)
+			keptSet := map[string]bool{}
+			for _, d := range kept {
+				keptSet[d.Name] = true
+			}
 			for _, d := range st.defs {
+				if !keptSet[d.Name] {
+					st.filtered[d.Name] = true
+				}
+			}
+			if len(st.cfg.Tools.Include) > 0 || len(st.cfg.Tools.Exclude) > 0 {
+				if res.hidden == nil {
+					res.hidden = map[string]int{}
+				}
+				res.hidden[st.name] = hidden
+			}
+			for _, w := range warns {
+				m.logger().Warn("mcp: tools config", "server", st.name, "warning", w)
+				res.warnings = append(res.warnings, st.name+": "+w)
+			}
+			hash := ConfigHash(st.cfg)
+			for _, d := range kept {
 				name := ToolName(st.name, d.Name)
 				if owner[name] != nil {
 					skipped = append(skipped, name)
@@ -183,7 +215,13 @@ func (m *Manager) apply(reg *tools.Registry) (count int, skipped []string) {
 					continue
 				}
 				owner[name] = st
-				add = append(add, &mcpTool{m: m, server: st.name, tool: d.Name, name: name, def: d, parallel: st.cfg.SupportsParallelToolCalls})
+				class, ignored := finalClass(st.name, d, st.cfg.Tools.Class)
+				if ignored {
+					w := fmt.Sprintf("tools.class entry %q is ignored, because the tool is human-only", d.Name)
+					m.logger().Warn("mcp: tools config", "server", st.name, "warning", w)
+					res.warnings = append(res.warnings, st.name+": "+w)
+				}
+				add = append(add, &mcpTool{m: m, server: st.name, tool: d.Name, name: name, def: d, parallel: st.cfg.SupportsParallelToolCalls, class: class, hash: hash})
 			}
 		}
 		st.mu.Unlock()
@@ -198,7 +236,35 @@ func (m *Manager) apply(reg *tools.Registry) (count int, skipped []string) {
 		st.registered[name] = true
 		st.mu.Unlock()
 	}
-	return len(owner), append(skipped, clash...)
+	res.count, res.skipped = len(owner), append(skipped, clash...)
+	return res
+}
+
+// applyResult is the result of apply.
+type applyResult struct {
+	count    int
+	skipped  []string
+	hidden   map[string]int
+	warnings []string
+}
+
+// finalClass returns the class of the tool d of a server. A human-only rule wins. Then
+// Classify gives the class. A human-only result stays. Else an override entry sets the
+// class. ignored is true when an override entry exists for a human-only tool.
+func finalClass(server string, d ToolDef, override map[string]string) (c Class, ignored bool) {
+	if security.IsHumanOnlyMCP(server, d.Name) {
+		c = ClassHumanOnly
+	} else {
+		c = Classify(d.Name, server, d.ReadOnly, d.Destructive)
+	}
+	v, has := override[d.Name]
+	if c == ClassHumanOnly {
+		return c, has
+	}
+	if has {
+		return Class(v), false
+	}
+	return c, false
 }
 
 // ToolName returns the registry name of an MCP tool: mcp_<server>_<tool>. A character
@@ -207,9 +273,15 @@ func ToolName(server, tool string) string {
 	return "mcp_" + config.MCPSafeName(server) + "_" + config.MCPSafeName(tool)
 }
 
-// call runs one tool call. A cold server starts first. A call that fails because the
-// connection is dead dials again and tries the call one more time.
-func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMessage) (string, error) {
+// mayHaveRunText is the error text for a call that may have reached the server.
+func mayHaveRunText(server, tool string) string {
+	return "The " + ToolName(server, tool) + " call may have run. Do not send it again. Check the result first, or tell the owner."
+}
+
+// call runs one tool call. A cold server starts first. A call that did not run because the
+// connection is dead dials again and tries one more time. A call that is not read never
+// goes again when it may have run.
+func (m *Manager) call(ctx context.Context, server, tool string, class Class, args json.RawMessage) (string, error) {
 	st := m.state(server)
 	if st == nil {
 		return "", fmt.Errorf("MCP server %s is not configured", server)
@@ -220,9 +292,19 @@ func (m *Manager) call(ctx context.Context, server, tool string, args json.RawMe
 			return "", err
 		}
 		out, err := c.Call(ctx, tool, args)
-		dead := err != nil && ctx.Err() == nil && deadConn(server, tool, err)
-		m.release(st, c, dead)
-		if !dead || attempt > 0 {
+		f := faultNone
+		if err != nil && ctx.Err() == nil {
+			f = callFault(server, tool, class, err)
+		}
+		m.release(st, c, f == faultNotRun || f == faultBroken)
+		if f == faultNone || f == faultOther {
+			return out, err
+		}
+		retry := attempt == 0 && (f == faultNotRun || (f == faultBroken && class == ClassRead))
+		if !retry {
+			if class != ClassRead && (f == faultBroken || f == faultTimeout) {
+				return "", fmt.Errorf("%w: %s", tools.ErrToolError, mayHaveRunText(server, tool))
+			}
 			return out, err
 		}
 		m.logger().Warn("mcp: the connection is dead; the server is started again", "server", server, "err", err.Error())
@@ -377,6 +459,12 @@ type ReloadResult struct {
 	// Skipped holds the MCP tool names that are not in the registry, because a different
 	// tool has the name.
 	Skipped []string
+	// Hidden holds the count of tools that tools.include and tools.exclude hide, for each
+	// enabled server that has one of the two lists. It is nil when no server has a filter.
+	Hidden map[string]int
+	// Warnings holds the filter entries that match no tool and the ignored class overrides.
+	// Each warning starts with "<server>: ".
+	Warnings []string
 }
 
 // Reload is ReloadReport without the result.
@@ -448,7 +536,8 @@ func (m *Manager) ReloadReport(ctx context.Context, reg *tools.Registry) (Reload
 		}()
 	}
 	wg.Wait()
-	res.Tools, res.Skipped = m.apply(reg)
+	ar := m.apply(reg)
+	res.Tools, res.Skipped, res.Hidden, res.Warnings = ar.count, ar.skipped, ar.hidden, ar.warnings
 
 	after := m.enabled()
 	res.Servers = len(after)
@@ -528,7 +617,7 @@ func (m *Manager) Stats() Stats {
 			s.Servers++
 			s.Tools += len(st.defs)
 			for _, d := range st.defs {
-				if !st.registered[ToolName(st.name, d.Name)] {
+				if !st.registered[ToolName(st.name, d.Name)] && !st.filtered[d.Name] {
 					s.Pending++
 				}
 			}
@@ -667,23 +756,76 @@ func (m *Manager) logger() *slog.Logger {
 	return slog.Default()
 }
 
-// deadConn reports whether a call error comes from a dead connection, not from the tool.
-// Client.Call keeps only the text of the go-sdk error, so the check uses the text. A
-// request error starts with "mcp <server>: call <tool>: ". An error result of the tool
-// has no "call", so a tool error never starts a second call.
-func deadConn(server, tool string, err error) bool {
-	msg, ok := strings.CutPrefix(err.Error(), "mcp "+server+": call "+tool+": ")
+// fault is the class of a failed call.
+type fault int
+
+const (
+	faultNone    fault = iota
+	faultNotRun        // the call did not reach the server; a new connection can help
+	faultBroken        // the connection broke after the write; the call may have run
+	faultTimeout       // the call timed out; the call may have run
+	faultOther         // a JSON-RPC error or a tool error; the model gets the text
+)
+
+// codeRejected is the JSON-RPC code of the "rejected by transport" error. The streamable
+// HTTP client wraps each failed HTTP request in it, so the cause below it decides the fault.
+const codeRejected = -32005
+
+// callFault classifies a call error. It checks the error chain first. The text decides
+// only for an error with no known cause in the chain, and only for the request prefix
+// "mcp <server>: call <tool>". An error result of the tool has no "call", so a tool error
+// never starts a second call.
+//
+// Only a closed connection or a broken pipe proves that the request was not written. A lost
+// session or a refused reconnect can also end a call that the server already got, because
+// the streamable HTTP client ends each pending call with the error of the connection. Thus
+// such an error is faultNotRun only for a read call. For other classes, it is faultBroken.
+func callFault(server, tool string, class Class, err error) fault {
+	lost := faultNotRun
+	if class != ClassRead {
+		lost = faultBroken
+	}
+	var rpc *jsonrpc.Error
+	switch {
+	case errors.Is(err, sdk.ErrConnectionClosed), errors.Is(err, syscall.EPIPE):
+		return faultNotRun
+	case errors.Is(err, sdk.ErrSessionMissing), errors.Is(err, syscall.ECONNREFUSED):
+		return lost
+	case errors.As(err, &rpc) && rpc.Code != codeRejected:
+		if rpc.Code == -32003 || rpc.Code == -32004 {
+			return faultNotRun
+		}
+		return faultOther
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, syscall.ECONNRESET):
+		return faultBroken
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+		return faultTimeout
+	}
+	prefix := "mcp " + server + ": call " + tool
+	msg, ok := strings.CutPrefix(err.Error(), prefix)
 	if !ok {
-		return false
+		return faultOther
 	}
 	msg = strings.ToLower(msg)
-	for _, s := range []string{"connection closed", "session not found", "client is closing", "server is closing",
-		"broken pipe", "connection reset", "connection refused", "eof"} {
-		if strings.Contains(msg, s) {
-			return true
+	has := func(list ...string) bool {
+		for _, s := range list {
+			if strings.Contains(msg, s) {
+				return true
+			}
 		}
+		return false
 	}
-	return false
+	switch {
+	case has("connection closed", "client is closing", "server is closing", "broken pipe"):
+		return faultNotRun
+	case has("session not found", "connection refused"):
+		return lost
+	case has("connection reset", "eof"):
+		return faultBroken
+	case has("timed out"):
+		return faultTimeout
+	}
+	return faultOther
 }
 
 // cacheFile is the JSON shape of a tool cache file.
@@ -696,6 +838,8 @@ type cachedTool struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	InputSchema json.RawMessage `json:"input_schema,omitempty"`
+	ReadOnly    bool            `json:"read_only,omitempty"`
+	Destructive *bool           `json:"destructive,omitempty"`
 }
 
 func (m *Manager) cachePath(server string) string {
@@ -755,22 +899,48 @@ func (m *Manager) writeCache(server string, defs []ToolDef) error {
 // sameDefs reports whether two tool lists are equal.
 func sameDefs(a, b []ToolDef) bool {
 	return slices.EqualFunc(a, b, func(x, y ToolDef) bool {
-		return x.Name == y.Name && x.Description == y.Description && string(x.InputSchema) == string(y.InputSchema)
+		return x.Name == y.Name && x.Description == y.Description && string(x.InputSchema) == string(y.InputSchema) &&
+			x.ReadOnly == y.ReadOnly && sameHint(x.Destructive, y.Destructive)
 	})
 }
 
-// mcpTool is one tool of an MCP server in the registry. The approval gate does not
-// apply to it, because Tether Agent cannot see what the server runs.
+// sameHint reports whether two optional hints are equal. It compares the values.
+func sameHint(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// mcpTool is one tool of an MCP server in the registry. A read call runs with no gate.
+// Each other call goes through the approval gate. apply sets class
+// (the final class) and hash (the ConfigHash of the server entry).
 type mcpTool struct {
 	m                  *Manager
 	server, tool, name string
 	def                ToolDef
 	parallel           bool
+	class              Class
+	hash               string
 }
 
 func (t *mcpTool) Name() string       { return t.name }
 func (t *mcpTool) Toolset() string    { return tools.SetMCP + "_" + t.server }
-func (t *mcpTool) ParallelSafe() bool { return t.parallel }
+func (t *mcpTool) ParallelSafe() bool { return t.parallel && t.class == ClassRead }
+
+// MCPClass returns the final class of the tool.
+func (t *mcpTool) MCPClass() string { return string(t.class) }
+
+// firstSentence returns the first line of s, cut after the first ". ".
+func firstSentence(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if i := strings.Index(s, ". "); i >= 0 {
+		s = s[:i+1]
+	}
+	return strings.TrimSpace(s)
+}
 
 func (t *mcpTool) Schema() provider.ToolSchema {
 	params := t.def.InputSchema
@@ -780,8 +950,22 @@ func (t *mcpTool) Schema() provider.ToolSchema {
 	return provider.ToolSchema{Name: t.name, Description: t.def.Description, Parameters: params}
 }
 
-func (t *mcpTool) Run(ctx context.Context, args json.RawMessage, _ *tools.Env) (string, error) {
-	out, err := t.m.call(ctx, t.server, t.tool, args)
+func (t *mcpTool) Run(ctx context.Context, args json.RawMessage, env *tools.Env) (string, error) {
+	if t.class != ClassRead {
+		var ap tools.MCPApprover
+		if env != nil && env.Gate != nil {
+			ap, _ = env.Gate.(tools.MCPApprover)
+		}
+		if ap == nil {
+			return "", fmt.Errorf("%w: approval gate missing: the MCP call %s cannot run without a gate", tools.ErrToolError, t.name)
+		}
+		call := security.MCPCall{Server: t.server, Tool: t.tool, Class: string(t.class), ConfigHash: t.hash,
+			Summary: firstSentence(t.def.Description), Args: args}
+		if err := ap.CheckMCP(ctx, env, call); err != nil {
+			return "", fmt.Errorf("%w: %s", tools.ErrToolError, err.Error())
+		}
+	}
+	out, err := t.m.call(ctx, t.server, t.tool, t.class, args)
 	if err != nil && !errors.Is(err, tools.ErrToolError) {
 		// The client error text is for the model, and it has no credentials.
 		err = fmt.Errorf("%w: %s", tools.ErrToolError, err.Error())
