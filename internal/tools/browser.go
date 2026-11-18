@@ -72,6 +72,28 @@ func (t funcTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (strin
 	return t.run(ctx, raw, env)
 }
 
+// cookieArgs are the arguments of browser_cookies.
+type cookieArgs struct {
+	Action string `json:"action"`
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Domain string `json:"domain"`
+}
+
+// cookiesTool is the browser_cookies tool. It has its own type, so that only it gets the
+// ReadOnlyCall method of the browser tools.
+type cookiesTool struct{ funcTool }
+
+// ReadOnlyCall reports whether the call only reads the cookies: the action get. It decodes
+// args with the struct of the tool, so it sees the same action.
+func (cookiesTool) ReadOnlyCall(args json.RawMessage) bool {
+	var a cookieArgs
+	if err := decodeArgs(args, &a); err != nil {
+		return false
+	}
+	return a.Action == "get"
+}
+
 // RegisterBrowserTools adds the seven browser tools of bt to r.
 func RegisterBrowserTools(r *Registry, bt *BrowserTools) {
 	for _, t := range bt.Tools() {
@@ -170,7 +192,7 @@ func (bt *BrowserTools) Tools() []Tool {
 }`,
 			run: bt.runJS,
 		},
-		funcTool{
+		cookiesTool{funcTool{
 			set:  SetBrowser,
 			name: "browser_cookies",
 			desc: "Read, set, or delete browser cookies. get: return the cookies of the current page, or of a domain, " +
@@ -188,7 +210,7 @@ func (bt *BrowserTools) Tools() []Tool {
   "required": ["action"]
 }`,
 			run: bt.cookies,
-		},
+		}},
 	}
 }
 
@@ -616,12 +638,7 @@ type cookieOut struct {
 }
 
 func (bt *BrowserTools) cookies(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
-	var a struct {
-		Action string `json:"action"`
-		Name   string `json:"name"`
-		Value  string `json:"value"`
-		Domain string `json:"domain"`
-	}
+	var a cookieArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return "", err
 	}

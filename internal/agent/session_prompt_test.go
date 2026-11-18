@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/memory"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -86,12 +87,13 @@ func TestEachKeyFieldRebuilds(t *testing.T) {
 	if builds != 1 {
 		t.Fatal("a plain new turn must not rebuild", builds)
 	}
-	changed := []PromptKey{base, base, base, base, base}
+	changed := []PromptKey{base, base, base, base, base, base}
 	changed[0].ModelOverride = "cheap"
 	changed[1].PromptOverride = "x"
 	changed[2].Compactions = 2
 	changed[3].MCPGeneration = 1
 	changed[4].Member = true
+	changed[5].Mode = security.ModeReadOnly
 	for i, k := range changed {
 		a.Prompts.Get(ctx, sess, k, "cli")
 		if builds != i+2 {
@@ -487,5 +489,44 @@ func TestNoteTopicWithThreatLeftOut(t *testing.T) {
 	// The note file stays.
 	if _, err := os.Stat(filepath.Join(notes, "ignore-all-previous-instructions.md")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestReadOnlyPromptHidesDeniedToolNotes(t *testing.T) {
+	a, sess := newAgent(t, scripted(), newNamed("terminal", tools.SetTerminal), newNamed("todo_list", tools.SetTodo))
+	a.Prompts = NewPromptCache(a.SessionPrompt)
+	guarded := keyFor(sess, 0)
+	ro := guarded
+	ro.Mode = security.ModeReadOnly
+	pg, _ := a.Prompts.Get(ctx, sess, guarded, "telegram")
+	pr, _ := a.Prompts.Get(ctx, sess, ro, "telegram")
+	if !strings.Contains(pg, noteCurl) || !strings.Contains(pg, noteTodo) {
+		t.Fatal("the guarded prompt keeps the notes:", pg)
+	}
+	if strings.Contains(pr, noteCurl) {
+		t.Fatal("the read-only prompt must drop the note of terminal:", pr)
+	}
+	if !strings.Contains(pr, noteTodo) {
+		t.Fatal("the read-only prompt keeps the note of an allowed tool:", pr)
+	}
+	full := guarded
+	full.Mode = security.ModeFull
+	if pf, _ := a.Prompts.Get(ctx, sess, full, "telegram"); !strings.Contains(pf, noteCurl) {
+		t.Fatal("only read-only hides the notes:", pf)
+	}
+}
+
+func TestTurnModeGoesToThePromptKey(t *testing.T) {
+	a, sess := newAgent(t, scripted(text("ok")))
+	var keys []PromptKey
+	a.Prompts = NewPromptCache(func(_ context.Context, _ *sessions.Session, k PromptKey, _ string) (string, time.Time) {
+		keys = append(keys, k)
+		return "P", time.Now()
+	})
+	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "hi", Toolsets: all(), Sink: &recSink{}, Mode: security.ModeReadOnly}); err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0].Mode != security.ModeReadOnly {
+		t.Fatalf("%+v", keys)
 	}
 }

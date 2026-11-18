@@ -79,6 +79,16 @@ type cronArgs struct {
 // Name returns "cronjob".
 func (CronJobTool) Name() string { return "cronjob" }
 
+// ReadOnlyCall reports whether the call only reads the jobs: the actions list and runs. It
+// decodes args with the struct of Run, so it sees the same action.
+func (CronJobTool) ReadOnlyCall(args json.RawMessage) bool {
+	var a cronArgs
+	if err := decodeArgs(args, &a); err != nil {
+		return false
+	}
+	return a.Action == "list" || a.Action == "runs"
+}
+
 // Toolset returns the cron toolset.
 func (CronJobTool) Toolset() string { return SetCron }
 

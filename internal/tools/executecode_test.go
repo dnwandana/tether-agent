@@ -242,19 +242,19 @@ except ToolError as e:
 // gateFunc is an Approver from a function.
 type gateFunc func(cmd string) error
 
-func (g gateFunc) CheckCommand(_ context.Context, _ *Env, cmd, _ string) error { return g(cmd) }
+func (g gateFunc) CheckCommand(_ context.Context, _ *Env, c CommandCheck) error { return g(c.Command) }
 
 func (g gateFunc) CheckScript(_ context.Context, _ *Env, code, _ string) error { return g(code) }
 
 // commandOnly is an Approver with no CheckScript.
 type commandOnly struct{}
 
-func (commandOnly) CheckCommand(context.Context, *Env, string, string) error { return nil }
+func (commandOnly) CheckCommand(context.Context, *Env, CommandCheck) error { return nil }
 
 // splitGate fails the test when execute_code uses CheckCommand for the script.
 type splitGate struct{ t *testing.T }
 
-func (g splitGate) CheckCommand(context.Context, *Env, string, string) error {
+func (g splitGate) CheckCommand(context.Context, *Env, CommandCheck) error {
 	g.t.Error("execute_code checked the script with CheckCommand")
 	return nil
 }

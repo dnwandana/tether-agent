@@ -131,7 +131,8 @@ func (t ExecuteCodeTool) Run(ctx context.Context, raw json.RawMessage, env *Env)
 	}
 	// A script can start processes without the terminal tool, so the gate checks the whole
 	// script text with one approval for each script. With no gate, or with a gate that cannot
-	// check scripts, the script does not run (fail closed).
+	// check scripts, the script does not run (fail closed). The script gate gets no workdir,
+	// because the run folder is made after the gate and has a random name.
 	if env == nil || env.Gate == nil {
 		return "", toolErr("approval gate missing: execute_code cannot run a script without the approval gate")
 	}

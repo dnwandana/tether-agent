@@ -114,17 +114,26 @@ func (t *TerminalTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (
 	if env == nil || env.Gate == nil {
 		return "", toolErr("approval gate missing: terminal cannot run a command without the approval gate")
 	}
-	if err := env.Gate.CheckCommand(ctx, env, a.Command, security.CleanSummary(a.Description)); err != nil {
+	// Resolve the folder and the PATH one time, so the gate and the run use the same values.
+	dir, err := resolveWorkdir(env, a.Workdir)
+	if err != nil {
+		return "", err
+	}
+	check := CommandCheck{
+		Command: a.Command, Workdir: dir, Path: envPath(t.childEnv(env)),
+		Summary: security.CleanSummary(a.Description),
+	}
+	if err := env.Gate.CheckCommand(ctx, env, check); err != nil {
 		return "", toolErr("%s", err.Error())
 	}
 	if a.Background {
-		return t.startBackground(env, a.Command, a.Workdir)
+		return t.startBackground(env, a.Command, dir)
 	}
 	timeout := t.defaultTimeout()
 	if a.TimeoutS > 0 {
 		timeout = time.Duration(a.TimeoutS) * time.Second
 	}
-	out, _, err := t.Exec(ctx, env, a.Command, a.Workdir, timeout)
+	out, _, err := t.execIn(ctx, env, a.Command, dir, timeout)
 	return out, err
 }
 
@@ -139,6 +148,11 @@ func (t *TerminalTool) Exec(ctx context.Context, env *Env, command, workdir stri
 	if err != nil {
 		return "", -1, err
 	}
+	return t.execIn(ctx, env, command, dir, timeout)
+}
+
+// execIn runs command in dir, which resolveWorkdir already resolved. See Exec.
+func (t *TerminalTool) execIn(ctx context.Context, env *Env, command, dir string, timeout time.Duration) (output string, exitCode int, err error) {
 	buf := newCapBuffer(t.MaxOutputBytes)
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = dir
@@ -202,12 +216,8 @@ func (t *TerminalTool) Exec(ctx context.Context, env *Env, command, workdir stri
 
 // startBackground starts command in a new session with its output in
 // SpillDir/bg-<pid>.log, and returns the pid and the log path as JSON. A
-// goroutine reaps the process and records its exit in Procs.
-func (t *TerminalTool) startBackground(env *Env, command, workdir string) (string, error) {
-	dir, err := resolveWorkdir(env, workdir)
-	if err != nil {
-		return "", err
-	}
+// goroutine reaps the process and records its exit in Procs. dir is a resolved workdir.
+func (t *TerminalTool) startBackground(env *Env, command, dir string) (string, error) {
 	spill := t.SpillDir
 	if spill == "" && env != nil && env.DataDir != "" {
 		spill = filepath.Join(env.DataDir, "cache", "spill")
@@ -278,14 +288,17 @@ type GateApprover struct {
 
 // CheckCommand builds the approval request from env and returns nil when command may
 // run. Otherwise it returns the reason for the model.
-func (g GateApprover) CheckCommand(ctx context.Context, env *Env, command, summary string) error {
+func (g GateApprover) CheckCommand(ctx context.Context, env *Env, c CommandCheck) error {
 	if g.Gate == nil {
 		return errors.New("approval gate missing: the command cannot run without the approval gate")
 	}
-	req := security.ApprovalRequest{Command: command, Summary: summary}
+	req := security.ApprovalRequest{
+		Command: c.Command, Summary: c.Summary, Workdir: c.Workdir, Path: c.Path, Tool: "terminal",
+	}
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
 		req.Member = env.Member
+		req.Scope, req.LogScope = env.ModeScope, env.LogScope
 		req.ChildName = childName(env)
 	}
 	return g.Gate.Check(ctx, req, g.Prompter)
@@ -297,10 +310,11 @@ func (g GateApprover) CheckScript(ctx context.Context, env *Env, code, summary s
 	if g.Gate == nil {
 		return errors.New("approval gate missing: the script cannot run without the approval gate")
 	}
-	req := security.ApprovalRequest{Command: code, Summary: summary}
+	req := security.ApprovalRequest{Command: code, Summary: summary, Tool: "execute_code"}
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
 		req.Member = env.Member
+		req.Scope, req.LogScope = env.ModeScope, env.LogScope
 		req.ChildName = childName(env)
 	}
 	return g.Gate.CheckScript(ctx, req, g.Prompter)
@@ -313,12 +327,40 @@ func (g GateApprover) AskPermission(ctx context.Context, env *Env, req security.
 	if g.Gate == nil {
 		return security.ScopeDeny, errors.New("approval gate missing: the coding agent cannot get an approval without the approval gate")
 	}
+	req.Tool = "acp:" + acpAgent(req.PatternID)
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
 		req.Member = env.Member
+		req.Scope, req.LogScope = env.ModeScope, env.LogScope
 	}
 	return g.Gate.AskACP(ctx, req, g.Prompter)
 }
+
+// CheckMCP builds the approval request of an MCP call from env and returns nil when the call
+// may run. Otherwise it returns the reason for the model. Each UI escapes the summary.
+func (g GateApprover) CheckMCP(ctx context.Context, env *Env, call security.MCPCall) error {
+	if g.Gate == nil {
+		return errors.New("approval gate missing: the MCP call cannot run without the approval gate")
+	}
+	summary := security.CleanSummary(call.Summary)
+	if r := []rune(summary); len(r) > mcpSummaryRunes {
+		summary = string(r[:mcpSummaryRunes-1]) + "…"
+	}
+	req := security.ApprovalRequest{
+		Summary: summary, Tool: "mcp:" + call.Server + "." + call.Tool,
+		Server: call.Server, ToolName: call.Tool, Class: call.Class,
+	}
+	if env != nil {
+		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
+		req.Member = env.Member
+		req.Scope, req.LogScope = env.ModeScope, env.LogScope
+		req.ChildName = childName(env)
+	}
+	return g.Gate.CheckMCP(ctx, req, call, g.Prompter)
+}
+
+// mcpSummaryRunes is the longest summary of an MCP call, with the final "…".
+const mcpSummaryRunes = 120
 
 // ACPFloor checks command against the floor of the gate. It passes false for the sudo
 // password flag, because the adapter does not get SUDO_PASSWORD. Kind and RootKind make the
@@ -327,12 +369,22 @@ func (g GateApprover) ACPFloor(env *Env, command string) (label string, err erro
 	if g.Gate == nil {
 		return "approval gate missing", errors.New("approval gate missing: the coding agent cannot get an approval without the approval gate")
 	}
-	req := security.ApprovalRequest{Command: command}
+	req := security.ApprovalRequest{Command: command, Tool: "acp"}
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
 		req.Member = env.Member
+		req.Scope, req.LogScope = env.ModeScope, env.LogScope
 	}
-	return g.Gate.FloorLabel(req, false)
+	return g.Gate.CheckACPFloor(context.Background(), req, false)
+}
+
+// ModeCheck returns the /mode value of scope from the gate, and the query error. A nil gate
+// gives "" (guarded) and no error.
+func (g GateApprover) ModeCheck(ctx context.Context, scope string) (string, error) {
+	if g.Gate == nil {
+		return "", nil
+	}
+	return g.Gate.ModeCheck(ctx, scope)
 }
 
 // ResetSession removes the "This session" answers of sessionID from the gate. A run with
@@ -373,21 +425,40 @@ func (t *TerminalTool) childEnv(env *Env) []string {
 	return out
 }
 
-// resolveWorkdir returns the folder for a command. A relative workdir starts
-// at env.WorkDir. An empty workdir is env.WorkDir.
+// acpAgent returns the agent name of an "acp:<agent>:<session>:<kind>" pattern ID.
+func acpAgent(patternID string) string {
+	parts := strings.Split(patternID, ":")
+	if len(parts) > 1 {
+		return parts[1]
+	}
+	return ""
+}
+
+// envPath returns the value of the last "PATH=" entry of environ.
+func envPath(environ []string) string {
+	path := ""
+	for _, e := range environ {
+		if v, ok := strings.CutPrefix(e, "PATH="); ok {
+			path = v
+		}
+	}
+	return path
+}
+
+// resolveWorkdir returns the clean, absolute folder for a command. A relative workdir
+// starts at env.WorkDir. An empty workdir is env.WorkDir, or "" when env has no base folder.
 func resolveWorkdir(env *Env, workdir string) (string, error) {
-	base := ""
-	if env != nil {
-		base = env.WorkDir
-	}
-	dir := workdir
-	if dir == "" {
-		dir = base
+	var dir string
+	if workdir == "" {
+		if env == nil || env.WorkDir == "" {
+			return "", nil
+		}
+		dir = filepath.Clean(env.WorkDir)
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
 	} else {
-		dir = resolvePath(env, expandHome(dir))
-	}
-	if dir == "" {
-		return "", nil
+		dir = resolvePath(env, expandHome(workdir))
 	}
 	info, err := os.Stat(dir)
 	if err != nil {

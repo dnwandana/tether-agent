@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/memory"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/tools"
@@ -28,6 +29,8 @@ type PromptKey struct {
 	MCPGeneration                            uint64
 	// Member is true for the prompt of a member session, which has no owner memory.
 	Member bool
+	// Mode is the /mode value of the turn. A read-only prompt has no notes of the hidden tools.
+	Mode string
 }
 
 // promptEntry is the cached prompt of one session.
@@ -94,6 +97,17 @@ func (c *PromptCache) storedMember(sessionID string) bool {
 	defer c.mu.Unlock()
 	e, ok := c.entries[sessionID]
 	return ok && e.key.Member
+}
+
+// storedMode returns key.Mode of the entry of the session. It returns "" when the session
+// has no entry.
+func (c *PromptCache) storedMode(sessionID string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.entries[sessionID]; ok {
+		return e.key.Mode
+	}
+	return ""
 }
 
 // evict removes the least recently used entries above promptCacheMax. The caller holds mu.
@@ -180,7 +194,11 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, key Prompt
 		if key.Member {
 			sets = tools.MemberToolsets(a.config().Toolsets[channel], a.config().Toolsets["member"])
 		}
-		visible, _ = a.Tools.Visible(sets, nil)
+		var hidden []string
+		if key.Mode == security.ModeReadOnly {
+			hidden = tools.ReadOnlyDenied()
+		}
+		visible, _ = a.Tools.Visible(sets, hidden)
 		in.ToolNotes = DefaultToolNotes(visible)
 	}
 	// The topic list is useful only when the model can search and read a note.
@@ -252,13 +270,13 @@ func (a *Agent) turnSystem(ctx context.Context, t Turn, channel string) (string,
 	if t.System != "" || a.Prompts == nil || t.review != nil {
 		return t.System, time.Time{}
 	}
-	return a.Prompts.Get(ctx, t.Session, a.promptKey(ctx, t.Session, t.Member && !t.Shared), channel)
+	return a.Prompts.Get(ctx, t.Session, a.promptKey(ctx, t.Session, t.Member && !t.Shared, t.Mode), channel)
 }
 
 // promptKey returns the prompt key of the session from its row, the number of its
 // compactions, and the MCP generation.
-func (a *Agent) promptKey(ctx context.Context, s *sessions.Session, member bool) PromptKey {
-	k := PromptKey{SessionID: s.ID, ModelOverride: s.ModelOverride, PromptOverride: s.PromptOverride, Member: member}
+func (a *Agent) promptKey(ctx context.Context, s *sessions.Session, member bool, mode string) PromptKey {
+	k := PromptKey{SessionID: s.ID, ModelOverride: s.ModelOverride, PromptOverride: s.PromptOverride, Member: member, Mode: mode}
 	k.Compactions = a.compactionCount(ctx, s.ID)
 	if a.MCPGen != nil {
 		k.MCPGeneration = a.MCPGen()

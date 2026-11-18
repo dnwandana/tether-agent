@@ -179,6 +179,9 @@ type Turn struct {
 	// stay the Toolsets, so the prompt cache keeps its hits. The gateway sets it only when
 	// Member and Shared are both true.
 	MemberTools map[string]bool
+	// Mode is the /mode value of the scope of the turn, read one time at turn start.
+	// Read-only hides the denied tools in the prompt and starts no review.
+	Mode string
 	// Env is the tool context. Its Values map must stay the same for a session across turns.
 	Env  *tools.Env
 	Sink Sink
@@ -269,7 +272,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	if t.Session == nil {
 		return res, errors.New("agent: the turn has no session")
 	}
-	if t.Member {
+	if t.Member || t.Mode == security.ModeReadOnly {
 		ctx = WithNoReview(ctx)
 	}
 	defer func() {
@@ -280,7 +283,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	// lastReq is the last model request of the turn. The review triggers use its shape.
 	var lastReq provider.Request
 	// A review can write the owner memory and the skills, so a member turn starts none.
-	if t.review == nil && !t.Member {
+	if t.review == nil && !t.Member && t.Mode != security.ModeReadOnly {
 		defer func() {
 			counted := res
 			if err != nil {
@@ -329,7 +332,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	}
 	system, frozenAt := a.turnSystem(ctx, t, channel)
 	if t.review == nil && !noReviews(t.Session.Kind) {
-		a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify)
+		a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify, t.Mode)
 	}
 
 	// The stored user message keeps only the image markers. The images go inline only to a
@@ -388,7 +391,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			// The compaction count is part of the prompt key, so the prompt is rebuilt.
 			system, _ = a.turnSystem(ctx, t, channel)
 			if t.review == nil && !noReviews(t.Session.Kind) {
-				a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify)
+				a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify, t.Mode)
 			}
 		}
 		// The check read the latest compaction in this round. No other writer adds a

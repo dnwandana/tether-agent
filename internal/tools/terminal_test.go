@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
@@ -148,7 +149,7 @@ func jsonString(s string) string {
 // allowAll is an Approver that lets each command run.
 type allowAll struct{}
 
-func (allowAll) CheckCommand(context.Context, *Env, string, string) error { return nil }
+func (allowAll) CheckCommand(context.Context, *Env, CommandCheck) error { return nil }
 
 func (allowAll) CheckScript(context.Context, *Env, string, string) error { return nil }
 
@@ -158,15 +159,15 @@ type denyAll struct {
 	seen   *[]string
 }
 
-func (d denyAll) CheckCommand(_ context.Context, _ *Env, command, _ string) error {
+func (d denyAll) CheckCommand(_ context.Context, _ *Env, c CommandCheck) error {
 	if d.seen != nil {
-		*d.seen = append(*d.seen, command)
+		*d.seen = append(*d.seen, c.Command)
 	}
 	return &security.BlockedError{Reason: d.reason}
 }
 
 func (d denyAll) CheckScript(ctx context.Context, env *Env, code, summary string) error {
-	return d.CheckCommand(ctx, env, code, summary)
+	return d.CheckCommand(ctx, env, CommandCheck{Command: code, Summary: summary})
 }
 
 // runExec runs tool with a new Env that lets each command run.
@@ -244,7 +245,7 @@ func TestGateApproverBuildsRequest(t *testing.T) {
 	p := &recPrompter{scope: security.ScopeDeny}
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
 	env := &Env{SessionID: "s1", SessionKey: "cli:ana", Kind: "subagent", Values: map[string]any{"child_name": "2/3"}}
-	err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", "")
+	err := g.CheckCommand(ctx, env, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""})
 	var be *security.BlockedError
 	if !errors.As(err, &be) || !strings.Contains(be.Reason, "BLOCKED by user") {
 		t.Fatal(err)
@@ -257,7 +258,7 @@ func TestGateApproverBuildsRequest(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	// A safe command needs no question.
-	if err := g.CheckCommand(ctx, env, "ls -la", ""); err != nil || len(p.reqs) != 1 {
+	if err := g.CheckCommand(ctx, env, CommandCheck{Command: "ls -la", Summary: ""}); err != nil || len(p.reqs) != 1 {
 		t.Fatal(err, p.reqs)
 	}
 }
@@ -265,7 +266,7 @@ func TestGateApproverBuildsRequest(t *testing.T) {
 func TestGateApproverPassesSummary(t *testing.T) {
 	p := &recPrompter{scope: security.ScopeDeny}
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
-	err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x", "Delete the old build folder.")
+	err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, CommandCheck{Command: "rm -rf /tmp/x", Summary: "Delete the old build folder."})
 	if len(p.reqs) != 1 || p.reqs[0].Summary != "Delete the old build folder." {
 		t.Fatalf("%+v", p.reqs)
 	}
@@ -275,7 +276,7 @@ func TestGateApproverPassesSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	// An empty summary gives an empty field.
-	_ = g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x", "")
+	_ = g.CheckCommand(ctx, &Env{SessionID: "s1"}, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""})
 	if len(p.reqs) != 2 || p.reqs[1].Summary != "" {
 		t.Fatalf("%+v", p.reqs)
 	}
@@ -285,7 +286,7 @@ func TestGateApproverPassesRootKind(t *testing.T) {
 	p := &recPrompter{scope: security.ScopeDeny}
 	g := GateApprover{Gate: &security.Gate{Mode: "manual", CronMode: "approve"}, Prompter: p}
 	env := &Env{SessionID: "c1", Kind: "subagent", RootKind: "cron"}
-	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", ""); err != nil || len(p.reqs) != 0 {
+	if err := g.CheckCommand(ctx, env, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""}); err != nil || len(p.reqs) != 0 {
 		t.Fatal("a child of a cron run follows cron_mode:", err, p.reqs)
 	}
 }
@@ -294,11 +295,11 @@ func TestGateApproverResetSession(t *testing.T) {
 	p := &recPrompter{scope: security.ScopeSession}
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
 	env := &Env{SessionID: "s1"}
-	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", ""); err != nil {
+	if err := g.CheckCommand(ctx, env, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""}); err != nil {
 		t.Fatal(err)
 	}
 	g.ResetSession("s1")
-	if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", ""); err != nil || len(p.reqs) != 2 {
+	if err := g.CheckCommand(ctx, env, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""}); err != nil || len(p.reqs) != 2 {
 		t.Fatal("the reset must remove the session answer:", err, len(p.reqs))
 	}
 	(GateApprover{}).ResetSession("s1")
@@ -309,7 +310,7 @@ func TestGateApproverSessionScopeHoldsForSession(t *testing.T) {
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
 	env := &Env{SessionID: "s1"}
 	for range 2 {
-		if err := g.CheckCommand(ctx, env, "rm -rf /tmp/x", ""); err != nil {
+		if err := g.CheckCommand(ctx, env, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -320,16 +321,16 @@ func TestGateApproverSessionScopeHoldsForSession(t *testing.T) {
 
 func TestGateApproverNoPrompterBlocksDangerous(t *testing.T) {
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}}
-	if err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x", ""); err == nil || !strings.Contains(err.Error(), "no user is present") {
+	if err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""}); err == nil || !strings.Contains(err.Error(), "no user is present") {
 		t.Fatal(err)
 	}
-	if err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, "echo hi", ""); err != nil {
+	if err := g.CheckCommand(ctx, &Env{SessionID: "s1"}, CommandCheck{Command: "echo hi", Summary: ""}); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestGateApproverNilGateFailsClosed(t *testing.T) {
-	if err := (GateApprover{}).CheckCommand(ctx, &Env{}, "echo hi", ""); err == nil || !strings.Contains(err.Error(), "approval gate missing") {
+	if err := (GateApprover{}).CheckCommand(ctx, &Env{}, CommandCheck{Command: "echo hi", Summary: ""}); err == nil || !strings.Contains(err.Error(), "approval gate missing") {
 		t.Fatal(err)
 	}
 }
@@ -361,6 +362,23 @@ func TestGateApproverACPFloor(t *testing.T) {
 	// A nil gate fails closed, as CheckCommand does.
 	if label, err := (GateApprover{}).ACPFloor(chat, "ls"); err == nil || label != "approval gate missing" {
 		t.Fatal(label, err)
+	}
+}
+
+func TestGateApproverACPFloorWritesLog(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	g := &security.Gate{DB: d}
+	env := &Env{SessionID: "s1", Kind: "chat", ModeScope: "telegram:5:0"}
+	if _, err := (GateApprover{Gate: g}).ACPFloor(env, "rm -rf /"); err == nil {
+		t.Fatal("the floor must block rm -rf /")
+	}
+	rows, err := g.ListLog(context.Background(), "telegram:5:0", false, 15)
+	if err != nil || len(rows) != 1 || rows[0].Decision != security.DecisionBlocked || rows[0].Source != "hardline" {
+		t.Fatalf("%+v %v", rows, err)
 	}
 }
 
@@ -468,13 +486,13 @@ func TestTerminalChildEnvInGateway(t *testing.T) {
 // recApprover blocks each command and records the summary that it gets.
 type recApprover struct{ summaries *[]string }
 
-func (r recApprover) CheckCommand(_ context.Context, _ *Env, _, summary string) error {
-	*r.summaries = append(*r.summaries, summary)
+func (r recApprover) CheckCommand(_ context.Context, _ *Env, c CommandCheck) error {
+	*r.summaries = append(*r.summaries, c.Summary)
 	return &security.BlockedError{Reason: "BLOCKED"}
 }
 
 func (r recApprover) CheckScript(ctx context.Context, env *Env, code, summary string) error {
-	return r.CheckCommand(ctx, env, code, summary)
+	return r.CheckCommand(ctx, env, CommandCheck{Command: code, Summary: summary})
 }
 
 func TestGateApproverCheckScriptBuildsRequest(t *testing.T) {
@@ -516,7 +534,7 @@ func TestGateApproverPassesMember(t *testing.T) {
 	p := &recPrompter{scope: security.ScopeDeny}
 	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
 	env := &Env{SessionID: "s1", Member: true}
-	_ = g.CheckCommand(ctx, env, "rm -rf /tmp/x", "")
+	_ = g.CheckCommand(ctx, env, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""})
 	_ = g.CheckScript(ctx, env, "print(1)", "")
 	_, _ = g.AskPermission(ctx, env, acpRequest())
 	if len(p.reqs) != 3 {
@@ -528,8 +546,97 @@ func TestGateApproverPassesMember(t *testing.T) {
 		}
 	}
 	// An owner Env gives an owner request.
-	_ = g.CheckCommand(ctx, &Env{SessionID: "s1"}, "rm -rf /tmp/x", "")
+	_ = g.CheckCommand(ctx, &Env{SessionID: "s1"}, CommandCheck{Command: "rm -rf /tmp/x", Summary: ""})
 	if r := p.reqs[3]; r.Member || r.NoSession {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// checkRec is an Approver that records each CommandCheck and blocks the command.
+type checkRec struct{ got *[]CommandCheck }
+
+func (r checkRec) CheckCommand(_ context.Context, _ *Env, c CommandCheck) error {
+	*r.got = append(*r.got, c)
+	return &security.BlockedError{Reason: "BLOCKED"}
+}
+
+func TestTerminalResolvesWorkdirBeforeGate(t *testing.T) {
+	t.Setenv("PATH", "/opt/fake/bin:/usr/bin:/bin")
+	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var got []CommandCheck
+	env := newEnv(t)
+	env.WorkDir = base + "/sub/.."
+	env.Gate = checkRec{got: &got}
+	tool := &TerminalTool{DefaultTimeout: time.Minute}
+	runToolEnvErr(t, tool, `{"command":"ls","description":"List."}`, env)
+	runToolEnvErr(t, tool, `{"command":"ls","workdir":"sub/./"}`, env)
+	// A missing workdir fails before the gate.
+	runToolEnvErr(t, tool, `{"command":"ls","workdir":"nope"}`, env)
+	want := []CommandCheck{
+		{Command: "ls", Workdir: base, Path: "/opt/fake/bin:/usr/bin:/bin", Summary: "List."},
+		{Command: "ls", Workdir: filepath.Join(base, "sub"), Path: "/opt/fake/bin:/usr/bin:/bin"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+	// No base folder gives an empty workdir, and the command gets no Always answer.
+	env.WorkDir, got = "", nil
+	runToolEnvErr(t, tool, `{"command":"ls"}`, env)
+	if len(got) != 1 || got[0].Workdir != "" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestGateApproverPassesScopeAndTool(t *testing.T) {
+	p := &recPrompter{scope: security.ScopeDeny}
+	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
+	env := &Env{SessionID: "s1", ModeScope: "telegram:42:7", LogScope: "telegram:42:0", WorkDir: "/srv/app"}
+	_ = g.CheckCommand(ctx, env, CommandCheck{Command: "rm -rf /tmp/x", Workdir: "/srv/app", Path: "/usr/bin:/bin"})
+	_ = g.CheckScript(ctx, env, "print(1)", "")
+	_, _ = g.AskPermission(ctx, env, acpRequest())
+	if len(p.reqs) != 3 {
+		t.Fatal(len(p.reqs))
+	}
+	for i, tool := range []string{"terminal", "execute_code", "acp:claude-code"} {
+		r := p.reqs[i]
+		if r.Tool != tool || r.Scope != "telegram:42:7" || r.LogScope != "telegram:42:0" {
+			t.Fatalf("request %d: %+v", i, r)
+		}
+	}
+	if r := p.reqs[0]; r.Workdir != "/srv/app" || r.Path != "/usr/bin:/bin" {
+		t.Fatalf("%+v", r)
+	}
+	if r := p.reqs[1]; r.Workdir != "" || r.Path != "" {
+		t.Fatalf("a script has no workdir: %+v", r)
+	}
+}
+func TestGateApproverCheckMCP(t *testing.T) {
+	p := &recPrompter{scope: security.ScopeDeny}
+	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: p}
+	var _ MCPApprover = g
+	env := &Env{SessionID: "s1", SessionKey: "cli:ana", Kind: "subagent", ModeScope: "cli", LogScope: "cli",
+		Values: map[string]any{"child_name": "2/3"}}
+	call := security.MCPCall{Server: "gh", Tool: "create_issue", Class: "write", ConfigHash: "0123456789abcdef",
+		Summary: "Create an \x1b[31missue.\n" + strings.Repeat("a", 300), Args: json.RawMessage(`{"title":"x"}`)}
+	err := g.CheckMCP(ctx, env, call)
+	var be *security.BlockedError
+	if !errors.As(err, &be) || !strings.Contains(be.Reason, "BLOCKED by user") || len(p.reqs) != 1 {
+		t.Fatal(err, p.reqs)
+	}
+	r := p.reqs[0]
+	if r.SessionID != "s1" || r.SessionKey != "cli:ana" || r.Kind != "subagent" || r.ChildName != "2/3" ||
+		r.Scope != "cli" || r.LogScope != "cli" || r.Tool != "mcp:gh.create_issue" || r.Server != "gh" ||
+		r.ToolName != "create_issue" || r.Class != "write" {
+		t.Fatalf("%+v", r)
+	}
+	if utf8.RuneCountInString(r.Summary) != 120 || !strings.HasPrefix(r.Summary, "Create an issue. aaa") ||
+		!strings.HasSuffix(r.Summary, "…") || strings.Contains(r.Summary, "\x1b") {
+		t.Fatalf("%q", r.Summary)
+	}
+	if err := (GateApprover{}).CheckMCP(ctx, env, call); err == nil || !strings.Contains(err.Error(), "approval gate missing") {
+		t.Fatal(err)
 	}
 }

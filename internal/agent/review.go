@@ -552,6 +552,8 @@ type reviewState struct {
 	schemas   []provider.ToolSchema
 	env       *tools.Env
 	notify    func(string)
+	// mode is the /mode value of the last turn.
+	mode string
 }
 
 // state returns the data of the session. The caller holds c.mu.
@@ -568,11 +570,11 @@ func (c *ReviewCounters) state(id string) *reviewState {
 }
 
 // remember keeps the request shape and the notice function of the current turn.
-func (c *ReviewCounters) remember(id, system string, schemas []provider.ToolSchema, env *tools.Env, notify func(string)) {
+func (c *ReviewCounters) remember(id, system string, schemas []provider.ToolSchema, env *tools.Env, notify func(string), mode string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := c.state(id)
-	st.haveShape, st.system, st.schemas, st.env = true, system, schemas, env
+	st.haveShape, st.system, st.schemas, st.env, st.mode = true, system, schemas, env, mode
 	if notify != nil {
 		st.notify = notify
 	}
@@ -771,6 +773,13 @@ func (a *Agent) fullReview(ctx context.Context, sess *sessions.Session) (r Revie
 		return r, false
 	}
 	st := a.Reviews.shape(sess.ID)
+	mode := st.mode
+	if !st.haveShape && a.Prompts != nil {
+		mode = a.Prompts.storedMode(sess.ID)
+	}
+	if mode == security.ModeReadOnly {
+		return r, false
+	}
 	r = ReviewRequest{Session: sess, Memory: mem, Skills: skill, Notify: st.notify, ParentEnv: st.env,
 		System: st.system, Tools: st.schemas}
 	if !st.haveShape {
@@ -778,7 +787,7 @@ func (a *Agent) fullReview(ctx context.Context, sess *sessions.Session) (r Revie
 		// tools of the channel. A member session keeps its member prompt and tools.
 		member := a.Prompts != nil && a.Prompts.storedMember(sess.ID)
 		if a.Prompts != nil {
-			r.System, _ = a.Prompts.Get(ctx, sess, a.promptKey(ctx, sess, member), sess.Source)
+			r.System, _ = a.Prompts.Get(ctx, sess, a.promptKey(ctx, sess, member, mode), sess.Source)
 		}
 		if a.Tools != nil {
 			cfg := a.config()

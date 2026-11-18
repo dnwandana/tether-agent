@@ -62,6 +62,11 @@ type Env struct {
 	// Member is true for the tool context of a member turn. The zero value means owner,
 	// so each Env of a member turn must set it.
 	Member bool
+	// ModeScope is the /mode scope of the chat or the topic of the turn. "" for a cron run.
+	ModeScope string
+	// LogScope is the scope of the approval log rows. A cron run sets it from the origin chat
+	// of its job.
+	LogScope string
 }
 
 // RunRootKind returns the kind of the top-level run of env: RootKind, or Kind for a
@@ -95,10 +100,16 @@ type Asker interface {
 	Ask(ctx context.Context, q Question) (Answer, error)
 }
 
-// Approver checks a shell command against the approval gate. summary is the cleaned
-// description of the model, or empty.
+// CommandCheck is one shell command for the approval gate. Workdir is the resolved, clean,
+// absolute workdir, or "" for no base folder. Path is the PATH value of the child
+// environment. Summary is the cleaned description of the model, or "".
+type CommandCheck struct {
+	Command, Workdir, Path, Summary string
+}
+
+// Approver checks a shell command against the approval gate.
 type Approver interface {
-	CheckCommand(ctx context.Context, env *Env, command, summary string) error
+	CheckCommand(ctx context.Context, env *Env, c CommandCheck) error
 }
 
 // ScriptApprover is an optional interface of Env.Gate. It checks the full text of an
@@ -111,6 +122,12 @@ type ScriptApprover interface {
 // acp_delegate tool reads it from env.Gate with a type assertion.
 type PermissionAsker interface {
 	AskPermission(ctx context.Context, env *Env, req security.ApprovalRequest) (security.Scope, error)
+}
+
+// MCPApprover is an optional interface of Env.Gate. An MCP tool of a class other than read
+// reads it with a type assertion. With no MCPApprover, such a call does not run.
+type MCPApprover interface {
+	CheckMCP(ctx context.Context, env *Env, call security.MCPCall) error
 }
 
 // ACPFloor is an optional interface of Env.Gate. The acp_delegate tool reads it with a type
@@ -233,6 +250,20 @@ func (r *Registry) Dispatch(ctx context.Context, name string, args json.RawMessa
 			res = Result{Text: fmt.Sprintf("tool %s failed: internal error", name), IsError: true}
 		}
 	}()
+	if env.ModeScope != "" && !ReadOnlyAllowed(t, args) {
+		if mr, ok := env.Gate.(ModeReader); ok {
+			mode, err := mr.ModeCheck(ctx, env.ModeScope)
+			if err != nil {
+				// Closed toward read-only: refuse and log one line.
+				if env.Log != nil {
+					env.Log.Warn("tools: cannot read the mode, so the call is refused", "scope", env.ModeScope, "err", err)
+				}
+			}
+			if err != nil || mode == security.ModeReadOnly {
+				return Result{Text: readOnlyRefusal(t, args), IsError: true}
+			}
+		}
+	}
 	// The check runs under the recover. A panic result replaces the whole
 	// result, so it gets no note.
 	note := argsNote(name, t, args, env)

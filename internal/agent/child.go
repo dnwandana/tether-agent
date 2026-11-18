@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -113,6 +115,10 @@ func (a *Agent) RunChild(ctx context.Context, spec ChildSpec) (res ChildResult) 
 
 	env := childEnv(spec.ParentEnv, sess)
 	defer releaseApprovals(env)
+	mode := a.childMode(ctx, env)
+	if mode == security.ModeReadOnly {
+		remove = append(slices.Clone(remove), a.readOnlyHidden()...)
+	}
 	env.Values[ChildNameKey] = spec.Name
 	env.Values[ChildDepthKey] = spec.Depth + 1
 
@@ -128,6 +134,7 @@ func (a *Agent) RunChild(ctx context.Context, spec ChildSpec) (res ChildResult) 
 		System:      system,
 		MaxTurns:    limits.MaxIterations,
 		Member:      env.Member,
+		Mode:        mode,
 	})
 	partial, calls, lastTool := a.childActivity(context.WithoutCancel(ctx), sess.ID)
 	res.ToolCalls = calls
@@ -203,11 +210,44 @@ func childEnv(parent *tools.Env, sess *sessions.Session) *tools.Env {
 		env.WorkDir, env.DataDir, env.Gate, env.Log, env.Progress = parent.WorkDir, parent.DataDir, parent.Gate, parent.Log, parent.Progress
 		env.RootKind = parent.RunRootKind()
 		env.Member = parent.Member
+		env.ModeScope, env.LogScope = parent.ModeScope, parent.LogScope
 		if parent.Channel != "" {
 			env.Channel = parent.Channel
 		}
 	}
 	return env
+}
+
+// childMode returns the /mode value of the parent scope of a child. It returns "" when the
+// scope is empty or the gate cannot read modes. A read error gives read-only, so the child
+// hides the denied tools, like Dispatch does.
+func (a *Agent) childMode(ctx context.Context, env *tools.Env) string {
+	if env.ModeScope == "" {
+		return ""
+	}
+	r, ok := env.Gate.(tools.ModeReader)
+	if !ok {
+		return ""
+	}
+	mode, err := r.ModeCheck(ctx, env.ModeScope)
+	if err != nil {
+		return security.ModeReadOnly
+	}
+	return mode
+}
+
+// readOnlyHidden returns the tool names that a read-only child does not see.
+func (a *Agent) readOnlyHidden() []string {
+	names := tools.ReadOnlyDenied()
+	if a.Tools == nil {
+		return names
+	}
+	for _, t := range a.Tools.All() {
+		if c, ok := t.(tools.MCPClassed); ok && c.MCPClass() != "read" {
+			names = append(names, t.Name())
+		}
+	}
+	return names
 }
 
 // releaseApprovals removes the "This session" answers of the forked run of env from the

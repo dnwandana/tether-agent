@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -281,7 +282,7 @@ type resetGate struct {
 	reset []string
 }
 
-func (g *resetGate) CheckCommand(context.Context, *tools.Env, string, string) error { return nil }
+func (g *resetGate) CheckCommand(context.Context, *tools.Env, tools.CommandCheck) error { return nil }
 
 func (g *resetGate) ResetSession(id string) {
 	g.mu.Lock()
@@ -343,26 +344,110 @@ func (p *memberPrompter) PromptApproval(_ context.Context, req security.Approval
 	return security.ScopeDeny, nil
 }
 
+// scopePrompter answers each question with scope.
+type scopePrompter struct{ scope security.Scope }
+
+func (p scopePrompter) PromptApproval(context.Context, security.ApprovalRequest) (security.Scope, error) {
+	return p.scope, nil
+}
+
 func TestChildOfMemberTurnIgnoresAlwaysRow(t *testing.T) {
 	d := openTestDB(t)
-	if _, err := d.ExecContext(ctx, "INSERT INTO approvals_always(pattern_id, created_at) VALUES ('recursive_delete', 1)"); err != nil {
+	g := &security.Gate{Mode: "manual", Timeout: 5 * time.Second, DB: d}
+	c := tools.CommandCheck{Command: "rm -rf build", Workdir: t.TempDir(), Path: os.Getenv("PATH")}
+	saver := tools.GateApprover{Gate: g, Prompter: scopePrompter{scope: security.ScopeAlways}}
+	if err := saver.CheckCommand(ctx, &tools.Env{SessionID: "p0"}, c); err != nil {
 		t.Fatal(err)
 	}
 	p := &memberPrompter{}
-	gate := tools.GateApprover{Gate: &security.Gate{Mode: "manual", Timeout: 5 * time.Second, DB: d}, Prompter: p}
+	gate := tools.GateApprover{Gate: g, Prompter: p}
 	child := &sessions.Session{ID: "c", Kind: "child"}
 
 	member := childEnv(&tools.Env{SessionID: "p", Gate: gate, Member: true}, child)
-	if err := gate.CheckCommand(ctx, member, "rm -rf build", ""); err == nil {
+	if err := gate.CheckCommand(ctx, member, c); err == nil {
 		t.Fatal("the denied member child command ran")
 	}
 	if len(p.reqs) != 1 || !p.reqs[0].Member {
 		t.Fatalf("%+v", p.reqs)
 	}
-
 	// An owner parent: the row covers the child, and the prompter is not called.
 	owner := childEnv(&tools.Env{SessionID: "p", Gate: gate}, child)
-	if err := gate.CheckCommand(ctx, owner, "rm -rf build", ""); err != nil || len(p.reqs) != 1 {
+	if err := gate.CheckCommand(ctx, owner, c); err != nil || len(p.reqs) != 1 {
 		t.Fatal(err, len(p.reqs))
+	}
+}
+
+// modeGate is a tools.Approver with a fixed /mode value. It records the scopes that it reads.
+type modeGate struct {
+	mode   string
+	mu     sync.Mutex
+	scopes []string
+}
+
+func (g *modeGate) CheckCommand(context.Context, *tools.Env, tools.CommandCheck) error { return nil }
+
+func (g *modeGate) ModeCheck(_ context.Context, scope string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.scopes = append(g.scopes, scope)
+	return g.mode, nil
+}
+
+// classedTool is a namedTool with an MCP class.
+type classedTool struct {
+	namedTool
+	class string
+}
+
+func (c classedTool) MCPClass() string { return c.class }
+
+func TestChildInReadOnlyScopeHidesDeniedTools(t *testing.T) {
+	for _, mode := range []string{security.ModeReadOnly, security.ModeFull, ""} {
+		fp := scripted(text("ok"))
+		a, parent := newAgent(t, fp, echoTool{},
+			newNamed("terminal", tools.SetFile), newNamed("write_file", tools.SetFile), newNamed("read_file", tools.SetFile),
+			classedTool{newNamed("mcp_gh_search", tools.SetFile), "read"},
+			classedTool{newNamed("mcp_gh_create_issue", tools.SetFile), "write"})
+		gate := &modeGate{mode: mode}
+		parentEnv := &tools.Env{Gate: gate, ModeScope: "telegram:-100:7"}
+		a.RunChild(ctx, ChildSpec{Goal: "x", ParentSession: parent, ParentToolsets: all(), ParentEnv: parentEnv})
+		names := schemaNames(fp.requests[0])
+		ro := mode == security.ModeReadOnly
+		for _, denied := range []string{"terminal", "write_file", "mcp_gh_create_issue"} {
+			if names[denied] == ro {
+				t.Fatalf("mode %q: %s visible=%v", mode, denied, names[denied])
+			}
+		}
+		if !names["read_file"] || !names["mcp_gh_search"] || !names["echo"] {
+			t.Fatalf("mode %q: the allowed tools stay visible: %v", mode, names)
+		}
+		if !slices.Equal(gate.scopes, []string{"telegram:-100:7"}) {
+			t.Fatalf("mode %q: the child reads the mode of the parent scope one time: %v", mode, gate.scopes)
+		}
+	}
+	if slices.Contains(ChildBlockedTools, "terminal") {
+		t.Fatal("the read-only names must not go into ChildBlockedTools")
+	}
+}
+
+func TestChildWithNoScopeReadsNoMode(t *testing.T) {
+	fp := scripted(text("ok"))
+	a, parent := newAgent(t, fp, echoTool{}, newNamed("terminal", tools.SetFile))
+	gate := &modeGate{mode: security.ModeReadOnly}
+	a.RunChild(ctx, ChildSpec{Goal: "x", ParentSession: parent, ParentToolsets: all(), ParentEnv: &tools.Env{Gate: gate}})
+	if len(gate.scopes) != 0 || !schemaNames(fp.requests[0])["terminal"] {
+		t.Fatalf("an empty scope makes no query: %v", gate.scopes)
+	}
+}
+
+func TestChildEnvCopiesTheScopes(t *testing.T) {
+	parent := &tools.Env{ModeScope: "telegram:-100:7", LogScope: "telegram:-100:1"}
+	child := childEnv(parent, &sessions.Session{ID: "c1", Kind: KindSubagent})
+	if child.ModeScope != "telegram:-100:7" || child.LogScope != "telegram:-100:1" {
+		t.Fatalf("%+v", child)
+	}
+	grand := childEnv(child, &sessions.Session{ID: "c2", Kind: KindSubagent})
+	if grand.ModeScope != "telegram:-100:7" || grand.LogScope != "telegram:-100:1" {
+		t.Fatalf("a grandchild keeps the scopes: %+v", grand)
 	}
 }

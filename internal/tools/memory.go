@@ -39,6 +39,16 @@ type memoryArgs struct {
 // Name returns "memory".
 func (MemoryTool) Name() string { return "memory" }
 
+// ReadOnlyCall reports whether the call only reads the memory: the actions read and search. It
+// decodes args with the struct of Run, so it sees the same action.
+func (MemoryTool) ReadOnlyCall(args json.RawMessage) bool {
+	var a memoryArgs
+	if err := decodeArgs(args, &a); err != nil {
+		return false
+	}
+	return a.Action == "read" || a.Action == "search"
+}
+
 // Toolset returns the memory toolset.
 func (MemoryTool) Toolset() string { return SetMemory }
 

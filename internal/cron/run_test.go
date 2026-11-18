@@ -101,9 +101,10 @@ type gateApprover struct {
 	p security.Prompter
 }
 
-func (a gateApprover) CheckCommand(ctx context.Context, env *tools.Env, command, summary string) error {
+func (a gateApprover) CheckCommand(ctx context.Context, env *tools.Env, c tools.CommandCheck) error {
 	return a.g.Check(ctx, security.ApprovalRequest{
-		SessionID: env.SessionID, SessionKey: env.SessionKey, Kind: env.Kind, Command: command, Summary: summary,
+		SessionID: env.SessionID, SessionKey: env.SessionKey, Kind: env.Kind, Command: c.Command, Summary: c.Summary,
+		Workdir: c.Workdir, Path: c.Path,
 	}, a.p)
 }
 
@@ -151,7 +152,7 @@ func newFixture(t *testing.T, script ...reply) *fixture {
 		stubTool{name: "terminal", set: tools.SetTerminal, run: func(ctx context.Context, env *tools.Env, args json.RawMessage) string {
 			var a struct{ Command string }
 			_ = json.Unmarshal(args, &a)
-			if err := env.Gate.CheckCommand(ctx, env, a.Command, ""); err != nil {
+			if err := env.Gate.CheckCommand(ctx, env, tools.CommandCheck{Command: a.Command}); err != nil {
 				return err.Error()
 			}
 			return "ran"

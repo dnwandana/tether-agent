@@ -17,6 +17,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -812,7 +813,7 @@ func TestCompactNowForcesAndCounts(t *testing.T) {
 	// The last turn of the session remembered its prompt shape, so the sizes count the
 	// system prompt.
 	system := strings.Repeat("s", 4000)
-	a.Reviews.remember(sess.ID, system, nil, nil, nil)
+	a.Reviews.remember(sess.ID, system, nil, nil, nil, "")
 	fixed := ctxmgr.EstimateFixed(system, nil)
 	before, err := a.Compactor.View(ctx, sess.ID)
 	if err != nil {
@@ -1110,5 +1111,66 @@ func TestFullReviewKeepsTheMemberPrompt(t *testing.T) {
 	waitUntil(t, func() bool { return len(reviews()) == 1 })
 	if r := reviews()[0]; r.System != "MEMBER" || builds != 1 || len(r.Tools) != 0 {
 		t.Fatalf("the review must keep the member prompt and the member tools: %q %d %d", r.System, builds, len(r.Tools))
+	}
+}
+
+func TestReadOnlyTurnStartsNoReview(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	for range 12 {
+		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "hi", Toolsets: all(), System: "SYS",
+			Sink: &recSink{}, Mode: security.ModeReadOnly}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The shape of the last turn holds the mode, so /new starts no review either.
+	a.ReviewBeforeNew(ctx, sess)
+	time.Sleep(20 * time.Millisecond)
+	if n := len(reviews()); n != 0 {
+		t.Fatal("a read-only session must start no review:", n)
+	}
+}
+
+func TestReadOnlyTurnMarksTheCompactionHook(t *testing.T) {
+	for _, mode := range []string{security.ModeReadOnly, security.ModeFull, ""} {
+		fp := scripted(text("SUM"), text("ok"))
+		a, sess := compactingAgent(t, fp)
+		var got []bool
+		a.Compactor.OnCompact = func(c context.Context, _ *sessions.Session, _ []provider.Message, _, _ int) {
+			got = append(got, NoReview(c))
+		}
+		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Toolsets: all(), Sink: &recSink{}, Mode: mode}); err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0] != (mode == security.ModeReadOnly) {
+			t.Fatal(mode, got)
+		}
+	}
+}
+
+func TestFullReviewKeepsTheStoredMode(t *testing.T) {
+	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
+	builds := 0
+	a.Prompts = NewPromptCache(func(_ context.Context, _ *sessions.Session, k PromptKey, _ string) (string, time.Time) {
+		builds++
+		return "MODE " + k.Mode, time.Time{}
+	})
+	full := keyFor(sess, 0)
+	full.Mode = security.ModeFull
+	a.Prompts.Get(ctx, sess, full, sess.Source)
+	seedHistory(t, a, sess.ID, 12) // 6 user turns, and no turn ran in this process
+	a.ReviewBeforeNew(ctx, sess)
+	waitUntil(t, func() bool { return len(reviews()) == 1 })
+	if r := reviews()[0]; r.System != "MODE full" || builds != 1 {
+		t.Fatalf("the review must use the stored mode in its key: %q %d", r.System, builds)
+	}
+
+	// A stored read-only key starts no review.
+	ro := keyFor(sess, 0)
+	ro.Mode = security.ModeReadOnly
+	a.Prompts.Get(ctx, sess, ro, sess.Source)
+	a.ReviewBeforeNew(ctx, sess)
+	time.Sleep(20 * time.Millisecond)
+	if n := len(reviews()); n != 1 {
+		t.Fatal("a stored read-only key must start no review:", n)
 	}
 }

@@ -54,7 +54,7 @@ type askGate struct {
 	got   *security.ApprovalRequest
 }
 
-func (askGate) CheckCommand(context.Context, *Env, string, string) error { return nil }
+func (askGate) CheckCommand(context.Context, *Env, CommandCheck) error { return nil }
 
 func (g askGate) AskPermission(_ context.Context, _ *Env, req security.ApprovalRequest) (security.Scope, error) {
 	*g.got = req
@@ -64,7 +64,7 @@ func (g askGate) AskPermission(_ context.Context, _ *Env, req security.ApprovalR
 // plainGate is an Approver with no AskPermission.
 type plainGate struct{}
 
-func (plainGate) CheckCommand(context.Context, *Env, string, string) error { return nil }
+func (plainGate) CheckCommand(context.Context, *Env, CommandCheck) error { return nil }
 
 func acpConfig(allow ...string) config.ACPConfig {
 	return config.ACPConfig{Enabled: true, IdleTimeoutS: 300, MaxSessions: 2, TurnTimeoutS: 1800,
