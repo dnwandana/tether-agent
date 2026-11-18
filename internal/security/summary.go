@@ -73,6 +73,10 @@ func (r ApprovalRequest) FallbackParts() (pattern, line string, more int) {
 			line = l
 			break
 		}
+		if _, ok := MatchHumanOnlyParsed(l, ReadCommand(l)); ok {
+			line = l
+			break
+		}
 	}
 	return pattern, cutRunes(ShowHidden(line), maxFallbackLineRunes), len(lines) - 1
 }

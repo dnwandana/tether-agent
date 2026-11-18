@@ -100,8 +100,8 @@ func TestAskACPSessionMemory(t *testing.T) {
 		t.Fatal("another session must ask", p.n)
 	}
 	var n int
-	if err := g.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM approvals_always").Scan(&n); err != nil || n != 0 {
-		t.Fatalf("AskACP must not write approvals_always: %d %v", n, err)
+	if err := g.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM approval_grants").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("AskACP must not write approval_grants: %d %v", n, err)
 	}
 	g.ResetSession("s1")
 	if _, _ = g.AskACP(ctx, acpReq("acp:claude-code:a1:execute:go"), p); p.n != 4 {

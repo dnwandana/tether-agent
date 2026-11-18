@@ -97,3 +97,9 @@ func TestFallbackPartsShowsHiddenRunes(t *testing.T) {
 		t.Fatalf("%q", line)
 	}
 }
+func TestFallbackPartsFindsHumanOnlyLine(t *testing.T) {
+	r := ApprovalRequest{Command: "cd /srv\npasswd bob", Description: "password change"}
+	if pattern, line, more := r.FallbackParts(); pattern != "password change" || line != "passwd bob" || more != 1 {
+		t.Fatal(pattern, line, more)
+	}
+}
