@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -20,32 +21,79 @@ func TestFormatContext(t *testing.T) {
 }
 
 func TestTipsAreCopiedFromSpec(t *testing.T) {
-	if len(Tips) != 40 {
+	if len(Tips) != 41 {
 		t.Fatal(len(Tips))
 	}
-	if Tips[0] != "/fork copies this session, so you can try a different idea and keep the original." {
-		t.Fatal(Tips[0])
-	}
-	if Tips[8] != "/archive hides a session from the list. /sessions archived shows the hidden sessions again." {
-		t.Fatal(Tips[8])
-	}
-	if Tips[17] != "Send /usage all to see the tokens, the cache use, and the cost of all chats since the start." {
-		t.Fatal(Tips[17])
-	}
-	if Tips[19] != "Run `tether update` in a terminal to install the newest release." {
-		t.Fatal(Tips[19])
-	}
-	if Tips[20] != "/goal gives the agent a task that can need many turns. The agent works on it until the goal is done." {
-		t.Fatal(Tips[20])
+	for i, want := range map[int]string{
+		0:  "/fork copies this session, so you can try a different idea and keep the original.",
+		8:  "/archive hides a session from the list. /sessions archived shows the hidden sessions again.",
+		17: "Send /usage all to see the tokens, the cache use, and the cost of all chats since the start.",
+		19: "Run `tether update` in a terminal to install the newest release.",
+		20: "/goal gives the agent a task that can need many turns. The agent works on it until the goal is done.",
+	} {
+		if Tips[i].Text != want {
+			t.Fatal(i, Tips[i].Text)
+		}
 	}
 	for _, tip := range Tips {
-		if strings.Contains(tip, "/resume brings it back") {
-			t.Fatal(tip)
+		if strings.Contains(tip.Text, "/resume brings it back") {
+			t.Fatal(tip.Text)
+		}
+		if tip.Channel != "" && tip.Channel != "telegram" && tip.Channel != "cli" {
+			t.Fatal(tip.Channel, tip.Text)
 		}
 	}
-	for range 50 {
-		if tip := pickTip(); tip == "" {
-			t.Fatal("empty tip")
+	for _, channel := range []string{"telegram", "cli"} {
+		for range 50 {
+			if tip := pickTip(channel); tip == "" {
+				t.Fatal("empty tip")
+			}
 		}
 	}
+}
+
+// hyphenCommand matches a slash command with "-" in its name. Telegram stops the command
+// link at the "-".
+var hyphenCommand = regexp.MustCompile(`(^|\s)/[a-z_]+-`)
+
+func TestTipsForChannel(t *testing.T) {
+	has := func(tips []string, prefix string) bool {
+		for _, tip := range tips {
+			if strings.HasPrefix(tip, prefix) {
+				return true
+			}
+		}
+		return false
+	}
+	tg, cli := tipsFor("telegram"), tipsFor("cli")
+	for _, prefix := range []string{"/restart ", "/sethome ", "/reload_mcp ", "Send a sticker.", "Send a photo.", "Send a voice note."} {
+		if !has(tg, prefix) {
+			t.Errorf("telegram has no tip %q", prefix)
+		}
+		if has(cli, prefix) {
+			t.Errorf("cli has the tip %q", prefix)
+		}
+	}
+	if !has(cli, "/reload-mcp ") || has(tg, "/reload-mcp ") {
+		t.Error("only the cli must have the /reload-mcp tip")
+	}
+	for _, tip := range tg {
+		if hyphenCommand.MatchString(tip) {
+			t.Errorf("telegram tip has a command with \"-\": %q", tip)
+		}
+	}
+	if len(tg)+len(cli) != len(Tips)+countChannel("") {
+		t.Fatal(len(tg), len(cli))
+	}
+}
+
+// countChannel returns the number of tips with the channel tag channel.
+func countChannel(channel string) int {
+	n := 0
+	for _, tip := range Tips {
+		if tip.Channel == channel {
+			n++
+		}
+	}
+	return n
 }

@@ -945,8 +945,27 @@ func (m modelProv) Model() string { return m.model }
 func fixTip(t *testing.T, tip string) {
 	t.Helper()
 	old := pickTip
-	pickTip = func() string { return tip }
+	pickTip = func(string) string { return tip }
 	t.Cleanup(func() { pickTip = old })
+}
+
+func TestNewReplyTipOfChannel(t *testing.T) {
+	old := pickTip
+	t.Cleanup(func() { pickTip = old })
+	pickTip = func(channel string) string { return channel }
+	c, sent := interactiveCtx(t)
+	run(t, c, "/new")
+	if got := lastSent(t, sent).Text; !strings.HasSuffix(got, "💡 Tip: telegram") {
+		t.Fatal(got)
+	}
+	// A channel with no buttons gets the tips of the CLI.
+	c.Send = nil
+	if got := c.channel(); got != "cli" {
+		t.Fatal(got)
+	}
+	if got := newReply(&Deps{}, "cli"); !strings.HasSuffix(got, "💡 Tip: cli") {
+		t.Fatal(got)
+	}
 }
 
 func TestNewReplyFormat(t *testing.T) {

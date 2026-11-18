@@ -193,6 +193,14 @@ func (c *CommandCtx) reply(format string, args ...any) {
 // interactive reports whether the channel of the caller shows buttons.
 func (c *CommandCtx) interactive() bool { return c.Send != nil }
 
+// channel returns "telegram" for a channel with buttons, else "cli".
+func (c *CommandCtx) channel() string {
+	if c.interactive() {
+		return "telegram"
+	}
+	return "cli"
+}
+
 // send sends r with its buttons. A text-only channel gets r.Text only.
 func (c *CommandCtx) send(r Reply) {
 	switch {
@@ -369,14 +377,14 @@ func cmdNew(ctx context.Context, c *CommandCtx, _ string) error {
 		return err
 	}
 	c.Session = s
-	c.send(Reply{Text: newReply(c.Deps)})
+	c.send(Reply{Text: newReply(c.Deps, c.channel())})
 	return nil
 }
 
 // newReply returns the reply to /new and /reset. With no agent, the reply has no model
 // and no context lines. When the primary failed, the reply names the model of the served
-// entry and adds the warning.
-func newReply(d *Deps) string {
+// entry and adds the warning. The tip is a tip of channel.
+func newReply(d *Deps, channel string) string {
 	text := "✨ Starting new session.\nSend a message to begin.\n\n"
 	if d.Agent != nil {
 		ms := d.Agent.CurrentModel(nil)
@@ -390,7 +398,7 @@ func newReply(d *Deps) string {
 		}
 		text += "\n"
 	}
-	return text + "💡 Tip: " + pickTip()
+	return text + "💡 Tip: " + pickTip(channel)
 }
 
 // fallbackWarning returns the warning line for a first entry that failed, or "" when the
@@ -963,9 +971,9 @@ const helpDescMax = 60
 // cmdHelp sends the main commands and the first skill commands. "/help skills" sends all
 // skill commands. Another argument gives the normal reply.
 func cmdHelp(_ context.Context, c *CommandCtx, args string) error {
-	text, channel := helpCLI, "cli"
+	text, channel := helpCLI, c.channel()
 	if c.interactive() {
-		text, channel = helpTelegram, "telegram"
+		text = helpTelegram
 	}
 	if !c.Owner {
 		text = helpMember
