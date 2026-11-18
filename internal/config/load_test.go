@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -421,6 +422,26 @@ func TestMCPServerNameValidation(t *testing.T) {
 	}
 }
 
+func TestApprovalsLogRetentionDays(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Approvals.LogRetentionDays, 180)
+	eq(t, Default().Approvals.LogRetentionDays, 180)
+	c, err = Load(writeTemp(t, minimal+"approvals:\n  log_retention_days: 0\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatalf("0 keeps all rows and is valid: %v", err)
+	}
+	eq(t, c.Approvals.LogRetentionDays, 0)
+	eq(t, c.Approvals.Mode, "manual") // the other approvals defaults stay
+	_, err = Load(writeTemp(t, minimal+"approvals:\n  log_retention_days: -1\n"), mapEnv(nil))
+	if err == nil || !strings.Contains(err.Error(), "config: approvals.log_retention_days is -1, which is negative. "+
+		"Use 0 to keep all approval log rows, or a number of days") {
+		t.Fatalf("a negative value must name the key, got %v", err)
+	}
+}
+
 func TestMediaCacheRetentionDays(t *testing.T) {
 	c, err := Load(writeTemp(t, minimal), mapEnv(nil))
 	if err != nil {
@@ -728,4 +749,94 @@ func TestToolsetsEmptyMember(t *testing.T) {
 		t.Fatal(err)
 	}
 	eq(t, len(c.Toolsets["member"]), 0)
+}
+
+func TestApprovalsHumanOnlyForm(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Approvals.HumanOnly == nil || len(c.Approvals.HumanOnly) != 0 {
+		t.Fatalf("the default must be an empty list: %#v", c.Approvals.HumanOnly)
+	}
+	c, err = Load(writeTemp(t, minimal+
+		"approvals:\n  human_only: [git_force_push, \"mcp:stripe.create_refund\", \"mcp:my.server.tool-x\"]\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, strings.Join(c.Approvals.HumanOnly, ","), "git_force_push,mcp:stripe.create_refund,mcp:my.server.tool-x")
+	for _, bad := range []string{`"Git Force"`, `""`, `"mcp:"`, `git-force-push`, `"rm -rf"`} {
+		_, err := Load(writeTemp(t, minimal+"approvals:\n  human_only: ["+bad+"]\n"), mapEnv(nil))
+		if err == nil || !strings.Contains(err.Error(), "approvals.human_only") {
+			t.Fatalf("%s: got %v", bad, err)
+		}
+	}
+}
+
+// mcpTools is the start of a config file with one MCP server gh and a tools block. Line 7 is
+// "      tools:".
+const mcpTools = minimal + "mcp:\n  servers:\n    gh:\n      command: [gh-mcp]\n      tools:\n"
+
+func TestLoadMCPTools(t *testing.T) {
+	path := writeTemp(t, mcpTools+
+		"        include: [\"search_*\", get_issue]\n"+
+		"        exclude: [\"*_delete\"]\n"+
+		"        class: {create_issue: send, list_pulls: read}\n")
+	c, err := Load(path, mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gh := c.MCP.Servers["gh"]
+	want := MCPTools{
+		Include: []string{"search_*", "get_issue"},
+		Exclude: []string{"*_delete"},
+		Class:   map[string]string{"create_issue": "send", "list_pulls": "read"},
+	}
+	if !reflect.DeepEqual(gh.Tools, want) {
+		t.Fatalf("%+v", gh.Tools)
+	}
+	if gh.TimeoutS != 120 || !gh.Enabled {
+		t.Fatalf("the other keys keep their defaults: %+v", gh)
+	}
+
+	// A server with no tools block keeps the empty defaults.
+	c, err = Load(writeTemp(t, minimal+"mcp:\n  servers:\n    gh:\n      command: [gh-mcp]\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tl := c.MCP.Servers["gh"].Tools; len(tl.Include) != 0 || len(tl.Exclude) != 0 || tl.Class == nil || len(tl.Class) != 0 {
+		t.Fatalf("%+v", tl)
+	}
+}
+
+func TestLoadMCPToolsUnknownKeyFails(t *testing.T) {
+	path := writeTemp(t, mcpTools+"        exlude: [x]\n")
+	_, err := Load(path, mapEnv(nil))
+	want := "config: " + path + `: mcp.servers: the key "exlude" under tools at line 8 is not known. Use one of: class, exclude, include. Correct the file and try again`
+	if err == nil || err.Error() != want {
+		t.Fatalf("got  %v\nwant %q", err, want)
+	}
+}
+
+func TestValidateMCPTools(t *testing.T) {
+	cases := []struct{ block, want string }{
+		{"        include: [\"a/b\"]\n",
+			`config: mcp.servers.gh.tools.include has the pattern "a/b", which has a "/". Use a raw MCP tool name or a pattern with "*"`},
+		{"        exclude: [\"[x\"]\n",
+			`config: mcp.servers.gh.tools.exclude has the pattern "[x", which is not a valid pattern: syntax error in pattern`},
+		{"        class: {create_issue: admin}\n",
+			`config: mcp.servers.gh.tools.class.create_issue is "admin", which is not a known value. Use read | write | send`},
+		{"        class: {create_refund: human-only}\n",
+			`config: mcp.servers.gh.tools.class.create_refund is "human-only", which is not a known value. Use read | write | send`},
+	}
+	for _, c := range cases {
+		_, err := Load(writeTemp(t, mcpTools+c.block), mapEnv(nil))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("block %q:\ngot  %v\nwant %q", c.block, err, c.want)
+		}
+	}
+	// A plain name and a pattern with "*" are valid.
+	if _, err := Load(writeTemp(t, mcpTools+"        include: [get_issue, \"list_*\"]\n"), mapEnv(nil)); err != nil {
+		t.Fatal(err)
+	}
 }

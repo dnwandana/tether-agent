@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -278,6 +279,9 @@ func (c *Config) Validate() error {
 	if c.Sessions.RetentionDays < 0 {
 		errs = append(errs, fmt.Errorf("config: sessions.retention_days is %d, which is negative. Use 0 to keep all sessions, or a number of days", c.Sessions.RetentionDays))
 	}
+	if c.Approvals.LogRetentionDays < 0 {
+		errs = append(errs, fmt.Errorf("config: approvals.log_retention_days is %d, which is negative. Use 0 to keep all approval log rows, or a number of days", c.Approvals.LogRetentionDays))
+	}
 	if c.Media.CacheRetentionDays < 0 {
 		errs = append(errs, fmt.Errorf("config: media.cache_retention_days is %d, which is negative. Use 0 to keep all media files, or a number of days", c.Media.CacheRetentionDays))
 	}
@@ -300,7 +304,9 @@ func (c *Config) Validate() error {
 	}
 	errs = append(errs, c.checkLimits()...)
 	errs = append(errs, checkMCPNames(c.MCP.Servers)...)
+	errs = append(errs, checkMCPTools(c.MCP.Servers)...)
 	errs = append(errs, c.ACP.validate()...)
+	errs = append(errs, checkHumanOnly(c.Approvals.HumanOnly)...)
 	errs = append(errs,
 		oneOf("approvals.mode", c.Approvals.Mode, "manual", "smart", "off"),
 		oneOf("approvals.cron_mode", c.Approvals.CronMode, "deny", "approve"),
@@ -309,6 +315,24 @@ func (c *Config) Validate() error {
 		oneOf("telegram.tool_progress", c.Telegram.ToolProgress, "off", "new", "all", "verbose"),
 	)
 	return errors.Join(errs...)
+}
+
+var humanOnlyRuleID = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// checkHumanOnly returns one error for each entry of approvals.human_only that is not a rule ID
+// and not an mcp:<server>.<tool> entry. The rule IDs are checked at startup, not here.
+func checkHumanOnly(entries []string) []error {
+	var errs []error
+	for _, e := range entries {
+		if humanOnlyRuleID.MatchString(e) {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(e, "mcp:"); ok && rest != "" {
+			continue
+		}
+		errs = append(errs, fmt.Errorf("config: approvals.human_only has %q, which is not a rule ID or an mcp:<server>.<tool> entry. Use a rule ID such as git_force_push, or mcp:<server>.<tool>", e))
+	}
+	return errs
 }
 
 // MCPSafeName returns s with each character that a provider does not accept in a tool name
@@ -335,6 +359,34 @@ func checkMCPNames(servers map[string]MCPServer) []error {
 			continue
 		}
 		first[key] = name
+	}
+	return errs
+}
+
+// checkMCPTools returns an error for each bad pattern in the include and exclude lists of an MCP
+// server, and for each class value that is not read, write, or send. It does not check that a
+// pattern matches a tool, because the config does not know the tool list.
+func checkMCPTools(servers map[string]MCPServer) []error {
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(servers)) {
+		tl := servers[name].Tools
+		for _, list := range []struct {
+			key      string
+			patterns []string
+		}{{"include", tl.Include}, {"exclude", tl.Exclude}} {
+			for _, p := range list.patterns {
+				if strings.Contains(p, "/") {
+					errs = append(errs, fmt.Errorf("config: mcp.servers.%s.tools.%s has the pattern %q, which has a \"/\". Use a raw MCP tool name or a pattern with \"*\"", name, list.key, p))
+					continue
+				}
+				if _, err := path.Match(p, ""); err != nil {
+					errs = append(errs, fmt.Errorf("config: mcp.servers.%s.tools.%s has the pattern %q, which is not a valid pattern: %v", name, list.key, p, err))
+				}
+			}
+		}
+		for _, tool := range slices.Sorted(maps.Keys(tl.Class)) {
+			errs = append(errs, oneOf("mcp.servers."+name+".tools.class."+tool, tl.Class[tool], "read", "write", "send"))
+		}
 	}
 	return errs
 }

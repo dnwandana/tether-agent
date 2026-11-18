@@ -6,7 +6,10 @@
 package config
 
 import (
+	"fmt"
+	"reflect"
 	"slices"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -262,6 +265,12 @@ type ApprovalsConfig struct {
 	SmartTimeoutS int `yaml:"smart_timeout_s"`
 	// SmartScriptMaxChars is the number of script characters that the smart judge gets.
 	SmartScriptMaxChars int `yaml:"smart_script_max_chars"`
+	// HumanOnly lists more rules that need the owner to tap Approve each time: rule IDs of the
+	// dangerous rules, or MCP tools as mcp:<server>.<tool>. The list can only raise a rule.
+	HumanOnly []string `yaml:"human_only"`
+	// LogRetentionDays is the age in days after which the gateway deletes an approval log
+	// row. 0 keeps all rows.
+	LogRetentionDays int `yaml:"log_retention_days"`
 }
 
 // GoalsConfig sets the /goal loop.
@@ -408,11 +417,56 @@ type MCPServer struct {
 	IdleStopMinutes           int               `yaml:"idle_stop_minutes"`
 	Enabled                   bool              `yaml:"enabled"`
 	MaxDialTries              int               `yaml:"max_dial_tries"`
+	Tools                     MCPTools          `yaml:"tools"`
+}
+
+// MCPTools filters the tools of one MCP server and sets their classes.
+type MCPTools struct {
+	// Include lists the tools that the model sees: raw MCP tool names or patterns with "*".
+	// An empty list means all tools.
+	Include []string `yaml:"include"`
+	// Exclude lists the tools that the model does not see. An exclude wins over an include.
+	Exclude []string `yaml:"exclude"`
+	// Class sets the class of a tool (read, write, or send). It replaces the guess from the
+	// tool name. It cannot change a human-only tool.
+	Class map[string]string `yaml:"class"`
+}
+
+// mcpToolsKeys returns the sorted yaml keys of MCPTools. It reads the struct tags, so a new
+// field cannot miss the unknown-key check.
+func mcpToolsKeys() []string {
+	t := reflect.TypeFor[MCPTools]()
+	keys := make([]string, 0, t.NumField())
+	for f := range t.Fields() {
+		tag, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+		if tag != "" && tag != "-" {
+			keys = append(keys, tag)
+		}
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // UnmarshalYAML decodes an MCP server entry over DefaultMCPServer, so that
-// a key that the file does not set keeps its default.
+// a key that the file does not set keeps its default. An unknown key under tools is an
+// error, because a typo would keep a tool visible with no warning.
 func (s *MCPServer) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.MappingNode {
+		known := mcpToolsKeys()
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value != "tools" || n.Content[i+1].Kind != yaml.MappingNode {
+				continue
+			}
+			tn := n.Content[i+1]
+			for j := 0; j+1 < len(tn.Content); j += 2 {
+				key := tn.Content[j]
+				if !slices.Contains(known, key.Value) {
+					return &unknownKeyError{msg: fmt.Sprintf("mcp.servers: the key %q under tools at line %d is not known. Use one of: %s",
+						key.Value, key.Line, strings.Join(known, ", "))}
+				}
+			}
+		}
+	}
 	type plain MCPServer
 	p := plain(DefaultMCPServer())
 	if err := n.Decode(&p); err != nil {
@@ -491,6 +545,7 @@ func DefaultMCPServer() MCPServer {
 		IdleStopMinutes: 10,
 		Enabled:         true,
 		MaxDialTries:    5,
+		Tools:           MCPTools{Class: map[string]string{}},
 	}
 }
 
@@ -599,6 +654,8 @@ func Default() Config {
 			CronMode:            "deny",
 			SmartTimeoutS:       30,
 			SmartScriptMaxChars: 8000,
+			HumanOnly:           []string{},
+			LogRetentionDays:    180,
 		},
 		Goals: GoalsConfig{
 			MaxTurns:                  20,

@@ -284,6 +284,8 @@ The background memory and skill review.
 | `approvals.cron_mode` | `deny` | The result for a dangerous command in a cron run: `deny` or `approve`. |
 | `approvals.smart_timeout_s` | `30` | The time limit of one call of the smart judge, in seconds. The minimum is 1. The maximum is 2592000. |
 | `approvals.smart_script_max_chars` | `8000` | The smart judge gets at most this number of characters of a script. The minimum is 100. |
+| `approvals.human_only` | `[]` | More rules that need the owner to tap Approve each time. Each entry is a rule ID, for example `git_force_push`, or an MCP tool as `mcp:<server>.<tool>`. The list can only raise a rule. The built-in human-only rules always apply. |
+| `approvals.log_retention_days` | `180` | The gateway deletes an approval log row when it is older than this number of days. `0` keeps all rows. |
 
 ## goals
 
@@ -451,6 +453,9 @@ example, `a b` and `a_b`, or `GitHub` and `github`, are not valid together.
 | `mcp.servers.<name>.always_on` | `false` | When `true`, the server starts at startup and stays connected. When `false`, it starts at the first call. |
 | `mcp.servers.<name>.idle_stop_minutes` | `10` | The program stops the server after this number of minutes with no call. |
 | `mcp.servers.<name>.enabled` | `true` | When `false`, the program ignores the server. |
+| `mcp.servers.<name>.tools.include` | `[]` | The tools of the server that the model sees. A raw MCP tool name or a pattern with `*`. An empty list means all tools. |
+| `mcp.servers.<name>.tools.exclude` | `[]` | The tools of the server that the model does not see. An exclude wins over an include. |
+| `mcp.servers.<name>.tools.class` | `{}` | Sets the class of a tool: `read`, `write`, or `send`. It replaces the guess from the tool name. It cannot change a human-only tool. |
 
 ## acp
 
