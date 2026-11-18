@@ -187,15 +187,17 @@ func TestCLIAskOneQuestionAtATime(t *testing.T) {
 }
 
 // approvalDeps returns test deps with the terminal tool behind a gate that asks the CLI.
+// The env has a base folder, so a command can get an Always answer.
 func approvalDeps(t *testing.T, fp *fakeProv) *Deps {
 	t.Helper()
 	d := testDeps(t, fp)
+	workDir := t.TempDir()
 	d.Agent.Tools.Register(&tools.TerminalTool{DefaultTimeout: time.Minute})
 	ask := &CLIAsk{}
 	gate := &security.Gate{Mode: "manual"}
 	d.CLIAsk = ask
 	d.NewEnv = func(_ *sessions.Session, channel string) *tools.Env {
-		return &tools.Env{Channel: channel, Gate: tools.GateApprover{Gate: gate, Prompter: ask}, Ask: ask, Values: map[string]any{}}
+		return &tools.Env{Channel: channel, WorkDir: workDir, Gate: tools.GateApprover{Gate: gate, Prompter: ask}, Ask: ask, Values: map[string]any{}}
 	}
 	return d
 }
@@ -372,5 +374,51 @@ func TestCLIPromptDefaultRetryLine(t *testing.T) {
 	got, _ := ask.PromptApproval(context.Background(), security.ApprovalRequest{Command: "rm -rf /tmp/x", Description: "recursive delete"})
 	if got != security.ScopeAlways || !strings.Contains(out.String(), ApprovalPrompt+"Type o, s, a, or d.\n"+ApprovalPrompt) {
 		t.Fatalf("got %v, %q", got, out.String())
+	}
+}
+
+func TestCLIPromptHeadersAndFlaggedLines(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		req  security.ApprovalRequest
+		want string
+	}{
+		{"human-only", security.ApprovalRequest{Command: "passwd", Description: "password change",
+			HumanOnly: true, NoSession: true, NoAlways: true},
+			"🔒 Human-only action\n  password change: passwd\n" +
+				"  Flagged: password change. No mode, grant, or judge can approve this. Tap each time.\n  passwd\n" +
+				"[o]nce / [d]eny: "},
+		{"could not read", security.ApprovalRequest{Command: "$c x",
+			Description: "could not read the command: the program name is built at run time",
+			Unread:      true, NoSession: true, NoAlways: true},
+			"⚠ Approval needed\n  could not read the command: the program name is built at run time: $c x\n" +
+				"  Flagged: could not read the command: the program name is built at run time\n  $c x\n" +
+				"[o]nce / [d]eny: "},
+		{"mcp send", security.ApprovalRequest{Command: "to: bob@example.com", Summary: "Send an email.",
+			Server: "gmail", ToolName: "send_email", Class: "send", NoSession: true, NoAlways: true},
+			"📤 Send on your behalf?\n  Send an email.\n  Flagged: MCP send (gmail · send_email)\n  to: bob@example.com\n" +
+				"[o]nce / [d]eny: "},
+		{"mcp write", security.ApprovalRequest{Command: "title: x", Summary: "Update a page.",
+			Server: "notion", ToolName: "API-patch-page", Class: "write"},
+			"⚠ Approval needed\n  Update a page.\n  Flagged: MCP write (notion · API-patch-page)\n  title: x\n" +
+				ApprovalPrompt},
+		{"inner match", security.ApprovalRequest{Command: "sudo rm -rf build/", Description: "recursive delete",
+			Via: "sudo", Summary: "Delete the build folder."},
+			"⚠ Approval needed\n  Delete the build folder.\n  Flagged: recursive delete (inside sudo)\n  sudo rm -rf build/\n" +
+				ApprovalPrompt},
+		// The ESC bytes and U+202E of a hostile server name and Via host do not reach the terminal.
+		{"hostile names", security.ApprovalRequest{Command: "x", Summary: "S.",
+			Server: "\x1b[31mevil\u202e", ToolName: "do`*_[x](y)", Class: "write", Via: "ssh \u202eprod\x1b[2J"},
+			"⚠ Approval needed\n  S.\n  Flagged: MCP write (evil · do`*_[x](y)) (inside ssh prod)\n  x\n" +
+				ApprovalPrompt},
+	} {
+		var out bytes.Buffer
+		ask := &CLIAsk{In: bufio.NewReader(strings.NewReader("o\n")), Out: &out}
+		if _, err := ask.PromptApproval(context.Background(), c.req); err != nil {
+			t.Fatal(c.name, err)
+		}
+		if want := c.want + "✅ Approval allowed · once\n"; out.String() != want {
+			t.Errorf("%s:\n got %q\nwant %q", c.name, out.String(), want)
+		}
 	}
 }

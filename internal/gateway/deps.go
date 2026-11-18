@@ -11,6 +11,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/goals"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/tools"
@@ -63,6 +64,9 @@ type Deps struct {
 	// OwnerOf gives the owner flag and the shared flag of a turn that has no sender, for
 	// example a resumed turn. The channel sets it. Nil gives owner, not shared.
 	OwnerOf func(sess *sessions.Session) (owner, shared bool)
+	// ModeOf returns the /mode value of a scope. The app sets it to Gate.ModeOf. Nil gives
+	// guarded.
+	ModeOf func(ctx context.Context, scope string) string
 }
 
 // TurnInput is the input of one agent turn that a channel starts.
@@ -124,6 +128,17 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 	if t.Env != nil {
 		t.Env.Member = !in.Owner
 	}
+	// The mode is read one time for the turn, so a /mode change applies at the next turn.
+	scope := ModeScope(sess)
+	if t.Env != nil {
+		t.Env.ModeScope = scope
+	}
+	if d.ModeOf != nil {
+		t.Mode = d.ModeOf(ctx, scope)
+	}
+	if t.Mode == security.ModeReadOnly {
+		t.RemoveTools = append(t.RemoveTools, d.readOnlyHidden()...)
+	}
 	t.UserText = d.userText(sess, in)
 	// The progress lines of the delegate_task children go through the CLI sink. Its lock
 	// keeps each line apart from the streamed answer text. The CLI does not group the
@@ -151,6 +166,18 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 		}
 	}
 	return res, err
+}
+
+// readOnlyHidden returns the tools that a read-only turn hides: the denied tools and each
+// MCP tool with a class other than read.
+func (d *Deps) readOnlyHidden() []string {
+	out := tools.ReadOnlyDenied()
+	for _, t := range d.Agent.Tools.All() {
+		if mc, ok := t.(tools.MCPClassed); ok && mc.MCPClass() != "read" {
+			out = append(out, t.Name())
+		}
+	}
+	return out
 }
 
 // userText returns the user text of the turn. A marked slash text that names a skill of

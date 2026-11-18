@@ -11,6 +11,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/goals"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -315,9 +316,14 @@ func goalGate(ctx context.Context, c *CommandCtx, sess *sessions.Session, cmd go
 		}
 		rep, err := addGate(ctx, c.Deps, gc.sessionID, gc.command)
 		rep.Edit = true
+		if err == nil {
+			recordGateAdd(ctx, c, sess, gc.command, security.DecisionAllowed)
+		}
 		return rep, err
 	case "no":
-		takeGateConfirm(c.Key, cmd.GateIndex, nowFunc())
+		if gc, ok := takeGateConfirm(c.Key, cmd.GateIndex, nowFunc()); ok {
+			recordGateAdd(ctx, c, sess, gc.command, security.DecisionDenied)
+		}
 		return Reply{Text: gateNotAddedReply, Edit: true}, nil
 	}
 	var (
@@ -366,10 +372,15 @@ func gateAdd(ctx context.Context, c *CommandCtx, sess *sessions.Session, command
 	}
 	check := goals.CheckGateCommand(command, !strings.HasPrefix(c.Key, "cli:"), sudoPasswordSet(c, sess))
 	if check.Refused {
+		recordGateAdd(ctx, c, sess, command, security.DecisionBlocked)
 		return Reply{Text: EscapeMarkdown(check.Reason)}, nil
 	}
 	if !check.Dangerous {
-		return addGate(ctx, c.Deps, sess.ID, command)
+		rep, err := addGate(ctx, c.Deps, sess.ID, command)
+		if err == nil {
+			recordGateAdd(ctx, c, sess, command, security.DecisionAllowed)
+		}
+		return rep, err
 	}
 	text := "⚠️ This gate matches a dangerous pattern: " + EscapeMarkdown(check.Description) +
 		". The gate runs before each judge call, with no approval prompt. Add it?"
@@ -383,8 +394,13 @@ func gateAdd(ctx context.Context, c *CommandCtx, sess *sessions.Session, command
 			{Text: "Cancel", Data: "/goal gate no " + num},
 		}}}, nil
 	case c.Confirm != nil && c.Confirm(StripMarkdown(text)):
-		return addGate(ctx, c.Deps, sess.ID, command)
+		rep, err := addGate(ctx, c.Deps, sess.ID, command)
+		if err == nil {
+			recordGateAdd(ctx, c, sess, command, security.DecisionAllowed)
+		}
+		return rep, err
 	}
+	recordGateAdd(ctx, c, sess, command, security.DecisionDenied)
 	return Reply{Text: gateNotAddedReply}, nil
 }
 
@@ -411,21 +427,36 @@ func addGate(ctx context.Context, d *Deps, sessionID, command string) (Reply, er
 	return Reply{Text: gateAddedLine(added)}, nil
 }
 
-// sudoPasswordSet reports whether the approval gate of the session knows a sudo password.
-func sudoPasswordSet(c *CommandCtx, sess *sessions.Session) bool {
+// gateOf returns the approval gate of the session, or nil.
+func gateOf(c *CommandCtx, sess *sessions.Session) *security.Gate {
 	if c.Deps.NewEnv == nil {
-		return false
+		return nil
 	}
 	channel, _, _ := strings.Cut(c.Key, ":")
 	env := c.Deps.NewEnv(sess, channel)
 	if env == nil {
-		return false
+		return nil
 	}
 	switch g := env.Gate.(type) {
 	case tools.GateApprover:
-		return g.Gate != nil && g.Gate.SudoPasswordSet
+		return g.Gate
 	case *tools.GateApprover:
-		return g != nil && g.Gate != nil && g.Gate.SudoPasswordSet
+		if g != nil {
+			return g.Gate
+		}
 	}
-	return false
+	return nil
+}
+
+// recordGateAdd writes the log row of one gate add. A session with no gate writes nothing.
+func recordGateAdd(ctx context.Context, c *CommandCtx, sess *sessions.Session, command, decision string) {
+	if g := gateOf(c, sess); g != nil {
+		g.RecordGateAdd(ctx, ModeScope(sess), command, decision)
+	}
+}
+
+// sudoPasswordSet reports whether the approval gate of the session knows a sudo password.
+func sudoPasswordSet(c *CommandCtx, sess *sessions.Session) bool {
+	g := gateOf(c, sess)
+	return g != nil && g.SudoPasswordSet
 }

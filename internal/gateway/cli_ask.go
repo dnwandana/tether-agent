@@ -82,9 +82,10 @@ func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalReques
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := c.out()
-	pattern, _, _ := req.FallbackParts()
-	fmt.Fprintf(out, "⚠ Approval needed\n  %s\n  Flagged: %s\n  %s\n",
-		cliSummary(req), pattern, strings.ReplaceAll(security.ShowHidden(req.Command), "\n", "\n  "))
+	// A terminal runs ANSI escapes and bidi controls, so clean the flagged text too.
+	fmt.Fprintf(out, "%s\n  %s\n  Flagged: %s\n  %s\n", cliHeader(req),
+		cliSummary(req), security.CleanSummary(ApprovalFlagged(req)),
+		strings.ReplaceAll(security.ShowHidden(req.Command), "\n", "\n  "))
 	if req.ChildName != "" {
 		fmt.Fprintf(out, "  (from subagent %s)\n", req.ChildName)
 	}
@@ -125,6 +126,55 @@ func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalReques
 	}
 }
 
+// maxFlaggedRunes is the limit of the flagged text of an approval prompt, with the final "…".
+const maxFlaggedRunes = 300
+
+// humanOnlySentence follows the subject of a human-only request.
+const humanOnlySentence = ". No mode, grant, or judge can approve this. Tap each time."
+
+// cutFlagged cuts s at maxFlaggedRunes runes. A cut keeps 299 runes and adds "…".
+func cutFlagged(s string) string {
+	if rs := []rune(s); len(rs) > maxFlaggedRunes {
+		return string(rs[:maxFlaggedRunes-1]) + "…"
+	}
+	return s
+}
+
+// ApprovalSubject returns the raw subject of req for the approval texts. Each UI cleans it.
+func ApprovalSubject(req security.ApprovalRequest) string {
+	var s string
+	if req.Class != "" {
+		s = "MCP " + req.Class + " (" + req.Server + " · " + req.ToolName + ")"
+	} else {
+		s, _, _ = req.FallbackParts()
+	}
+	if req.Via != "" {
+		s += " (inside " + req.Via + ")"
+	}
+	return cutFlagged(s)
+}
+
+// ApprovalFlagged returns the raw text after "Flagged: ". A human-only request adds the
+// sentence that only a tap approves it. The sentence is never cut.
+func ApprovalFlagged(req security.ApprovalRequest) string {
+	s := ApprovalSubject(req)
+	if req.HumanOnly {
+		s += humanOnlySentence
+	}
+	return s
+}
+
+// cliHeader returns the first line of the CLI approval question.
+func cliHeader(req security.ApprovalRequest) string {
+	switch {
+	case req.HumanOnly:
+		return "🔒 Human-only action"
+	case req.Class == "send":
+		return "📤 Send on your behalf?"
+	}
+	return "⚠ Approval needed"
+}
+
 // cliSummary returns the summary line of the CLI approval question: the clean summary of
 // the model, or the pattern name and one line of the command when the model gave none.
 func cliSummary(req security.ApprovalRequest) string {
@@ -132,8 +182,8 @@ func cliSummary(req security.ApprovalRequest) string {
 	if s := security.CleanSummary(req.Summary); s != "" {
 		return s
 	}
-	pattern, line, more := req.FallbackParts()
-	s := pattern
+	_, line, more := req.FallbackParts()
+	s := security.CleanSummary(ApprovalSubject(req))
 	if line != "" {
 		s += ": " + line
 	}

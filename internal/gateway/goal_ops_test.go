@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
@@ -9,6 +10,9 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/goals"
+	"github.com/dnwandana/tether-agent/internal/security"
+	"github.com/dnwandana/tether-agent/internal/sessions"
+	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
 // resetGateConfirms empties the waiting gate confirms now and at the end of the test.
@@ -299,5 +303,35 @@ func TestGoalGateAddUsesTheConfig(t *testing.T) {
 func TestGateValuesNilConfig(t *testing.T) {
 	if s, r := gateValues(&Deps{}); s != 0 || r != 0 {
 		t.Fatal("a nil Cfg gives 0, so AddGateWith uses the consts:", s, r)
+	}
+}
+
+func TestGoalGateAddWritesLogRow(t *testing.T) {
+	resetGateConfirms(t)
+	c, rec := goalCtx(t, false)
+	gate := &security.Gate{DB: openTestDB(t)}
+	c.Deps.NewEnv = func(*sessions.Session, string) *tools.Env {
+		return &tools.Env{Gate: tools.GateApprover{Gate: gate}}
+	}
+	setGoal(t, c.Deps, c.Session.ID, "ship it")
+	run(t, c, "/goal gate add go test ./...")
+	run(t, c, "/goal gate add passwd")
+	if got := rec.lastText(t); !strings.Contains(got, "cannot be a gate") {
+		t.Fatalf("%q", got)
+	}
+	rows, err := gate.ListLog(context.Background(), "", true, 15)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("%+v %v", rows, err)
+	}
+	if r := rows[0]; r.Tool != "goal_gate" || r.Decision != security.DecisionBlocked || r.Source != "human-only" ||
+		r.Rule != "human_only_password_change" {
+		t.Fatalf("%+v", r)
+	}
+	if r := rows[1]; r.Tool != "goal_gate" || r.Decision != security.DecisionAllowed || r.Source != "owner" ||
+		r.Preview != "go test ./..." {
+		t.Fatalf("%+v", r)
+	}
+	if st := loadGoal(t, c.Deps, c.Session.ID); len(st.Gates) != 1 {
+		t.Fatalf("a refused gate must not be added: %+v", st.Gates)
 	}
 }

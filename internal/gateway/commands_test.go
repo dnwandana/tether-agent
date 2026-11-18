@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -543,6 +545,31 @@ func TestReloadMCPCommand(t *testing.T) {
 	if out.String() != want || m.Generation() != 1 {
 		t.Fatalf("%q %d", out, m.Generation())
 	}
+
+	// A filter hides tools, and the reply counts them.
+	s := config.DefaultMCPServer()
+	s.Command = []string{"/nonexistent/tether-mcp-test-server"}
+	s.ConnectTimeoutS = 5
+	s.Tools.Exclude = []string{"old_*", "gone"}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gh.json"), []byte(`{"server":"gh","tools":[{"name":"search"},{"name":"old_list"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m2 := &mcp.Manager{Servers: map[string]config.MCPServer{"gh": s}, CacheDir: dir}
+	if err := m2.Init(context.Background(), c.Deps.Agent.Tools); err != nil {
+		t.Fatal(err)
+	}
+	Register(ReloadMCPCommand(m2))
+	out.Reset()
+	run(t, c, "/reload-mcp")
+	for _, line := range []string{
+		"• gh: 1 tool hidden by tools.include or tools.exclude\n",
+		"⚠️ gh: tools.exclude entry \"gone\" matches no tool\n",
+	} {
+		if !strings.Contains(out.String(), line) {
+			t.Fatalf("no line %q in:\n%s", line, out)
+		}
+	}
 }
 
 func TestReloadMCPReply(t *testing.T) {
@@ -580,6 +607,23 @@ func TestReloadMCPReply(t *testing.T) {
 	if got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
+	res = mcp.ReloadResult{Reloaded: []string{"my_gh"}, Servers: 1, Tools: 3, Skipped: []string{"mcp_x"},
+		Hidden:   map[string]int{"my_gh": 2, "fs": 1},
+		Warnings: []string{`my_gh: tools.exclude entry "old_*" matches no tool`, `my_gh: tools.class entry "create_refund" is ignored, because the tool is human-only`}}
+	got = reloadMCPReply(res, errors.New("mcp web: connection refused"))
+	want = "🔌 **MCP servers reloaded**\n" +
+		"• Reloaded: my\\_gh\n" +
+		"3 tools from 1 server.\n" +
+		"• Not added, because another tool has the same name: mcp\\_x\n" +
+		"• fs: 1 tool hidden by tools.include or tools.exclude\n" +
+		"• my\\_gh: 2 tools hidden by tools.include or tools.exclude\n" +
+		"⚠️ my\\_gh: tools.exclude entry \"old\\_\\*\" matches no tool\n" +
+		"⚠️ my\\_gh: tools.class entry \"create\\_refund\" is ignored, because the tool is human-only\n" +
+		"⚠️ Some servers did not reload. They keep their last tool lists: mcp web: connection refused\n" +
+		last
+	if got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
 }
 
 func TestHelpTelegram(t *testing.T) {
@@ -589,7 +633,7 @@ func TestHelpTelegram(t *testing.T) {
 		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 		"/goal · keep working toward a goal\n/todo · see the task list\n" +
-		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/approvals · see and remove the Always answers\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
+		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat or topic\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 	run(t, c, "/help")
 	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
 		t.Fatalf("got:\n%s", r.Text)
@@ -607,7 +651,7 @@ func TestHelpCLI(t *testing.T) {
 		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 		"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
-		"**Setup**\n/approvals · see and remove the Always answers\n/reload-mcp · reload the MCP servers\n/exit · leave the chat\n"
+		"**Setup**\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat\n/reload-mcp · reload the MCP servers\n/exit · leave the chat\n"
 	if out.String() != want {
 		t.Fatalf("got:\n%s", out)
 	}

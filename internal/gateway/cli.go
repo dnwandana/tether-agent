@@ -20,6 +20,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/goals"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -111,6 +112,7 @@ func (c *CLI) Run(ctx context.Context) error {
 			fmt.Fprintln(c.Out, goals.StatusLine(st, time.Now()))
 		}
 	}
+	c.printModeLine(ctx, sess)
 	// A command can change the session, so the exit reads sess when it runs.
 	defer func() {
 		if c.pauseChatEnded(ctx, sess) {
@@ -903,5 +905,19 @@ func (s *CLISink) endLine() {
 	if s.midLine {
 		_, _ = io.WriteString(s.W, "\n")
 		s.midLine = false
+	}
+}
+
+// printModeLine prints one line at the start when the mode of the CLI is not guarded.
+func (c *CLI) printModeLine(ctx context.Context, sess *sessions.Session) {
+	d := c.deps()
+	if d.ModeOf == nil {
+		return
+	}
+	switch d.ModeOf(ctx, ModeScope(sess)) {
+	case security.ModeFull:
+		fmt.Fprintln(c.Out, "Mode: full. Send /mode guarded to turn the approval prompts on again.")
+	case security.ModeReadOnly:
+		fmt.Fprintln(c.Out, "Mode: read-only. Send /mode guarded to let the agent change files and run commands again.")
 	}
 }

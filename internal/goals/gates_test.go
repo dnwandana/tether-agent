@@ -32,6 +32,15 @@ func TestCheckGateCommand(t *testing.T) {
 		{"rm -rf build && go test ./...", true, false, GateCheck{Dangerous: true,
 			Reason:      "⚠️ This gate matches a dangerous pattern: recursive delete. The gate runs before each judge call, with no approval prompt. Add it?",
 			Description: "recursive delete"}},
+		{"passwd", true, false, GateCheck{Refused: true, Description: "password change",
+			Reason: "BLOCKED (human-only): password change. This command cannot be a gate."}},
+		{"sudo passwd root", true, false, GateCheck{Refused: true, Description: "password change",
+			Reason: "BLOCKED (human-only): password change. This command cannot be a gate."}},
+		{"$c x", true, false, GateCheck{Refused: true,
+			Description: "could not read the command: the program name is built at run time",
+			Reason:      "BLOCKED: could not read the command: the program name is built at run time. This command cannot be a gate."}},
+		// A read of /etc/passwd is not a password change.
+		{"cat /etc/passwd", true, false, GateCheck{}},
 	}
 	for _, c := range cases {
 		if got := CheckGateCommand(c.cmd, c.inGateway, c.sudoSet); got != c.want {
@@ -115,5 +124,19 @@ func TestAddGateWithWritesTheValues(t *testing.T) {
 	}
 	if n := st.AddGateWith("   ", 600, 5); n != 0 || len(st.Gates) != 2 {
 		t.Fatal("an empty command adds no gate")
+	}
+}
+
+func TestGateCommandRaisedRuleIsRefused(t *testing.T) {
+	t.Cleanup(func() { security.SetHumanOnlyRules(nil) })
+	security.SetHumanOnlyRules([]string{"git_force_push"})
+	want := GateCheck{Refused: true, Description: "git force push (rewrites remote history)",
+		Reason: "BLOCKED (human-only): git force push (rewrites remote history). This command cannot be a gate."}
+	if got := CheckGateCommand("git push --force origin main", true, false); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	security.SetHumanOnlyRules(nil)
+	if got := CheckGateCommand("git push --force origin main", true, false); !got.Dangerous || got.Refused {
+		t.Fatalf("without the raise, the rule needs only a confirm: %+v", got)
 	}
 }

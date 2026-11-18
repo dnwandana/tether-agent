@@ -22,6 +22,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -590,5 +591,30 @@ func TestCLIOwnerHelpAndUsage(t *testing.T) {
 	}
 	if strings.Contains(out, "Only the owner") {
 		t.Fatal(out)
+	}
+}
+
+func TestCLIStartLineShowsMode(t *testing.T) {
+	for mode, want := range map[string]string{
+		security.ModeFull:     "Mode: full. Send /mode guarded to turn the approval prompts on again.\n",
+		security.ModeReadOnly: "Mode: read-only. Send /mode guarded to let the agent change files and run commands again.\n",
+	} {
+		d := testDeps(t, &fakeProv{})
+		var scopes []string
+		d.ModeOf = func(_ context.Context, scope string) string { scopes = append(scopes, scope); return mode }
+		out := runCLI(t, d, "")
+		if !strings.Contains(out, want) || len(scopes) != 1 || scopes[0] != "cli" {
+			t.Fatalf("mode %q: %q %v", mode, out, scopes)
+		}
+	}
+	for _, mode := range []string{"", security.ModeGuarded} {
+		d := testDeps(t, &fakeProv{})
+		d.ModeOf = func(context.Context, string) string { return mode }
+		if out := runCLI(t, d, ""); strings.Contains(out, "Mode:") {
+			t.Fatalf("mode %q prints no line: %q", mode, out)
+		}
+	}
+	if out := runCLI(t, testDeps(t, &fakeProv{}), ""); strings.Contains(out, "Mode:") {
+		t.Fatalf("a nil ModeOf prints no line: %q", out)
 	}
 }

@@ -28,9 +28,9 @@ type GateCheck struct {
 }
 
 // CheckGateCommand checks cmd once, when the owner adds it as a gate. A gate
-// runs before each judge call with no approval prompt, so a hardline or a
-// self-kill command is refused, and a dangerous command needs a confirm. The
-// order of the checks is the order of the approval gate.
+// runs before each judge call with no approval prompt. A hardline, self-stop,
+// human-only, or unreadable command is refused, and a dangerous command needs a
+// confirm. The order of the checks is the order of the approval gate.
 func CheckGateCommand(cmd string, inGateway, sudoPasswordSet bool) GateCheck {
 	if p, ok := security.MatchHardline(cmd); ok {
 		return GateCheck{Refused: true, Description: p.Description,
@@ -45,12 +45,32 @@ func CheckGateCommand(cmd string, inGateway, sudoPasswordSet bool) GateCheck {
 	if security.MatchSudoStdin(cmd, sudoPasswordSet) {
 		return GateCheck{Refused: true, Reason: "sudo with a password on stdin cannot be a gate."}
 	}
+	parsed := security.ReadCommand(cmd)
+	if h, ok := security.MatchHumanOnlyParsed(cmd, parsed); ok {
+		return humanOnlyRefusal(h.Description)
+	}
+	for _, d := range security.MatchAllDangerousParsed(cmd, parsed) {
+		if security.IsHumanOnlyRaised(d.ID) {
+			return humanOnlyRefusal(d.Description)
+		}
+	}
+	if !parsed.Read {
+		desc := "could not read the command: " + parsed.Why
+		return GateCheck{Refused: true, Description: desc,
+			Reason: "BLOCKED: " + desc + ". This command cannot be a gate."}
+	}
 	if p, ok := security.MatchDangerous(cmd); ok {
 		return GateCheck{Dangerous: true, Description: p.Description,
 			Reason: "⚠️ This gate matches a dangerous pattern: " + p.Description +
 				". The gate runs before each judge call, with no approval prompt. Add it?"}
 	}
 	return GateCheck{}
+}
+
+// humanOnlyRefusal returns the refusal of a human-only gate command.
+func humanOnlyRefusal(desc string) GateCheck {
+	return GateCheck{Refused: true, Description: desc,
+		Reason: "BLOCKED (human-only): " + desc + ". This command cannot be a gate."}
 }
 
 // AddGate appends a gate for cmd and returns its 1-based number. An empty

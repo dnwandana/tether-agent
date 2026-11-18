@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -930,7 +931,7 @@ const helpTelegram = "📖 **Commands**\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n" +
 	"/approve · /deny · answer an approval\n\n" +
-	"**Setup**\n/sethome · send cron results to this chat\n/approvals · see and remove the Always answers\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
+	"**Setup**\n/sethome · send cron results to this chat\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat or topic\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 
 // helpCLI is the reply to /help on a text-only channel. It does not have the Telegram
 // commands, and it has /exit.
@@ -942,7 +943,7 @@ const helpCLI = "📖 **Commands**\n\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
-	"**Setup**\n/approvals · see and remove the Always answers\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
+	"**Setup**\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
 
 // helpMember is the reply to /help for a member. It lists only the commands that a member
 // can run.
@@ -1075,6 +1076,12 @@ func reloadMCPReply(res mcp.ReloadResult, err error) string {
 	}
 	if len(res.Skipped) > 0 {
 		lines = append(lines, "• Not added, because another tool has the same name: "+escapeNames(res.Skipped))
+	}
+	for _, name := range slices.Sorted(maps.Keys(res.Hidden)) {
+		lines = append(lines, fmt.Sprintf("• %s: %s hidden by tools.include or tools.exclude", EscapeMarkdown(name), plural(res.Hidden[name], "tool")))
+	}
+	for _, w := range res.Warnings {
+		lines = append(lines, "⚠️ "+EscapeMarkdown(w))
 	}
 	if err != nil {
 		lines = append(lines, "⚠️ Some servers did not reload. They keep their last tool lists: "+EscapeMarkdown(err.Error()))
