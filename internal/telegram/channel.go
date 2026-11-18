@@ -379,9 +379,10 @@ func (ch *Channel) logNotAccepted(ctx context.Context, u Update, m Message, n No
 	ch.logger().Log(ctx, level, "telegram: message not accepted", attrs...)
 }
 
-// logServiceEvent writes one log line for a service event that concerns the bot. It only
-// logs and changes no state, because any person can add the bot to a group and send these
-// events. handleUpdate always goes on to Gate after it, and Gate drops the event as
+// logServiceEvent writes one log line for a service event that concerns the bot. It changes
+// no state except the /mode rows of the chat that moves, because only Telegram sends a
+// migration message, and only in the chat that moves. Any person can add the bot to a group
+// and send the other events, so they only log. handleUpdate always goes on to Gate after it, and Gate drops the event as
 // no_content. A message with MigrateFromChatID writes no line, because the
 // MigrateToChatID message gives the same facts.
 func (ch *Channel) logServiceEvent(ctx context.Context, m Message, n Normalized) {
@@ -395,6 +396,7 @@ func (ch *Channel) logServiceEvent(ctx context.Context, m Message, n Normalized)
 			ch.logger().Info("telegram: the group chat moved to a new chat id",
 				"old_chat", n.ChatID, "new_chat", newID)
 		}
+		ch.moveChatModes(ctx, n.ChatID, newID)
 	case slices.ContainsFunc(m.NewChatMembers, func(u User) bool { return u.ID == ch.Bot.ID }):
 		ch.logger().Info("telegram: the bot was added to a group",
 			"chat", n.ChatID, "title", m.Chat.Title, "by", n.UserID)
@@ -434,6 +436,35 @@ func (ch *Channel) oldIDPlaces(ctx context.Context, oldID string) []string {
 		}
 	}
 	return places
+}
+
+// moveChatModes moves the chat_modes rows of the old chat id to the new chat id. A row of the
+// new chat stays when it has the same thread, because it is newer. A failed statement writes
+// a warning and stops the move.
+func (ch *Channel) moveChatModes(ctx context.Context, oldID, newID string) {
+	if ch.DB == nil {
+		return
+	}
+	oldPrefix := "telegram:" + oldID + ":"
+	newPrefix := "telegram:" + newID + ":"
+	res, err := ch.DB.ExecContext(ctx,
+		"UPDATE OR IGNORE chat_modes SET scope = ? || substr(scope, ?) WHERE substr(scope, 1, ?) = ?",
+		newPrefix, len(oldPrefix)+1, len(oldPrefix), oldPrefix)
+	if err == nil {
+		var n int64
+		n, _ = res.RowsAffected()
+		_, err = ch.DB.ExecContext(ctx,
+			"DELETE FROM chat_modes WHERE substr(scope, 1, ?) = ?", len(oldPrefix), oldPrefix)
+		if err == nil {
+			if n > 0 {
+				ch.logger().Info("telegram: the chat modes now use the new chat id",
+					"old_chat", oldID, "new_chat", newID, "rows", n)
+			}
+			return
+		}
+	}
+	ch.logger().Warn("telegram: cannot move the chat modes to the new chat id",
+		"old_chat", oldID, "new_chat", newID, "err", err.Error())
 }
 
 // dispatch builds the inbound message of msgs and gives it to the gateway. text is the
@@ -657,11 +688,11 @@ func (ch *Channel) resolveText(chatID int64, threadID, name, args string) string
 	if name == "deny" {
 		scope = security.ScopeDeny
 	}
-	n, applied := 0, scope
+	n, applied, waiting := 0, scope, 0
 	if ch.UI != nil {
-		n, applied = ch.UI.resolveApprovals(chatID, threadID, scope, all)
+		n, applied, waiting = ch.UI.resolveApprovals(chatID, threadID, scope, all)
 	}
-	return resolveReply(name, applied, n)
+	return resolveReply(name, applied, n, waiting)
 }
 
 // sessionKey returns the session key of a message. In a chat with observed

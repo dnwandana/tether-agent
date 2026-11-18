@@ -278,3 +278,50 @@ func TestApprovalShowsHiddenRunesInCommand(t *testing.T) {
 		t.Fatalf("no visible marks:\n%s\n%s", mdv2, full)
 	}
 }
+
+func TestBuildApprovalPromptKinds(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		req         security.ApprovalRequest
+		mdv2, plain string
+	}{
+		{"human-only", security.ApprovalRequest{Command: "passwd", Description: "password change", HumanOnly: true},
+			"🔒 *Human\\-only action*\n_Flagged: password change\\. No mode, grant, or judge can approve this\\. Tap each time\\._\n```\npasswd\n```",
+			"🔒 Human-only action\nFlagged: password change. No mode, grant, or judge can approve this. Tap each time.\npasswd"},
+		{"could not read", security.ApprovalRequest{Command: "$c x", Unread: true,
+			Description: "could not read the command: the program name is built at run time"},
+			"🛡 *Approval needed*\n_Flagged: could not read the command: the program name is built at run time_\n```\n$c x\n```",
+			"🛡 Approval needed\nFlagged: could not read the command: the program name is built at run time\n$c x"},
+		{"mcp send", security.ApprovalRequest{Command: "to: bob@example.com", Summary: "Send an email.",
+			Server: "gmail", ToolName: "send_email", Class: "send"},
+			"📤 *Send on your behalf?*\nSend an email\\.\n_Flagged: MCP send \\(gmail · send\\_email\\)_\n```\nto: bob@example.com\n```",
+			"📤 Send on your behalf?\nSend an email.\nFlagged: MCP send (gmail · send_email)\nto: bob@example.com"},
+		{"mcp write", security.ApprovalRequest{Command: "title: x", Server: "notion", ToolName: "API-patch-page", Class: "write"},
+			"🛡 *Approval needed*\n_Flagged: MCP write \\(notion · API\\-patch\\-page\\)_\n```\ntitle: x\n```",
+			"🛡 Approval needed\nFlagged: MCP write (notion · API-patch-page)\ntitle: x"},
+		{"inner match", security.ApprovalRequest{Command: "sudo rm -rf build/", Description: "recursive delete", Via: "sudo"},
+			"🛡 *Approval needed*\n_Flagged: recursive delete \\(inside sudo\\)_\n```\nsudo rm -rf build/\n```",
+			"🛡 Approval needed\nFlagged: recursive delete (inside sudo)\nsudo rm -rf build/"},
+		// A hidden rune in a host name shows as a mark. The marks and the Markdown characters are escaped.
+		{"hostile via", security.ApprovalRequest{Command: "ssh x", Description: "recursive delete", Via: "ssh \u202eprod"},
+			"🛡 *Approval needed*\n_Flagged: recursive delete \\(inside ssh <U\\+202E\\>prod\\)_\n```\nssh x\n```",
+			"🛡 Approval needed\nFlagged: recursive delete (inside ssh <U+202E>prod)\nssh x"},
+	} {
+		mdv2, plain := buildApprovalPrompt(c.req, 0)
+		if mdv2 != c.mdv2 || plain != c.plain {
+			t.Errorf("%s:\n got %q\nwant %q\n got %q\nwant %q", c.name, mdv2, c.mdv2, plain, c.plain)
+		}
+		if err := checkMDV2(mdv2); err != nil {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+}
+
+func TestBuildApprovalResultMCPSubject(t *testing.T) {
+	req := security.ApprovalRequest{Command: "to: bob@example.com", Server: "gmail", ToolName: "send_email", Class: "send"}
+	_, short, plain := buildApprovalResult(headerFor(security.ScopeOnce, 0), req)
+	if short != "✅ *Approval allowed* · once\nMCP send \\(gmail · send\\_email\\): `to: bob@example.com`" ||
+		plain != "✅ Approval allowed · once\nMCP send (gmail · send_email): to: bob@example.com" {
+		t.Fatalf("%q\n%q", short, plain)
+	}
+}

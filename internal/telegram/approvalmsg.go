@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
@@ -133,10 +134,22 @@ func fitLines(cmd string, esc func(string) string, perLine, budget int) []string
 	return append([]string{string(rs[:n]) + "…"}, tail...)
 }
 
+// promptHeader returns the first line of the approval prompt as MarkdownV2 and as plain text.
+func promptHeader(req security.ApprovalRequest) (mdv2, plain string) {
+	switch {
+	case req.HumanOnly:
+		return "🔒 *Human\\-only action*", "🔒 Human-only action"
+	case req.Class == "send":
+		return "📤 *Send on your behalf?*", "📤 Send on your behalf?"
+	}
+	return "🛡 *Approval needed*", "🛡 Approval needed"
+}
+
 // buildApprovalPrompt returns the approval prompt as MarkdownV2 and as plain text. The
 // command is cut first, so the timeout line stays.
 func buildApprovalPrompt(req security.ApprovalRequest, timeout time.Duration) (mdv2, plain string) {
-	pattern, _, _ := req.FallbackParts()
+	pattern := security.ShowHidden(gateway.ApprovalFlagged(req))
+	hdMD, hdPlain := promptHeader(req)
 	child := ""
 	if req.ChildName != "" {
 		child = "(from subagent " + req.ChildName + ")"
@@ -147,7 +160,8 @@ func buildApprovalPrompt(req security.ApprovalRequest, timeout time.Duration) (m
 	}
 
 	var head strings.Builder
-	head.WriteString("🛡 *Approval needed*\n")
+	head.WriteString(hdMD)
+	head.WriteString("\n")
 	if req.Summary != "" {
 		head.WriteString(escapeMDV2(req.Summary))
 		head.WriteString("\n")
@@ -172,7 +186,7 @@ func buildApprovalPrompt(req security.ApprovalRequest, timeout time.Duration) (m
 	}
 	mdv2 = head.String() + strings.Join(esc, "\n") + tail
 
-	parts := []string{"🛡 Approval needed"}
+	parts := []string{hdPlain}
 	if req.Summary != "" {
 		parts = append(parts, req.Summary)
 	}
@@ -194,7 +208,8 @@ func buildApprovalPrompt(req security.ApprovalRequest, timeout time.Duration) (m
 func buildApprovalResult(h approvalHeader, req security.ApprovalRequest) (full, short, plain string) {
 	sumMD, sumPlain := escapeMDV2(req.Summary), req.Summary
 	if req.Summary == "" {
-		pattern, line, more := req.FallbackParts()
+		_, line, more := req.FallbackParts()
+		pattern := security.ShowHidden(gateway.ApprovalSubject(req))
 		sumMD, sumPlain = escapeMDV2(pattern), pattern
 		if line != "" {
 			sumMD += ": `" + escapePre(line) + "`"

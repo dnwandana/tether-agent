@@ -260,7 +260,7 @@ func TestResolveReplyTexts(t *testing.T) {
 		{"approve", security.ScopeOnce, 0, "💤 **No command waits for approval**"},
 		{"deny", security.ScopeDeny, 0, "💤 **No command waits for approval**"},
 	} {
-		if got := resolveReply(c.name, c.scope, c.n); got != c.want {
+		if got := resolveReply(c.name, c.scope, c.n, 0); got != c.want {
 			t.Errorf("resolveReply(%q, %v, %d) = %q, want %q", c.name, c.scope, c.n, got, c.want)
 		}
 	}
@@ -761,7 +761,7 @@ func TestAddSetsFlagsBeforePublish(t *testing.T) {
 	if got != p || !got.noAlways || !got.noSession {
 		t.Fatalf("pending prompt %+v", got)
 	}
-	if n, applied := it.resolveApprovals(42, "", security.ScopeAlways, true); n != 1 || applied != security.ScopeOnce {
+	if n, applied, _ := it.resolveApprovals(42, "", security.ScopeAlways, true); n != 1 || applied != security.ScopeOnce {
 		t.Fatalf("n %d, applied %v", n, applied)
 	}
 }
@@ -922,5 +922,83 @@ func TestResolveApprovalsOnlyItsTopic(t *testing.T) {
 	}
 	if n := it.ResolveApprovals(-100, "17", security.ScopeOnce, true); n != 1 || <-out != security.ScopeOnce {
 		t.Fatal(n)
+	}
+}
+
+// TestApproveAllSkipsHumanOnly: two human-only prompts wait, then /approve all. Both stay open.
+func TestApproveAllSkipsHumanOnly(t *testing.T) {
+	it, api := interactions(t)
+	out := make(chan security.Scope, 2)
+	for range 2 {
+		go func() {
+			sc, _ := it.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5",
+				Command: "passwd", Description: "password change", HumanOnly: true, NoSession: true, NoAlways: true})
+			out <- sc
+		}()
+	}
+	waitSends(t, api, 2)
+	if n, applied, waiting := it.resolveApprovals(5, "", security.ScopeOnce, true); n != 0 || applied != security.ScopeOnce || waiting != 2 {
+		t.Fatal(n, applied, waiting)
+	}
+	select {
+	case sc := <-out:
+		t.Fatalf("/approve all must not answer a human-only prompt, got %v", sc)
+	case <-time.After(50 * time.Millisecond):
+	}
+	// /deny all still answers the human-only prompts.
+	if n := it.ResolveApprovals(5, "", security.ScopeDeny, true); n != 2 {
+		t.Fatal(n)
+	}
+	for range 2 {
+		if sc := <-out; sc != security.ScopeDeny {
+			t.Fatal(sc)
+		}
+	}
+}
+
+func TestApproveAllAnswersOnlyTheOthers(t *testing.T) {
+	it, api := interactions(t)
+	plain, human := make(chan security.Scope, 1), make(chan security.Scope, 1)
+	go func() {
+		sc, _ := it.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5",
+			Command: "rm -rf build/", Description: "recursive delete"})
+		plain <- sc
+	}()
+	waitSends(t, api, 1)
+	go func() {
+		sc, _ := it.For(5, "", "").PromptApproval(ctx, security.ApprovalRequest{SessionKey: "telegram:dm:5",
+			Command: "passwd", Description: "password change", HumanOnly: true, NoSession: true, NoAlways: true})
+		human <- sc
+	}()
+	waitSends(t, api, 2)
+	if n, applied, waiting := it.resolveApprovals(5, "", security.ScopeSession, true); n != 1 || applied != security.ScopeSession || waiting != 1 {
+		t.Fatal(n, applied, waiting)
+	}
+	if sc := <-plain; sc != security.ScopeSession {
+		t.Fatal(sc)
+	}
+	// /approve with no "all" answers the oldest prompt, which is now the human-only one.
+	if n, _, waiting := it.resolveApprovals(5, "", security.ScopeOnce, false); n != 1 || waiting != 0 {
+		t.Fatal(n, waiting)
+	}
+	if sc := <-human; sc != security.ScopeOnce {
+		t.Fatal(sc)
+	}
+}
+
+func TestResolveReplyHumanOnlyLine(t *testing.T) {
+	for _, c := range []struct {
+		scope      security.Scope
+		n, waiting int
+		want       string
+	}{
+		{security.ScopeOnce, 1, 2, "✅ **Approval allowed** · once\nThe agent continues.\n2 human-only requests still wait for a tap."},
+		{security.ScopeOnce, 3, 1, "✅ **Approval allowed** · 3 commands\nThe agent continues.\n1 human-only request still waits for a tap."},
+		{security.ScopeOnce, 0, 2, "🔒 **No command was approved**\n2 human-only requests still wait for a tap."},
+		{security.ScopeOnce, 0, 0, "💤 **No command waits for approval**"},
+	} {
+		if got := resolveReply("approve", c.scope, c.n, c.waiting); got != c.want {
+			t.Errorf("resolveReply(approve, %v, %d, %d) = %q, want %q", c.scope, c.n, c.waiting, got, c.want)
+		}
 	}
 }

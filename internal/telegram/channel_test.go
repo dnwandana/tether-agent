@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -1166,6 +1167,57 @@ func TestBotJoinAndRemovalLogged(t *testing.T) {
 	// no session, no turn.
 	if prov.count() != 0 || h.api.count("sendMessage") != 0 || h.session("telegram:group:-1001234567890:1") != nil {
 		t.Fatalf("turns %d, sent %q", prov.count(), h.sentTexts())
+	}
+}
+
+func TestMigrationMovesChatModes(t *testing.T) {
+	migrate := `{"message_id":4,"from":{"id":5,"first_name":"Alice"},"chat":{"id":-1234567890,"title":"Test Group","type":"group"},"migrate_to_chat_id":-1001234567890}`
+	from := `{"message_id":1,"from":{"id":5,"first_name":"Alice"},"chat":{"id":-1001234567890,"title":"Test Group","type":"supergroup"},"migrate_from_chat_id":-1234567890}`
+	h := harness(t, &tgProv{}, func(*config.TelegramConfig) {})
+	rows := map[string]string{
+		"telegram:-1234567890:0":    "read-only",
+		"telegram:-1234567890:7":    "full",
+		"telegram:-1234567890:9":    "read-only",
+		"telegram:-1001234567890:9": "full", // set in the new chat before the event: it stays
+		"telegram:-12345678901:0":   "full", // a longer chat id: it stays
+		"telegram:-777:0":           "read-only",
+		"cli":                       "full",
+	}
+	for scope, mode := range rows {
+		if _, err := h.ch.DB.ExecContext(ctx, "INSERT INTO chat_modes(scope, mode, set_at) VALUES (?, ?, 1)", scope, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.update(serviceMsg(t, migrate))
+	h.update(serviceMsg(t, from))
+	h.waitIdle()
+
+	got := map[string]string{}
+	q, err := h.ch.DB.QueryContext(ctx, "SELECT scope, mode FROM chat_modes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for q.Next() {
+		var scope, mode string
+		if err := q.Scan(&scope, &mode); err != nil {
+			t.Fatal(err)
+		}
+		got[scope] = mode
+	}
+	if err := q.Err(); err != nil {
+		t.Fatal(err)
+	}
+	q.Close()
+	want := map[string]string{
+		"telegram:-1001234567890:0": "read-only",
+		"telegram:-1001234567890:7": "full",
+		"telegram:-1001234567890:9": "full",
+		"telegram:-12345678901:0":   "full",
+		"telegram:-777:0":           "read-only",
+		"cli":                       "full",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %v\nwant %v", got, want)
 	}
 }
 

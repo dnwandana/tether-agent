@@ -78,7 +78,9 @@ type prompt struct {
 	free bool
 	// noAlways and noSession are the answers that the approval request does not permit.
 	noAlways, noSession bool
-	reply               chan promptReply
+	// humanOnly is true for a request that needs a tap for each request. /approve all skips it.
+	humanOnly bool
+	reply     chan promptReply
 }
 
 type promptReply struct {
@@ -126,6 +128,7 @@ func (it *Interactions) promptApproval(ctx context.Context, chatID int64, thread
 	p := it.add(approvalPrefix, chatID, threadID, func(p *prompt) {
 		p.userID = userID
 		p.noAlways, p.noSession = req.NoAlways, req.NoSession
+		p.humanOnly = req.HumanOnly
 	})
 	kb := approvalKeyboard(p.id, req.NoAlways, req.NoSession)
 	if err := it.sendMDV2(ctx, p, mdv2, plain, kb); err != nil {
@@ -313,13 +316,15 @@ func (it *Interactions) askCallback(ctx context.Context, p *prompt, arg string, 
 // /deny text fallbacks. It answers the oldest one, or all of them with all. It returns the
 // number of answered approvals.
 func (it *Interactions) ResolveApprovals(chatID int64, threadID string, scope security.Scope, all bool) int {
-	n, _ := it.resolveApprovals(chatID, threadID, scope, all)
+	n, _, _ := it.resolveApprovals(chatID, threadID, scope, all)
 	return n
 }
 
 // resolveApprovals does the work of ResolveApprovals. It also returns the scope that the
 // last answered approval got after fitScope. With no pending approval, applied is scope.
-func (it *Interactions) resolveApprovals(chatID int64, threadID string, scope security.Scope, all bool) (n int, applied security.Scope) {
+// An /approve all leaves each human-only prompt open and counts it in waiting. A deny
+// answers all prompts.
+func (it *Interactions) resolveApprovals(chatID int64, threadID string, scope security.Scope, all bool) (n int, applied security.Scope, waiting int) {
 	applied = scope
 	it.mu.Lock()
 	defer it.mu.Unlock()
@@ -329,6 +334,17 @@ func (it *Interactions) resolveApprovals(chatID int64, threadID string, scope se
 			list = append(list, p)
 		}
 	}
+	if all && scope != security.ScopeDeny {
+		kept := list[:0]
+		for _, p := range list {
+			if p.humanOnly {
+				waiting++
+				continue
+			}
+			kept = append(kept, p)
+		}
+		list = kept
+	}
 	slices.SortFunc(list, func(a, b *prompt) int { return int(a.seq - b.seq) })
 	if !all && len(list) > 1 {
 		list = list[:1]
@@ -337,7 +353,7 @@ func (it *Interactions) resolveApprovals(chatID int64, threadID string, scope se
 		applied = fitScope(scope, p.noAlways, p.noSession)
 		it.deliverLocked(p.id, promptReply{scope: scope})
 	}
-	return len(list), applied
+	return len(list), applied, waiting
 }
 
 // fitScope returns the scope that an approval request permits for the answer s. With
@@ -573,9 +589,26 @@ func answerSummary(a tools.Answer) string {
 	return a.Text
 }
 
-// resolveReply returns the reply to /approve or /deny that answered n approvals. These are
-// Tether Agent texts. The scopes and the oldest-first order follow Hermes.
-func resolveReply(name string, scope security.Scope, n int) string {
+// resolveReply returns the reply to /approve or /deny that answered n approvals. Waiting is
+// the number of human-only prompts that /approve all left open. These are Tether Agent
+// texts. The scopes and the oldest-first order follow Hermes.
+func resolveReply(name string, scope security.Scope, n, waiting int) string {
+	line := "1 human-only request still waits for a tap."
+	if waiting > 1 {
+		line = fmt.Sprintf("%d human-only requests still wait for a tap.", waiting)
+	}
+	if n == 0 && waiting > 0 {
+		return "🔒 **No command was approved**\n" + line
+	}
+	reply := resolveAnswered(name, scope, n)
+	if n > 0 && waiting > 0 {
+		reply += "\n" + line
+	}
+	return reply
+}
+
+// resolveAnswered returns the reply text for the n answered approvals.
+func resolveAnswered(name string, scope security.Scope, n int) string {
 	switch {
 	case n == 0:
 		return noPendingApproval
