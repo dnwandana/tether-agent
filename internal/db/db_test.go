@@ -59,7 +59,7 @@ func TestOpenCreatesSchemaAndWAL(t *testing.T) {
 	}
 	for _, tbl := range []string{"sessions", "messages", "messages_fts", "compactions", "cron_jobs",
 		"approval_grants", "pairing", "active_session", "delegation_batches", "kv", "schema_version", "goals",
-		"acp_sessions", "chat_modes", "approval_log"} {
+		"acp_sessions", "chat_modes", "approval_log", "secret_pins", "held_sends"} {
 		var n int
 		if err := d.QueryRow("SELECT count(*) FROM sqlite_master WHERE name=?", tbl).Scan(&n); err != nil {
 			t.Fatal(err)
@@ -431,7 +431,7 @@ func TestMigrationCronRunsFrom006(t *testing.T) {
 	if err := d.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'cron_runs_job'`).Scan(&n); err != nil || n != 1 {
 		t.Fatal("missing index cron_runs_job:", n, err)
 	}
-	if v, err := d.SchemaVersion(ctx); err != nil || v != 9 || v != LatestVersion() {
+	if v, err := d.SchemaVersion(ctx); err != nil || v != LatestVersion() {
 		t.Fatal(v, LatestVersion(), err)
 	}
 }
@@ -614,9 +614,74 @@ func TestMigrationGrantsFrom008(t *testing.T) {
 		if got := strings.Join(cols, ","); got != "id,pattern_id,content_sha256,workdir,via,programs,preview,server,tool_name,created_at" {
 			t.Fatal(got)
 		}
-		if v, err := d.SchemaVersion(ctx); err != nil || v != 9 || v != LatestVersion() {
+		if v, err := d.SchemaVersion(ctx); err != nil || v != LatestVersion() {
 			t.Fatal(v, LatestVersion(), err)
 		}
 		d.Close()
+	}
+}
+
+func TestKVDelete(t *testing.T) {
+	d, err := Open(filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ctx := context.Background()
+	if err := d.KVSet(ctx, "secret_check:PYPI_TOKEN", "1763463060000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.KVDelete(ctx, "secret_check:PYPI_TOKEN"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := d.KVGet(ctx, "secret_check:PYPI_TOKEN"); ok || err != nil {
+		t.Fatal("the key must be gone", err)
+	}
+	// A delete of a missing key is not an error.
+	if err := d.KVDelete(ctx, "secret_check:NONE"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A database at schema version 11 gains cron_jobs.draft_only. An old job reads it as 0.
+func TestMigrationDraftOnlyFrom011(t *testing.T) {
+	ctx := context.Background()
+	p := filepath.Join(t.TempDir(), "state.db")
+	sdb, err := sql.Open("sqlite", p+dsnParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdb.SetMaxOpenConns(1)
+	old := &DB{DB: sdb}
+	if _, err := old.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.version <= 11 {
+			if err := old.apply(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if _, err := old.ExecContext(ctx, `INSERT INTO cron_jobs (id, schedule) VALUES ('j1', 'every 1h')`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+	d, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	var v int
+	if err := d.QueryRowContext(ctx, `SELECT draft_only FROM cron_jobs WHERE id = 'j1'`).Scan(&v); err != nil || v != 0 {
+		t.Fatal("an old job must read draft_only as 0:", v, err)
+	}
+	if v, err := d.SchemaVersion(ctx); err != nil || v != 12 || v != LatestVersion() {
+		t.Fatal(v, LatestVersion(), err)
 	}
 }

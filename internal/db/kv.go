@@ -28,3 +28,11 @@ func (d *DB) KVSet(ctx context.Context, key, value string) error {
 	}
 	return nil
 }
+
+// KVDelete removes key. A missing key is not an error.
+func (d *DB) KVDelete(ctx context.Context, key string) error {
+	if _, err := d.ExecContext(ctx, "DELETE FROM kv WHERE key = ?", key); err != nil {
+		return fmt.Errorf("db: delete kv %q: %w", key, err)
+	}
+	return nil
+}
