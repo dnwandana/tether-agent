@@ -794,3 +794,17 @@ func TestClientTimeoutFields(t *testing.T) {
 		t.Fatal("a download must stop at UploadTimeout:", err, time.Since(start))
 	}
 }
+
+func TestGetChat(t *testing.T) {
+	srv := tgServer(t, func(method string, body map[string]any) any {
+		if method != "getChat" || body["chat_id"].(float64) != -100 {
+			t.Errorf("%s %v", method, body)
+		}
+		return map[string]any{"id": -100, "type": "supergroup", "title": "Pricing team", "is_forum": true}
+	})
+	c := &Client{Token: "T", BaseURL: srv.URL}
+	got, err := c.GetChat(ctx, -100)
+	if err != nil || got.ID != -100 || got.Type != "supergroup" || got.Title != "Pricing team" || !got.IsForum {
+		t.Fatal(got, err)
+	}
+}

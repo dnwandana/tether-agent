@@ -107,7 +107,7 @@ func (SkillViewTool) Schema() provider.ToolSchema {
 			"Load a skill before you do a task that it covers. To read a support file, pass its path " +
 			"in the skill folder as file, for example references/api.md. When the skill needs environment " +
 			"variables, the result gives the status of each one. A secret reaches the terminal tool only " +
-			"when the owner adds its name to terminal.env_passthrough in config.yaml.",
+			"when the owner binds it to a command in exec_secrets in config.yaml. You never see the value.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {
@@ -352,7 +352,7 @@ func (SkillManageTool) Schema() provider.ToolSchema {
 			"- delete: name.\n\n" +
 			"The skill guard scans each write. It refuses a skill that sends secrets out, for example curl with " +
 			"$API_KEY. Put an API call in a script under ~/.tether/scripts/ (write_file cannot write there: ask the user, or use the terminal tool), and make " +
-			"the skill run that script with the terminal tool. Skills from external folders are read-only.",
+			"the skill run that script with the terminal tool. Ask the owner to bind the key name in exec_secrets to the path of the script. Skills from external folders are read-only.",
 		Parameters: json.RawMessage(`{
   "type": "object",
   "properties": {

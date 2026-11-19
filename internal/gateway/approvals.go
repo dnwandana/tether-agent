@@ -456,6 +456,8 @@ func logRowText(r security.LogRow, now time.Time, all bool) string {
 	switch r.Answer {
 	case "once":
 		parts = append(parts, "Once")
+	case "redacted":
+		parts = append(parts, "Send redacted")
 	case "session":
 		parts = append(parts, "Session")
 	case "always":

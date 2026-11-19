@@ -933,6 +933,13 @@ func (l *lazyRenderer) Notice(text string)           { l.get().Notice(text) }
 func (l *lazyRenderer) Done(final string, err error) { l.get().Done(final, err) }
 func (l *lazyRenderer) Ack(text string)              { l.get().Ack(text) }
 
+// SetSession makes the inner renderer and gives it the session id, when it takes one.
+func (l *lazyRenderer) SetSession(id string) {
+	if sr, ok := l.get().(SessionRenderer); ok {
+		sr.SetSession(id)
+	}
+}
+
 // AckReply sends r with its buttons when the inner renderer can show them, else r.Text.
 func (l *lazyRenderer) AckReply(r Reply) {
 	if rr, ok := l.get().(ReplyRenderer); ok {

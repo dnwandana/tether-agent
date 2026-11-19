@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
+
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 // ErrNoTarget is the error for a job that has no delivery target.
@@ -24,10 +27,43 @@ const (
 	DeliveryNone   = "none"   // Send was false for another reason, or the scheduler has no Deliverer.
 	DeliveryLocal  = "local"  // The job saves only. Also a pause alert of a local job with no home channel.
 	DeliveryFailed = "failed" // The send returned an error.
+	// DeliveryHeld means that model_guard held the text. The owner card waits.
+	DeliveryHeld = "held"
+	// DeliveryDropped means that the owner dropped the held text.
+	DeliveryDropped = "dropped"
+	// DeliveryExpired means that the held text waited 24 h with no tap.
+	DeliveryExpired = "expired"
 )
 
+// partialAnswerMark joins the failure alert of a timed-out run to the partial answer of the run.
+const partialAnswerMark = ". The partial answer follows."
+
+// Note is the data for the owner note about a masked delivery. Original is the text after
+// Redact, with no masks of the scan. HeldID is the held_sends row that keeps Original.
+type Note struct {
+	Job         Job
+	Target      Target
+	TargetTitle string
+	Findings    []security.Finding
+	Original    string
+	HeldID      string
+}
+
+// TargetInfo describes a target for the guard and the owner cards. Kind is "group", "topic",
+// or "private chat of a member".
+type TargetInfo struct {
+	Kind, Title string
+}
+
+// HeldCardInfo is the data of the owner card for a held delivery.
+type HeldCardInfo struct {
+	JobName, TargetTitle, TargetKind, Reason string
+	Sources                                  []string
+}
+
 // RunOutcome is the result of one job run. Deliver sends Text only when Send is true and
-// Silent is false.
+// Silent is false. Sources, Hosts, ToolCounts, and Handles come from the agent turn and feed
+// the scan and the guard of the delivery.
 type RunOutcome struct {
 	Text      string
 	Send      bool
@@ -37,6 +73,13 @@ type RunOutcome struct {
 	Silent bool
 	// Pause is true when this run pauses the job. Deliver then also sends for a local job.
 	Pause bool
+	// Sources, Hosts, and ToolCounts are the outside facts of the agent turn.
+	Sources, Hosts []string
+	ToolCounts     map[string]int
+	// Handles holds the handle values of the run for the scan of the delivery. They stay in memory.
+	Handles []string
+	// RunID is the cron_runs row of the run. It is 0 when the row does not exist yet.
+	RunID int64
 }
 
 // Deliverer sends the outcome of a job run. internal/app sets the function fields, so cron
@@ -51,6 +94,27 @@ type Deliverer struct {
 	Redact func(string) string
 	// Log gets the delivery failures. Nil means slog.Default().
 	Log *slog.Logger
+	// IsPrivate tells whether t is a private chat of the owner. Nil means that every target is
+	// private, so only Redact runs.
+	IsPrivate func(ctx context.Context, t Target) bool
+	// Scan finds sensitive data in the raw text of a delivery to a target that is not private.
+	// It returns the masked text and the findings. The handle values are in handles. Nil finds nothing.
+	Scan func(text string, handles []string) (masked string, findings []security.Finding)
+	// Guard checks a delivery after an outside source. Nil skips the check.
+	Guard security.SendGuarder
+	// Hold shows the owner a card for a held delivery. An error means that no card went out.
+	Hold func(ctx context.Context, h HeldSend, card HeldCardInfo) error
+	// Note tells the owner that the scan masked a delivery. Nil sends no note.
+	Note func(ctx context.Context, n Note) error
+	// TargetInfo gives the kind and the title of a target. Nil gives the kind "chat" and the chat id.
+	TargetInfo func(ctx context.Context, t Target) TargetInfo
+	// LogDecision writes the decision of the guard to the approval log. Nil writes nothing.
+	LogDecision func(ctx context.Context, j Job, decision, reason string)
+	// Held keeps the held texts and the originals. Nil means that a hold is a block.
+	Held *HeldStore
+	// OwnerHome returns the owner's private chat. The alerts of a draft-only job go there. Nil
+	// means no owner chat.
+	OwnerHome func(ctx context.Context) (Target, bool)
 }
 
 // resolveTarget returns the target for the job j. An empty deliver value or
@@ -88,7 +152,9 @@ func resolveTarget(ctx context.Context, j Job, home func(context.Context, bool) 
 // DeliverySilent, and an outcome with Send false gives DeliveryNone. A local job gives
 // DeliveryLocal and sends nothing, except a pause alert: that goes to the home channel. A
 // failure is logged and returned with DeliveryFailed, so the caller can save last_status
-// 'delivery_failed'. Deliver never panics.
+// 'delivery_failed'. For a target that is not private, Deliver scans the raw text before
+// Redact, asks the guard after an outside source, and returns DeliveryHeld when the guard
+// holds the text. Deliver never panics.
 func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (delivery string, err error) {
 	if o.Silent {
 		return DeliverySilent, nil
@@ -109,6 +175,11 @@ func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (delivery 
 	if err != nil {
 		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: %w", j.ID, err)
 	}
+	if j.DraftOnly {
+		if delivery, done, err := d.deliverDraftOnly(ctx, j, o, t, local); done {
+			return delivery, err
+		}
+	}
 	if local {
 		// resolveTarget returns local before it calls Home, so the pause alert asks Home here.
 		if !o.Pause || d.Home == nil || d.Send == nil {
@@ -126,14 +197,156 @@ func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (delivery 
 	if d.Send == nil {
 		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: no send function is set", j.ID)
 	}
-	text := o.Text
-	if d.Redact != nil {
-		text = d.Redact(text)
+	if d.IsPrivate == nil || d.IsPrivate(ctx, t) {
+		return d.send(ctx, j, t, d.redact(o.Text))
 	}
+	// Scan reads the raw text. Redact first would leave 10 characters of a token, and the scan would miss it.
+	masked, findings := o.Text, []security.Finding(nil)
+	if d.Scan != nil {
+		masked, findings = d.Scan(o.Text, o.Handles)
+	}
+	info := d.targetInfo(ctx, t)
+	if d.guarded(o) {
+		allow, reason := d.Guard.Check(ctx, security.GuardInput{SessionID: o.SessionID, JobName: j.Name,
+			JobPurpose: j.Prompt, Sources: o.Sources, Hosts: o.Hosts, ToolCounts: o.ToolCounts,
+			Findings: security.FindingKinds(findings),
+			Action:   "deliver the final text to the Telegram " + info.Kind + ` "` + info.Title + `"`})
+		if !allow {
+			d.logDecision(ctx, j, security.DecisionBlocked, reason)
+			return d.hold(ctx, j, o, t, info, reason)
+		}
+		d.logDecision(ctx, j, security.DecisionAllowed, reason)
+	}
+	delivery, err = d.send(ctx, j, t, d.redact(masked))
+	if err == nil && len(findings) > 0 {
+		d.noteOriginal(ctx, j, o, t, info, findings)
+	}
+	return delivery, err
+}
+
+// deliverDraftOnly applies the delivery rule of a draft-only job. done is false when the
+// target is private and the normal flow goes on.
+func (d *Deliverer) deliverDraftOnly(ctx context.Context, j Job, o RunOutcome, t Target, local bool) (delivery string, done bool, err error) {
+	if !local && d.IsPrivate != nil && d.IsPrivate(ctx, t) {
+		return "", false, nil
+	}
+	if o.Status == "error" || o.Pause {
+		// An alert goes to the private chat of the owner, never to a group.
+		if local && !o.Pause {
+			return DeliveryLocal, true, nil
+		}
+		var home Target
+		ok := false
+		if d.OwnerHome != nil {
+			home, ok = d.OwnerHome(ctx)
+		}
+		if !ok || home.ChatID == "" || d.Send == nil {
+			if local {
+				return DeliveryLocal, true, nil
+			}
+			return DeliveryFailed, true, fmt.Errorf("cron: deliver job %s: no private chat of the owner for the alert of a draft-only job", j.ID)
+		}
+		if home.Source == "" {
+			home.Source = "telegram"
+		}
+		delivery, err = d.send(ctx, j, home, d.redact(o.Text))
+		return delivery, true, err
+	}
+	if local {
+		return DeliveryLocal, true, nil
+	}
+	return DeliveryFailed, true, fmt.Errorf("cron: deliver job %s: %w", j.ID, ErrDraftDeliver)
+}
+
+// guarded tells whether the guard checks o. A failure alert and a pause alert are fixed texts.
+func (d *Deliverer) guarded(o RunOutcome) bool {
+	return d.Guard != nil && len(o.Sources) > 0 && !o.Pause &&
+		(o.Status == "ok" || strings.Contains(o.Text, partialAnswerMark))
+}
+
+func (d *Deliverer) redact(s string) string {
+	if d.Redact == nil {
+		return s
+	}
+	return d.Redact(s)
+}
+
+func (d *Deliverer) send(ctx context.Context, j Job, t Target, text string) (string, error) {
 	if err := d.Send(ctx, t, text, nil); err != nil {
 		return DeliveryFailed, fmt.Errorf("cron: deliver job %s to %s:%s: %w", j.ID, t.Source, t.ChatID, err)
 	}
 	return DeliverySent, nil
+}
+
+func (d *Deliverer) targetInfo(ctx context.Context, t Target) TargetInfo {
+	if d.TargetInfo == nil {
+		return TargetInfo{Kind: "chat", Title: t.ChatID}
+	}
+	return d.TargetInfo(ctx, t)
+}
+
+func (d *Deliverer) logDecision(ctx context.Context, j Job, decision, reason string) {
+	if d.LogDecision != nil {
+		d.LogDecision(ctx, j, decision, reason)
+	}
+}
+
+// targetKey returns "source:chat[:thread]" for t.
+func targetKey(t Target) string {
+	k := t.Source + ":" + t.ChatID
+	if t.ThreadID != "" {
+		k += ":" + t.ThreadID
+	}
+	return k
+}
+
+// hold keeps the text in a held_sends row and shows the owner a card. With no store, no Hold
+// function, or a failed Hold, the hold is a block: the row goes away and the delivery fails.
+func (d *Deliverer) hold(ctx context.Context, j Job, o RunOutcome, t Target, info TargetInfo, reason string) (string, error) {
+	if d.Held == nil || d.Hold == nil {
+		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: model_guard held the delivery, and no owner chat can get the card", j.ID)
+	}
+	id, err := newHeldID()
+	if err != nil {
+		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: model_guard held the delivery, and the owner card failed: %w", j.ID, err)
+	}
+	h := HeldSend{ID: id, Kind: "hold", JobID: j.ID, RunID: o.RunID, Target: targetKey(t), TargetTitle: info.Title,
+		Text: d.redact(o.Text), Reason: reason, Sources: o.Sources, CreatedAt: time.Now()}
+	if err := d.Held.Insert(ctx, h); err != nil {
+		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: model_guard held the delivery, and the owner card failed: %w", j.ID, err)
+	}
+	card := HeldCardInfo{JobName: j.Name, TargetTitle: info.Title, TargetKind: info.Kind, Reason: reason, Sources: o.Sources}
+	if err := d.Hold(ctx, h, card); err != nil {
+		if _, _, cerr := d.Held.Claim(ctx, id); cerr != nil {
+			d.log().Error("cron held send cleanup failed", "job", j.ID, "id", id, "err", cerr)
+		}
+		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: model_guard held the delivery, and the owner card failed: %w", j.ID, err)
+	}
+	return DeliveryHeld, nil
+}
+
+// noteOriginal tells the owner that the scan masked a delivery. An error only logs.
+func (d *Deliverer) noteOriginal(ctx context.Context, j Job, o RunOutcome, t Target, info TargetInfo, findings []security.Finding) {
+	if d.Note == nil {
+		return
+	}
+	original := d.redact(o.Text)
+	n := Note{Job: j, Target: t, TargetTitle: info.Title, Findings: findings, Original: original}
+	if d.Held != nil {
+		id, err := newHeldID()
+		if err == nil {
+			err = d.Held.Insert(ctx, HeldSend{ID: id, Kind: "original", JobID: j.ID, RunID: o.RunID, Target: targetKey(t),
+				TargetTitle: info.Title, Text: original, Sources: o.Sources, CreatedAt: time.Now()})
+		}
+		if err != nil {
+			d.log().Error("cron original text not kept", "job", j.ID, "err", err)
+		} else {
+			n.HeldID = id
+		}
+	}
+	if err := d.Note(ctx, n); err != nil {
+		d.log().Error("cron owner note failed", "job", j.ID, "err", err)
+	}
 }
 
 func (d *Deliverer) log() *slog.Logger {

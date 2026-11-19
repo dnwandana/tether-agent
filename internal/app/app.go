@@ -82,7 +82,11 @@ type App struct {
 	Registry *tools.Registry
 	Log      *slog.Logger
 	Redactor *security.Redactor
-	DotEnv   map[string]string
+	// DotEnv holds the .env values. It loads the file again when its size or mtime changes.
+	DotEnv *security.DotEnvStore
+	// Handles holds the handles of the credentials that terminal results printed. The agent and
+	// the terminal tool share it.
+	Handles *security.Handles
 	// HTTP is the shared client of the providers and the price sources.
 	HTTP *http.Client
 	// Models keeps the model lists for /model. It makes no call until the first
@@ -126,6 +130,10 @@ type App struct {
 	acpReaper chan struct{}
 	// Sched is the cron scheduler. It is nil outside the gateway role.
 	Sched *cron.Scheduler
+	// titles caches the chat titles of the cron deliveries. AddTelegram sets it.
+	titles *chatTitles
+	// heldCards posts the owner cards of held sends. AddTelegram sets it.
+	heldCards *telegram.HeldCards
 	// Telegram is the Telegram channel. AddTelegram sets it in the gateway role.
 	Telegram *telegram.Channel
 	// Delegator runs the children of delegate_task.
@@ -186,14 +194,15 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 			a.Close()
 		}
 	}()
-	if a.DotEnv, err = security.LoadDotEnv(filepath.Join(dir, ".env")); err != nil {
+	dotenv, err := security.LoadDotEnv(filepath.Join(dir, ".env"))
+	if err != nil {
 		return nil, err
 	}
 	cfgPath := opts.ConfigPath
 	if cfgPath == "" {
 		cfgPath = filepath.Join(dir, "config.yaml")
 	}
-	if a.Cfg, err = config.Load(cfgPath, security.EnvLookup(a.DotEnv)); err != nil {
+	if a.Cfg, err = config.Load(cfgPath, security.EnvLookup(dotenv)); err != nil {
 		return nil, err
 	}
 	if err := security.CheckHumanOnly(a.Cfg.Approvals.HumanOnly); err != nil {
@@ -201,12 +210,15 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	}
 	// The gate, the goal gates, and the MCP manager read the raise list.
 	security.SetHumanOnlyRules(a.Cfg.Approvals.HumanOnly)
+	// A bound name is a secret name. ChildEnv strips it from each child.
+	security.SetBoundSecretNames(boundNames(a.Cfg))
 	for _, d := range dataDirs {
 		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
 			return nil, fmt.Errorf("app: cannot make the folder %s: %w", d, err)
 		}
 	}
-	a.Redactor = NewRedactor(a.DotEnv)
+	a.Redactor = NewNamedRedactor(dotenv)
+	a.DotEnv = security.NewDotEnvStore(filepath.Join(dir, ".env"), dotenv, a.Redactor.Add)
 	if err := a.openLog(opts); err != nil {
 		return nil, err
 	}
@@ -256,13 +268,15 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		}
 	}
 	a.Gate = security.NewGate(a.Cfg.Approvals, a.DB)
-	a.Gate.SudoPasswordSet = a.DotEnv["SUDO_PASSWORD"] != "" || os.Getenv("SUDO_PASSWORD") != ""
+	a.Gate.SudoPasswordSet = dotenv["SUDO_PASSWORD"] != "" || os.Getenv("SUDO_PASSWORD") != ""
 	// The judge runs only in smart mode.
 	a.Gate.Judge = security.ProviderJudge{
 		Prov:    a.Prov,
 		Record:  a.recordUsage,
 		Timeout: time.Duration(a.Cfg.Approvals.SmartTimeoutS) * time.Second,
 	}
+	// model_guard runs only for an unattended send after outside content.
+	a.Gate.Guard = a.sendGuard()
 	a.Gate.SmartScriptMaxChars = a.Cfg.Approvals.SmartScriptMaxChars
 	a.Gate.Log = a.Log
 	a.Gate.Redactor = a.Redactor
@@ -276,8 +290,9 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	// The command reads and removes the Always answers of the gate of this process.
 	gateway.Register(gateway.ApprovalsCommand(a.Gate))
 	gateway.Register(gateway.ModeCommand(a.Gate))
+	gateway.Register(gateway.SecretsCommand(a.secretsDeps()))
 	// CLI.Run attaches the prompt to the REPL input. With no CLI, a question gets no answer.
-	a.CLIAsk = &gateway.CLIAsk{}
+	a.CLIAsk = &gateway.CLIAsk{Save: a.SaveSecret}
 	a.Prices = pricing.NewService(a.Cfg, filepath.Join(dir, "cache"), a.HTTP, a.DB, a.Log)
 	if a.Memory, err = memory.Open(filepath.Join(dir, "memory"), a.Cfg.Memory.MemoryCharLimit, a.Cfg.Memory.UserCharLimit); err != nil {
 		return nil, err
@@ -301,6 +316,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	}
 	a.Cron = &cron.Store{DB: a.DB, Loc: time.Local,
 		RunHistory: a.Cfg.Cron.RunHistory, FailStreakLimit: a.Cfg.Cron.FailStreakLimit, Redact: a.Redactor.Redact,
+		IsPrivate:    a.isPrivateTarget,
 		ValidToolset: func(s string) bool { return tools.ValidToolset(s, mcpServers) }}
 	if opts.Gateway {
 		a.Sched = a.newScheduler()
@@ -310,6 +326,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.gatewayRole = opts.Gateway
 	a.Procs = tools.NewProcRegistry()
 	a.Procs.Keep = time.Duration(a.Cfg.Terminal.ProcessKeepS) * time.Second
+	a.Handles = security.NewHandles()
 	a.registerTools(opts.Gateway)
 	a.startMCP(ctx, cfgPath)
 	if opts.Gateway {
@@ -319,22 +336,24 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	}
 
 	a.Agent = &agent.Agent{
-		Prov:       a.Prov,
-		Providers:  a.Providers,
-		Chains:     a.Set,
-		Tools:      a.Registry,
-		Store:      a.Store,
-		DB:         a.DB,
-		Cfg:        a.Cfg,
-		Log:        a.Log,
-		SpillDir:   filepath.Join(dir, "cache", "spill"),
-		Redactor:   a.Redactor,
-		Prices:     a.Prices,
-		Memory:     a.Memory,
-		Skills:     a.Skills,
-		WorkDir:    a.WorkDir,
-		MediaInbox: filepath.Join(dir, "cache", "media"),
-		Compactor:  &ctxmgr.Compactor{Store: a.Store, DB: a.DB, Cfg: a.Cfg.Context, Log: a.Log},
+		Prov:           a.Prov,
+		Providers:      a.Providers,
+		Chains:         a.Set,
+		Tools:          a.Registry,
+		Store:          a.Store,
+		DB:             a.DB,
+		Cfg:            a.Cfg,
+		Log:            a.Log,
+		SpillDir:       filepath.Join(dir, "cache", "spill"),
+		Redactor:       a.Redactor,
+		Handles:        a.Handles,
+		BeforeToolText: func() { a.DotEnv.Refresh() },
+		Prices:         a.Prices,
+		Memory:         a.Memory,
+		Skills:         a.Skills,
+		WorkDir:        a.WorkDir,
+		MediaInbox:     filepath.Join(dir, "cache", "media"),
+		Compactor:      &ctxmgr.Compactor{Store: a.Store, DB: a.DB, Cfg: a.Cfg.Context, Log: a.Log},
 	}
 	// The frozen system prompt of each session. A /reload-mcp changes the MCP
 	// generation, so the prompt is rebuilt.
@@ -378,6 +397,7 @@ func (a *App) goalDeps() goals.Deps {
 		Alive:       goals.PIDAlive,
 		Now:         time.Now,
 		Log:         a.Log,
+		Redact:      a.Redactor.Redact,
 
 		InGateway:       a.Gate.InGateway,
 		SudoPasswordSet: a.Gate.SudoPasswordSet,
@@ -518,14 +538,19 @@ func (a *App) registerDelegation(gatewayRole bool) {
 // the send function and the home channel of its deliverer.
 func (a *App) newScheduler() *cron.Scheduler {
 	cfg := a.Cfg
+	var guard security.SendGuarder
+	if a.Gate != nil {
+		guard = a.Gate.Guard
+	}
 	return &cron.Scheduler{
+		Sweep: a.sweepHeld,
 		Store: a.Cron,
 		Runner: &cron.Runner{
 			Store:      a.Store,
 			ScriptsDir: filepath.Join(a.DataDir, "scripts"),
 			Turn:       a.cronTurn,
 			Skills:     a.Skills.Load,
-			Env:        security.ChildEnv(os.Environ(), a.DotEnv, cfg.Terminal.EnvPassthrough),
+			Env:        security.ChildEnv(os.Environ(), a.DotEnv.Snapshot(), cfg.Terminal.EnvPassthrough),
 			SpillDir:   filepath.Join(a.DataDir, "cache", "spill"),
 			Log:        a.Log,
 			Script: cron.ScriptLimits{
@@ -535,10 +560,13 @@ func (a *App) newScheduler() *cron.Scheduler {
 			},
 			AgentTimeout: time.Duration(cfg.Cron.AgentTimeoutS) * time.Second,
 		},
-		Tick:        time.Duration(cfg.Cron.TickS) * time.Second,
-		GraceMin:    time.Duration(cfg.Cron.GraceMinS) * time.Second,
-		GraceMax:    time.Duration(cfg.Cron.GraceMaxS) * time.Second,
-		Deliver:     &cron.Deliverer{Redact: a.Redactor.Redact, Log: a.Log},
+		Tick:     time.Duration(cfg.Cron.TickS) * time.Second,
+		GraceMin: time.Duration(cfg.Cron.GraceMinS) * time.Second,
+		GraceMax: time.Duration(cfg.Cron.GraceMaxS) * time.Second,
+		Deliver: &cron.Deliverer{Redact: a.Redactor.Redact, Log: a.Log,
+			IsPrivate: a.isPrivateTarget, Scan: a.deliveryScan(), Guard: guard,
+			Held: &cron.HeldStore{DB: a.DB}, Hold: a.holdDelivery, Note: a.sendCronNote,
+			TargetInfo: a.cronTargetInfo, LogDecision: a.logDeliveryDecision},
 		MaxParallel: cfg.Cron.MaxParallelJobs,
 		Missed:      cfg.Cron.MissedRuns,
 		Log:         a.Log,
@@ -547,9 +575,10 @@ func (a *App) newScheduler() *cron.Scheduler {
 
 // cronTurn runs the agent turn of a cron job. The kind "cron" makes the gate apply
 // approvals.cron_mode. Env.Ask stays nil, so no user gets a question.
-func (a *App) cronTurn(ctx context.Context, t cron.CronTurn) (string, error) {
+func (a *App) cronTurn(ctx context.Context, t cron.CronTurn) (cron.TurnOutput, error) {
 	env := a.NewEnv(t.Session, "cron")
 	env.Kind = "cron"
+	env.JobName, env.JobPurpose, env.DraftOnly = t.JobName, t.JobPurpose, t.DraftOnly
 	// Only the log row gets the scope of the origin chat. A cron run follows cron_mode, not the mode of that topic.
 	env.LogScope = a.cronLogScope(ctx, t.Session)
 	if t.Workdir != "" {
@@ -564,8 +593,19 @@ func (a *App) cronTurn(ctx context.Context, t cron.CronTurn) (string, error) {
 		// The default toolsets.cron is [all], so remove acp_delegate. The tool also refuses a cron run.
 		RemoveTools: append(slices.Clone(t.RemoveTools), "acp_delegate"),
 		Env:         env,
+		Outside:     t.Outside,
 	})
-	return res.Final, err
+	// RunTurn marks t.Outside at its start, so the facts hold those sources.
+	facts := tools.Outside(env)
+	sources := slices.Clone(facts.Sources)
+	slices.Sort(sources)
+	var handles []string
+	if a.Agent.Handles != nil {
+		// Read the values before the deferred ForgetSession frees them.
+		handles = a.Agent.Handles.Values(t.Session.ID)
+	}
+	return cron.TurnOutput{Final: res.Final, Sources: sources, Hosts: facts.Hosts,
+		ToolCounts: facts.ToolCounts, Handles: handles}, err
 }
 
 // AddTelegram checks the bot token with getMe, builds the Telegram channel, and adds it to
@@ -612,7 +652,7 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		// Media sets the local files that an answer can send (a port of Hermes
 		// validate_media_delivery_path). The gateway.media_* keys set the policy.
 		// A set TETHER_MEDIA_* variable wins. A nil policy sends no file.
-		Media: telegram.NewMediaPolicyWith(a.DataDir, security.EnvLookup(a.DotEnv), telegram.MediaPolicyConfig{
+		Media: telegram.NewMediaPolicyWith(a.DataDir, security.EnvLookup(a.DotEnv.Snapshot()), telegram.MediaPolicyConfig{
 			Strict:       a.Cfg.Gateway.MediaDeliveryStrict,
 			AllowDirs:    a.Cfg.Gateway.MediaAllowDirs,
 			TrustRecent:  a.Cfg.Gateway.MediaTrustRecentFiles,
@@ -633,13 +673,41 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 			return cronChatIDs(jobs), nil
 		}
 	}
+	ch.SaveSecret = a.SaveSecret
+	ch.Secrets = &telegram.SecretCards{C: c, DB: a.DB, Log: a.Log}
+	ch.UI.Secrets = ch.Secrets
+	ch.UI.OwnerChat = ch.OwnerChat
 	a.Telegram = ch
 	a.Agent.ChatInfo = telegram.ChatInfo(cfg, me)
+	// A group or topic session that members can read gets no bound-secrets entry.
+	ownerOf := telegram.OwnerOf(cfg, func(uid string) bool {
+		return ch.Pair.IsApproved(context.Background(), "telegram", uid)
+	})
+	a.Agent.SharedSession = func(s *sessions.Session) bool {
+		_, shared := ownerOf(s)
+		return shared
+	}
 	a.Gateway().Channels[ch.Name()] = ch
+	ch.Outbound = a.channelOutbound()
+	ch.Partial = a.Redactor.PartialExact
+	ch.PrivateChat = func(chat int64) bool {
+		return a.isPrivateTarget(context.Background(), cron.Target{Source: "telegram", ChatID: strconv.FormatInt(chat, 10)})
+	}
 	if a.Sched != nil {
+		a.titles = &chatTitles{C: c, TTL: time.Hour}
+		a.heldCards = &telegram.HeldCards{C: c, Log: a.Log,
+			Store: heldSendStore{held: a.Sched.Deliver.Held, jobs: a.Cron}, Send: a.sendHeld}
+		ch.HeldCards = a.heldCards
 		a.Sched.Deliver.Send = func(ctx context.Context, to cron.Target, text string, files []string) error {
 			return ch.Send(ctx, gateway.Target{Source: "telegram", ChatID: to.ChatID, ThreadID: to.ThreadID},
 				gateway.Outbound{Text: text, Files: files})
+		}
+		a.Sched.Deliver.OwnerHome = func(ctx context.Context) (cron.Target, bool) {
+			id, ok := ch.HomeOwnerChat(ctx)
+			if !ok {
+				return cron.Target{}, false
+			}
+			return cron.Target{Source: "telegram", ChatID: strconv.FormatInt(id, 10)}, true
 		}
 		a.Sched.Deliver.Home = func(ctx context.Context, forCron bool) (cron.Target, bool) {
 			t, ok := telegram.HomeTarget(ctx, a.DB, a.Cfg.Telegram, forCron)
@@ -692,9 +760,11 @@ func (a *App) startMCP(ctx context.Context, cfgPath string) {
 		CacheDir: filepath.Join(a.DataDir, "cache", "mcp-tools"),
 		Log:      a.Log,
 		BaseEnv:  os.Environ(),
-		DotEnv:   a.DotEnv,
+		EnvStore: a.DotEnv,
 		LoadServers: func() (map[string]config.MCPServer, error) {
-			c, err := config.Load(cfgPath, security.EnvLookup(a.DotEnv))
+			// A /reload-mcp sees a value that the owner saved after the start.
+			a.DotEnv.Refresh()
+			c, err := config.Load(cfgPath, security.EnvLookup(a.DotEnv.Snapshot()))
 			if err != nil {
 				return nil, err
 			}
@@ -744,7 +814,7 @@ func (a *App) startACP(ctx context.Context, version string) {
 	a.ACP = acp.NewManager(acp.ManagerOptions{
 		Config:        a.Cfg.ACP,
 		DataDir:       a.DataDir,
-		DotEnv:        a.DotEnv,
+		EnvStore:      a.DotEnv,
 		Store:         acp.NewStore(a.DB),
 		ClientVersion: version,
 		Log:           a.Log,
@@ -840,14 +910,21 @@ func (a *App) registerTools(gatewayRole bool) {
 	imageWait := time.Duration(cfg.Media.ImageDownloadTimeoutS) * time.Second
 	a.terminal = &tools.TerminalTool{
 		DefaultTimeout: time.Duration(cfg.Terminal.DefaultTimeoutS) * time.Second,
-		DotEnv:         a.DotEnv,
-		// A child keeps only the secret names of terminal.env_passthrough.
+		// A child keeps only the secret names of terminal.env_passthrough, and the bound
+		// secrets of a matching command.
 		Passthrough: func(*tools.Env) []string { return skillPassthrough(cfg) },
+		Bound:       boundCommands(cfg),
+		Store:       a.DotEnv,
+		Pins:        &security.PinStore{DB: a.DB},
+		Marks:       kvMarks{DB: a.DB},
+		Handles:     a.Handles,
 		SpillDir:    spill,
 		InGateway:   gatewayRole,
 		Procs:       a.Procs,
 	}
 	a.RegisterTool(a.terminal)
+	// request_secret always registers. With an empty exec_secrets, it refuses each name.
+	a.RegisterTool(tools.RequestSecretTool{Bound: boundCommands(cfg)})
 	a.RegisterTool(tools.ReadFileTool{MaxLines: cfg.Files.ReadMaxLines, MaxLineChars: cfg.Files.ReadMaxLineChars})
 	// With Protected nil, the file tools refuse the protected paths of env.DataDir.
 	a.RegisterTool(tools.WriteFileTool{})
@@ -896,7 +973,7 @@ func (a *App) registerTools(gatewayRole bool) {
 		HC:        a.HTTP,
 		// An image URL in an endpoint response comes from the network, so the client is guarded.
 		Download:  tools.GuardedClient(true, imageWait, 3),
-		Env:       security.ChildEnv(os.Environ(), a.DotEnv, cfg.Terminal.EnvPassthrough),
+		Env:       security.ChildEnv(os.Environ(), a.DotEnv.Snapshot(), cfg.Terminal.EnvPassthrough),
 		Log:       a.Log,
 		Protected: protected,
 	}
@@ -918,6 +995,7 @@ func (a *App) registerTools(gatewayRole bool) {
 		Tick:            time.Duration(cfg.Cron.TickS) * time.Second,
 		GraceMin:        time.Duration(cfg.Cron.GraceMinS) * time.Second,
 		GraceMax:        time.Duration(cfg.Cron.GraceMaxS) * time.Second,
+		PrivateTarget:   a.draftPrivateTarget,
 	})
 	// view_image exists only when a vision provider exists.
 	if vp, ok := tools.VisionProvider(cfg, a.Providers); ok {
@@ -940,7 +1018,7 @@ func (a *App) registerTools(gatewayRole bool) {
 			MaxCalls:       cfg.CodeExecution.MaxToolCalls,
 			MaxStdout:      cfg.CodeExecution.MaxStdoutBytes,
 			Python:         python,
-			DotEnv:         a.DotEnv,
+			DotEnv:         a.DotEnv.Snapshot(),
 			Passthrough:    func(*tools.Env) []string { return skillPassthrough(cfg) },
 			InGateway:      gatewayRole,
 			MaxStderrChars: cfg.CodeExecution.MaxStderrChars,
@@ -989,11 +1067,13 @@ func (a *App) NewTurnEnv(sess *sessions.Session, channel, userID string) *tools.
 		Log:     a.Log,
 		Todo:    a.todoLimits(),
 	}
+	env.UserID = userID
 	gate := tools.GateApprover{Gate: a.Gate}
 	switch {
 	case channel == "cli":
 		if a.CLIAsk != nil {
 			gate.Prompter = a.CLIAsk
+			gate.OwnerPrompter = a.CLIAsk
 			env.Ask = a.CLIAsk
 		}
 		// gateway.Deps.Turn sends the "🔀 [i/n] tool" lines of the delegate_task children and
@@ -1004,6 +1084,11 @@ func (a *App) NewTurnEnv(sess *sessions.Session, channel, userID string) *tools.
 			ui := ch.UI.For(chat, sess.ThreadID, userID)
 			gate.Prompter = ui
 			env.Ask = ui
+			if chat > 0 {
+				gate.OwnerPrompter = ui
+			} else {
+				gate.OwnerPrompter = &ownerPrompter{ch: ch, userID: userID, chatID: sess.ChatID, threadID: sess.ThreadID}
+			}
 		}
 		key := sess.Key
 		env.Progress = func(batch uint64, child, tool, preview string) {
@@ -1110,6 +1195,9 @@ func (a *App) ForgetSession(sessionID string) {
 	a.valuesMu.Lock()
 	delete(a.values, sessionID)
 	a.valuesMu.Unlock()
+	if a.Handles != nil {
+		a.Handles.Forget(sessionID)
+	}
 	if a.Gate != nil {
 		a.Gate.ResetSession(sessionID)
 	}
@@ -1466,7 +1554,23 @@ func approvalWait(timeoutS int) time.Duration {
 }
 
 // NewRedactor returns a redactor that masks the .env values and the values of the secret
-// variables in the process environment.
+// variables in the process environment with the Mask form. The setup wizard uses it,
+// because its names are not .env names.
 func NewRedactor(dotenv map[string]string) *security.Redactor {
 	return security.NewRedactor(security.KnownSecretValues(dotenv, os.Environ()))
+}
+
+// NewNamedRedactor returns a redactor that replaces each .env value, and the value of each
+// secret variable in the process environment, with the label «NAME».
+func NewNamedRedactor(dotenv map[string]string) *security.Redactor {
+	environ := os.Environ()
+	pairs := security.KnownSecretPairs(dotenv, environ)
+	r := security.NewNamedRedactor(pairs)
+	// A process value that differs from the .env value of the same name is not in pairs.
+	for v, name := range security.KnownSecretNames(dotenv, environ) {
+		if pairs[name] != v {
+			r.Add(name, v)
+		}
+	}
+	return r
 }

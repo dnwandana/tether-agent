@@ -19,12 +19,19 @@ import (
 // and the tail (30% of max). The result is always valid UTF-8. A failed spill write is an
 // error, because the marker must never point to a file that does not exist.
 func Truncate(s string, max int, spillDir string) (string, error) {
+	return TruncateNamed(s, max, spillDir, "")
+}
+
+// TruncateNamed works like Truncate. The spill file is spillDir/<source>-<id>.txt, so a later
+// read of the file can tell where the text came from. An empty source gives <id>.txt.
+// Each rune of source that is not an ASCII letter, a digit, or "_" becomes "_".
+func TruncateNamed(s string, max int, spillDir, source string) (string, error) {
 	clean := SanitizeUTF8(s)
 	total := utf8.RuneCountInString(clean)
 	if max <= 0 || total <= max {
 		return clean, nil
 	}
-	path, err := writeSpill(spillDir, s)
+	path, err := writeSpill(spillDir, cleanSource(source), s)
 	if err != nil {
 		return "", err
 	}
@@ -80,8 +87,19 @@ func CleanupSpill(dir string, olderThan time.Duration, now time.Time) (removed i
 	return removed, nil
 }
 
+// cleanSource replaces each rune that is not an ASCII letter, a digit, or "_" with "_".
+func cleanSource(source string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x80 && (r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z') {
+			return r
+		}
+		return '_'
+	}, source)
+}
+
 // writeSpill writes the raw output to a new file in dir and returns the file path.
-func writeSpill(dir, s string) (string, error) {
+// A source that is not empty goes before the id in the file name.
+func writeSpill(dir, source, s string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("spill: create folder %s: %w", dir, err)
 	}
@@ -90,6 +108,9 @@ func writeSpill(dir, s string) (string, error) {
 		return "", fmt.Errorf("spill: make file id: %w", err)
 	}
 	id := time.Now().UTC().Format("20060102-150405") + hex.EncodeToString(rnd[:])
+	if source != "" {
+		id = source + "-" + id
+	}
 	path := filepath.Join(dir, id+".txt")
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {

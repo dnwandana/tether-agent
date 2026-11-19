@@ -23,7 +23,19 @@ const humanOnlyScriptStart = `["']\s*(?:/(?:usr/)?(?:local/)?s?bin/)?`
 type humanOnlyRule struct {
 	pat    Pattern
 	cmd    func(c SimpleCmd) bool
+	raw    func(c SimpleCmd) bool // optional: the test for a raw command and a script literal
 	script *regexp.Regexp
+}
+
+// HumanOnlyStageCredential is the ID of the rule for staging credential files.
+const HumanOnlyStageCredential = "human_only_stage_credential"
+
+// rawTest returns the test for a command that the gate cannot read: raw when set, else cmd.
+func (r humanOnlyRule) rawTest() func(SimpleCmd) bool {
+	if r.raw != nil {
+		return r.raw
+	}
+	return r.cmd
 }
 
 var humanOnlyRules = buildHumanOnlyRules()
@@ -49,9 +61,17 @@ var (
 	privGroups     = []string{"sudo", "wheel", "admin", "docker"}
 )
 
+// gitValueOptionsRe matches a git global option that takes its value in the next word. The
+// script regex is case-insensitive, so "-c" also matches "-C".
+const gitValueOptionsRe = `(?:-c|--namespace|--git-dir|--work-tree|--config-env|--super-prefix|--attr-source)`
+
 // buildHumanOnlyRules builds the rule table.
 func buildHumanOnlyRules() []humanOnlyRule {
-	mk := func(id, desc string, progs []string, extra string, cmd func(SimpleCmd) bool, script string) humanOnlyRule {
+	mkRaw := func(id, desc string, progs []string, extra string, cmd, raw func(SimpleCmd) bool, script string) humanOnlyRule {
+		test := cmd
+		if raw != nil {
+			test = raw
+		}
 		alt := strings.Join(progs, "|")
 		src := humanOnlyAnchor + `(?:` + alt + `)\b[^\n;&|]*`
 		if extra != "" {
@@ -68,7 +88,7 @@ func buildHumanOnlyRules() []humanOnlyRule {
 					for _, a := range fields[i:] {
 						argv = append(argv, strings.Trim(a, `"'`))
 					}
-					if cmd(SimpleCmd{Argv: argv}) {
+					if test(SimpleCmd{Argv: argv}) {
 						return true
 					}
 					break
@@ -81,7 +101,10 @@ func buildHumanOnlyRules() []humanOnlyRule {
 			}
 			return false
 		}
-		return humanOnlyRule{pat: p, cmd: cmd, script: regexp.MustCompile(`(?is)` + humanOnlyScriptStart + `(?:` + script + `)`)}
+		return humanOnlyRule{pat: p, cmd: cmd, raw: raw, script: regexp.MustCompile(`(?is)` + humanOnlyScriptStart + `(?:` + script + `)`)}
+	}
+	mk := func(id, desc string, progs []string, extra string, cmd func(SimpleCmd) bool, script string) humanOnlyRule {
+		return mkRaw(id, desc, progs, extra, cmd, nil, script)
 	}
 	return []humanOnlyRule{
 		mk("human_only_password_change", "password change",
@@ -97,6 +120,9 @@ func buildHumanOnlyRules() []humanOnlyRule {
 		mk("human_only_permanent_deletion", "permanent deletion",
 			[]string{"shred", "wipefs", "srm", "blkdiscard", "dd"}, "", permanentDeletion,
 			`shred\b|wipefs\b|srm\b|blkdiscard\b|dd\s[^"'\n]*`),
+		mkRaw(HumanOnlyStageCredential, "staging of credential files",
+			[]string{"git"}, "", stageCredential, stageCredentialRaw,
+			`git\s+(?:`+gitValueOptionsRe+`\s+\S+\s+|-\S+\s+)*(?:add|stage)\b[^"'\n]*`),
 	}
 }
 
@@ -108,8 +134,8 @@ func (r humanOnlyRule) scriptMatch(code string) bool {
 		if len(fields) == 0 {
 			continue
 		}
-		if prog := filepath.Base(fields[0]); prog == "usermod" || prog == "gpasswd" || prog == "htpasswd" || prog == "dd" {
-			if !r.cmd(SimpleCmd{Argv: fields}) {
+		if prog := filepath.Base(fields[0]); prog == "usermod" || prog == "gpasswd" || prog == "htpasswd" || prog == "dd" || prog == "git" {
+			if !r.rawTest()(SimpleCmd{Argv: fields}) {
 				continue
 			}
 		}
@@ -264,6 +290,141 @@ func permanentDeletion(c SimpleCmd) bool {
 			}
 		}
 		return src && of != "" && !rawDevRe.MatchString(of)
+	}
+	return false
+}
+
+// gitValueOptions are the git global options that take their value in the next word.
+var gitValueOptions = []string{"-C", "-c", "--namespace", "--git-dir", "--work-tree", "--config-env",
+	"--super-prefix", "--attr-source"}
+
+// IsGitValueOption reports whether w is a git global option that takes its value in the next
+// word, for example "-C" or "--namespace".
+func IsGitValueOption(w string) bool { return slices.Contains(gitValueOptions, w) }
+
+// gitAddLongOptions are the long options of git add.
+var gitAddLongOptions = []string{"dry-run", "verbose", "force", "sparse", "interactive", "patch", "edit",
+	"update", "all", "ignore-removal", "intent-to-add", "refresh", "ignore-errors", "ignore-missing",
+	"warn-embedded-repo", "renormalize", "chmod", "pathspec-from-file", "pathspec-file-nul"}
+
+// GitAddLongOption returns the name of the git add long option of w (with no "--" and no
+// "=value"), and neg true for a "no-" form. git also takes a unique prefix of a name. It
+// returns ok false for an unknown or an ambiguous word, because git refuses such a word.
+func GitAddLongOption(w string) (name string, neg, ok bool) {
+	type cand struct {
+		name string
+		neg  bool
+	}
+	var cands []cand
+	for _, n := range gitAddLongOptions {
+		if w == n {
+			return n, false, true
+		}
+		if w == "no-"+n {
+			return n, true, true
+		}
+		if strings.HasPrefix(n, w) {
+			cands = append(cands, cand{n, false})
+		}
+		if rest, isNeg := strings.CutPrefix(w, "no-"); isNeg && strings.HasPrefix(n, rest) {
+			cands = append(cands, cand{n, true})
+		}
+	}
+	if len(cands) != 1 {
+		return "", false, false
+	}
+	return cands[0].name, cands[0].neg, true
+}
+
+// gitStageWords returns the words after "git add" or "git stage" and the index of the first
+// word after "--" (len(words) when there is none). It skips the git global options and the
+// value of each option that takes its value in the next word. It returns ok false when the
+// command is not a stage command.
+func gitStageWords(argv []string) (words []string, dashdash int, ok bool) {
+	if len(argv) == 0 || filepath.Base(argv[0]) != "git" {
+		return nil, 0, false
+	}
+	i := 1
+	for i < len(argv) {
+		a := argv[i]
+		switch {
+		case IsGitValueOption(a):
+			i += 2
+		case strings.HasPrefix(a, "-"):
+			i++
+		default:
+			if a != "add" && a != "stage" {
+				return nil, 0, false
+			}
+			words = argv[i+1:]
+			dashdash = len(words)
+			if j := slices.Index(words, "--"); j >= 0 {
+				dashdash = j
+			}
+			return words, dashdash, true
+		}
+	}
+	return nil, 0, false
+}
+
+// stageCredential reports whether c is a git add or git stage that names a credential file.
+func stageCredential(c SimpleCmd) bool {
+	words, dd, ok := gitStageWords(c.Argv)
+	if !ok {
+		return false
+	}
+	for i, w := range words {
+		if i == dd || (i < dd && strings.HasPrefix(w, "-")) {
+			continue
+		}
+		if IsCredentialFile(w) {
+			return true
+		}
+	}
+	return false
+}
+
+// broadStageWord reports whether a word of a stage command can name files that the gate cannot
+// check: a dot, an option that stages all files or reads the paths from a file, a glob, a
+// folder, or a pathspec with magic (":/", ":(top)").
+func broadStageWord(w string, option bool) bool {
+	if option {
+		if body, ok := strings.CutPrefix(w, "--"); ok {
+			body, _, _ = strings.Cut(body, "=")
+			name, neg, ok := GitAddLongOption(body)
+			if !ok {
+				// git refuses an unknown or an ambiguous option and stages nothing.
+				return false
+			}
+			switch name {
+			case "all", "update", "renormalize", "pathspec-from-file":
+				return !neg
+			case "ignore-removal":
+				return neg
+			}
+			return false
+		}
+		// The raw form is in lower case, so "-A" arrives as "-a".
+		return shortCluster(w) && strings.ContainsAny(w[1:], "AUau")
+	}
+	return w == "." || strings.HasPrefix(w, ":") || strings.ContainsAny(w, "*?[") || strings.HasSuffix(w, "/")
+}
+
+// stageCredentialRaw reports whether c is a git add or git stage with a broad form or a named
+// credential file. It serves a command that the gate cannot read and a script literal.
+func stageCredentialRaw(c SimpleCmd) bool {
+	words, dd, ok := gitStageWords(c.Argv)
+	if !ok {
+		return false
+	}
+	for i, w := range words {
+		if i == dd {
+			continue
+		}
+		option := i < dd && strings.HasPrefix(w, "-")
+		if broadStageWord(w, option) || (!option && IsCredentialFile(w)) {
+			return true
+		}
 	}
 	return false
 }

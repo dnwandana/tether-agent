@@ -46,6 +46,18 @@ type TerminalTool struct {
 	InGateway bool
 	// Procs records the background processes of each session. Nil records nothing.
 	Procs *ProcRegistry
+	// Bound maps each bound secret name to its command prefixes (exec_secrets). Nil binds no name.
+	Bound map[string][]string
+	// Store holds the .env values. A bound value comes from it only. Nil uses DotEnv and gives
+	// no bound secret.
+	Store *security.DotEnvStore
+	// Pins holds the programs that the owner allowed for each bound secret. Nil allows no program.
+	Pins *security.PinStore
+	// Marks records the bound secrets that got an auth failure. Nil records nothing.
+	Marks SecretMarks
+	// Handles holds the handles of credentials that a result printed. A command that names
+	// a handle gets its value. Nil gives no handle.
+	Handles *security.Handles
 }
 
 // GatewayEnv is the environment line that a child of the gateway gets. A script
@@ -119,22 +131,36 @@ func (t *TerminalTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (
 	if err != nil {
 		return "", err
 	}
+	plan := t.planSecrets(env, a.Command)
 	check := CommandCheck{
-		Command: a.Command, Workdir: dir, Path: envPath(t.childEnv(env)),
-		Summary: security.CleanSummary(a.Description),
+		Command: a.Command, Workdir: dir, Path: envPath(t.childEnv(env, nil)),
+		Summary: security.CleanSummary(a.Description), Secrets: plan.names(),
 	}
+	check.StagedCredentials, check.StageUnchecked = StagedCredentials(ctx, security.ReadCommand(a.Command), dir)
 	if err := env.Gate.CheckCommand(ctx, env, check); err != nil {
 		return "", toolErr("%s", err.Error())
 	}
+	// The pin check runs after the gate, so a denied command never asks for a pin.
+	bound, given, lines := t.giveSecrets(ctx, env, plan, a.Command, dir, check.Path)
 	if a.Background {
-		return t.startBackground(env, a.Command, dir)
+		out, err := t.startBackground(env, a.Command, dir, bound, given)
+		if err != nil {
+			return "", err
+		}
+		return withLines(out, lines), nil
 	}
 	timeout := t.defaultTimeout()
 	if a.TimeoutS > 0 {
 		timeout = time.Duration(a.TimeoutS) * time.Second
 	}
-	out, _, err := t.execIn(ctx, env, a.Command, dir, timeout)
-	return out, err
+	out, code, err := t.execIn(ctx, env, a.Command, dir, timeout, bound)
+	if err != nil {
+		return out, err
+	}
+	if note := t.afterRun(ctx, given, code, out); note != "" {
+		lines = append(lines, note)
+	}
+	return withLines(out, lines), nil
 }
 
 // Exec runs command with bash -c in its own process group and waits for it.
@@ -148,15 +174,16 @@ func (t *TerminalTool) Exec(ctx context.Context, env *Env, command, workdir stri
 	if err != nil {
 		return "", -1, err
 	}
-	return t.execIn(ctx, env, command, dir, timeout)
+	return t.execIn(ctx, env, command, dir, timeout, nil)
 }
 
-// execIn runs command in dir, which resolveWorkdir already resolved. See Exec.
-func (t *TerminalTool) execIn(ctx context.Context, env *Env, command, dir string, timeout time.Duration) (output string, exitCode int, err error) {
+// execIn runs command in dir, which resolveWorkdir already resolved, and gives it the values
+// of bound. See Exec.
+func (t *TerminalTool) execIn(ctx context.Context, env *Env, command, dir string, timeout time.Duration, bound map[string]string) (output string, exitCode int, err error) {
 	buf := newCapBuffer(t.MaxOutputBytes)
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = dir
-	cmd.Env = t.childEnv(env)
+	cmd.Env = t.childEnv(env, bound)
 	cmd.Stdout = buf
 	cmd.Stderr = buf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -216,8 +243,10 @@ func (t *TerminalTool) execIn(ctx context.Context, env *Env, command, dir string
 
 // startBackground starts command in a new session with its output in
 // SpillDir/bg-<pid>.log, and returns the pid and the log path as JSON. A
-// goroutine reaps the process and records its exit in Procs. dir is a resolved workdir.
-func (t *TerminalTool) startBackground(env *Env, command, dir string) (string, error) {
+// goroutine reaps the process and records its exit in Procs. dir is a resolved workdir. It gives
+// the command the values of bound. When given is not empty, the reap goroutine calls afterRun
+// with the exit code and the last 4 KB of the log.
+func (t *TerminalTool) startBackground(env *Env, command, dir string, bound map[string]string, given []string) (string, error) {
 	spill := t.SpillDir
 	if spill == "" && env != nil && env.DataDir != "" {
 		spill = filepath.Join(env.DataDir, "cache", "spill")
@@ -239,7 +268,7 @@ func (t *TerminalTool) startBackground(env *Env, command, dir string) (string, e
 	// descriptor, so it never holds the stdout or stderr of the agent open.
 	cmd := exec.Command("bash", "-c", command)
 	cmd.Dir = dir
-	cmd.Env = t.childEnv(env)
+	cmd.Env = t.childEnv(env, bound)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -263,14 +292,16 @@ func (t *TerminalTool) startBackground(env *Env, command, dir string) (string, e
 	}
 	go func() {
 		_ = cmd.Wait()
-		if t.Procs == nil {
-			return
-		}
 		code := -1
 		if cmd.ProcessState != nil {
 			code = cmd.ProcessState.ExitCode()
 		}
-		t.Procs.Exit(pid, code, time.Now())
+		if len(given) > 0 {
+			t.afterRun(context.Background(), given, code, tailFile(logPath, authTailBytes))
+		}
+		if t.Procs != nil {
+			t.Procs.Exit(pid, code, time.Now())
+		}
 	}()
 	b, _ := json.Marshal(struct {
 		PID     int    `json:"pid"`
@@ -284,6 +315,34 @@ func (t *TerminalTool) startBackground(env *Env, command, dir string) (string, e
 type GateApprover struct {
 	Gate     *security.Gate
 	Prompter security.Prompter
+	// OwnerPrompter asks the owner in a private chat. The pin prompt, the handle prompt, and
+	// an MCP send prompt with a scan finding use it, because a group must not see them. Nil
+	// uses Prompter.
+	OwnerPrompter security.Prompter
+}
+
+// ownerOr returns OwnerPrompter, or Prompter when it is nil.
+func (g GateApprover) ownerOr() security.Prompter {
+	if g.OwnerPrompter != nil {
+		return g.OwnerPrompter
+	}
+	return g.Prompter
+}
+
+// findingRouter sends a prompt with a scan finding to the owner, and each other prompt to the
+// chat of the turn.
+type findingRouter struct{ chat, owner security.Prompter }
+
+// PromptApproval sends a request with a finding to the owner, and each other request to the chat.
+func (r findingRouter) PromptApproval(ctx context.Context, req security.ApprovalRequest) (security.Scope, error) {
+	p := r.chat
+	if len(req.Findings) > 0 {
+		p = r.owner
+	}
+	if p == nil {
+		return security.ScopeDeny, security.ErrNoPrompter
+	}
+	return p.PromptApproval(ctx, req)
 }
 
 // CheckCommand builds the approval request from env and returns nil when command may
@@ -294,6 +353,7 @@ func (g GateApprover) CheckCommand(ctx context.Context, env *Env, c CommandCheck
 	}
 	req := security.ApprovalRequest{
 		Command: c.Command, Summary: c.Summary, Workdir: c.Workdir, Path: c.Path, Tool: "terminal",
+		Secrets: c.Secrets, StagedCredentials: c.StagedCredentials, StageUnchecked: c.StageUnchecked,
 	}
 	if env != nil {
 		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
@@ -333,14 +393,22 @@ func (g GateApprover) AskPermission(ctx context.Context, env *Env, req security.
 		req.Member = env.Member
 		req.Scope, req.LogScope = env.ModeScope, env.LogScope
 	}
+	if strings.HasSuffix(req.PatternID, ":execute") {
+		dir := req.Workdir
+		if dir == "" && env != nil {
+			dir = env.WorkDir
+		}
+		req.StagedCredentials, req.StageUnchecked = StagedCredentials(ctx, security.ReadCommand(req.Command), dir)
+	}
 	return g.Gate.AskACP(ctx, req, g.Prompter)
 }
 
 // CheckMCP builds the approval request of an MCP call from env and returns nil when the call
-// may run. Otherwise it returns the reason for the model. Each UI escapes the summary.
-func (g GateApprover) CheckMCP(ctx context.Context, env *Env, call security.MCPCall) error {
+// may run. Otherwise it returns the reason for the model. Each UI escapes the summary. The
+// first result is the argument object that the gate chose, or nil for the arguments of the model.
+func (g GateApprover) CheckMCP(ctx context.Context, env *Env, call security.MCPCall) (json.RawMessage, error) {
 	if g.Gate == nil {
-		return errors.New("approval gate missing: the MCP call cannot run without the approval gate")
+		return nil, errors.New("approval gate missing: the MCP call cannot run without the approval gate")
 	}
 	summary := security.CleanSummary(call.Summary)
 	if r := []rune(summary); len(r) > mcpSummaryRunes {
@@ -355,8 +423,34 @@ func (g GateApprover) CheckMCP(ctx context.Context, env *Env, call security.MCPC
 		req.Member = env.Member
 		req.Scope, req.LogScope = env.ModeScope, env.LogScope
 		req.ChildName = childName(env)
+		req.JobName, req.JobPurpose, req.DraftOnly = env.JobName, env.JobPurpose, env.DraftOnly
+		f := Outside(env)
+		req.OutsideSources, req.OutsideHosts, req.ToolCounts = f.Sources, f.Hosts, f.ToolCounts
 	}
-	return g.Gate.CheckMCP(ctx, req, call, g.Prompter)
+	p := g.Prompter
+	if g.OwnerPrompter != nil && g.OwnerPrompter != g.Prompter {
+		p = findingRouter{chat: g.Prompter, owner: g.OwnerPrompter}
+	}
+	return g.Gate.CheckMCP(ctx, req, call, p)
+}
+
+// AskPin builds the pin request from env and r and asks through Gate.AskPin. A nil Gate fails
+// closed with an error. A nil Prompter gives security.ErrNoPrompter.
+func (g GateApprover) AskPin(ctx context.Context, env *Env, r PinRequest) (bool, error) {
+	if g.Gate == nil {
+		return false, errors.New("approval gate missing: the secret cannot go to the command without the approval gate")
+	}
+	req := security.ApprovalRequest{
+		Command: r.Command, PinName: r.Name, PinPath: r.Path, PinHash: r.SHA256,
+		HandleNames: r.Handles, OutsideSources: r.Sources,
+	}
+	if env != nil {
+		req.SessionID, req.SessionKey, req.Kind, req.RootKind = env.SessionID, env.SessionKey, env.Kind, env.RootKind
+		req.Member = env.Member
+		req.Scope, req.LogScope = env.ModeScope, env.LogScope
+		req.ChildName = childName(env)
+	}
+	return g.Gate.AskPin(ctx, req, g.ownerOr())
 }
 
 // mcpSummaryRunes is the longest summary of an MCP call, with the final "…".
@@ -412,13 +506,17 @@ func childName(env *Env) string {
 // childNameKey is the Env.Values key of the child name (agent.ChildNameKey).
 const childNameKey = "child_name"
 
-// childEnv returns the environment for a child process, without secrets.
-func (t *TerminalTool) childEnv(env *Env) []string {
+// childEnv returns the environment for a child process, without secrets, plus the values of bound.
+func (t *TerminalTool) childEnv(env *Env, bound map[string]string) []string {
 	var pass []string
 	if t.Passthrough != nil {
 		pass = t.Passthrough(env)
 	}
-	out := security.ChildEnv(os.Environ(), t.DotEnv, pass)
+	dotenv := t.DotEnv
+	if t.Store != nil {
+		dotenv = t.Store.Snapshot()
+	}
+	out := security.ChildEnvBound(os.Environ(), dotenv, pass, bound)
 	if t.InGateway && env.RunRootKind() != "cron" {
 		out = append(out, GatewayEnv)
 	}

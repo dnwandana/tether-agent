@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 const (
@@ -75,6 +76,13 @@ type Streamer struct {
 	// FlushTimer runs f after d for a later flush of the stream. Nil means
 	// time.AfterFunc. Tests replace it.
 	FlushTimer func(d time.Duration, f func()) (stop func() bool)
+	// Mask replaces the sensitive data of a text with labels and returns the findings with
+	// their offsets in text. Nil shows the text as it is. The channel sets it for a chat that
+	// is not private.
+	Mask func(text string) (string, []security.Finding)
+	// Partial returns the byte length of the longest suffix of tail that is the start of a
+	// known exact value or of its JSON form. Nil holds no partial value.
+	Partial func(tail string) int
 
 	mu       sync.Mutex
 	started  bool
@@ -107,6 +115,10 @@ type Streamer struct {
 	// parts are the numbered preview parts that did not go out yet. They
 	// keep the numbers of the first split.
 	parts []previewPart
+	// flushAll is true when the segment ends: the mask holds no tail.
+	flushAll bool
+	// lastFindings are the findings of the last masked view.
+	lastFindings []security.Finding
 
 	// stopFlush stops the armed flush timer. Nil means no timer.
 	stopFlush func() bool
@@ -156,6 +168,7 @@ func (s *Streamer) Boundary(ctx context.Context) {
 		return
 	}
 	s.stopTimer()
+	s.flushAll = true
 	if s.view() != "" || s.msgID != 0 {
 		if err := s.finalize(ctx); err != nil {
 			s.logger().Warn("telegram stream segment send failed", "err", err.Error())
@@ -177,6 +190,7 @@ func (s *Streamer) Finish(ctx context.Context, final string) error {
 		return nil
 	}
 	s.finished = true
+	s.flushAll = true
 	s.stopTimer()
 	if final != "" {
 		s.acc = final
@@ -201,9 +215,14 @@ func (s *Streamer) init(ctx context.Context) {
 }
 
 // view returns the clean text of the open message: the segment text without
-// the media tags and without the text in closed messages.
+// the media tags and without the text in closed messages. With a mask, it
+// masks the open segment and holds back a tail that can still grow into a
+// match, until the segment ends.
 func (s *Streamer) view() string {
 	full := cleanForDisplay(s.acc)
+	if s.Mask != nil {
+		return s.maskedView(full)
+	}
 	if s.committed == "" {
 		return full
 	}
@@ -214,8 +233,46 @@ func (s *Streamer) view() string {
 	return strings.TrimLeft(full[len(s.committed):], "\n")
 }
 
-// commit marks the first n bytes of the view as sent in a closed message.
+// maskedView returns the masked text of the open segment. It keeps the findings
+// for commit.
+func (s *Streamer) maskedView(full string) string {
+	if !strings.HasPrefix(full, s.committed) {
+		s.logger().Info("telegram stream text changed before the sent part")
+		masked, f := s.Mask(full)
+		s.lastFindings = f
+		return masked
+	}
+	rest := strings.TrimLeft(full[len(s.committed):], "\n")
+	cut := len(rest)
+	if !s.flushAll {
+		cut = holdCut(rest, s.Partial)
+		if cut < len(rest) {
+			// holdCut holds at most 64 bytes, so the cut can fall inside a finding that
+			// is complete in rest. The mask of rest[:cut] does not match a part of a
+			// value, so move the cut to the start of that finding.
+			_, all := s.Mask(rest)
+			for _, x := range all {
+				if x.Start < cut && cut < x.End {
+					cut = x.Start
+				}
+			}
+		}
+	}
+	masked, f := s.Mask(rest[:cut])
+	if !s.flushAll && len(f) > 0 && f[len(f)-1].End == cut {
+		cut = f[len(f)-1].Start
+		masked, f = s.Mask(rest[:cut])
+	}
+	s.lastFindings = f
+	return masked
+}
+
+// commit marks the first n bytes of the view as sent in a closed message. With a
+// mask, n counts bytes of the masked view, and commit changes it to raw bytes.
 func (s *Streamer) commit(n int) {
+	if s.Mask != nil {
+		n = rawOffset(s.lastFindings, n)
+	}
 	full := cleanForDisplay(s.acc)
 	rest := full[len(s.committed):]
 	lead := len(rest) - len(strings.TrimLeft(rest, "\n"))
@@ -226,12 +283,62 @@ func (s *Streamer) safeLimit() int {
 	return max(500, maxMessageLen-UTF16Len(s.Cfg.Cursor)-100)
 }
 
-// previewPart is one numbered preview part that did not go out yet. n is
-// the number of view bytes that the part shows, without the leading
-// newlines.
+// previewPart is one numbered preview part that did not go out yet. end is
+// the byte offset in the clean raw text where the part ends. It is fixed when
+// the part is made, because a later view can have other findings.
 type previewPart struct {
 	text string
-	n    int
+	end  int
+}
+
+// viewStart returns the byte offset in full, the clean raw text, where the view
+// starts.
+func (s *Streamer) viewStart(full string) int {
+	// view shows all of full when the text changed. Without a mask, it also shows
+	// the leading newlines of the first message.
+	if !strings.HasPrefix(full, s.committed) || (s.Mask == nil && s.committed == "") {
+		return 0
+	}
+	rest := full[len(s.committed):]
+	return len(s.committed) + len(rest) - len(strings.TrimLeft(rest, "\n"))
+}
+
+// rawAt changes n, a byte offset in the view, into the offset in the raw text
+// of the view. s.mu is held.
+func (s *Streamer) rawAt(n int) int {
+	if s.Mask != nil {
+		return rawOffset(s.lastFindings, n)
+	}
+	return n
+}
+
+// splitView splits the view v into parts of at most limit UTF-16 units. With a
+// mask, a cut inside a label moves to the start of that label. Thus no part
+// shows a part of a label, and each cut maps to an exact raw offset. s.mu is
+// held.
+func (s *Streamer) splitView(v string, limit int) []string {
+	if s.Mask == nil || len(s.lastFindings) == 0 {
+		return SplitUTF16(v, limit)
+	}
+	spans := labelSpans(s.lastFindings)
+	var parts []string
+	for off := 0; off < len(v); {
+		rest := v[off:]
+		end := off + len(SplitUTF16(rest, limit)[0])
+		for _, sp := range spans {
+			if sp[0] < end && end < sp[1] {
+				end = sp[0]
+				if end <= off {
+					// The part holds only the label. Keep the full label.
+					end = sp[1]
+				}
+				break
+			}
+		}
+		parts = append(parts, v[off:end])
+		off = end
+	}
+	return parts
 }
 
 // streamFlush shows the current text with the cursor. s.mu is held.
@@ -254,16 +361,18 @@ func (s *Streamer) streamFlush(ctx context.Context) {
 	for v := s.view(); UTF16Len(v) > safe; v = s.view() {
 		if s.msgID == 0 {
 			// No message to edit: send numbered parts now (Hermes).
-			chunks := SplitUTF16(v, safe-numberRoom)
+			chunks := s.splitView(v, safe-numberRoom)
+			base, pos := s.viewStart(cleanForDisplay(s.acc)), 0
 			for i, text := range NumberParts(chunks, false) {
-				s.parts = append(s.parts, previewPart{text: text, n: len(strings.TrimLeft(chunks[i], "\n"))})
+				pos += len(chunks[i])
+				s.parts = append(s.parts, previewPart{text: text, end: base + s.rawAt(pos)})
 			}
 			s.sendParts(ctx)
 			return
 		}
 		// Close the open message with the first part. The rest goes into
 		// a new message.
-		chunk := SplitUTF16(v, safe)[0]
+		chunk := s.splitView(v, safe)[0]
 		if !s.editStream(ctx, chunk) {
 			return
 		}
@@ -290,7 +399,11 @@ func (s *Streamer) sendParts(ctx context.Context) {
 		}
 		s.strikes = 0
 		s.parts = s.parts[1:]
-		s.commit(p.n)
+		// The end of the part is a raw offset already. A new view can have other
+		// findings, so do not map it again.
+		if full := cleanForDisplay(s.acc); p.end <= len(full) {
+			s.committed = full[:p.end]
+		}
 		s.msgID, s.lastSent, s.msgCreated = 0, "", time.Time{}
 	}
 }
@@ -836,6 +949,7 @@ func (s *Streamer) resetSegment() {
 	s.msgID, s.msgCreated, s.pending = 0, time.Time{}, 0
 	s.drained = false
 	s.parts = nil
+	s.flushAll, s.lastFindings = false, nil
 	if s.draft {
 		s.draftID = draftSeq.Add(1)
 	}

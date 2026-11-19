@@ -40,6 +40,9 @@ const (
 	ScopeDeny Scope = "deny"
 	// ScopeTimeout means that the user did not answer in time.
 	ScopeTimeout Scope = "timeout"
+	// ScopeRedacted sends the call with each finding replaced by its label. Only an MCP send
+	// with a finding permits it.
+	ScopeRedacted Scope = "redacted"
 )
 
 // DefaultApprovalTimeout is the time that the gate waits for an answer when
@@ -99,6 +102,27 @@ type ApprovalRequest struct {
 	Class string
 	// HumanOnly and Unread are set by the gate and read by the UIs.
 	HumanOnly, Unread bool
+	// Secrets holds the bound secret names that the command gets. The prompt shows them.
+	// The grant key does not use them.
+	Secrets []string
+	// StagedCredentials holds the credential files that a "git add" command stages.
+	// StageUnchecked is true when the check of the staged files failed.
+	StagedCredentials []string
+	StageUnchecked    bool
+	// PinName, PinPath, and PinHash make the request a pin prompt: the owner allows the
+	// program at PinPath with the sha256 PinHash to get the bound secret PinName.
+	PinName, PinPath, PinHash string
+	// HandleNames holds the handles of printed credentials that the command names, for
+	// example TMP_SECRET_1. OutsideSources and OutsideHosts tell what outside content the
+	// run read. ToolCounts counts each tool name that the run called.
+	HandleNames                  []string
+	OutsideSources, OutsideHosts []string
+	ToolCounts                   map[string]int
+	// JobName, JobPurpose, and DraftOnly describe the cron job of the run.
+	JobName, JobPurpose string
+	DraftOnly           bool
+	// Findings holds the sensitive data that the scan found in the arguments of an MCP send.
+	Findings []Finding
 }
 
 // Prompter asks the user about one dangerous command. It is the UI of a
@@ -169,6 +193,9 @@ type Gate struct {
 	// Redactor masks the secrets in the previews of the gate. A command that it changes holds
 	// a credential and gets no grant. A nil Redactor masks nothing.
 	Redactor *Redactor
+	// Guard asks a model about an MCP send of a cron run after outside content. A nil Guard
+	// skips the guard.
+	Guard SendGuarder
 
 	grantsOff atomic.Bool
 	offCause  string // under mu
@@ -338,6 +365,9 @@ func (g *Gate) Check(ctx context.Context, req ApprovalRequest, p Prompter) error
 		req.PatternID, req.Description = pat.ID, pat.Description
 		req.HumanOnly, req.NoSession, req.NoAlways = true, true, true
 		return g.humanOnlyAsk(ctx, req, p)
+	}
+	if staged, ok := stageStep(req); ok {
+		return g.humanOnlyAsk(ctx, staged, p)
 	}
 	if len(pats) == 0 && parsed.Read {
 		return nil
@@ -533,6 +563,29 @@ func (g *Gate) CheckScript(ctx context.Context, req ApprovalRequest, p Prompter)
 	return g.ask(ctx, req, p, nil)
 }
 
+// maxStageNames is the most paths that the text of the stage step names.
+const maxStageNames = 20
+
+// stageStep returns the request with the rule ID, the text, and the human-only flags when the
+// request has staged credential files or an unchecked stage command.
+func stageStep(req ApprovalRequest) (ApprovalRequest, bool) {
+	switch {
+	case len(req.StagedCredentials) > 0:
+		names := req.StagedCredentials
+		if len(names) > maxStageNames {
+			names = names[:maxStageNames]
+		}
+		req.Description = "staging of credential files: " + strings.Join(names, ", ")
+	case req.StageUnchecked:
+		req.Description = "staging of files. Tether Agent could not check which files this command stages"
+	default:
+		return req, false
+	}
+	req.PatternID = HumanOnlyStageCredential
+	req.HumanOnly, req.NoSession, req.NoAlways = true, true, true
+	return req, true
+}
+
 // humanOnlyAsk handles a human-only request: only a present owner can answer it.
 func (g *Gate) humanOnlyAsk(ctx context.Context, req ApprovalRequest, p Prompter) error {
 	source := ""
@@ -696,6 +749,22 @@ func (g *Gate) prompt(ctx context.Context, req ApprovalRequest, p Prompter) (Sco
 // session" or "always" answer becomes ScopeOnce, and the gate saves nothing. A
 // member request reads no earlier answer and saves none.
 func (g *Gate) AskACP(ctx context.Context, req ApprovalRequest, p Prompter) (Scope, error) {
+	if staged, ok := stageStep(req); ok {
+		req = staged
+		source := ""
+		switch {
+		case isCron(req):
+			source = sourceHumanOnly
+		case req.Member:
+			source = sourceMember
+		case p == nil:
+			source = sourceNoPrompter
+		}
+		if source != "" {
+			g.record(ctx, req, DecisionBlocked, source, "")
+			return ScopeDeny, nil
+		}
+	}
 	if p == nil {
 		g.record(ctx, req, DecisionBlocked, sourceNoPrompter, "")
 		return ScopeDeny, nil

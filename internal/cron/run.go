@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/skills"
 )
@@ -29,6 +30,15 @@ const CronPreamble = "[IMPORTANT: You are running as a scheduled cron job. No us
 // and a run cannot create cron jobs.
 var cronRemovedTools = []string{"cronjob", "clarify"}
 
+// draftOnlyPreamble is the sentence that CronPreamble gets for a draft-only run.
+const draftOnlyPreamble = "DRAFT-ONLY: This job can read and write drafts. It cannot send, post, or change " +
+	"anything outside this machine. Put what it would send into a draft or into your final response."
+
+// draftOnlyRemovedTools are the tools that can send or change things outside this machine. A
+// draft-only run cannot see them.
+var draftOnlyRemovedTools = []string{"terminal", "execute_code", "delegate_task", "acp_delegate",
+	"browser_click", "browser_fill", "browser_run_js", "browser_cookies"}
+
 // errAgentTimeout is the cause of the context of an agent turn that reached AgentTimeout.
 // It tells a time-out from a stop of the gateway.
 var errAgentTimeout = errors.New("cron: the agent turn reached its time limit")
@@ -48,6 +58,25 @@ type CronTurn struct {
 	Model *ModelPin
 	// Workdir is the working folder of the tools. Empty uses the default folder.
 	Workdir string
+	// JobName is the name of the job.
+	JobName string
+	// JobPurpose is the raw prompt of the job, not the built text.
+	JobPurpose string
+	// DraftOnly is true when the run cannot send.
+	DraftOnly bool
+	// Outside holds the outside sources from before the turn.
+	Outside []string
+}
+
+// TurnOutput is the result of the agent turn of a cron run. Final is the answer text, also
+// the partial text after an error. Sources, Hosts, and ToolCounts are the outside facts of the
+// turn for model_guard. Handles holds the values of the handles of the run for the scan of
+// the delivery. The values stay in memory.
+type TurnOutput struct {
+	Final          string
+	Sources, Hosts []string
+	ToolCounts     map[string]int
+	Handles        []string
 }
 
 // Runner runs one job. cron does not import agent or tools, so internal/app gives the
@@ -57,8 +86,8 @@ type Runner struct {
 	Store *sessions.Store
 	// ScriptsDir is the folder of the job scripts. A relative script path resolves in it.
 	ScriptsDir string
-	// Turn runs the agent turn and returns the final text.
-	Turn func(ctx context.Context, t CronTurn) (final string, err error)
+	// Turn runs the agent turn and returns its output. The output is valid also when err is not nil.
+	Turn func(ctx context.Context, t CronTurn) (TurnOutput, error)
 	// AgentTimeout is the total time limit of the agent turn of a job. The skills and the
 	// data script run before the turn and do not count. 0 means no limit.
 	AgentTimeout time.Duration
@@ -135,21 +164,30 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 		tctx, cancel = context.WithTimeoutCause(ctx, r.AgentTimeout, errAgentTimeout)
 		defer cancel()
 	}
-	final, err := r.Turn(tctx, CronTurn{
+	removed := append([]string(nil), cronRemovedTools...)
+	if j.DraftOnly {
+		removed = append(removed, draftOnlyRemovedTools...)
+	}
+	out, err := r.Turn(tctx, CronTurn{
 		Session:     sess,
 		Text:        text,
 		Toolsets:    j.Toolsets,
-		RemoveTools: append([]string(nil), cronRemovedTools...),
+		RemoveTools: removed,
 		Model:       j.Model,
 		Workdir:     j.Workdir,
+		JobName:     j.Name,
+		JobPurpose:  j.Prompt,
+		DraftOnly:   j.DraftOnly,
 	})
+	final := out.Final
+	o.Sources, o.Hosts, o.ToolCounts, o.Handles = out.Sources, out.Hosts, out.ToolCounts, out.Handles
 	if err != nil {
 		if errors.Is(context.Cause(tctx), errAgentTimeout) {
 			r.log().Warn("cron agent turn timed out", "job", j.ID, "name", j.Name,
 				"limit", r.AgentTimeout, "session", sess.ID)
 			o.Text = fmt.Sprintf("⚠ Cron job %s failed (timed out after %s)", j.Name, seconds(r.AgentTimeout))
 			if strings.TrimSpace(final) != "" {
-				o.Text += ". The partial answer follows.\n\n" + final
+				o.Text += partialAnswerMark + "\n\n" + final
 			}
 			o.Send, o.Status = true, "error"
 			return o, nil
@@ -185,6 +223,10 @@ func (r *Runner) buildText(ctx context.Context, j Job) (text string, scriptFaile
 	b.WriteString(j.Prompt)
 	b.WriteString("\n\n")
 	b.WriteString(CronPreamble)
+	if j.DraftOnly {
+		b.WriteString("\n\n")
+		b.WriteString(draftOnlyPreamble)
+	}
 	return b.String(), scriptFailed, nil
 }
 
@@ -228,7 +270,7 @@ func (r *Runner) writeSkills(b *strings.Builder, j Job) error {
 	return nil
 }
 
-// writeScript runs the script of an agent job and writes its stdout as data. A failure
+// writeScript runs the script of an agent job and writes its stdout as untrusted data inside the untrusted block. A failure
 // goes into the prompt too, so that the model reports it (Hermes). It returns true when it
 // wrote a "Script error:" block.
 func (r *Runner) writeScript(ctx context.Context, b *strings.Builder, j Job) (failed bool) {
@@ -240,14 +282,15 @@ func (r *Runner) writeScript(ctx context.Context, b *strings.Builder, j Job) (fa
 	res := RunScriptSpill(ctx, path, j.Workdir, r.Env, r.Script, r.SpillDir)
 	if res.TimedOut || res.ExitCode != 0 {
 		alert, _ := ScriptJobMessage(j, res, r.Script)
-		fmt.Fprintf(b, "Script error: the data-collection script failed. Report this to the user.\n%s\n\n", alert)
+		fmt.Fprintf(b, "Script error: the data-collection script failed. Report this to the user.\n%s\n\n",
+			security.WrapUntrusted(security.UntrustedCronSource, alert))
 		return true
 	}
 	out := strings.TrimRight(res.Stdout, "\n")
 	if strings.TrimSpace(out) == "" {
 		out = "(the script printed nothing)"
 	}
-	fmt.Fprintf(b, "Script output:\n%s\n\n", out)
+	fmt.Fprintf(b, "Script output:\n%s\n\n", security.WrapUntrusted(security.UntrustedCronSource, out))
 	return false
 }
 

@@ -46,7 +46,7 @@ func readOnlyEnv(mode string, scopes *[]string) *Env {
 
 func TestReadOnlyDenied(t *testing.T) {
 	want := []string{"acp_delegate", "browser_click", "browser_fill", "browser_run_js", "execute_code",
-		"patch", "skill_manage", "terminal", "write_file"}
+		"patch", "request_secret", "skill_manage", "terminal", "write_file"}
 	if got := ReadOnlyDenied(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v", got)
 	}

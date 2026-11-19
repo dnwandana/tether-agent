@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -594,9 +595,9 @@ func TestCronTurnRunsWithCronKind(t *testing.T) {
 	if env.Kind != "cron" || env.Ask != nil || env.Gate.(tools.GateApprover).Prompter != nil {
 		t.Fatalf("%+v", env)
 	}
-	final, err := a.cronTurn(ctx, cron.CronTurn{Session: sess, Text: "report"})
-	if err != nil || final != "Hello, world." {
-		t.Fatal(final, err)
+	out, err := a.cronTurn(ctx, cron.CronTurn{Session: sess, Text: "report"})
+	if err != nil || out.Final != "Hello, world." {
+		t.Fatal(out, err)
 	}
 	a.valuesMu.Lock()
 	_, kept := a.values[sess.ID]
@@ -2025,5 +2026,18 @@ func TestModeCommandRegistered(t *testing.T) {
 	}
 	if got := d.ModeOf(ctx, "cli"); got != security.ModeFull {
 		t.Fatal(got)
+	}
+}
+
+func TestCronTurnReturnsOutput(t *testing.T) {
+	a := gatewayApp(t, "", "")
+	sess, err := a.Store.Create(ctx, sessions.Session{Source: "cron", Kind: "cron", Key: "cron:j2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.cronTurn(ctx, cron.CronTurn{Session: sess, Text: "report", JobName: "n", JobPurpose: "p",
+		Outside: []string{"web_fetch"}})
+	if err != nil || out.Final != "Hello, world." || !reflect.DeepEqual(out.Sources, []string{"web_fetch"}) {
+		t.Fatalf("%+v %v", out, err)
 	}
 }

@@ -3,7 +3,9 @@ package backup
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -25,6 +27,7 @@ var freeTextColumns = map[string][]string{
 	"goals":              {"state"},
 	"approval_log":       {"preview"},
 	"approval_grants":    {"preview"},
+	"held_sends":         {"text", "reason", "target_title"},
 }
 
 // stateColumns lists every other TEXT column of the schema. maskDB never masks these columns.
@@ -51,7 +54,9 @@ var stateColumns = map[string][]string{
 	"acp_sessions":       {"session_id", "agent", "acp_session_id", "cwd"},
 	"approval_log": {"session_id", "scope", "kind", "tool", "server", "tool_name", "rule", "class",
 		"decision", "source", "answer", "content_sha256"},
-	"chat_modes": {"scope", "mode"},
+	"chat_modes":  {"scope", "mode"},
+	"secret_pins": {"name", "path", "sha256"},
+	"held_sends":  {"id", "kind", "job_id", "target", "sources", "card_chat"},
 }
 
 // maskCell is one cell that maskDB changes.
@@ -60,24 +65,63 @@ type maskCell struct {
 	value string
 }
 
-// maskDB masks the known secret values in the free-text columns of the DB copy d. It returns
-// the count of cells that changed. Values shorter than 8 characters are ignored.
+// namedRedactor returns a redactor that replaces each value of known with the label of its
+// name. known maps a value to its name, so one name can have two values.
+func namedRedactor(known map[string]string) *security.Redactor {
+	pairs := map[string]string{}
+	var extra []string
+	for _, v := range slices.Sorted(maps.Keys(known)) {
+		if _, ok := pairs[known[v]]; ok {
+			extra = append(extra, v)
+			continue
+		}
+		pairs[known[v]] = v
+	}
+	r := security.NewNamedRedactor(pairs)
+	for _, v := range extra {
+		r.Add(known[v], v)
+	}
+	return r
+}
+
+// jsonText returns the JSON text of v without the outer quotes and without the newline. It does
+// not escape HTML. The named redactor uses the same rule for the JSON form of a value.
+func jsonText(v string) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return v
+	}
+	t := strings.TrimSuffix(b.String(), "\n")
+	return t[1 : len(t)-1]
+}
+
+// maskDB replaces the known secret values in the free-text columns of the DB copy d with the
+// label «NAME». known maps each value to its name. It returns the count of cells that changed.
+// Values shorter than 8 characters are ignored.
 //
 // An UPDATE leaves the old text in free pages of the file, and the FTS5 index keeps the old
 // tokens until a merge. When a cell changes, maskDB rebuilds messages_fts and runs VACUUM, so
 // the raw bytes of the copy do not hold the secret. Use maskDB only on a copy, never on the
 // live state.db.
-func maskDB(ctx context.Context, d *db.DB, values []string) (cells int, err error) {
-	var vals []string
-	for _, v := range values {
-		if utf8.RuneCountInString(v) >= 8 && !slices.Contains(vals, v) {
-			vals = append(vals, v)
+func maskDB(ctx context.Context, d *db.DB, known map[string]string) (cells int, err error) {
+	kept := map[string]string{}
+	var args []any
+	for _, v := range slices.Sorted(maps.Keys(known)) {
+		if utf8.RuneCountInString(v) < 8 {
+			continue
+		}
+		kept[v] = known[v]
+		args = append(args, v)
+		if j := jsonText(v); j != v {
+			args = append(args, j)
 		}
 	}
-	if len(vals) == 0 {
+	if len(kept) == 0 {
 		return 0, nil
 	}
-	r := security.NewRedactor(vals)
+	r := namedRedactor(kept)
 
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
@@ -85,10 +129,6 @@ func maskDB(ctx context.Context, d *db.DB, values []string) (cells int, err erro
 	}
 	defer tx.Rollback()
 
-	args := make([]any, len(vals))
-	for i, v := range vals {
-		args[i] = v
-	}
 	tables := make([]string, 0, len(freeTextColumns))
 	for tbl := range freeTextColumns {
 		tables = append(tables, tbl)

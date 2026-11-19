@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/dnwandana/tether-agent/internal/backup"
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 // dataDirWithDB returns a temp data dir that holds a migrated state.db.
@@ -162,5 +165,21 @@ func TestPrintBackupReportKeyNotePartialScan(t *testing.T) {
 	printBackupReport(&b, r)
 	if got := b.String(); !strings.Contains(got, "Note: at least 3 stored values hold text that looks like a key.") {
 		t.Fatalf("a partial scan must say at least:\n%s", got)
+	}
+}
+
+func TestBackupSetsBoundNames(t *testing.T) {
+	t.Cleanup(func() { security.SetBoundSecretNames(nil) })
+	dir := dataDirWithDB(t)
+	cfg := "exec_secrets:\n  GITHUB_PAT:\n    commands: [\"gh release\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"backup", "--data-dir", dir}, &out, &errb); code != 0 {
+		t.Fatal(code, errb.String())
+	}
+	if got := security.BoundSecretNames(); !slices.Equal(got, []string{"GITHUB_PAT"}) {
+		t.Fatalf("bound names %v", got)
 	}
 }

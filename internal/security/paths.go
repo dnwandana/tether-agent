@@ -61,16 +61,18 @@ var homeStartupFiles = []string{
 	".netrc", ".pgpass", ".npmrc", ".pypirc", ".gitconfig",
 }
 
+// homeCredentialDirs are the folders in the home folder that hold credentials. A credential
+// file can also start a program, for example credential_process in ~/.aws/config.
+var homeCredentialDirs = []string{".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh", ".config/gcloud"}
+
 // homeStartupDirs are the folders in the home folder that start programs, that
-// configure a shell or git, or that hold credentials. A credential file can also
-// start a program, for example credential_process in ~/.aws/config.
+// configure a shell or git, or that hold credentials.
 // ~/.local/bin and .git stay writable, because a refusal there blocks common
 // requests such as the install of a tool or of a git hook.
-var homeStartupDirs = []string{
+var homeStartupDirs = append([]string{
 	".config/systemd", ".config/autostart", ".config/environment.d", ".config/fish",
 	".config/git", "Library/LaunchAgents",
-	".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh", ".config/gcloud",
-}
+}, homeCredentialDirs...)
 
 // ProtectedPaths returns the protected paths. A path that ends in "/" is a
 // folder. A file path also covers the names that start with it and a "-",
@@ -90,6 +92,7 @@ func ProtectedPaths(dataDir, home string) []string {
 	if dataDir != "" {
 		out = append(out,
 			filepath.Join(dataDir, ".env"),
+			filepath.Join(dataDir, ".env.lock"),
 			filepath.Join(dataDir, "config.yaml"),
 			filepath.Join(dataDir, "state.db"),
 			filepath.Join(dataDir, "state.db.lock"),

@@ -62,6 +62,9 @@ type Manager struct {
 	// BaseEnv uses os.Environ().
 	BaseEnv []string
 	DotEnv  map[string]string
+	// EnvStore holds the live .env values. When it is set, a dial reads it in place of DotEnv,
+	// so a value that the owner saves reaches the next start of a server.
+	EnvStore *security.DotEnvStore
 	// LoadServers reads the server entries again for Reload. Nil keeps Servers.
 	LoadServers func() (map[string]config.MCPServer, error)
 
@@ -719,7 +722,7 @@ func (m *Manager) dialer() func(ctx context.Context, name string, s config.MCPSe
 		if env == nil {
 			env = os.Environ()
 		}
-		c, err := dialWithLog(ctx, name, s, env, m.DotEnv, m.logger())
+		c, err := dialWithLog(ctx, name, s, env, m.dotEnv(), m.logger())
 		if err != nil {
 			return nil, err
 		}
@@ -913,7 +916,8 @@ func sameHint(a, b *bool) bool {
 }
 
 // mcpTool is one tool of an MCP server in the registry. A read call runs with no gate.
-// Each other call goes through the approval gate. apply sets class
+// Each other call goes through the approval gate. An owner answer can replace the arguments with a
+// redacted copy. apply sets class
 // (the final class) and hash (the ConfigHash of the server entry).
 type mcpTool struct {
 	m                  *Manager
@@ -961,14 +965,28 @@ func (t *mcpTool) Run(ctx context.Context, args json.RawMessage, env *tools.Env)
 		}
 		call := security.MCPCall{Server: t.server, Tool: t.tool, Class: string(t.class), ConfigHash: t.hash,
 			Summary: firstSentence(t.def.Description), Args: args}
-		if err := ap.CheckMCP(ctx, env, call); err != nil {
+		sendArgs, err := ap.CheckMCP(ctx, env, call)
+		if err != nil {
 			return "", fmt.Errorf("%w: %s", tools.ErrToolError, err.Error())
+		}
+		if sendArgs != nil {
+			args = sendArgs
 		}
 	}
 	out, err := t.m.call(ctx, t.server, t.tool, t.class, args)
-	if err != nil && !errors.Is(err, tools.ErrToolError) {
+	var remote *tools.RemoteError
+	if err != nil && !errors.Is(err, tools.ErrToolError) && !errors.As(err, &remote) {
 		// The client error text is for the model, and it has no credentials.
 		err = fmt.Errorf("%w: %s", tools.ErrToolError, err.Error())
 	}
 	return out, err
+}
+
+// dotEnv returns the .env values for a dial: the store after a refresh, else DotEnv.
+func (m *Manager) dotEnv() map[string]string {
+	if m.EnvStore != nil {
+		m.EnvStore.Refresh()
+		return m.EnvStore.Snapshot()
+	}
+	return m.DotEnv
 }

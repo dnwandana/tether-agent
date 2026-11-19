@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -206,10 +207,42 @@ func (t ReadFileTool) Run(_ context.Context, raw json.RawMessage, env *Env) (str
 	case shown == 0:
 		return "", toolErr("offset %d is past the end of %s (%d lines)", offset, path, lineNo)
 	}
-	if more {
-		fmt.Fprintf(&b, "[more lines follow; next_offset: %d]\n", offset+shown)
+	text := b.String()
+	if source := outsideSpillSource(env, path); source != "" {
+		text = security.WrapUntrusted(source, strings.TrimSuffix(text, "\n")) + "\n"
 	}
-	return b.String(), nil
+	if more {
+		text += fmt.Sprintf("[more lines follow; next_offset: %d]\n", offset+shown)
+	}
+	return text, nil
+}
+
+// cronScriptSpillName is the source in the spill file name of a long cron data script stdout.
+const cronScriptSpillName = "cron_data_script"
+
+var spillNameRE = regexp.MustCompile(`^(.+)-\d{8}-\d{6}[0-9a-f]{6}\.txt$`)
+
+// outsideSpillSource returns the source of a spill file of an outside tool, or "" for each other file.
+func outsideSpillSource(env *Env, path string) string {
+	if env == nil || env.DataDir == "" {
+		return ""
+	}
+	if filepath.Clean(filepath.Dir(path)) != filepath.Clean(filepath.Join(env.DataDir, "cache", "spill")) {
+		return ""
+	}
+	m := spillNameRE.FindStringSubmatch(filepath.Base(path))
+	if m == nil {
+		return ""
+	}
+	// The spill of a cron data script has a clean file name. The block uses the same source
+	// text as the inline part of the script output.
+	if m[1] == cronScriptSpillName {
+		return security.UntrustedCronSource
+	}
+	if !IsOutsideTool(m[1]) {
+		return ""
+	}
+	return m[1]
 }
 
 // readLine returns the next line of br without its line end, as valid UTF-8

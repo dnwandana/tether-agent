@@ -25,7 +25,7 @@ type fakeTurn struct {
 	started   chan string
 }
 
-func (f *fakeTurn) turn(ctx context.Context, t CronTurn) (string, error) {
+func (f *fakeTurn) turn(ctx context.Context, t CronTurn) (TurnOutput, error) {
 	f.mu.Lock()
 	f.calls[t.Session.Key]++
 	f.active++
@@ -44,7 +44,7 @@ func (f *fakeTurn) turn(ctx context.Context, t CronTurn) (string, error) {
 	f.mu.Lock()
 	f.active--
 	f.mu.Unlock()
-	return "report", nil
+	return TurnOutput{Final: "report"}, nil
 }
 
 func (f *fakeTurn) total() int {
@@ -375,7 +375,7 @@ func TestDeliveryFailureRecorded(t *testing.T) {
 
 func TestAgentErrorRecorded(t *testing.T) {
 	s, clk := scheduler(t)
-	s.Runner.Turn = func(context.Context, CronTurn) (string, error) { return "", errors.New("provider down") }
+	s.Runner.Turn = func(context.Context, CronTurn) (TurnOutput, error) { return TurnOutput{}, errors.New("provider down") }
 	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
 	clk.t = clk.t.Add(31 * time.Minute)
 	s.TickOnce(ctx)
@@ -387,7 +387,7 @@ func TestAgentErrorRecorded(t *testing.T) {
 
 func TestPanicDoesNotStopScheduler(t *testing.T) {
 	s, clk := scheduler(t)
-	s.Runner.Turn = func(context.Context, CronTurn) (string, error) { panic("boom") }
+	s.Runner.Turn = func(context.Context, CronTurn) (TurnOutput, error) { panic("boom") }
 	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
 	clk.t = clk.t.Add(31 * time.Minute)
 	s.TickOnce(ctx)
@@ -669,10 +669,10 @@ func TestAgentTimeoutStopIsNotTimeout(t *testing.T) {
 	s, clk := scheduler(t)
 	s.Runner.AgentTimeout = time.Hour
 	started := make(chan struct{}, 1)
-	s.Runner.Turn = func(ctx context.Context, _ CronTurn) (string, error) {
+	s.Runner.Turn = func(ctx context.Context, _ CronTurn) (TurnOutput, error) {
 		started <- struct{}{}
 		<-ctx.Done()
-		return "partial", ctx.Err()
+		return TurnOutput{Final: "partial"}, ctx.Err()
 	}
 	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
 	clk.t = clk.t.Add(31 * time.Minute)
@@ -689,7 +689,9 @@ func TestAgentTimeoutStopIsNotTimeout(t *testing.T) {
 }
 
 // failTurn is an agent turn that always fails.
-func failTurn(context.Context, CronTurn) (string, error) { return "", errors.New("provider down") }
+func failTurn(context.Context, CronTurn) (TurnOutput, error) {
+	return TurnOutput{}, errors.New("provider down")
+}
 
 // failTicks moves the clock past the next run of a "30m" job and runs one tick, n times.
 func failTicks(s *schedFixture, clk *clock, n int) {
@@ -820,7 +822,7 @@ func TestLocalJobWithoutHomePauses(t *testing.T) {
 func TestSilentRunRecordsDeliverySilent(t *testing.T) {
 	s, clk := scheduler(t)
 	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
-	s.Runner.Turn = func(context.Context, CronTurn) (string, error) { return "[SILENT]", nil }
+	s.Runner.Turn = func(context.Context, CronTurn) (TurnOutput, error) { return TurnOutput{Final: "[SILENT]"}, nil }
 	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
 	failTicks(s, clk, 1)
 	j := mustGet(t, s.Store, id)
@@ -863,5 +865,30 @@ func TestRunDurationEndsBeforeDelivery(t *testing.T) {
 	r := newestRunRow(t, s.Store, id)
 	if r.delivery != DeliverySent || r.startedAt != ranAt.UnixMilli() || r.finishedAt != ranAt.UnixMilli() {
 		t.Fatalf("%+v, ran at %d", r, ranAt.UnixMilli())
+	}
+}
+
+func TestSweepRunsBeforeDue(t *testing.T) {
+	s, clk := scheduler(t)
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	clk.t = clk.t.Add(31 * time.Minute)
+	sweeps, before := 0, -1
+	s.Sweep = func(context.Context) {
+		sweeps++
+		before = runs(t, s, id)
+	}
+	s.TickOnce(ctx)
+	if sweeps != 1 || before != 0 || runs(t, s, id) != 1 {
+		t.Fatal(sweeps, before, runs(t, s, id))
+	}
+	s.TickOnce(ctx)
+	if sweeps != 2 {
+		t.Fatal("the sweep runs on each tick, also with no due job")
+	}
+	s.Sweep = func(context.Context) { panic("boom") }
+	clk.t = clk.t.Add(31 * time.Minute)
+	s.TickOnce(ctx)
+	if runs(t, s, id) != 2 {
+		t.Fatal("a panic in the sweep must not stop the tick")
 	}
 }

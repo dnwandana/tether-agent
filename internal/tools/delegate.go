@@ -110,6 +110,8 @@ type ChildResultLite struct {
 	ToolCalls int
 	DurationS float64
 	Error     string
+	// Outside holds the outside facts of the child. The parent adds them to its own set.
+	Outside OutsideFacts `json:"-"`
 }
 
 // ChildRunner runs one child and waits for its result. The app gives an adapter over
@@ -220,7 +222,7 @@ func (t DelegateTool) Schema() provider.ToolSchema {
 		"- If the user writes in a language other than English, or asks for a specific language or style, say so in 'context'.\n" +
 		"- Subagent summaries are SELF-REPORTS, not verified facts. For operations with external side effects, " +
 		"require a verifiable handle (URL, ID, absolute path) and verify it yourself before you tell the user it succeeded.\n" +
-		"- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob, acp_delegate.\n" +
+		"- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob, acp_delegate, request_secret.\n" +
 		"- Results are always returned as an array, one entry per task."
 	params := map[string]any{
 		"type": "object",
@@ -279,7 +281,11 @@ func (t DelegateTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (s
 	if a.Background {
 		return t.runBackground(ctx, env, specs)
 	}
-	return FormatDelegateResults(t.runForeground(ctx, env, specs)), nil
+	results := t.runForeground(ctx, env, specs)
+	for _, r := range results {
+		AddOutside(env, r.Outside)
+	}
+	return FormatDelegateResults(results), nil
 }
 
 // specs returns the child specs of the call. The children are named "i/n".

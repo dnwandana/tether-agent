@@ -8,7 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -102,6 +106,11 @@ type Agent struct {
 	SpillDir string
 	// Redactor masks the secrets in each tool result. A nil Redactor applies the patterns only.
 	Redactor *security.Redactor
+	// Handles gives a stable name to each credential that a terminal result or a background
+	// log prints. Nil gives no handle.
+	Handles *security.Handles
+	// BeforeToolText runs once at the start of each tool round, before toolText. Nil does nothing.
+	BeforeToolText func()
 	// Prices gives the cost of each response. A nil Prices stores no cost.
 	Prices *pricing.Service
 	// Prompts holds the frozen system prompt of each session. RunTurn uses it when
@@ -123,6 +132,9 @@ type Agent struct {
 	// ChatInfo describes the chat of a session for the system prompt, for example the
 	// chat type and the topic on Telegram. It can be nil.
 	ChatInfo func(s *sessions.Session) string
+	// SharedSession reports whether the members of a chat or a topic can read the session. A
+	// shared session gets no bound-secrets entry in its prompt. Nil means that no session is shared.
+	SharedSession func(s *sessions.Session) bool
 	// Compactor compacts a long session before a model call. A nil Compactor never
 	// compacts, but the view still applies the stored compactions.
 	Compactor *ctxmgr.Compactor
@@ -130,6 +142,12 @@ type Agent struct {
 	// Reviews counts the turns and the tool rounds of each session for the background
 	// reviews.
 	Reviews ReviewCounters
+
+	// outsideMu guards pendingOutside: the outside facts of finished background batches, by
+	// session key, for the next turn of the key.
+	outsideMu      sync.Mutex
+	pendingOutside map[string]tools.OutsideFacts
+
 	// Background is the base context of the background reviews. Its end stops the running
 	// reviews, and no new review starts. Nil means context.Background().
 	Background context.Context
@@ -175,6 +193,9 @@ type Turn struct {
 	// Member is true for a turn of a member. Shared is true when the users of the chat or
 	// the topic share the session.
 	Member, Shared bool
+	// Outside holds the outside sources from before the turn, for example the sources of
+	// the parent of a child run. The turn starts with them.
+	Outside []string
 	// MemberTools holds the toolsets of a member turn in a shared session. The schemas
 	// stay the Toolsets, so the prompt cache keeps its hits. The gateway sets it only when
 	// Member and Shared are both true.
@@ -237,6 +258,9 @@ type TurnResult struct {
 	// NoSummary is true when the summary was empty two times. Then Final is NoteNoSummary
 	// or NoteNoSummaryCron.
 	NoSummary bool
+	// Outside holds the outside facts of the turn: the sources, the hosts, and the tool counts.
+	// It is set also after an error.
+	Outside tools.OutsideFacts
 
 	// usedMemory tells that the turn called memory with an action that is not search or
 	// read. usedSkills tells that the turn called skill_manage. Such a call resets the review
@@ -267,7 +291,8 @@ type turnState struct {
 // created. A cancelled ctx stops the turn. Then the partial text and the finished tool
 // results stay saved, and RunTurn returns ctx.Err(). After every end, also a cancel,
 // TurnResult.PendingSteer holds the steer text that the turn did not deliver, and the steer
-// queue is empty.
+// queue is empty. The outside set of the env is for this turn only: RunTurn empties it at
+// the start and reports it in TurnResult.Outside.
 func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error) {
 	if t.Session == nil {
 		return res, errors.New("agent: the turn has no session")
@@ -306,6 +331,12 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		sink = nopSink{}
 	}
 	env := a.turnEnv(t)
+	tools.ResetOutside(env)
+	for _, src := range t.Outside {
+		tools.MarkOutside(env, src, "")
+	}
+	tools.AddOutside(env, a.takeOutside(t.Session.Key))
+	defer func() { res.Outside = tools.Outside(env) }()
 	// The writes use a context without cancel, so a /stop does not lose a finished message.
 	dbCtx := context.WithoutCancel(ctx)
 	prov := a.providerFor(t.Session)
@@ -500,11 +531,14 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		}
 		stop := false
 		contents := make([]string, len(results))
+		if a.BeforeToolText != nil {
+			a.BeforeToolText()
+		}
 		for i, c := range out.ToolCalls {
 			if failures.Observe(a.failureKind(c, turnVisible)) {
 				stop = true
 			}
-			contents[i] = a.toolText(results[i].Text)
+			contents[i] = a.toolText(a.handleTool(c, env), env.RunRootSession(), results[i])
 		}
 		// The steer goes into the last result before the save, so no update is necessary.
 		// After a cancel, the text goes back into the queue, so the turn returns it as
@@ -992,17 +1026,78 @@ func (a *Agent) Meta(prov provider.Provider, out provider.Result) sessions.Messa
 	return a.meta(prov, out)
 }
 
-// toolText returns the stored text of one tool result: redacted, then truncated.
-func (a *Agent) toolText(s string) string {
+// bgLogTool is the tool name that handleTool gives to a read_file call of a background log.
+const bgLogTool = "read_file:bg-log"
+
+// handleTool returns bgLogTool for a read_file call of <SpillDir>/bg-<pid>.log, else the name
+// of the call.
+func (a *Agent) handleTool(c provider.ToolCall, env *tools.Env) string {
+	if c.Name != "read_file" || a.SpillDir == "" {
+		return c.Name
+	}
+	var args struct {
+		Path string `json:"path"`
+	}
+	if json.Unmarshal([]byte(c.Args), &args) != nil || args.Path == "" {
+		return c.Name
+	}
+	p := args.Path
+	switch {
+	case p == "~" || strings.HasPrefix(p, "~/"):
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return c.Name
+		}
+		p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+	case !filepath.IsAbs(p):
+		if env == nil || env.WorkDir == "" {
+			return c.Name
+		}
+		p = filepath.Join(env.WorkDir, p)
+	}
+	p = filepath.Clean(p)
+	if filepath.Dir(p) != filepath.Clean(a.SpillDir) {
+		return c.Name
+	}
+	if bgLogName.MatchString(filepath.Base(p)) {
+		return bgLogTool
+	}
+	return c.Name
+}
+
+// bgLogName matches the file name of a background log.
+var bgLogName = regexp.MustCompile(`^bg-[0-9]+\.log$`)
+
+// toolText returns the stored text of one tool result. A terminal result and a background
+// log read get the handles of root first. Then the text is redacted and truncated. The text of an
+// outside result goes into the untrusted block last, so the spill note is inside the block and the
+// close tag is never cut. The note of Tether Agent follows the block.
+func (a *Agent) toolText(tool, root string, r tools.Result) string {
+	s := r.Text
+	if a.Handles != nil && (tool == "terminal" || tool == bgLogTool) {
+		s = a.Handles.Swap(root, s, a.Redactor)
+	}
 	s = a.Redactor.Redact(s)
 	max := a.config().Context.ToolOutputMaxChars
-	out, err := ctxmgr.Truncate(s, max, a.SpillDir)
-	if err == nil {
-		return out
+	var out string
+	var err error
+	if r.Outside {
+		out, err = ctxmgr.TruncateNamed(s, max, a.SpillDir, tool)
+	} else {
+		out, err = ctxmgr.Truncate(s, max, a.SpillDir)
 	}
-	a.logger().Warn("agent: cannot write the spill file; the tool output is cut without a copy",
-		"dir", a.SpillDir, "err", err.Error())
-	return cutNoSpill(ctxmgr.SanitizeUTF8(s), max)
+	if err != nil {
+		a.logger().Warn("agent: cannot write the spill file; the tool output is cut without a copy",
+			"dir", a.SpillDir, "err", err.Error())
+		out = cutNoSpill(ctxmgr.SanitizeUTF8(s), max)
+	}
+	if r.Outside {
+		out = security.WrapUntrusted(tool, out)
+	}
+	if r.Note != "" {
+		out += "\n\n" + r.Note
+	}
+	return out
 }
 
 // cutNoSpill keeps the head (60%) and the tail (30%) of s when no spill file can be written.
@@ -1183,6 +1278,50 @@ func (a *Agent) visible(t Turn) (map[string]bool, []provider.ToolSchema) {
 		return map[string]bool{}, nil
 	}
 	return a.Tools.Visible(t.Toolsets, t.RemoveTools)
+}
+
+// queueOutside keeps f for the next turn of sessionKey. An empty key keeps nothing.
+func (a *Agent) queueOutside(sessionKey string, f tools.OutsideFacts) {
+	if sessionKey == "" {
+		return
+	}
+	a.outsideMu.Lock()
+	defer a.outsideMu.Unlock()
+	if a.pendingOutside == nil {
+		a.pendingOutside = map[string]tools.OutsideFacts{}
+	}
+	cur := a.pendingOutside[sessionKey]
+	cur.Sources = unionStrings(cur.Sources, f.Sources)
+	cur.Hosts = unionStrings(cur.Hosts, f.Hosts)
+	if len(f.ToolCounts) > 0 {
+		counts := make(map[string]int, len(cur.ToolCounts)+len(f.ToolCounts))
+		maps.Copy(counts, cur.ToolCounts)
+		for k, v := range f.ToolCounts {
+			counts[k] += v
+		}
+		cur.ToolCounts = counts
+	}
+	a.pendingOutside[sessionKey] = cur
+}
+
+// takeOutside returns and deletes the kept facts of sessionKey.
+func (a *Agent) takeOutside(sessionKey string) tools.OutsideFacts {
+	a.outsideMu.Lock()
+	defer a.outsideMu.Unlock()
+	f := a.pendingOutside[sessionKey]
+	delete(a.pendingOutside, sessionKey)
+	return f
+}
+
+// unionStrings returns a and b with no repeats. It keeps the order of first use.
+func unionStrings(a, b []string) []string {
+	out := append([]string(nil), a...)
+	for _, v := range b {
+		if !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // turnEnv returns the tool context of the turn.

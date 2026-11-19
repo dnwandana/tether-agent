@@ -25,6 +25,8 @@ func headerFor(s security.Scope, timeout time.Duration) approvalHeader {
 		return approvalHeader{"✅", allowed, "this session"}
 	case security.ScopeAlways:
 		return approvalHeader{"✅", allowed, "always"}
+	case security.ScopeRedacted:
+		return approvalHeader{"✅", "Sent redacted", ""}
 	case security.ScopeTimeout:
 		if timeout > 0 {
 			return approvalHeader{"⌛", denied, "no answer in " + formatWait(timeout)}
@@ -35,17 +37,40 @@ func headerFor(s security.Scope, timeout time.Duration) approvalHeader {
 	return approvalHeader{"❌", denied, ""}
 }
 
+// resultHeader returns the header after the answer s. With pin true, the titles are for a
+// pin request and the header has no "once" detail. Otherwise it is headerFor(s, timeout).
+func resultHeader(pin bool, s security.Scope, timeout time.Duration) approvalHeader {
+	h := headerFor(s, timeout)
+	if !pin {
+		return h
+	}
+	if h.Emoji == "✅" {
+		return approvalHeader{h.Emoji, "Program allowed", ""}
+	}
+	h.Title = "Program denied"
+	return h
+}
+
 // approvalKeyboard returns the buttons of the approval prompt id: "❌ Deny" alone on the
-// first row, and the permitted allow answers on the second row. noAlways removes
-// "✅ Always". noSession keeps only "✅ Once".
-func approvalKeyboard(id string, noAlways, noSession bool) *InlineKeyboardMarkup {
+// first row, and the permitted allow answers on the second row. NoAlways of req removes
+// "✅ Always". NoSession keeps only "✅ Once". A pin request has only "✅ Allow this program".
+// A request with findings has "✅ Send redacted" first on the second row.
+func approvalKeyboard(id string, req security.ApprovalRequest) *InlineKeyboardMarkup {
 	btn := func(text, arg string) InlineKeyboardButton {
 		return InlineKeyboardButton{Text: text, CallbackData: callbackData(approvalPrefix, id, arg)}
 	}
-	allow := []InlineKeyboardButton{btn("✅ Once", "once")}
-	if !noSession {
+	if req.PinName != "" {
+		return &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{
+			{btn("❌ Deny", "deny")}, {btn("✅ Allow this program", "once")}}}
+	}
+	var allow []InlineKeyboardButton
+	if len(req.Findings) > 0 {
+		allow = append(allow, btn("✅ Send redacted", "r"))
+	}
+	allow = append(allow, btn("✅ Once", "once"))
+	if !req.NoSession {
 		allow = append(allow, btn("✅ Session", "session"))
-		if !noAlways {
+		if !req.NoAlways {
 			allow = append(allow, btn("✅ Always", "always"))
 		}
 	}
@@ -88,6 +113,15 @@ func escapePre(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// findingItems returns the labels of f without the outer brackets, joined with ", ".
+func findingItems(f []security.Finding) string {
+	items := make([]string, len(f))
+	for i, x := range f {
+		items[i] = strings.TrimSuffix(strings.TrimPrefix(x.Label, "["), "]")
+	}
+	return strings.Join(items, ", ")
 }
 
 // moreLine returns the last line of a cut command.
@@ -148,6 +182,9 @@ func promptHeader(req security.ApprovalRequest) (mdv2, plain string) {
 // buildApprovalPrompt returns the approval prompt as MarkdownV2 and as plain text. The
 // command is cut first, so the timeout line stays.
 func buildApprovalPrompt(req security.ApprovalRequest, timeout time.Duration) (mdv2, plain string) {
+	if req.PinName != "" {
+		return buildPinPrompt(req, timeout)
+	}
 	pattern := security.ShowHidden(gateway.ApprovalFlagged(req))
 	hdMD, hdPlain := promptHeader(req)
 	child := ""
@@ -173,8 +210,19 @@ func buildApprovalPrompt(req security.ApprovalRequest, timeout time.Duration) (m
 		head.WriteString(" ")
 		head.WriteString(escapeMDV2(child))
 	}
+	secretLines := gateway.ApprovalSecretLines(req)
+	for i := range secretLines {
+		secretLines[i] = security.ShowHidden(secretLines[i])
+		head.WriteString("\n")
+		head.WriteString(escapeMDV2(secretLines[i]))
+	}
 	head.WriteString("\n```\n")
 	tail := "\n```"
+	found := ""
+	if len(req.Findings) > 0 {
+		found = "⚠️ Found: " + findingItems(req.Findings)
+		tail += "\n" + escapeMDV2(found)
+	}
 	if wait != "" {
 		tail += "\n_No answer in " + escapeMDV2(wait) + " \\= deny\\._"
 	}
@@ -195,7 +243,57 @@ func buildApprovalPrompt(req security.ApprovalRequest, timeout time.Duration) (m
 		flagged += " " + child
 	}
 	parts = append(parts, flagged)
+	parts = append(parts, secretLines...)
 	parts = append(parts, lines...)
+	if found != "" {
+		parts = append(parts, found)
+	}
+	if wait != "" {
+		parts = append(parts, "No answer in "+wait+" = deny.")
+	}
+	return mdv2, cutUTF16(strings.Join(parts, "\n"), maxMessageLen)
+}
+
+// buildPinPrompt returns the prompt of a pin request as MarkdownV2 and as plain text.
+func buildPinPrompt(req security.ApprovalRequest, timeout time.Duration) (mdv2, plain string) {
+	question := security.ShowHidden(gateway.PinQuestion(req))
+	path := security.ShowHidden(req.PinPath)
+	hash := gateway.ShortHash(req.PinHash)
+	child := ""
+	if req.ChildName != "" {
+		child = "(from subagent " + req.ChildName + ")"
+	}
+	var head strings.Builder
+	head.WriteString("🔑 *")
+	head.WriteString(escapeMDV2(strings.TrimPrefix(question, "🔑 ")))
+	head.WriteString("*")
+	if child != "" {
+		head.WriteString(" ")
+		head.WriteString(escapeMDV2(child))
+	}
+	head.WriteString("\n`")
+	head.WriteString(escapePre(path))
+	head.WriteString("`\nsha256 ")
+	head.WriteString(escapeMDV2(hash))
+	head.WriteString("\nCommand:\n```\n")
+	tail := "\n```"
+	wait := ""
+	if timeout > 0 {
+		wait = formatWait(timeout)
+		tail += "\n_No answer in " + escapeMDV2(wait) + " \\= deny\\._"
+	}
+	lines := fitLines(security.ShowHidden(req.Command), escapePre, 1, maxMessageLen-UTF16Len(head.String())-UTF16Len(tail))
+	esc := make([]string, len(lines))
+	for i, l := range lines {
+		esc[i] = escapePre(l)
+	}
+	mdv2 = head.String() + strings.Join(esc, "\n") + tail
+
+	first := question
+	if child != "" {
+		first += " " + child
+	}
+	parts := []string{first, path, "sha256 " + hash, "Command: " + strings.Join(lines, "\n")}
 	if wait != "" {
 		parts = append(parts, "No answer in "+wait+" = deny.")
 	}
@@ -207,7 +305,11 @@ func buildApprovalPrompt(req security.ApprovalRequest, timeout time.Duration) (m
 // the summary. plain is short with no markup.
 func buildApprovalResult(h approvalHeader, req security.ApprovalRequest) (full, short, plain string) {
 	sumMD, sumPlain := escapeMDV2(req.Summary), req.Summary
-	if req.Summary == "" {
+	if req.PinName != "" {
+		path := security.ShowHidden(req.PinPath)
+		sumMD = escapeMDV2(req.PinName) + ": `" + escapePre(path) + "`"
+		sumPlain = req.PinName + ": " + path
+	} else if req.Summary == "" {
 		_, line, more := req.FallbackParts()
 		pattern := security.ShowHidden(gateway.ApprovalSubject(req))
 		sumMD, sumPlain = escapeMDV2(pattern), pattern

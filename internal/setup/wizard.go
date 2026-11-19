@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -63,9 +64,11 @@ type Wizard struct {
 	Term *os.File
 
 	// term replaces the terminal access in tests. Nil uses the real terminal.
-	term   *termOps
-	cfg    *configDoc
-	env    *envFile
+	term *termOps
+	cfg  *configDoc
+	// envSet holds the .env names that the owner changed in this run, with their new values.
+	// save applies them with security.SaveDotEnv and then clears the map.
+	envSet map[string]string
 	dotenv map[string]string
 	// saved holds the files that this run wrote once already. Only the first write of a
 	// run makes the .bak copy, so the copy keeps the state from before the run.
@@ -96,13 +99,11 @@ func (w *Wizard) Run(ctx context.Context) error {
 	if w.cfg, err = readConfigDoc(w.configPath()); err != nil {
 		return err
 	}
-	if w.env, err = readEnvFile(w.envPath()); err != nil {
-		return err
-	}
 	if w.dotenv, err = security.LoadDotEnv(w.envPath()); err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
 	w.saved = map[string]bool{}
+	w.envSet = map[string]string{}
 	w.say("tether setup. The data folder is %s.", w.DataDir)
 	w.say("Press Enter to keep the value in [brackets].")
 
@@ -239,8 +240,7 @@ func (w *Wizard) providerStep(ctx context.Context, name, keyVar string, chosen *
 		w.say("Check the values and try again.")
 	}
 	if a.keyFromUser {
-		w.env.set(a.keyRef, a.key)
-		w.dotenv[a.keyRef] = a.key
+		w.setEnv(a.keyRef, a.key)
 	}
 	if a.preset != "" {
 		pre, _ := config.PresetByID(a.preset)
@@ -696,26 +696,52 @@ func (w *Wizard) redactor(extra ...string) *security.Redactor {
 	return app.NewRedactor(vals)
 }
 
-// save writes config.yaml and .env with mode 0600. The first write of each file in a run
-// copies the old file to a .bak file.
+// setEnv records name=value for the next save, and updates the lookup map of the run.
+func (w *Wizard) setEnv(name, value string) {
+	if w.envSet == nil {
+		w.envSet = map[string]string{}
+	}
+	w.envSet[name] = value
+	w.dotenv[name] = value
+}
+
+// save applies the changed .env names with security.SaveDotEnv, then writes config.yaml with
+// mode 0600. The first write of each file in a run copies the old file to a .bak file.
 func (w *Wizard) save() error {
 	cfgData, err := w.cfg.bytes()
 	if err != nil {
 		return fmt.Errorf("setup: cannot encode the config: %w", err)
 	}
-	files := []struct {
-		path string
-		data []byte
-	}{{w.envPath(), w.env.bytes()}, {w.configPath(), cfgData}}
-	for _, f := range files {
-		if f.data == nil {
-			continue
-		}
-		if err := writeSecretFile(f.path, f.data, !w.saved[f.path]); err != nil {
+	if err := w.saveEnv(); err != nil {
+		return err
+	}
+	p := w.configPath()
+	if err := writeSecretFile(p, cfgData, !w.saved[p]); err != nil {
+		return err
+	}
+	w.saved[p] = true
+	return nil
+}
+
+// saveEnv applies each changed name to .env under the .env lock, so a value that another
+// process saved meanwhile stays. The first write of the run copies .env to .env.bak.
+func (w *Wizard) saveEnv() error {
+	if len(w.envSet) == 0 {
+		return nil
+	}
+	p := w.envPath()
+	if !w.saved[p] {
+		if err := copyToBak(p); err != nil {
 			return err
 		}
-		w.saved[f.path] = true
 	}
+	for _, name := range slices.Sorted(maps.Keys(w.envSet)) {
+		if err := security.SaveDotEnv(p, name, w.envSet[name]); err != nil {
+			return fmt.Errorf("setup: cannot save %s to %s: %w", name, p, err)
+		}
+	}
+	w.saved[p] = true
+	clear(w.envSet)
 	return nil
 }
 
@@ -764,8 +790,7 @@ func (w *Wizard) telegramStep(ctx context.Context) error {
 		cur = ""
 	}
 	w.say("The bot is @%s.", me.Username)
-	w.env.set(keyRef, token)
-	w.dotenv[keyRef] = token
+	w.setEnv(keyRef, token)
 	w.cfg.setString("${"+keyRef+"}", "telegram", "bot_token")
 	if err := w.save(); err != nil {
 		return err

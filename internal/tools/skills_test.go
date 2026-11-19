@@ -126,10 +126,15 @@ func TestSkillViewEnvStatusLine(t *testing.T) {
 	}
 }
 
-func TestSkillViewSchemaNamesEnvPassthrough(t *testing.T) {
-	desc := SkillViewTool{}.Schema().Description
-	if !strings.Contains(desc, "terminal.env_passthrough") || strings.Contains(desc, "gets them in this session") {
-		t.Fatal(desc)
+func TestSkillSchemasNameExecSecrets(t *testing.T) {
+	view := SkillViewTool{}.Schema().Description
+	if !strings.Contains(view, "binds it to a command in exec_secrets in config.yaml. You never see the value.") ||
+		strings.Contains(view, "gets them in this session") {
+		t.Fatal(view)
+	}
+	manage := SkillManageTool{}.Schema().Description
+	if !strings.Contains(manage, "Ask the owner to bind the key name in exec_secrets to the path of the script.") {
+		t.Fatal(manage)
 	}
 }
 

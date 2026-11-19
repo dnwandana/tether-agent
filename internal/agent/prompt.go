@@ -2,6 +2,8 @@ package agent
 
 import (
 	_ "embed"
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -161,6 +163,38 @@ func DefaultToolNotes(visible map[string]bool) []string {
 		out = append(out, noteTodo)
 	}
 	return out
+}
+
+// secretNotesMax is the most bound names in the TOOL NOTES entry.
+const secretNotesMax = 40
+
+// noteSecrets is the first line of the bound-secrets entry of TOOL NOTES.
+const noteSecrets = "Bound secrets: the owner bound these secrets to commands. " +
+	"A matching terminal command gets the value in its environment. You never see a value. " +
+	"Write \"$NAME\" on the command line only when the program needs it there. " +
+	"When a value is missing, ask the owner with request_secret."
+
+// SecretNotes returns the TOOL NOTES entry for the bound secrets: the first line, then one line
+// for each name in sorted order with its commands. It shows at most 40 names. An empty map gives "".
+func SecretNotes(bound map[string][]string) string {
+	if len(bound) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(bound))
+	for n := range bound {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString(noteSecrets)
+	for i, n := range names {
+		if i == secretNotesMax {
+			fmt.Fprintf(&b, "\n  · and %d more", len(names)-secretNotesMax)
+			break
+		}
+		fmt.Fprintf(&b, "\n  · %s: %s", n, strings.Join(bound[n], ", "))
+	}
+	return b.String()
 }
 
 // oneLine joins the lines and the runs of white space of s into single spaces.

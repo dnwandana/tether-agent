@@ -4,6 +4,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,7 +29,6 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/app"
 	"github.com/dnwandana/tether-agent/internal/config"
-	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
@@ -759,18 +761,43 @@ func cronUsers(dir string) func(name string) []string {
 		return none
 	}
 	defer d.Close()
-	jobs, err := (&cron.Store{DB: d}).List(context.Background())
+	// The query names only the columns that every schema version has, so a
+	// database from before a later migration still works.
+	rows, err := d.QueryContext(context.Background(), `SELECT id, name, skills FROM cron_jobs ORDER BY created_at, id`)
+	if err != nil {
+		return none
+	}
+	type cronUse struct {
+		id, name string
+		skills   []string
+	}
+	var jobs []cronUse
+	for rows.Next() {
+		var id, name string
+		var raw sql.NullString
+		if err := rows.Scan(&id, &name, &raw); err != nil {
+			rows.Close()
+			return none
+		}
+		u := cronUse{id: id, name: name}
+		if raw.Valid && raw.String != "" {
+			if err := json.Unmarshal([]byte(raw.String), &u.skills); err != nil {
+				rows.Close()
+				return none
+			}
+		}
+		jobs = append(jobs, u)
+	}
+	err = rows.Err()
+	rows.Close()
 	if err != nil {
 		return none
 	}
 	return func(name string) []string {
 		var lines []string
 		for _, j := range jobs {
-			for _, s := range j.Skills {
-				if s == name {
-					lines = append(lines, fmt.Sprintf("%q (%s)", j.Name, j.ID))
-					break
-				}
+			if slices.Contains(j.skills, name) {
+				lines = append(lines, fmt.Sprintf("%q (%s)", j.name, j.id))
 			}
 		}
 		return lines
@@ -1092,9 +1119,9 @@ func parseInterleaved(fl *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// newRedactor returns a redactor that masks the .env values and the values of the secret
-// variables in the process environment.
-func newRedactor(dotenv map[string]string) *security.Redactor { return app.NewRedactor(dotenv) }
+// newRedactor returns a redactor that replaces each .env value and each secret value of the
+// process environment with the label «NAME».
+func newRedactor(dotenv map[string]string) *security.Redactor { return app.NewNamedRedactor(dotenv) }
 
 // runSessions runs the sessions subcommand and returns the exit code. It opens state.db
 // and nothing else.

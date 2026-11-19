@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +124,7 @@ func (t *WebFetchTool) Run(ctx context.Context, raw json.RawMessage, _ *Env) (st
 
 	sections := make([]string, len(a.URLs))
 	failed := make([]bool, len(a.URLs))
+	remote := make([]bool, len(a.URLs))
 	var wg sync.WaitGroup
 	for i, u := range a.URLs {
 		wg.Add(1)
@@ -131,6 +133,8 @@ func (t *WebFetchTool) Run(ctx context.Context, raw json.RawMessage, _ *Env) (st
 			title, body, err := t.fetchOne(ctx, strings.TrimSpace(u))
 			if err != nil {
 				failed[i] = true
+				var re *RemoteError
+				remote[i] = errors.As(err, &re)
 				sections[i] = fmt.Sprintf("## %s\nerror: %s", u, strings.TrimPrefix(err.Error(), ErrToolError.Error()+": "))
 				return
 			}
@@ -144,6 +148,9 @@ func (t *WebFetchTool) Run(ctx context.Context, raw json.RawMessage, _ *Env) (st
 		if !f {
 			return out, nil
 		}
+	}
+	if slices.Contains(remote, true) {
+		return "", &RemoteError{Text: out}
 	}
 	return "", toolErr("%s", out)
 }
@@ -169,7 +176,8 @@ func (t *WebFetchTool) fetchOne(ctx context.Context, raw string) (finalURL, text
 	defer resp.Body.Close()
 	finalURL = resp.Request.URL.String()
 	if resp.StatusCode >= 400 {
-		return "", "", toolErr("HTTP %s", resp.Status)
+		// The reason phrase of the status line comes from the server.
+		return "", "", &RemoteError{Text: "HTTP " + resp.Status}
 	}
 
 	ctype := resp.Header.Get("Content-Type")

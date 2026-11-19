@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -340,8 +341,29 @@ func TestDelegateBackgroundErrors(t *testing.T) {
 
 func TestDelegateTextNamesACPDelegate(t *testing.T) {
 	want := "- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, " +
-		"execute_code, cronjob, acp_delegate.\n"
+		"execute_code, cronjob, acp_delegate, request_secret.\n"
 	if d := (DelegateTool{}).Schema().Description; !strings.Contains(d, want) {
 		t.Fatal(d)
+	}
+}
+
+type fakeRunnerFunc func(context.Context, ChildSpecLite) ChildResultLite
+
+func (f fakeRunnerFunc) RunChild(ctx context.Context, spec ChildSpecLite) ChildResultLite {
+	return f(ctx, spec)
+}
+
+func TestDelegateAddsChildSources(t *testing.T) {
+	runner := fakeRunnerFunc(func(context.Context, ChildSpecLite) ChildResultLite {
+		return ChildResultLite{Status: "ok", Summary: "s", Outside: OutsideFacts{Sources: []string{"web_fetch"}, Hosts: []string{"x.io"}}}
+	})
+	tool := DelegateTool{Runner: runner}
+	env := &Env{SessionID: "p", SessionKey: "cli:t", Values: map[string]any{}}
+	out, err := tool.Run(context.Background(), json.RawMessage(`{"goal":"x"}`), env)
+	if err != nil || strings.Contains(out, "Outside") || strings.Contains(out, "web_fetch") {
+		t.Fatalf("%q %v", out, err)
+	}
+	if f := Outside(env); !reflect.DeepEqual(f.Sources, []string{"web_fetch"}) || !reflect.DeepEqual(f.Hosts, []string{"x.io"}) {
+		t.Fatalf("%+v", f)
 	}
 }

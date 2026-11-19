@@ -14,6 +14,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/provider"
+	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -369,6 +370,25 @@ func TestStepJudgeFailuresPause(t *testing.T) {
 	}
 	if got := f.state(t); got.Status != StatusPaused || stepStr(got.PausedReason) != "the judge call failed 5 times" {
 		t.Fatalf("%+v", got)
+	}
+}
+
+func TestStepJudgeInputRedactsTail(t *testing.T) {
+	f := newStepFix(t, stepState("ship it", 20), `{"verdict":"continue","reason":"x"}`)
+	value := "pypi-AgEIcHlwaS5vcmcCJDU0ZjM4"
+	f.m.d.Redact = security.NewNamedRedactor(map[string]string{"PYPI_TOKEN": value}).Redact
+	log := filepath.Join(t.TempDir(), "bg-4242.log")
+	if err := os.WriteFile(log, []byte("upload with "+value+"\nghp_abcdefghijklmnopqrstuvwx done\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.procs.Add(f.sess.ID, 4242, "twine upload dist/*", log, stepNow.Add(-12*time.Second))
+	f.step("I started the upload.")
+	user := f.prov.reqs[0].Messages[0].Content
+	if strings.Contains(user, value) || strings.Contains(user, "ghp_abcdefghijklmnop") {
+		t.Fatalf("the judge prompt holds a secret:\n%s", user)
+	}
+	if !strings.Contains(user, "«PYPI_TOKEN»") {
+		t.Fatalf("the judge prompt has no label:\n%s", user)
 	}
 }
 

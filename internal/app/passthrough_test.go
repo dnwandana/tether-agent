@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -52,20 +53,42 @@ func TestSkillSecretNeedsEnvPassthrough(t *testing.T) {
 	}
 }
 
+// testStore writes dotenv to a new .env file and returns a store over it.
+func testStore(t *testing.T, dotenv map[string]string) *security.DotEnvStore {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), ".env")
+	var b strings.Builder
+	for k, v := range dotenv {
+		fmt.Fprintf(&b, "%s=%s\n", k, v)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return security.NewDotEnvStore(path, dotenv, nil)
+}
+
 func TestEnvStatus(t *testing.T) {
 	cfg := config.Default()
 	cfg.Terminal.EnvPassthrough = []string{"TETHER_TEST_LISTED", "TETHER_TEST_LISTED_EMPTY"}
-	dotenv := map[string]string{"TETHER_TEST_LISTED": "a", "TETHER_TEST_DOTENV": "b"}
+	cfg.ExecSecrets = map[string]config.ExecSecret{
+		"TETHER_TEST_BOUND":      {Commands: []string{"twine upload", "uv publish"}},
+		"TETHER_TEST_BOUND_PROC": {Commands: []string{"gh release"}},
+	}
+	store := testStore(t, map[string]string{"TETHER_TEST_LISTED": "a", "TETHER_TEST_DOTENV": "b", "TETHER_TEST_BOUND": "c"})
 	t.Setenv("TETHER_TEST_REGION", "eu")
 	t.Setenv("TETHER_TEST_API_KEY", "c")
+	// A process value of a bound name does not count.
+	t.Setenv("TETHER_TEST_BOUND_PROC", "d")
 	const notPassed = "not passed: add it to terminal.env_passthrough in config.yaml"
 	names := []string{"TETHER_TEST_LISTED", "TETHER_TEST_DOTENV", "TETHER_TEST_REGION",
-		"TETHER_TEST_API_KEY", "TETHER_TEST_LISTED_EMPTY", "TETHER_TEST_MISSING"}
-	want := []string{"passed", notPassed, "passed", notPassed, "not set", "not set"}
-	if got := envStatus(&cfg, dotenv, names); !slices.Equal(got, want) {
+		"TETHER_TEST_API_KEY", "TETHER_TEST_LISTED_EMPTY", "TETHER_TEST_MISSING",
+		"TETHER_TEST_BOUND", "TETHER_TEST_BOUND_PROC"}
+	want := []string{"passed", notPassed, "passed", notPassed, "not set", "not set",
+		"bound: twine upload, uv publish", "not set"}
+	if got := envStatus(&cfg, store, names); !slices.Equal(got, want) {
 		t.Fatalf("got %q, want %q", got, want)
 	}
-	if got := envStatus(&cfg, dotenv, nil); len(got) != 0 {
+	if got := envStatus(&cfg, store, nil); len(got) != 0 {
 		t.Fatalf("got %q", got)
 	}
 }

@@ -233,11 +233,15 @@ func (m *Manager) runChecks(ctx context.Context, out TurnOutcome, work State, en
 	}
 	if m.d.Procs != nil {
 		for _, p := range m.d.Procs.Running(sid) {
+			tail := m.d.Procs.Tail(p.PID, 480)
+			if m.d.Redact != nil {
+				tail = m.d.Redact(tail)
+			}
 			in.Processes = append(in.Processes, ProcLine{
 				PID:     p.PID,
 				Command: p.Command,
 				Running: now.Sub(p.StartedAt),
-				Tail:    m.d.Procs.Tail(p.PID, 480),
+				Tail:    tail,
 			})
 		}
 	}

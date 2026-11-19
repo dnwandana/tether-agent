@@ -26,6 +26,8 @@ FUZZ_TARGETS := \
 	./internal/provider:FuzzResponsesParse \
 	./internal/security:FuzzMatchAllDangerous \
 	./internal/security:FuzzReadCommand \
+	./internal/security:FuzzScan \
+	./internal/security:FuzzBindSecrets \
 	./internal/telegram:FuzzMarkdownV2 \
 	./internal/telegram:FuzzSplitUTF16 \
 	./internal/telegram:FuzzSplitMarkdownV2 \

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -208,5 +209,62 @@ func TestLocalPauseWithoutHomeStaysLocal(t *testing.T) {
 	}
 	if len(*noHomeCalls) != 0 || len(*nilHomeCalls) != 0 {
 		t.Fatal(*noHomeCalls, *nilHomeCalls)
+	}
+}
+
+// draftDeliverer returns a recorder whose private targets are the chats in private, with the
+// owner chat 5.
+func draftDeliverer(private ...string) (*Deliverer, *[]sent) {
+	d, calls := recorder(homeAt("-100", "99"))
+	d.IsPrivate = func(_ context.Context, t Target) bool { return slices.Contains(private, t.ChatID) }
+	d.OwnerHome = func(context.Context) (Target, bool) { return Target{Source: "telegram", ChatID: "5"}, true }
+	return d, calls
+}
+
+func TestDraftOnlyReportToGroupFails(t *testing.T) {
+	d, calls := draftDeliverer("5")
+	j := Job{ID: "j1", Name: "n", Deliver: "telegram:-100", DraftOnly: true}
+	got, err := d.Deliver(ctx, j, RunOutcome{Text: "drafts ready", Send: true, Status: "ok"})
+	if got != DeliveryFailed || !errors.Is(err, ErrDraftDeliver) || len(*calls) != 0 {
+		t.Fatal(got, err, *calls)
+	}
+}
+
+func TestDraftOnlyReportToPrivateSends(t *testing.T) {
+	d, calls := draftDeliverer("5")
+	j := Job{ID: "j1", Name: "n", Deliver: "telegram:5", DraftOnly: true}
+	got, err := d.Deliver(ctx, j, RunOutcome{Text: "drafts ready", Send: true, Status: "ok"})
+	if got != DeliverySent || err != nil || len(*calls) != 1 || (*calls)[0].to.ChatID != "5" {
+		t.Fatal(got, err, *calls)
+	}
+}
+
+func TestDraftOnlyAlertsGoToOwner(t *testing.T) {
+	alert := RunOutcome{Text: "⚠ Cron job n failed: boom", Send: true, Status: "error"}
+	pause := RunOutcome{Text: "⚠ alert\n\n⏸ paused", Send: true, Status: "error", Pause: true}
+	for name, tc := range map[string]struct {
+		job Job
+		o   RunOutcome
+	}{
+		"group alert":        {Job{ID: "j1", Name: "n", Deliver: "telegram:-100", DraftOnly: true}, alert},
+		"cli origin to home": {Job{ID: "j2", Name: "n", Origin: Origin{Source: "cli"}, DraftOnly: true}, alert},
+		"local pause":        {Job{ID: "j3", Name: "n", Deliver: "local", DraftOnly: true}, pause},
+	} {
+		d, calls := draftDeliverer("5")
+		got, err := d.Deliver(ctx, tc.job, tc.o)
+		if got != DeliverySent || err != nil || len(*calls) != 1 || (*calls)[0].to != (Target{Source: "telegram", ChatID: "5"}) {
+			t.Errorf("%s: %v %v %v", name, got, err, *calls)
+		}
+	}
+	// A local draft-only job with no pause sends nothing, as today.
+	d, calls := draftDeliverer("5")
+	if got, err := d.Deliver(ctx, Job{ID: "j4", Name: "n", Deliver: "local", DraftOnly: true}, alert); got != DeliveryLocal || err != nil || len(*calls) != 0 {
+		t.Fatal(got, err, *calls)
+	}
+	// No owner chat: the group alert fails, and nothing goes to the group.
+	d, calls = draftDeliverer("5")
+	d.OwnerHome = nil
+	if got, err := d.Deliver(ctx, Job{ID: "j5", Name: "n", Deliver: "telegram:-100", DraftOnly: true}, alert); got != DeliveryFailed || err == nil || len(*calls) != 0 {
+		t.Fatal(got, err, *calls)
 	}
 }

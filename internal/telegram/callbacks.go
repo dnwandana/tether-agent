@@ -52,6 +52,13 @@ type Interactions struct {
 	// ApprovalTimeout is the time that the approval gate waits for an answer. The approval
 	// message shows it. Zero leaves out the line about the time.
 	ApprovalTimeout time.Duration
+	// Mask replaces the sensitive data of a question text and its choices. Nil shows them as
+	// they are. Channel.Run sets it to the scan of the channel.
+	Mask func(chatID int64, text string) string
+	// Secrets sends the secret cards. Nil refuses each AskSecret.
+	Secrets *SecretCards
+	// OwnerChat returns the owner's private chat for the user of a turn. Nil refuses each AskSecret.
+	OwnerChat func(ctx context.Context, userID string) (chatID int64, ok bool)
 
 	mu      sync.Mutex
 	pending map[string]*prompt
@@ -80,7 +87,11 @@ type prompt struct {
 	noAlways, noSession bool
 	// humanOnly is true for a request that needs a tap for each request. /approve all skips it.
 	humanOnly bool
-	reply     chan promptReply
+	// redacted is true for a request with findings. Only then "Send redacted" is a valid answer.
+	redacted bool
+	// pin is true for a pin request. Its result texts say "Program".
+	pin   bool
+	reply chan promptReply
 }
 
 type promptReply struct {
@@ -101,6 +112,7 @@ type ChatUI struct {
 var (
 	_ security.Prompter = (*ChatUI)(nil)
 	_ tools.Asker       = (*ChatUI)(nil)
+	_ tools.SecretAsker = (*ChatUI)(nil)
 )
 
 // For returns the prompt UI of a chat, a topic, and the user of the turn. The user is ""
@@ -129,8 +141,10 @@ func (it *Interactions) promptApproval(ctx context.Context, chatID int64, thread
 		p.userID = userID
 		p.noAlways, p.noSession = req.NoAlways, req.NoSession
 		p.humanOnly = req.HumanOnly
+		p.pin = req.PinName != ""
+		p.redacted = len(req.Findings) > 0
 	})
-	kb := approvalKeyboard(p.id, req.NoAlways, req.NoSession)
+	kb := approvalKeyboard(p.id, req)
 	if err := it.sendMDV2(ctx, p, mdv2, plain, kb); err != nil {
 		it.remove(p.id)
 		return security.ScopeDeny, fmt.Errorf("telegram approval: %w", err)
@@ -140,20 +154,20 @@ func (it *Interactions) promptApproval(ctx context.Context, chatID int64, thread
 	ectx := context.WithoutCancel(ctx)
 	select {
 	case r := <-p.reply:
-		it.editResult(ectx, p, headerFor(r.scope, it.ApprovalTimeout), req)
+		it.editResult(ectx, p, resultHeader(p.pin, r.scope, it.ApprovalTimeout), req)
 		return r.scope, nil
 	case <-ctx.Done():
 		if !it.remove(p.id) {
 			// An answer came at the same time.
 			r := <-p.reply
-			it.editResult(ectx, p, headerFor(r.scope, it.ApprovalTimeout), req)
+			it.editResult(ectx, p, resultHeader(p.pin, r.scope, it.ApprovalTimeout), req)
 			return r.scope, nil
 		}
 		scope := security.ScopeDeny
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			scope = security.ScopeTimeout
 		}
-		it.editResult(ectx, p, headerFor(scope, it.ApprovalTimeout), req)
+		it.editResult(ectx, p, resultHeader(p.pin, scope, it.ApprovalTimeout), req)
 		return security.ScopeTimeout, ctx.Err()
 	}
 }
@@ -166,6 +180,14 @@ func (it *Interactions) ask(ctx context.Context, chatID int64, threadID, userID 
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, q.Timeout)
 		defer cancel()
+	}
+	if it.Mask != nil {
+		q.Text = it.Mask(chatID, q.Text)
+		choices := make([]string, len(q.Choices))
+		for i, c := range q.Choices {
+			choices[i] = it.Mask(chatID, c)
+		}
+		q.Choices = choices
 	}
 	p := it.add(askPrefix, chatID, threadID, func(p *prompt) { p.userID = userID })
 	text := "❓ " + q.Text
@@ -202,7 +224,7 @@ func (it *Interactions) ask(ctx context.Context, chatID int64, threadID, userID 
 // spinner. A press from another chat or from an unauthorized user changes nothing.
 func (it *Interactions) HandleCallback(ctx context.Context, cq CallbackQuery) bool {
 	kind, id, arg, ok := parseCallback(cq.Data)
-	if !ok {
+	if !ok || (kind != approvalPrefix && kind != askPrefix) {
 		return false
 	}
 	answerCB := func(text string) {
@@ -242,17 +264,23 @@ func (it *Interactions) HandleCallback(ctx context.Context, cq CallbackQuery) bo
 		scope, ok := map[string]security.Scope{
 			"once": security.ScopeOnce, "session": security.ScopeSession,
 			"always": security.ScopeAlways, "deny": security.ScopeDeny,
+			"r": security.ScopeRedacted,
 		}[arg]
 		if !ok {
 			answerCB(invalidCallback)
 			return true
 		}
 		it.mu.Lock()
+		if scope == security.ScopeRedacted && !p.redacted {
+			it.mu.Unlock()
+			answerCB(invalidCallback)
+			return true
+		}
 		applied := fitScope(scope, p.noAlways, p.noSession)
 		it.mu.Unlock()
 		// A pop-up shows plain text, so it gets the plain header. deliverLocked applies the
 		// same scope rule, so deliver gets the tapped scope.
-		answerCB(headerFor(applied, it.ApprovalTimeout).plain())
+		answerCB(resultHeader(p.pin, applied, it.ApprovalTimeout).plain())
 		if !it.deliver(id, promptReply{scope: scope}) {
 			it.logger().Info("telegram: the approval was answered already", "prompt", id)
 		}
@@ -359,7 +387,7 @@ func (it *Interactions) resolveApprovals(chatID int64, threadID string, scope se
 // fitScope returns the scope that an approval request permits for the answer s. With
 // noSession, "this session" and "always" give "once". noSession also hides "always",
 // because "always" is wider than "this session". Else with noAlways, "always" gives
-// "this session".
+// "this session". It never changes ScopeRedacted.
 func fitScope(s security.Scope, noAlways, noSession bool) security.Scope {
 	switch {
 	case noSession && (s == security.ScopeSession || s == security.ScopeAlways):
@@ -563,7 +591,10 @@ func callbackData(kind, id, arg string) string { return kind + ":" + id + ":" + 
 // parseCallback splits "<kind>:<id>:<arg>" callback data.
 func parseCallback(data string) (kind, id, arg string, ok bool) {
 	parts := strings.SplitN(data, ":", 3)
-	if len(parts) != 3 || (parts[0] != approvalPrefix && parts[0] != askPrefix) || parts[1] == "" {
+	if len(parts) == 2 && parts[0] == originalPrefix && parts[1] != "" {
+		return originalPrefix, parts[1], "", true
+	}
+	if len(parts) != 3 || (parts[0] != approvalPrefix && parts[0] != askPrefix && parts[0] != heldPrefix) || parts[1] == "" {
 		return "", "", "", false
 	}
 	return parts[0], parts[1], parts[2], true

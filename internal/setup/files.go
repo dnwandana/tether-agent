@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -201,75 +200,6 @@ func (c *configDoc) bytes() ([]byte, error) {
 	return b.Bytes(), nil
 }
 
-// envFile is .env as lines. An edit keeps the comments and the other lines.
-type envFile struct {
-	lines []string
-}
-
-// readEnvFile reads the .env file at path. A missing file gives an empty file.
-func readEnvFile(path string) (*envFile, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return &envFile{}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("setup: cannot read %s: %w", path, err)
-	}
-	text := strings.TrimSuffix(string(data), "\n")
-	if text == "" {
-		return &envFile{}, nil
-	}
-	return &envFile{lines: strings.Split(text, "\n")}, nil
-}
-
-// envLineName returns the variable name of a NAME=value line, or "".
-func envLineName(line string) string {
-	line = strings.TrimSpace(line)
-	if line == "" || strings.HasPrefix(line, "#") {
-		return ""
-	}
-	line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
-	name, _, ok := strings.Cut(line, "=")
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(name)
-}
-
-// set sets NAME=value. It replaces the line of the name, or adds a line at the end. It
-// reports whether the file changed.
-func (e *envFile) set(name, value string) bool {
-	line := name + "=" + quoteEnvValue(value)
-	for i, l := range e.lines {
-		if envLineName(l) == name {
-			if l == line {
-				return false
-			}
-			e.lines[i] = line
-			return true
-		}
-	}
-	e.lines = append(e.lines, line)
-	return true
-}
-
-// quoteEnvValue returns the value in the .env syntax of security.LoadDotEnv. A value with
-// spaces, quotes, "#", or a backslash goes in double quotes with escapes.
-func quoteEnvValue(v string) string {
-	if v == "" || !strings.ContainsAny(v, " \t#\"'\\\n") {
-		return v
-	}
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\t", `\t`)
-	return `"` + r.Replace(v) + `"`
-}
-
-func (e *envFile) bytes() []byte {
-	if len(e.lines) == 0 {
-		return nil
-	}
-	return []byte(strings.Join(e.lines, "\n") + "\n")
-}
-
 // writeSecretFile writes data to path with mode 0600 through a temporary file and a
 // rename. When backup is true and path exists, it first copies path to path.bak.
 func writeSecretFile(path string, data []byte, backup bool) error {
@@ -277,17 +207,23 @@ func writeSecretFile(path string, data []byte, backup bool) error {
 		return fmt.Errorf("setup: cannot make the folder of %s: %w", path, err)
 	}
 	if backup {
-		old, err := os.ReadFile(path)
-		switch {
-		case err == nil:
-			if err := atomicWrite(path+".bak", old, 0o600); err != nil {
-				return err
-			}
-		case !errors.Is(err, fs.ErrNotExist):
-			return fmt.Errorf("setup: cannot read %s for the backup: %w", path, err)
+		if err := copyToBak(path); err != nil {
+			return err
 		}
 	}
 	return atomicWrite(path, data, 0o600)
+}
+
+// copyToBak copies path to path.bak with mode 0600. A missing path is no error.
+func copyToBak(path string) error {
+	old, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		return atomicWrite(path+".bak", old, 0o600)
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("setup: cannot read %s for the backup: %w", path, err)
+	}
+	return nil
 }
 
 // atomicWrite writes data to path through a temporary file in the same folder and a

@@ -180,7 +180,7 @@ func RunScriptSpill(ctx context.Context, path, workdir string, env []string, lim
 	if stdout.cut {
 		out += fmt.Sprintf("\n[stdout was cut at %d bytes]\n", scriptStdoutMaxBytes)
 	}
-	capped, terr := ctxmgr.Truncate(out, lim.outputMax(), spillDir)
+	capped, terr := ctxmgr.TruncateNamed(out, lim.outputMax(), spillDir, cronSpillSource)
 	if terr != nil {
 		// Without a spill file, keep the head only. The marker must not name a file.
 		capped = ctxmgr.SanitizeUTF8(out)
@@ -191,6 +191,10 @@ func RunScriptSpill(ctx context.Context, path, workdir string, env []string, lim
 	res.Stdout = capped
 	return res
 }
+
+// cronSpillSource is the source name in the spill file name of a long script stdout. The
+// read_file tool reads the name and wraps the spill as untrusted text.
+const cronSpillSource = "cron_data_script"
 
 // ScriptJobMessage returns the message of a script job. Non-empty stdout goes out word for
 // word. Empty stdout after exit 0 sends nothing. A failure or a timeout always sends an

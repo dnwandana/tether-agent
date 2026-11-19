@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -21,6 +23,8 @@ import (
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/obs"
+	"github.com/dnwandana/tether-agent/internal/security"
+	"github.com/dnwandana/tether-agent/internal/telegram"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
@@ -121,7 +125,7 @@ func writeDataDir(t *testing.T, provURL, extra string) string {
 func doctorWithFakes(t *testing.T, prov, tg *httptest.Server, look func(string) (string, error)) *Doctor {
 	t.Helper()
 	fakeEUID(t, 1000)
-	dir := writeDataDir(t, prov.URL, "telegram:\n  enabled: true\n")
+	dir := writeDataDir(t, prov.URL, "telegram:\n  enabled: true\n  allowed_users: [\"12345\"]\n")
 	return &Doctor{
 		DataDir:      dir,
 		ConfigPath:   filepath.Join(dir, "config.yaml"),
@@ -281,10 +285,20 @@ func TestDoctorHidesSecrets(t *testing.T) {
 		http.Error(w, "bad key "+r.Header.Get("Authorization"), http.StatusUnauthorized)
 	}))
 	t.Cleanup(srv.Close)
-	d := doctorWithFakes(t, srv, okTelegram(t), allPrograms)
+	// The provider client masks its own key before the doctor sees the text. The bot server
+	// echoes the token, so the doctor redactor must give the label.
+	tg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error_code": 401, "description": "bad path " + r.URL.Path})
+	}))
+	t.Cleanup(tg.Close)
+	d := doctorWithFakes(t, srv, tg, allPrograms)
 	out := Format(d.Run(ctx))
 	if strings.Contains(out, "sk-doctor-secret-123456") || strings.Contains(out, "doctor-token-abcdef") {
 		t.Fatal(out)
+	}
+	if !strings.Contains(out, "«TELEGRAM_BOT_TOKEN»") {
+		t.Fatal("the doctor must show the label of the token:", out)
 	}
 }
 
@@ -1189,5 +1203,154 @@ func TestMCPListCheckFilter(t *testing.T) {
 	want := `starts and lists 3 tools; 1 hidden by tools.include or tools.exclude; tools.exclude entry "nomatch" matches no tool`
 	if c.Status != StatusWarn || c.Detail != want || c.Next != "check mcp.servers.gh.tools in config.yaml" {
 		t.Fatalf("warning: %+v", c)
+	}
+}
+
+func TestDoctorBoundSecrets(t *testing.T) {
+	t.Cleanup(func() { security.SetBoundSecretNames(nil) })
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	cfg := filepath.Join(d.DataDir, "config.yaml")
+	raw, _ := os.ReadFile(cfg)
+	raw = append(raw, "exec_secrets:\n  PYPI_TOKEN:\n    commands: [\"twine upload\"]\n  GH_TOKEN:\n    commands: [\"gh release\"]\n"...)
+	if err := os.WriteFile(cfg, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := filepath.Join(d.DataDir, ".env")
+	f, _ := os.OpenFile(env, os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString("GH_TOKEN=ghp_doctorvalue1234567890\n")
+	f.Close()
+	t.Setenv("PYPI_TOKEN", "from-the-process") // does not count
+	sdb, err := db.Open(filepath.Join(d.DataDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mark := time.Date(2026, 11, 18, 12, 31, 0, 0, time.Local)
+	if err := sdb.KVSet(ctx, "secret_check:GH_TOKEN", strconv.FormatInt(mark.UnixMilli(), 10)); err != nil {
+		t.Fatal(err)
+	}
+	sdb.Close()
+
+	checks := d.Run(ctx)
+	p := find(t, checks, "exec_secrets PYPI_TOKEN")
+	if p.Status != StatusWarn || p.Detail != "PYPI_TOKEN is bound but has no value in .env" ||
+		p.Next != "send /secrets set PYPI_TOKEN in a private chat with the bot, or add the value to .env" {
+		t.Fatalf("%+v", p)
+	}
+	g := find(t, checks, "exec_secrets GH_TOKEN")
+	if g.Status != StatusWarn || g.Detail != "GH_TOKEN is marked for a check: a command got an auth failure at 2026-11-18 12:31" ||
+		g.Next != "save a new value with /secrets set GH_TOKEN" {
+		t.Fatalf("%+v", g)
+	}
+	if !slices.Contains(security.BoundSecretNames(), "GH_TOKEN") {
+		t.Fatal("doctor did not set the bound names")
+	}
+}
+
+func TestDoctorBoundSecretsAllSet(t *testing.T) {
+	t.Cleanup(func() { security.SetBoundSecretNames(nil) })
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	cfg := filepath.Join(d.DataDir, "config.yaml")
+	raw, _ := os.ReadFile(cfg)
+	raw = append(raw, "exec_secrets:\n  TELEGRAM_BOT_TOKEN_COPY:\n    commands: [\"tg send\"]\n"...)
+	os.WriteFile(cfg, raw, 0o600)
+	f, _ := os.OpenFile(filepath.Join(d.DataDir, ".env"), os.O_APPEND|os.O_WRONLY, 0o600)
+	f.WriteString("TELEGRAM_BOT_TOKEN_COPY=123:copy-token-abcdef\n")
+	f.Close()
+	c := find(t, d.Run(ctx), "exec_secrets")
+	if c.Status != StatusOK || c.Detail != "1 bound secret; it has a value in .env" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestDoctorOutboundGuardOwner(t *testing.T) {
+	const detail = "outbound.guard is on, but Tether Agent has no private chat with the owner. A held send then blocks."
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	hasWarn := func(checks []Check) bool {
+		return slices.ContainsFunc(checks, func(c Check) bool { return c.Detail == detail })
+	}
+	cfg := filepath.Join(d.DataDir, "config.yaml")
+	raw, _ := os.ReadFile(cfg)
+	owner := string(raw)
+	noOwner := strings.Replace(owner, "  allowed_users: [\"12345\"]\n", "", 1)
+	if noOwner == owner {
+		t.Fatal("fixture has no owner")
+	}
+	if err := os.WriteFile(cfg, []byte(noOwner), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := d.Run(ctx)
+	if !hasWarn(checks) {
+		t.Fatalf("no owner warning in %+v", checks)
+	}
+	c := find(t, checks, "outbound guard")
+	if c.Status != StatusWarn || c.Next != "add your numeric Telegram user ID to telegram.allowed_users, or approve your pairing code with tether pairing approve telegram <code>" {
+		t.Fatalf("%+v", c)
+	}
+	if err := os.WriteFile(cfg, []byte(owner), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if hasWarn(d.Run(ctx)) {
+		t.Fatal("owner warning with a numeric owner")
+	}
+}
+
+func TestDoctorOutboundGuardHomeChatNeedsOwner(t *testing.T) {
+	const detail = "outbound.guard is on, but Tether Agent has no private chat with the owner. A held send then blocks."
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	hasWarn := func() bool {
+		return slices.ContainsFunc(d.Run(ctx), func(c Check) bool { return c.Detail == detail })
+	}
+	cfg := filepath.Join(d.DataDir, "config.yaml")
+	raw, _ := os.ReadFile(cfg)
+	star := strings.Replace(string(raw), "  allowed_users: [\"12345\"]\n",
+		"  allowed_users: [\"*\"]\n  allow_all_users: true\n  home_chat: \"777\"\n", 1)
+	if err := os.WriteFile(cfg, []byte(star), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !hasWarn() {
+		t.Fatal("no warning with a home chat that is not an owner")
+	}
+	sdb, err := db.Open(filepath.Join(d.DataDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &telegram.Pairing{DB: sdb}
+	code, _, err := p.Request(ctx, "telegram", "777", "owner")
+	if err == nil {
+		_, err = p.Approve(ctx, "telegram", code)
+	}
+	sdb.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasWarn() {
+		t.Fatal("warning with a paired home chat")
+	}
+}
+
+func TestDoctorOutboundGuardNeedsASendPath(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	cfg := filepath.Join(d.DataDir, "config.yaml")
+	raw, _ := os.ReadFile(cfg)
+	// With no Telegram and no MCP server, no send can be held, so the guard needs no owner chat.
+	off := strings.Replace(string(raw), "telegram:\n  enabled: true\n  allowed_users: [\"12345\"]\n", "", 1)
+	if off == string(raw) {
+		t.Fatal("fixture has no telegram block")
+	}
+	if err := os.WriteFile(cfg, []byte(off), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range d.Run(ctx) {
+		if c.Name == "outbound guard" {
+			t.Fatalf("guard warning with no send path: %+v", c)
+		}
+	}
+	// An MCP server can send, so the warning shows again.
+	mcp := off + "mcp:\n  servers:\n    mail:\n      command: [\"/nonexistent/mail-mcp\"]\n"
+	if err := os.WriteFile(cfg, []byte(mcp), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(d.Run(ctx), func(c Check) bool { return c.Name == "outbound guard" }) {
+		t.Fatal("no guard warning with an MCP server and no owner chat")
 	}
 }

@@ -24,7 +24,7 @@ the description and the JSON schema of the parameters that the model sees.
 | `media` | `generate_image`, `text_to_speech`, `transcribe_audio` |
 | `memory` | `memory`, `session_search` |
 | `skills` | `skill_manage`, `skill_view`, `skills_list` |
-| `terminal` | `terminal` |
+| `terminal` | `request_secret`, `terminal` |
 | `todo` | `todo_list` |
 | `vision` | `view_image` |
 | `web` | `web_fetch`, `web_search` |
@@ -362,6 +362,10 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
       "type": "boolean",
       "description": "Default false: the agent runs the prompt each tick. Set true to skip the model: the scheduler runs the script and delivers its stdout word for word, with zero tokens. Requires script."
     },
+    "draft_only": {
+      "type": "boolean",
+      "description": "Default false. Set true to make the job draft-only: it can read the web and read MCP data, and it can write drafts, but it cannot send. The run has no terminal, execute_code, browser actions, or delegate_task, and only MCP read tools and draft tools. A draft-only job delivers only to a private chat or local, and it cannot use no_agent. On update, pass false to clear."
+    },
     "toolsets": {
       "type": "array",
       "items": {
@@ -471,7 +475,7 @@ IMPORTANT:
 - Subagents have NO memory of your conversation. Pass all relevant info (file paths, error messages, constraints) in the 'context' field.
 - If the user writes in a language other than English, or asks for a specific language or style, say so in 'context'.
 - Subagent summaries are SELF-REPORTS, not verified facts. For operations with external side effects, require a verifiable handle (URL, ID, absolute path) and verify it yourself before you tell the user it succeeded.
-- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob, acp_delegate.
+- Subagents CANNOT call: delegate_task (unless role='orchestrator'), clarify, memory, execute_code, cronjob, acp_delegate, request_secret.
 - Results are always returned as an array, one entry per task.
 
 **Needs:** the gateway role for background: true. The chat role runs the tasks in the foreground.
@@ -835,7 +839,7 @@ ACTIONS:
 - write_file: name, file, content. Writes a support file under references/ or scripts/.
 - delete: name.
 
-The skill guard scans each write. It refuses a skill that sends secrets out, for example curl with $API_KEY. Put an API call in a script under ~/.tether/scripts/ (write_file cannot write there: ask the user, or use the terminal tool), and make the skill run that script with the terminal tool. Skills from external folders are read-only.
+The skill guard scans each write. It refuses a skill that sends secrets out, for example curl with $API_KEY. Put an API call in a script under ~/.tether/scripts/ (write_file cannot write there: ask the user, or use the terminal tool), and make the skill run that script with the terminal tool. Ask the owner to bind the key name in exec_secrets to the path of the script. Skills from external folders are read-only.
 
 ```json
 {
@@ -881,7 +885,7 @@ The skill guard scans each write. It refuses a skill that sends secrets out, for
 
 ### skill_view
 
-Load a skill: its SKILL.md instructions and the list of its support files. Load a skill before you do a task that it covers. To read a support file, pass its path in the skill folder as file, for example references/api.md. When the skill needs environment variables, the result gives the status of each one. A secret reaches the terminal tool only when the owner adds its name to terminal.env_passthrough in config.yaml.
+Load a skill: its SKILL.md instructions and the list of its support files. Load a skill before you do a task that it covers. To read a support file, pass its path in the skill folder as file, for example references/api.md. When the skill needs environment variables, the result gives the status of each one. A secret reaches the terminal tool only when the owner binds it to a command in exec_secrets in config.yaml. You never see the value.
 
 ```json
 {
@@ -914,6 +918,32 @@ List the installed skills with their descriptions. Load one with skill_view.
 ```
 
 ## terminal
+
+### request_secret
+
+Ask the owner for the value of a bound secret that is missing or bad. The owner gets a private message and pastes the value there. Tether Agent saves the value to .env. You never see the value. Use it only when a terminal result says that a bound secret has no value or is marked for a check. The bound names are in TOOL NOTES. It works only in a chat turn of the owner.
+
+**Needs:** a chat turn of the owner (CLI, or Telegram with interactive buttons).
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "The bound secret name, for example PYPI_TOKEN."
+    },
+    "reason": {
+      "type": "string",
+      "description": "One short sentence for the owner that tells why you need the value. At most 240 characters."
+    }
+  },
+  "required": [
+    "name",
+    "reason"
+  ]
+}
+```
 
 ### terminal
 

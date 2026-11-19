@@ -200,6 +200,9 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, key Prompt
 		}
 		visible, _ = a.Tools.Visible(sets, hidden)
 		in.ToolNotes = DefaultToolNotes(visible)
+		if note := a.secretNote(s, key.Member, visible); note != "" {
+			in.ToolNotes = append(in.ToolNotes, note)
+		}
 	}
 	// The topic list is useful only when the model can search and read a note.
 	if a.Memory != nil && !key.Member && (a.Tools == nil || visible["memory"]) {
@@ -296,4 +299,24 @@ func (a *Agent) compactionCount(ctx context.Context, sessionID string) int {
 		return 0
 	}
 	return n
+}
+
+// secretNote returns the bound-secrets entry for a prompt of s, or "". The entry needs the
+// terminal tool, an owner prompt, a session that is not shared, and a bound secret.
+func (a *Agent) secretNote(s *sessions.Session, member bool, visible map[string]bool) string {
+	if !visible["terminal"] || member {
+		return ""
+	}
+	if a.SharedSession != nil && a.SharedSession(s) {
+		return ""
+	}
+	exec := a.config().ExecSecrets
+	if len(exec) == 0 {
+		return ""
+	}
+	bound := make(map[string][]string, len(exec))
+	for name, e := range exec {
+		bound[name] = e.Commands
+	}
+	return SecretNotes(bound)
 }

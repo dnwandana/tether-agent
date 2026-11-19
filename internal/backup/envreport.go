@@ -3,6 +3,7 @@ package backup
 import (
 	"errors"
 	"io/fs"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -16,6 +17,8 @@ import (
 type VarStatus struct {
 	Name string
 	Set  bool
+	// Bound is true for a key of exec_secrets. Its value comes from .env only.
+	Bound bool
 }
 
 // RequiredVars returns each ${NAME} in the config file at configPath, with
@@ -42,6 +45,8 @@ func RequiredVars(configPath string, lookup func(string) (string, bool)) ([]VarS
 		names = append(names, string(m[1]))
 	}
 	names = append(names, presetKeyEnvs(b)...)
+	bound := boundNames(b)
+	names = append(names, bound...)
 	if len(names) == 0 {
 		return nil, nil
 	}
@@ -50,7 +55,7 @@ func RequiredVars(configPath string, lookup func(string) (string, bool)) ([]VarS
 	out := make([]VarStatus, len(names))
 	for i, n := range names {
 		_, set := lookup(n)
-		out[i] = VarStatus{Name: n, Set: set}
+		out[i] = VarStatus{Name: n, Set: set, Bound: slices.Contains(bound, n)}
 	}
 	return out, nil
 }
@@ -81,4 +86,15 @@ func presetKeyEnvs(b []byte) []string {
 		out = append(out, p.KeyEnv)
 	}
 	return out
+}
+
+// boundNames returns the keys of exec_secrets in sorted order. A YAML error returns nil.
+func boundNames(b []byte) []string {
+	var doc struct {
+		ExecSecrets map[string]struct{} `yaml:"exec_secrets"`
+	}
+	if err := yaml.Unmarshal(b, &doc); err != nil {
+		return nil
+	}
+	return slices.Sorted(maps.Keys(doc.ExecSecrets))
 }

@@ -3,6 +3,7 @@ package app
 import (
 	"os"
 	"slices"
+	"strings"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/security"
@@ -15,12 +16,44 @@ func skillPassthrough(cfg *config.Config) []string {
 	return slices.Clone(cfg.Terminal.EnvPassthrough)
 }
 
-// envStatus returns one status per name: "not set" when no value exists in the
-// process or in dotenv, "passed" when a child process keeps the name, and a
-// "not passed" hint when the name is a secret that the owner did not list.
-func envStatus(cfg *config.Config, dotenv map[string]string, names []string) []string {
+// boundCommands returns the command prefixes of each name of exec_secrets, or nil for none.
+func boundCommands(cfg *config.Config) map[string][]string {
+	if len(cfg.ExecSecrets) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(cfg.ExecSecrets))
+	for name, s := range cfg.ExecSecrets {
+		out[name] = s.Commands
+	}
+	return out
+}
+
+// boundNames returns the names of exec_secrets, sorted.
+func boundNames(cfg *config.Config) []string {
+	names := make([]string, 0, len(cfg.ExecSecrets))
+	for name := range cfg.ExecSecrets {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// envStatus returns one status per name: "bound: <commands>" for a bound name with a .env
+// value, "not set" when no value exists, "passed" when a child process keeps the name, and a
+// "not passed" hint when the name is a secret that the owner did not list. A bound name reads
+// .env only.
+func envStatus(cfg *config.Config, store *security.DotEnvStore, names []string) []string {
+	dotenv := store.Snapshot()
 	out := make([]string, 0, len(names))
 	for _, name := range names {
+		if es, ok := cfg.ExecSecrets[name]; ok {
+			if dotenv[name] == "" {
+				out = append(out, "not set")
+			} else {
+				out = append(out, "bound: "+strings.Join(es.Commands, ", "))
+			}
+			continue
+		}
 		v, _ := os.LookupEnv(name)
 		switch {
 		case v == "" && dotenv[name] == "":

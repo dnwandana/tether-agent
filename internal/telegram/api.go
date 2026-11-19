@@ -742,6 +742,23 @@ func (c *Client) SendMessage(ctx context.Context, p SendMessageParams) (Message,
 	return m, err
 }
 
+// SendForceReply sends a plain text that opens the reply field of the user. placeholder is
+// the hint in the empty field. The message cannot be edited later.
+func (c *Client) SendForceReply(ctx context.Context, chatID int64, text, placeholder string) (Message, error) {
+	params := map[string]any{
+		"chat_id": chatID,
+		"text":    text,
+		"reply_markup": map[string]any{
+			"force_reply":             true,
+			"selective":               true,
+			"input_field_placeholder": placeholder,
+		},
+	}
+	var m Message
+	err := c.call(ctx, "sendMessage", chatID, params, &m, c.callLimit())
+	return m, err
+}
+
 // SendRichMessage sends a rich message, for example a Markdown table.
 func (c *Client) SendRichMessage(ctx context.Context, p SendRichMessageParams) (Message, error) {
 	var m Message
@@ -798,6 +815,14 @@ func (c *Client) GetFile(ctx context.Context, fileID string) (File, error) {
 	var f File
 	err := c.Call(ctx, "getFile", map[string]any{"file_id": fileID}, &f)
 	return f, err
+}
+
+// GetChat returns the type and the title of a chat. The call sends nothing to the chat, so it
+// uses no chat budget.
+func (c *Client) GetChat(ctx context.Context, chatID int64) (Chat, error) {
+	var chat Chat
+	err := c.Call(ctx, "getChat", map[string]any{"chat_id": chatID}, &chat)
+	return chat, err
 }
 
 // DownloadFile saves the file at filePath (from GetFile) to dst. It writes a

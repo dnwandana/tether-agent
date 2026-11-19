@@ -67,6 +67,16 @@ type Env struct {
 	// LogScope is the scope of the approval log rows. A cron run sets it from the origin chat
 	// of its job.
 	LogScope string
+	// UserID is the user of the inbound message of the turn. A goal turn, an enqueued turn,
+	// and a cron run have no user.
+	UserID string
+	// RootSessionID is the session of the top-level run of a child run. It is empty for a
+	// top-level run. Use RunRootSession to read it.
+	RootSessionID string
+	// JobName and JobPurpose are the name and the raw prompt of the cron job of the run.
+	JobName, JobPurpose string
+	// DraftOnly is true for the run of a draft-only cron job and for each of its children.
+	DraftOnly bool
 }
 
 // RunRootKind returns the kind of the top-level run of env: RootKind, or Kind for a
@@ -79,6 +89,18 @@ func (e *Env) RunRootKind() string {
 		return e.RootKind
 	}
 	return e.Kind
+}
+
+// RunRootSession returns the session of the top-level run of env: RootSessionID, or
+// SessionID for a top-level run. A nil env gives "".
+func (e *Env) RunRootSession() string {
+	if e == nil {
+		return ""
+	}
+	if e.RootSessionID != "" {
+		return e.RootSessionID
+	}
+	return e.SessionID
 }
 
 // Question is a question to the user.
@@ -102,9 +124,14 @@ type Asker interface {
 
 // CommandCheck is one shell command for the approval gate. Workdir is the resolved, clean,
 // absolute workdir, or "" for no base folder. Path is the PATH value of the child
-// environment. Summary is the cleaned description of the model, or "".
+// environment. Summary is the cleaned description of the model, or "". Secrets holds the
+// bound names that the command can get. StagedCredentials holds the credential files that a
+// "git add" command stages. StageUnchecked is true when the check of the staged files failed.
 type CommandCheck struct {
 	Command, Workdir, Path, Summary string
+	Secrets                         []string
+	StagedCredentials               []string
+	StageUnchecked                  bool
 }
 
 // Approver checks a shell command against the approval gate.
@@ -125,9 +152,45 @@ type PermissionAsker interface {
 }
 
 // MCPApprover is an optional interface of Env.Gate. An MCP tool of a class other than read
-// reads it with a type assertion. With no MCPApprover, such a call does not run.
+// reads it with a type assertion. With no MCPApprover, such a call does not run. The result
+// args is the argument object to send, or nil to send the arguments of the model.
 type MCPApprover interface {
-	CheckMCP(ctx context.Context, env *Env, call security.MCPCall) error
+	CheckMCP(ctx context.Context, env *Env, call security.MCPCall) (json.RawMessage, error)
+}
+
+// PinRequest asks the owner to allow one program for a bound secret, or to allow the
+// printed credentials that a command names after the turn read outside content. Name, Path,
+// and SHA256 describe the program. Handles and Sources describe the credentials.
+type PinRequest struct {
+	Name, Path, SHA256, Command string
+	Handles                     []string
+	Sources                     []string
+}
+
+// SecretPinner is an optional interface of Env.Gate. The terminal tool reads it with a type
+// assertion. Without it, a program that has no pin does not get the secret.
+type SecretPinner interface {
+	AskPin(ctx context.Context, env *Env, r PinRequest) (bool, error)
+}
+
+// SecretQuestion asks the owner for the value of one bound secret. Commands holds the
+// bound command prefixes. Reason is the cleaned reason of the model.
+type SecretQuestion struct {
+	Name     string
+	Commands []string
+	Reason   string
+}
+
+// SecretAsker is an optional interface of Env.Ask. The UI saves the value itself. The
+// value never comes back to the tool.
+type SecretAsker interface {
+	AskSecret(ctx context.Context, q SecretQuestion) (saved bool, err error)
+}
+
+// SecretMarks records the bound secrets that got an auth failure.
+type SecretMarks interface {
+	Mark(ctx context.Context, name string, at time.Time) error
+	Clear(ctx context.Context, name string) error
 }
 
 // ACPFloor is an optional interface of Env.Gate. The acp_delegate tool reads it with a type
@@ -141,7 +204,20 @@ type ACPFloor interface {
 type Result struct {
 	Text    string
 	IsError bool
+	// Outside is true when Text comes from outside the machine. The agent puts it into the
+	// untrusted block.
+	Outside bool
+	// Note is a note of Tether Agent that goes after the untrusted block of an outside result.
+	// It is set only when Outside is true. For other results, the note is in Text.
+	Note string
 }
+
+// RemoteError is an error whose text comes from outside: an MCP error result, an HTTP error
+// status, or a page script error. Its text goes into the untrusted block.
+type RemoteError struct{ Text string }
+
+// Error returns the remote text.
+func (e *RemoteError) Error() string { return e.Text }
 
 // Registry holds the tools by name. It is safe for concurrent use: /reload-mcp
 // changes the MCP tools while turns read the registry.
@@ -268,11 +344,22 @@ func (r *Registry) Dispatch(ctx context.Context, name string, args json.RawMessa
 	// result, so it gets no note.
 	note := argsNote(name, t, args, env)
 	out, err := t.Run(ctx, args, env)
+	countTool(env, name)
+	noteOutside(name, t, args, env, err)
+	var remote *RemoteError
+	outside := !env.ScriptCall && IsOutsideTool(name) && (err == nil || errors.As(err, &remote))
 	if err != nil {
-		return Result{Text: ctxmgr.SanitizeUTF8(withNote(errorText(name, err), note)), IsError: true}
+		text := errorText(name, err)
+		if outside {
+			return Result{Text: ctxmgr.SanitizeUTF8(text), IsError: true, Outside: true, Note: note}
+		}
+		return Result{Text: ctxmgr.SanitizeUTF8(withNote(text, note)), IsError: true}
 	}
 	if env.ScriptCall {
 		note = ""
+	}
+	if outside {
+		return Result{Text: ctxmgr.SanitizeUTF8(out), Outside: true, Note: note}
 	}
 	return Result{Text: ctxmgr.SanitizeUTF8(withNote(out, note))}
 }

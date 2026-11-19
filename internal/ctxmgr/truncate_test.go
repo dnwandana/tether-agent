@@ -141,3 +141,37 @@ func TestCleanupSpillMissingDir(t *testing.T) {
 		t.Fatal(n, err)
 	}
 }
+
+func TestTruncateNamedSpillName(t *testing.T) {
+	dir := t.TempDir()
+	s := strings.Repeat("w", 200)
+	out, err := TruncateNamed(s, 100, dir, "web_fetch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatal(entries)
+	}
+	name := entries[0].Name()
+	if !regexp.MustCompile(`^web_fetch-\d{8}-\d{6}[0-9a-f]{6}\.txt$`).MatchString(name) ||
+		!strings.Contains(out, filepath.Join(dir, name)) {
+		t.Fatal(name, out)
+	}
+	// A bad rune in the source cannot leave the folder.
+	dir2 := t.TempDir()
+	if _, err := TruncateNamed(s, 100, dir2, "../mcp/x y"); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := os.ReadDir(dir2); len(e) != 1 || !strings.HasPrefix(e[0].Name(), "___mcp_x_y-") {
+		t.Fatal(e)
+	}
+	// Truncate keeps the plain name.
+	dir3 := t.TempDir()
+	if _, err := Truncate(s, 100, dir3); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := os.ReadDir(dir3); len(e) != 1 || !regexp.MustCompile(`^\d{8}-\d{6}[0-9a-f]{6}\.txt$`).MatchString(e[0].Name()) {
+		t.Fatal(e)
+	}
+}

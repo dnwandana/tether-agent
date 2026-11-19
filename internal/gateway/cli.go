@@ -72,6 +72,11 @@ type lineReader interface {
 	Close() error
 }
 
+// secretReader is a lineReader with a masked read that writes no history line.
+type secretReader interface {
+	ReadSecret(prompt string) (string, error)
+}
+
 // promptSetter is a lineReader that shows a prompt, for example readline.
 type promptSetter interface {
 	SetPrompt(prompt string)
@@ -134,7 +139,7 @@ func (c *CLI) Run(ctx context.Context) error {
 	feed := newLineFeed(lr, c.interruptWake)
 	defer feed.close()
 	if ask := c.deps().CLIAsk; ask != nil {
-		defer ask.attach(c.Out, c.askReader(lr, feed))()
+		defer ask.attach(c.Out, c.askReader(lr, feed), c.secretReader(lr, feed))()
 	}
 	turn := c.Turn
 	switch {
@@ -467,6 +472,36 @@ func (c *CLI) askReader(lr lineReader, feed *lineFeed) func(ctx context.Context,
 	}
 }
 
+// secretReader returns the masked line reader of CLIAsk. It is nil when lr has no masked
+// read, for example a pipe. It writes the prompt, because the masked read of readline shows
+// no prompt.
+func (c *CLI) secretReader(lr lineReader, feed *lineFeed) func(ctx context.Context, prompt string) (string, error) {
+	if _, ok := lr.(secretReader); !ok {
+		return nil
+	}
+	return func(ctx context.Context, prompt string) (string, error) {
+		_, _ = io.WriteString(c.Out, prompt)
+		line, err := feed.secret(ctx, prompt)
+		if err == nil {
+			// ReadPassword leaves the cursor on the prompt line.
+			_, _ = io.WriteString(c.Out, "\n")
+			return line, nil
+		}
+		// The prompt line has no new line yet. An early refusal gives the line end only.
+		_, _ = io.WriteString(c.Out, "\n")
+		if errors.Is(err, errFeedBusy) || errors.Is(err, errNoMaskedRead) {
+			return "", err
+		}
+		// The read stopped. The next line that the owner types can go to the stopped read.
+		_, _ = io.WriteString(c.Out, "The secret read stopped. Press Enter to continue.\n")
+		if errors.Is(err, readline.ErrInterrupt) && c.interruptTurn() {
+			<-ctx.Done()
+			return "", ctx.Err()
+		}
+		return "", err
+	}
+}
+
 // command runs one slash command and returns the session that the key uses after it.
 func (c *CLI) command(ctx context.Context, sess *sessions.Session, name, args, text string, feed *lineFeed,
 	ints <-chan os.Signal, turn cliTurnFunc) (*sessions.Session, error) {
@@ -590,15 +625,31 @@ func (c *CLI) store() *sessions.Store {
 type lineFeed struct {
 	mu      sync.Mutex
 	lr      lineReader
-	req     chan string
+	req     chan feedReq
 	res     chan lineResult
 	pending bool
+	// pendingSecret is true when pending is a masked read that the end of its context
+	// left open. The next read drops its result.
+	pendingSecret bool
 	// interrupt stops the running turn and returns false when no turn runs. Nil stops
 	// nothing.
 	interrupt func() bool
 	// inTurn is true while a turn runs during a read, for example a wake turn.
 	inTurn atomic.Bool
 }
+
+// feedReq is one read request of the feed. A secret read uses the masked read of the reader
+// and writes no history line.
+type feedReq struct {
+	prompt string
+	secret bool
+}
+
+// errFeedBusy is the result of a masked read while a plain read waits.
+var errFeedBusy = errors.New("cli: a plain read waits")
+
+// errNoMaskedRead is the result of a masked read on a reader that cannot mask, for example a pipe.
+var errNoMaskedRead = errors.New("cli: the input has no masked read")
 
 type lineResult struct {
 	line string
@@ -608,9 +659,16 @@ type lineResult struct {
 // newLineFeed starts the reads of lr. interrupt gets each readline Ctrl-C that comes while
 // inTurn is true.
 func newLineFeed(lr lineReader, interrupt func() bool) *lineFeed {
-	f := &lineFeed{lr: lr, req: make(chan string), res: make(chan lineResult, 1), interrupt: interrupt}
+	f := &lineFeed{lr: lr, req: make(chan feedReq), res: make(chan lineResult, 1), interrupt: interrupt}
 	go func() {
-		for prompt := range f.req {
+		for rq := range f.req {
+			if rq.secret {
+				// A masked read does not loop on Ctrl-C. The caller decides.
+				line, err := lr.(secretReader).ReadSecret(rq.prompt)
+				f.res <- lineResult{line, err}
+				continue
+			}
+			prompt := rq.prompt
 			line, err := readPrompt(lr, prompt)
 			// A wake turn runs while readline reads, and readline turns off the signals of
 			// the terminal. So Ctrl-C comes here as ErrInterrupt and not as SIGINT. It stops
@@ -660,8 +718,18 @@ func (f *lineFeed) read(ctx context.Context, ints <-chan os.Signal, wakes <-chan
 	prompt string) (string, *goals.Continuation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.pendingSecret {
+		// A masked read that ctx ended is still open. Drop its result, so a late secret
+		// never becomes a chat line.
+		select {
+		case <-f.res:
+			f.pending, f.pendingSecret = false, false
+		case <-ctx.Done():
+			return "", nil, ctx.Err()
+		}
+	}
 	if !f.pending {
-		f.req <- prompt
+		f.req <- feedReq{prompt: prompt}
 		f.pending = true
 	} else if prompt != "" {
 		// The pending read shows the REPL prompt, for example during a wake turn. A question
@@ -679,6 +747,29 @@ func (f *lineFeed) read(ctx context.Context, ints <-chan os.Signal, wakes <-chan
 		return "", nil, errInterrupted
 	case <-ctx.Done():
 		return "", nil, ctx.Err()
+	}
+}
+
+// secret reads one masked line with prompt. It never writes a history line. It refuses
+// while a plain read waits, because that read cannot stop.
+func (f *lineFeed) secret(ctx context.Context, prompt string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.lr.(secretReader); !ok {
+		return "", errNoMaskedRead
+	}
+	if f.pending {
+		return "", errFeedBusy
+	}
+	f.req <- feedReq{prompt: prompt, secret: true}
+	f.pending = true
+	select {
+	case r := <-f.res:
+		f.pending = false
+		return r.line, r.err
+	case <-ctx.Done():
+		f.pendingSecret = true
+		return "", ctx.Err()
 	}
 }
 
@@ -702,6 +793,15 @@ func (c *CLI) logger() *slog.Logger {
 		return c.Log
 	}
 	return slog.Default()
+}
+
+// maskedReadline is a readline instance with a masked read.
+type maskedReadline struct{ *readline.Instance }
+
+// ReadSecret reads one line with no echo and no history line.
+func (m maskedReadline) ReadSecret(prompt string) (string, error) {
+	b, err := m.Instance.ReadPassword(prompt)
+	return string(b), err
 }
 
 // newLineReader returns a readline prompt when In is a terminal, and a plain line scanner
@@ -731,7 +831,7 @@ func (c *CLI) newLineReader() (lineReader, error) {
 		if err != nil {
 			return nil, fmt.Errorf("cli: cannot start the prompt: %w", err)
 		}
-		return rl, nil
+		return maskedReadline{rl}, nil
 	}
 	sc := bufio.NewScanner(c.In)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)

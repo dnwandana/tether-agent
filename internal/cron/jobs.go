@@ -22,6 +22,11 @@ import (
 // ErrNotFound is the error for a job id that is not in cron_jobs.
 var ErrNotFound = errors.New("cron: job not found. Use list to see the job ids")
 
+// ErrDraftDeliver is the error for a draft-only job whose delivery target is not private.
+//
+//lint:ignore ST1005 the text is a fixed user message with a full sentence.
+var ErrDraftDeliver = errors.New("A draft-only job delivers only to a private chat or local.")
+
 // errBadSchedule is the error of MarkRun for a stored schedule that cannot be parsed. MarkRun
 // then disables the job.
 var errBadSchedule = errors.New("cron: the stored schedule is not valid")
@@ -92,6 +97,8 @@ type Job struct {
 	LastOutput       string
 	// FailStreak is the number of runs in a row with status error.
 	FailStreak int
+	// DraftOnly is true for a job that can read and write drafts, but cannot send.
+	DraftOnly bool
 }
 
 // JobPatch holds the fields that Update changes. A nil field stays the same.
@@ -108,7 +115,8 @@ type JobPatch struct {
 	RepeatLeft *int
 	Enabled    *bool
 	// NextRun moves the next run. The cronjob tool uses it to make a job due now.
-	NextRun *time.Time
+	NextRun   *time.Time
+	DraftOnly *bool
 }
 
 // Store reads and writes cron_jobs. It does no I/O except the database and the workdir
@@ -129,10 +137,13 @@ type Store struct {
 	// masks before it cuts, because a cut can split a secret that the redactor then misses.
 	// Nil keeps the text as it is.
 	Redact func(string) string
+	// IsPrivate reports whether a target stays with the owner. Nil refuses each draft-only
+	// target that is not local.
+	IsPrivate func(ctx context.Context, t Target) bool
 }
 
 const jobColumns = `id, name, schedule, prompt, script, no_agent, deliver, skills, model, toolsets, workdir,
-	repeat_left, enabled, origin, created_by_session, last_run, next_run, last_status, last_output, fail_streak`
+	repeat_left, enabled, origin, created_by_session, last_run, next_run, last_status, last_output, fail_streak, draft_only`
 
 var (
 	telegramChatRE   = regexp.MustCompile(`^(-?\d+|@[A-Za-z0-9_]+)$`)
@@ -166,7 +177,7 @@ func (s *Store) loc() *time.Location {
 func (s *Store) Create(ctx context.Context, j Job) (Job, error) {
 	now := s.now()
 	j = normalize(j)
-	if err := s.validate(j); err != nil {
+	if err := s.validate(ctx, j); err != nil {
 		return Job{}, err
 	}
 	sched, err := Parse(j.Schedule, now, s.loc())
@@ -205,15 +216,62 @@ func (s *Store) insert(ctx context.Context, j Job, now time.Time) error {
 		return err
 	}
 	_, err = s.DB.ExecContext(ctx, `INSERT INTO cron_jobs(`+jobColumns+`, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append(args, now.UnixMilli())...)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append(args, now.UnixMilli())...)
 	return err
+}
+
+// updateTries is the number of times that Update reads the job again when the draft target
+// of the job changes between the check and the transaction.
+const updateTries = 3
+
+// errDraftTargetChanged tells Update that another writer changed the draft target of the job.
+var errDraftTargetChanged = errors.New("cron: the delivery target of the job changed during the update")
+
+// draftKey holds the fields of a job that checkDraftTarget reads.
+type draftKey struct {
+	draftOnly, noAgent bool
+	deliver            string
+	origin             Origin
+}
+
+func draftKeyOf(j Job) draftKey {
+	return draftKey{draftOnly: j.DraftOnly, noAgent: j.NoAgent, deliver: j.Deliver, origin: j.Origin}
 }
 
 // Update applies patch to the job id and validates the result. A new schedule gives a new
 // NextRun. A one-shot time in the past is refused.
+//
+// IsPrivate can query state.db, and state.db has one connection. Thus Update validates the
+// patched job before the transaction starts. In the transaction, it validates again without
+// the draft target check, and it starts again when the draft target changed after the check.
 func (s *Store) Update(ctx context.Context, id string, patch JobPatch) (Job, error) {
+	for range updateTries {
+		checked, err := s.get(ctx, s.DB, id)
+		if err != nil {
+			return Job{}, err
+		}
+		applyPatch(&checked, patch)
+		checked = normalize(checked)
+		if err := s.validate(ctx, checked); err != nil {
+			return Job{}, err
+		}
+		err = s.update(ctx, id, patch, draftKeyOf(checked))
+		if errors.Is(err, errDraftTargetChanged) {
+			continue
+		}
+		if err != nil {
+			return Job{}, err
+		}
+		return s.Get(ctx, id)
+	}
+	return Job{}, fmt.Errorf("%w: job %s, try again", errDraftTargetChanged, id)
+}
+
+// update writes patch to the job id in one transaction. checked is the draft key of the job
+// that Update validated before the transaction.
+func (s *Store) update(ctx context.Context, id string, patch JobPatch, checked draftKey) error {
 	now := s.now()
-	err := s.inTx(ctx, func(tx *sql.Tx) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
 		j, err := s.get(ctx, tx, id)
 		if err != nil {
 			return err
@@ -221,8 +279,11 @@ func (s *Store) Update(ctx context.Context, id string, patch JobPatch) (Job, err
 		old := j
 		applyPatch(&j, patch)
 		j = normalize(j)
-		if err := s.validate(j); err != nil {
+		if err := s.validateFields(j); err != nil {
 			return err
+		}
+		if j.DraftOnly && draftKeyOf(j) != checked {
+			return errDraftTargetChanged
 		}
 		if j.Schedule != old.Schedule {
 			sched, err := Parse(j.Schedule, now, s.loc())
@@ -256,10 +317,6 @@ func (s *Store) Update(ctx context.Context, id string, patch JobPatch) (Job, err
 		}
 		return s.write(ctx, tx, j)
 	})
-	if err != nil {
-		return Job{}, err
-	}
-	return s.Get(ctx, id)
 }
 
 // Get returns the job id, or an error that wraps ErrNotFound.
@@ -320,6 +377,9 @@ func (s *Store) prepareResume(j *Job, now time.Time) error {
 func (s *Store) Remove(ctx context.Context, id string) error {
 	return s.inTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM cron_runs WHERE job_id=?`, id); err != nil {
+			return fmt.Errorf("cron: remove job %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM held_sends WHERE job_id=?`, id); err != nil {
 			return fmt.Errorf("cron: remove job %s: %w", id, err)
 		}
 		res, err := tx.ExecContext(ctx, `DELETE FROM cron_jobs WHERE id=?`, id)
@@ -498,11 +558,17 @@ func (s *Store) record(ctx context.Context, tx *sql.Tx, j Job, rec RunRecord) er
 	}
 	keep := max(s.RunHistory, 0) // SQLite reads a negative LIMIT as no limit
 	if keep > 0 {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO cron_runs(job_id, started_at, finished_at, status,
+		res, err := tx.ExecContext(ctx, `INSERT INTO cron_runs(job_id, started_at, finished_at, status,
 			delivery, output, delivery_error, session_id) VALUES(?,?,?,?,?,?,?,?)`,
 			j.ID, rec.RanAt.UnixMilli(), rec.FinishedAt.UnixMilli(), rec.Status, rec.Delivery,
-			TruncateRunes(s.redact(j.LastOutput), RunOutputMaxRunes), rec.DeliveryErr, rec.SessionID); err != nil {
+			TruncateRunes(s.redact(j.LastOutput), RunOutputMaxRunes), rec.DeliveryErr, rec.SessionID)
+		if err != nil {
 			return fmt.Errorf("cron: record run of job %s: %w", j.ID, err)
+		}
+		if rec.Delivery == DeliveryHeld {
+			if err := s.linkHeld(ctx, tx, j.ID, res); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM cron_runs WHERE job_id=? AND id NOT IN
@@ -512,9 +578,64 @@ func (s *Store) record(ctx context.Context, tx *sql.Tx, j Job, rec RunRecord) er
 	return nil
 }
 
-// validate checks a job before the store saves it. It checks the schedule, the prompt or
-// the script, the workdir, the toolsets, the skills, and the deliver value.
-func (s *Store) validate(j Job) error {
+// linkHeld writes the id of the new run row res into the hold rows of the job. A job never
+// runs two times at once, so each hold row without a run id is of this run.
+//
+// The hold row and its card exist before the run row. A fast tap can claim the row first, and
+// then no row gets the run id, and no tap or sweep can change the run row later. The store
+// cannot know if the tap sent or dropped the text, so the run row gets DeliveryNone, not
+// DeliveryHeld.
+func (s *Store) linkHeld(ctx context.Context, tx *sql.Tx, jobID string, res sql.Result) error {
+	runID, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("cron: record run of job %s: %w", jobID, err)
+	}
+	link, err := tx.ExecContext(ctx, `UPDATE held_sends SET run_id = ? WHERE job_id = ? AND kind = 'hold' AND run_id IS NULL`,
+		runID, jobID)
+	if err != nil {
+		return fmt.Errorf("cron: link held send of job %s: %w", jobID, err)
+	}
+	n, err := link.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("cron: link held send of job %s: %w", jobID, err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE cron_runs SET delivery = ? WHERE id = ?`, DeliveryNone, runID); err != nil {
+		return fmt.Errorf("cron: record run of job %s: %w", jobID, err)
+	}
+	return nil
+}
+
+// UpdateRunDelivery sets the delivery of the cron_runs row runID. A tap and the sweep of a
+// held send call it. A row that the history limit deleted is no error.
+func (s *Store) UpdateRunDelivery(ctx context.Context, runID int64, delivery string) error {
+	if runID == 0 {
+		return nil
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE cron_runs SET delivery=? WHERE id=?`, delivery, runID); err != nil {
+		return fmt.Errorf("cron: update delivery of run %d: %w", runID, err)
+	}
+	return nil
+}
+
+// validate checks a job before the store saves it. It checks the fields of validateFields and
+// the draft-only rules. Do not call it in a transaction: IsPrivate can query state.db, and
+// state.db has one connection.
+func (s *Store) validate(ctx context.Context, j Job) error {
+	if err := s.validateFields(j); err != nil {
+		return err
+	}
+	if j.DraftOnly {
+		return s.checkDraftTarget(ctx, j)
+	}
+	return nil
+}
+
+// validateFields checks the schedule, the prompt or the script, the workdir, the toolsets,
+// the skills, and the deliver value. It does no database query.
+func (s *Store) validateFields(j Job) error {
 	if j.Schedule == "" {
 		return fmt.Errorf("cron: schedule is required: %s", formatHelp)
 	}
@@ -547,6 +668,27 @@ func (s *Store) validate(j Job) error {
 		}
 	}
 	return validateDeliver(j.Deliver)
+}
+
+// checkDraftTarget refuses a draft-only job whose target is not private.
+func (s *Store) checkDraftTarget(ctx context.Context, j Job) error {
+	if j.NoAgent {
+		return errors.New("cron: a no_agent job cannot be draft-only, because it has no tools to remove")
+	}
+	t, local, err := resolveTarget(ctx, j, nil)
+	switch {
+	case err == nil && local:
+		return nil
+	case errors.Is(err, ErrNoTarget):
+		// The run checks the real home target again.
+		t = Target{Source: j.Origin.Source}
+	case err != nil:
+		return err
+	}
+	if s.IsPrivate == nil || !s.IsPrivate(ctx, t) {
+		return fmt.Errorf("cron: %w", ErrDraftDeliver)
+	}
+	return nil
 }
 
 func validateDeliver(d string) error {
@@ -624,6 +766,9 @@ func applyPatch(j *Job, p JobPatch) {
 	if p.Enabled != nil {
 		j.Enabled = *p.Enabled
 	}
+	if p.DraftOnly != nil {
+		j.DraftOnly = *p.DraftOnly
+	}
 }
 
 // taskChanged reports whether the edit changes what the job does. Such an edit starts a new
@@ -637,7 +782,8 @@ func taskChanged(old, j Job) bool {
 	}
 	return j.Prompt != old.Prompt || j.Script != old.Script || j.NoAgent != old.NoAgent ||
 		!slices.Equal(j.Skills, old.Skills) || !samePin(j.Model, old.Model) ||
-		!slices.Equal(j.Toolsets, old.Toolsets) || j.Workdir != old.Workdir || j.Schedule != old.Schedule
+		!slices.Equal(j.Toolsets, old.Toolsets) || j.Workdir != old.Workdir || j.Schedule != old.Schedule ||
+		j.DraftOnly != old.DraftOnly
 }
 
 func defaultRepeat(s Schedule) int {
@@ -725,7 +871,7 @@ func (s *Store) write(ctx context.Context, tx *sql.Tx, j Job) error {
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE cron_jobs SET name=?, schedule=?, prompt=?, script=?, no_agent=?, deliver=?,
 		skills=?, model=?, toolsets=?, workdir=?, repeat_left=?, enabled=?, origin=?, created_by_session=?,
-		last_run=?, next_run=?, last_status=?, last_output=?, fail_streak=? WHERE id=?`, append(args[1:], j.ID)...)
+		last_run=?, next_run=?, last_status=?, last_output=?, fail_streak=?, draft_only=? WHERE id=?`, append(args[1:], j.ID)...)
 	if err != nil {
 		return fmt.Errorf("cron: write job %s: %w", j.ID, err)
 	}
@@ -756,7 +902,7 @@ func rowArgs(j Job) ([]any, error) {
 	}
 	return []any{j.ID, j.Name, j.Schedule, j.Prompt, j.Script, boolInt(j.NoAgent), j.Deliver, skills, model, toolsets,
 		j.Workdir, j.RepeatLeft, boolInt(j.Enabled), string(origin), j.CreatedBySession,
-		msOrNil(j.LastRun), msOrNil(j.NextRun), j.LastStatus, j.LastOutput, j.FailStreak}, nil
+		msOrNil(j.LastRun), msOrNil(j.NextRun), j.LastStatus, j.LastOutput, j.FailStreak, boolInt(j.DraftOnly)}, nil
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -764,16 +910,16 @@ type scanner interface{ Scan(dest ...any) error }
 func (s *Store) scan(r scanner) (Job, error) {
 	var (
 		j                               Job
-		noAgent, enabled                int
+		noAgent, enabled, draftOnly     int
 		skills, model, toolsets, origin sql.NullString
 		lastRun, nextRun                sql.NullInt64
 	)
 	if err := r.Scan(&j.ID, &j.Name, &j.Schedule, &j.Prompt, &j.Script, &noAgent, &j.Deliver, &skills, &model,
 		&toolsets, &j.Workdir, &j.RepeatLeft, &enabled, &origin, &j.CreatedBySession, &lastRun, &nextRun,
-		&j.LastStatus, &j.LastOutput, &j.FailStreak); err != nil {
+		&j.LastStatus, &j.LastOutput, &j.FailStreak, &draftOnly); err != nil {
 		return Job{}, err
 	}
-	j.NoAgent, j.Enabled = noAgent != 0, enabled != 0
+	j.NoAgent, j.Enabled, j.DraftOnly = noAgent != 0, enabled != 0, draftOnly != 0
 	if err := unmarshalNull(skills, &j.Skills); err != nil {
 		return Job{}, fmt.Errorf("skills: %w", err)
 	}

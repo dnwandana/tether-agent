@@ -302,3 +302,14 @@ func TestRestoreSignalsKeepIgnoredSIGHUP(t *testing.T) {
 		t.Fatal("an ignored SIGHUP must stay ignored")
 	}
 }
+
+func TestPrintRestoreVarsBound(t *testing.T) {
+	var b bytes.Buffer
+	printRestoreVars(&b, []backup.VarStatus{{Name: "OPENAI_API_KEY", Set: true}, {Name: "PYPI_TOKEN", Bound: true}})
+	want := "config.yaml needs these variables in .env:\n" +
+		"  OPENAI_API_KEY        set\n" +
+		"  PYPI_TOKEN            not set (exec_secrets reads .env only)\n"
+	if b.String() != want {
+		t.Fatalf("got %q", b.String())
+	}
+}

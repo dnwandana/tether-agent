@@ -16,8 +16,8 @@ import (
 )
 
 // ChildBlockedTools are the tools that a child never sees: Hermes DELEGATE_BLOCKED_TOOLS
-// plus cronjob and acp_delegate.
-var ChildBlockedTools = []string{"delegate_task", "clarify", "memory", "execute_code", "cronjob", "acp_delegate"}
+// plus cronjob, acp_delegate, and request_secret.
+var ChildBlockedTools = []string{"delegate_task", "clarify", "memory", "execute_code", "cronjob", "acp_delegate", "request_secret"}
 
 // The Env.Values keys of a child run.
 const (
@@ -74,6 +74,17 @@ type ChildResult struct {
 	ToolCalls int
 	DurationS float64
 	Error     string
+	// Outside holds the outside facts of the child turn, with the sources that it got from
+	// the parent.
+	Outside tools.OutsideFacts
+}
+
+// parentSources returns the outside sources of the parent env. A nil env has none.
+func parentSources(env *tools.Env) []string {
+	if env == nil {
+		return nil
+	}
+	return tools.Outside(env).Sources
 }
 
 // RunChild runs one child: a fresh conversation in its own session, with a focused system
@@ -99,10 +110,8 @@ func (a *Agent) RunChild(ctx context.Context, spec ChildSpec) (res ChildResult) 
 
 	orchestrator := spec.Role == "orchestrator" && spec.Depth+1 < limits.MaxSpawnDepth
 	remove := ChildBlockedTools
-	system := ChildSystemPrompt(spec.Goal, spec.Context)
 	if orchestrator {
 		remove = without(ChildBlockedTools, "delegate_task")
-		system += "\n" + orchestratorNote(spec.Depth+1, limits.MaxSpawnDepth)
 	}
 	parentSets := make([]string, 0, len(spec.ParentToolsets))
 	for name, on := range spec.ParentToolsets {
@@ -122,6 +131,16 @@ func (a *Agent) RunChild(ctx context.Context, spec ChildSpec) (res ChildResult) 
 	env.Values[ChildNameKey] = spec.Name
 	env.Values[ChildDepthKey] = spec.Depth + 1
 
+	visible := map[string]bool{}
+	if a.Tools != nil {
+		visible, _ = a.Tools.Visible(sets, remove)
+	}
+	member := spec.ParentEnv != nil && spec.ParentEnv.Member
+	system := ChildSystemPrompt(spec.Goal, spec.Context, a.secretNote(spec.ParentSession, member, visible))
+	if orchestrator {
+		system += "\n" + orchestratorNote(spec.Depth+1, limits.MaxSpawnDepth)
+	}
+
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(limits.ChildTimeoutS)*time.Second)
 	defer cancel()
 	tr, err := a.RunTurn(cctx, Turn{
@@ -135,7 +154,9 @@ func (a *Agent) RunChild(ctx context.Context, spec ChildSpec) (res ChildResult) 
 		MaxTurns:    limits.MaxIterations,
 		Member:      env.Member,
 		Mode:        mode,
+		Outside:     parentSources(spec.ParentEnv),
 	})
+	res.Outside = tr.Outside
 	partial, calls, lastTool := a.childActivity(context.WithoutCancel(ctx), sess.ID)
 	res.ToolCalls = calls
 	switch {
@@ -210,6 +231,8 @@ func childEnv(parent *tools.Env, sess *sessions.Session) *tools.Env {
 		env.WorkDir, env.DataDir, env.Gate, env.Log, env.Progress = parent.WorkDir, parent.DataDir, parent.Gate, parent.Log, parent.Progress
 		env.RootKind = parent.RunRootKind()
 		env.Member = parent.Member
+		env.UserID, env.JobName, env.JobPurpose, env.DraftOnly = parent.UserID, parent.JobName, parent.JobPurpose, parent.DraftOnly
+		env.RootSessionID = parent.RunRootSession()
 		env.ModeScope, env.LogScope = parent.ModeScope, parent.LogScope
 		if parent.Channel != "" {
 			env.Channel = parent.Channel
@@ -283,7 +306,7 @@ func (a *Agent) childActivity(ctx context.Context, sessionID string) (lastText s
 
 // ChildSystemPrompt returns the focused system prompt of a child. It is a port of Hermes
 // _build_child_system_prompt.
-func ChildSystemPrompt(goal, context string) string {
+func ChildSystemPrompt(goal, context, secretNote string) string {
 	parts := []string{
 		"You are a focused subagent working on a specific delegated task.",
 		"",
@@ -291,6 +314,9 @@ func ChildSystemPrompt(goal, context string) string {
 	}
 	if strings.TrimSpace(context) != "" {
 		parts = append(parts, "\nCONTEXT:\n"+context)
+	}
+	if secretNote != "" {
+		parts = append(parts, "\nTOOL NOTES:\n- "+secretNote)
 	}
 	parts = append(parts, "\nComplete this task using the tools available to you. "+
 		"When finished, provide a clear, concise summary of:\n"+

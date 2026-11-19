@@ -19,6 +19,7 @@ func TestHumanOnlyPatternIDs(t *testing.T) {
 		"human_only_account_creation":   "account creation",
 		"human_only_credential_access":  "new credential access",
 		"human_only_permanent_deletion": "permanent deletion",
+		"human_only_stage_credential":   "staging of credential files",
 	}
 	if len(HumanOnlyPatterns) != len(want) {
 		t.Fatal(len(HumanOnlyPatterns))

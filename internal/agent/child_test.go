@@ -301,7 +301,7 @@ func TestChildReleasesApprovalSession(t *testing.T) {
 }
 
 func TestChildSystemPromptPort(t *testing.T) {
-	p := ChildSystemPrompt("fix the build", "")
+	p := ChildSystemPrompt("fix the build", "", "")
 	if !strings.HasPrefix(p, "You are a focused subagent working on a specific delegated task.") ||
 		strings.Contains(p, "CONTEXT:") || !strings.Contains(p, "- Any files you created or modified") {
 		t.Fatal(p)
@@ -327,6 +327,18 @@ func TestChildTakesParentEffort(t *testing.T) {
 func TestChildBlocksACPDelegate(t *testing.T) {
 	if !slices.Contains(ChildBlockedTools, "acp_delegate") {
 		t.Fatal("a delegate_task child must not see acp_delegate")
+	}
+}
+
+func TestChildBlocksRequestSecret(t *testing.T) {
+	if !slices.Contains(ChildBlockedTools, "request_secret") {
+		t.Fatal("a delegate_task child must not see request_secret")
+	}
+	fp := scripted(text("ok"))
+	a, parent := newAgent(t, fp, newNamed("request_secret", tools.SetTerminal), echoTool{})
+	a.RunChild(ctx, ChildSpec{Goal: "x", ParentSession: parent, ParentToolsets: all(), Role: "orchestrator"})
+	if schemaNames(fp.requests[0])["request_secret"] {
+		t.Fatal("an orchestrator child must not see request_secret either")
 	}
 }
 

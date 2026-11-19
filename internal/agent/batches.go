@@ -325,7 +325,7 @@ func newBatchID() (string, error) {
 }
 
 func liteResult(r ChildResult) tools.ChildResultLite {
-	return tools.ChildResultLite{Status: r.Status, Summary: r.Summary, ToolCalls: r.ToolCalls, DurationS: r.DurationS, Error: r.Error}
+	return tools.ChildResultLite{Status: r.Status, Summary: r.Summary, ToolCalls: r.ToolCalls, DurationS: r.DurationS, Error: r.Error, Outside: r.Outside}
 }
 
 func liteResults(rs []ChildResult) []tools.ChildResultLite {
@@ -382,7 +382,16 @@ func (d *Delegator) StartBackground(ctx context.Context, env *tools.Env, specs [
 		}
 		tasks[i] = cs
 	}
-	return d.Batches.Start(ctx, env.SessionKey, env.SessionID, tasks, d.run)
+	// The batch turn runs after the parent turn. Each child queues its facts for that turn.
+	key := env.SessionKey
+	run := func(ctx context.Context, spec ChildSpec) ChildResult {
+		r := d.run(ctx, spec)
+		if len(r.Outside.Sources) > 0 {
+			d.Agent.queueOutside(key, r.Outside)
+		}
+		return r
+	}
+	return d.Batches.Start(ctx, env.SessionKey, env.SessionID, tasks, run)
 }
 
 // childSpec builds a ChildSpec from a tools.ChildSpecLite. The parent session and the parent

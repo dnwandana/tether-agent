@@ -36,7 +36,7 @@ var readOnlyTools = []string{
 // readOnlyDeniedTools are the whole tools that read-only mode hides.
 var readOnlyDeniedTools = []string{
 	"terminal", "execute_code", "write_file", "patch", "skill_manage", "acp_delegate",
-	"browser_click", "browser_fill", "browser_run_js",
+	"browser_click", "browser_fill", "browser_run_js", "request_secret",
 }
 
 // readOnlyMixedTools have read and write actions. Each one decides through ReadOnlyCaller.

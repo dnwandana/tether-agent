@@ -550,6 +550,15 @@ func safeFileName(s string) string {
 	}, s)
 }
 
+// pageScriptError returns the error of a page script. A timeout or a stop stays a tool error.
+// Each other error text comes from the page, so it is a RemoteError.
+func (bt *BrowserTools) pageScriptError(ctx, actx context.Context, err error) error {
+	if ctx.Err() != nil || errors.Is(actx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) {
+		return bt.fail(ctx, actx, "run the code", err)
+	}
+	return &RemoteError{Text: "run the code: " + err.Error()}
+}
+
 func (bt *BrowserTools) runJS(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
 	var a struct {
 		Code string `json:"code"`
@@ -574,7 +583,7 @@ func (bt *BrowserTools) runJS(ctx context.Context, raw json.RawMessage, env *Env
 				err = errors.New(maskCookieValues(err.Error(), ck.Cookies))
 			}
 		}
-		return "", bt.fail(ctx, actx, "run the code", err)
+		return "", bt.pageScriptError(ctx, actx, err)
 	}
 	if len(bytes.TrimSpace(res)) == 0 {
 		return "undefined", nil

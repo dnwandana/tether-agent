@@ -25,6 +25,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/tools"
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 
@@ -283,6 +284,18 @@ func TestErrorTextRedacted(t *testing.T) {
 	c2 := dial(t, stdioServer(t), nil)
 	_, err = c2.Call(ctx, "fail", nil)
 	if err == nil || strings.Contains(err.Error(), "sk-abcdefghijklmnopqrstuv") {
+		t.Fatal(err)
+	}
+}
+
+func TestErrorResultIsRemote(t *testing.T) {
+	srv, _ := httpServer(t, false)
+	s := config.DefaultMCPServer()
+	s.URL = srv.URL
+	c := dial(t, s, nil)
+	_, err := c.Call(ctx, "fail", nil)
+	var re *tools.RemoteError
+	if !errors.As(err, &re) || strings.Contains(re.Text, "sk-abcdefghijklmnopqrstuv") || !strings.Contains(re.Text, "upstream refused") {
 		t.Fatal(err)
 	}
 }

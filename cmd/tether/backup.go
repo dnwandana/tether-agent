@@ -41,6 +41,17 @@ func runBackup(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "backup: %v\n", err)
 		return 1
 	}
+	// The names of exec_secrets are secret names, so the backup masks their values in the
+	// copied files. A config that cannot be read gives no bound names.
+	if vars, err := backup.RequiredVars(filepath.Join(dir, "config.yaml"), func(string) (string, bool) { return "", false }); err == nil {
+		var bound []string
+		for _, v := range vars {
+			if v.Bound {
+				bound = append(bound, v.Name)
+			}
+		}
+		security.SetBoundSecretNames(bound)
+	}
 	// A signal cancels the context, so the deferred cleanup of the temp files runs.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

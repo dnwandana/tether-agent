@@ -39,9 +39,12 @@ type Outcome struct {
 
 // ManagerOptions tells NewManager how to start and record the adapter processes.
 type ManagerOptions struct {
-	Config        config.ACPConfig
-	DataDir       string
-	DotEnv        map[string]string
+	Config  config.ACPConfig
+	DataDir string
+	DotEnv  map[string]string
+	// EnvStore holds the live .env values. When it is set, a start reads it in place of DotEnv,
+	// so a value that the owner saves reaches the next start of an agent.
+	EnvStore      *security.DotEnvStore
 	Store         *Store
 	ClientVersion string
 	Log           *slog.Logger
@@ -169,7 +172,7 @@ func (m *Manager) keyLock(key sessionKey) *sync.Mutex {
 
 // redactor returns a redactor that masks the .env values and the env values of agent a.
 func (m *Manager) redactor(a config.ACPAgent) *security.Redactor {
-	return security.NewRedactor(SecretValues(m.o.DotEnv, a))
+	return security.NewRedactor(SecretValues(m.dotEnv(), a))
 }
 
 // startClient starts the adapter of key.Agent. The working folder of the process is cwd, the
@@ -219,7 +222,7 @@ func (m *Manager) startClient(ctx context.Context, key sessionKey, cwd string) (
 	c, err := Start(ctx, StartOptions{
 		AgentID:       key.Agent,
 		Agent:         m.o.Config.Agents[key.Agent],
-		DotEnv:        m.o.DotEnv,
+		DotEnv:        m.dotEnv(),
 		Dir:           cwd,
 		ClientVersion: m.o.ClientVersion,
 		Log:           m.log,
@@ -673,4 +676,13 @@ func (m *Manager) Busy() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// dotEnv returns the .env values for a start: the store after a refresh, else DotEnv.
+func (m *Manager) dotEnv() map[string]string {
+	if m.o.EnvStore != nil {
+		m.o.EnvStore.Refresh()
+		return m.o.EnvStore.Snapshot()
+	}
+	return m.o.DotEnv
 }

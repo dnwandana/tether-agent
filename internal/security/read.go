@@ -36,6 +36,9 @@ type Parsed struct {
 	// lookupChanged is true when the command changes how the shell finds a program: it sets
 	// PATH or BASH_CMDS, or runs hash or enable.
 	lookupChanged bool
+	// text is the command text that the reader read to the end. It is empty when Read is
+	// false. BindSecrets parses it again to see the shape of the whole command.
+	text string
 }
 
 // SimpleCmd is one simple command after quote removal.
@@ -51,6 +54,10 @@ type SimpleCmd struct {
 	Data   bool
 	// assigned is true when a variable assignment comes before the program word.
 	assigned bool
+	// inner is the count of the parts that the reader added for the command that this
+	// wrapper runs. It is 0 for a part that is not a wrapper, and for a wrapper with no
+	// inner command, such as a bare env or "sh ./x.sh".
+	inner int
 }
 
 const (
@@ -120,6 +127,7 @@ func ReadCommand(text string) (res Parsed) {
 	if res.Read {
 		r.endData()
 		res.View = buildView(text, r.spans)
+		res.text = text
 	} else {
 		res.View = text
 		for i := range res.Cmds {
@@ -396,6 +404,7 @@ func (r *reader) setsVar(name string) {
 func (r *reader) add(c SimpleCmd, lit []bool, wc walkCtx) {
 	c.Depth = wc.depth
 	c.Via = append([]string(nil), wc.via...)
+	idx := len(r.out.Cmds)
 	r.out.Cmds = append(r.out.Cmds, c)
 	switch filepath.Base(c.Argv[0]) {
 	case "exec":
@@ -427,8 +436,16 @@ func (r *reader) add(c SimpleCmd, lit []bool, wc walkCtx) {
 	}
 	if r.out.Why == "" {
 		r.unwrap(c, lit, wc)
+		r.out.Cmds[idx].inner = len(r.out.Cmds) - idx - 1
 	}
 }
+
+// Assigned reports whether a variable assignment comes before the program word.
+func (c SimpleCmd) Assigned() bool { return c.assigned }
+
+// LookupChanged reports whether the command changes how the shell finds a program: it sets
+// PATH or BASH_CMDS, or runs hash or enable.
+func (p Parsed) LookupChanged() bool { return p.lookupChanged }
 
 // subst walks a node for expansions and substitutions. It sets RuntimeText and reads the
 // commands inside a substitution.

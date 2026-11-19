@@ -738,3 +738,25 @@ func TestApprovalsLogEmptyAndPreviews(t *testing.T) {
 		t.Fatalf("got:\n%s\nwant:\n%s", r.Text, want)
 	}
 }
+
+func TestApprovalsLogRedactedAnswer(t *testing.T) {
+	setNow(t, time.Date(2026, 11, 18, 14, 30, 0, 0, time.Local))
+	at := time.Date(2026, 11, 18, 10, 0, 0, 0, time.Local)
+	mcp := func(at time.Time, kind, decision, source, answer string) security.LogRow {
+		return security.LogRow{At: at, Scope: "telegram:1:0", Kind: kind, Tool: "mcp:gmail.send_email",
+			Rule: "mcp:gmail.send_email", Class: "send", Server: "gmail", ToolName: "send_email",
+			Decision: decision, Source: source, Answer: answer, Preview: "to: x"}
+	}
+	registerTestCommand(t, ApprovalsCommand(logGate(t,
+		mcp(at, "chat", security.DecisionAllowed, "owner", "redacted"),
+		mcp(at.Add(time.Minute), "cron", security.DecisionBlocked, "model-guard", ""))))
+	c, sent := interactiveCtx(t)
+	c.Session = &sessions.Session{Source: "telegram", ChatID: "1"}
+	run(t, c, "/approvals log")
+	want := "📜 **Approval log** (this topic, last 2)\n" +
+		"10:01 ⛔ model-guard · cron · MCP send (gmail · send\\_email)\n" +
+		"10:00 ✅ owner · Send redacted · MCP send (gmail · send\\_email)"
+	if r := lastSent(t, sent); r.Text != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", r.Text, want)
+	}
+}

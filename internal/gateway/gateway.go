@@ -35,6 +35,8 @@ type Outbound struct {
 	Files    []string
 	Keyboard [][]Button
 	ReplyTo  string
+	// Raw skips the outbound scan of the channel. The owner chose to post the full text.
+	Raw bool
 }
 
 // Channel is a source of inbound messages and a place to send answers.
@@ -825,6 +827,9 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 		return end
 	}
 	rs.SessionID = sess.ID
+	if sr, ok := r.(SessionRenderer); ok {
+		sr.SetSession(sess.ID)
+	}
 	g.mu.Lock()
 	if p.discard || g.stopping.Load() {
 		// /stop or the stop of the gateway came while the turn started.

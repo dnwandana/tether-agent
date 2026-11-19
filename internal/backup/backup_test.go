@@ -193,6 +193,12 @@ func TestCreateNoSecrets(t *testing.T) {
 			t.Fatalf("the entry %s holds the secret", name)
 		}
 	}
+	if got := string(a.contents["memory/memory.md"]); got != "the key is «OPENAI_API_KEY»\n" {
+		t.Fatalf("memory.md = %q", got)
+	}
+	if !bytes.Contains(a.contents["state.db"], []byte("my key is «OPENAI_API_KEY»")) {
+		t.Fatal("the state.db copy must hold the label")
+	}
 	if len(res.Replaced) != 1 || res.Replaced[0].Name != "OPENAI_API_KEY" {
 		t.Fatalf("Replaced = %+v", res.Replaced)
 	}
@@ -212,6 +218,26 @@ func TestCreateNoSecrets(t *testing.T) {
 	// The live data does not change.
 	if !strings.Contains(readFile(t, filepath.Join(dir, "memory/memory.md")), createSecret) {
 		t.Fatal("the backup changed the live memory file")
+	}
+}
+
+// A process value that differs from the .env value of the same name gets the label too.
+func TestCreateLabelsProcessValue(t *testing.T) {
+	dir, _ := newDataDir(t)
+	write(t, dir, "memory/memory.md", "a dotenv-gh-token-0123456789 b env-gh-token-0123456789\n")
+	opts := createOpts(dir)
+	opts.DotEnv = map[string]string{"GH_TOKEN": "dotenv-gh-token-0123456789"}
+	opts.Environ = []string{"GH_TOKEN=env-gh-token-0123456789"}
+	res, err := Create(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(res.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(createReadArchive(t, data).contents["memory/memory.md"]); got != "a «GH_TOKEN» b «GH_TOKEN»\n" {
+		t.Fatalf("memory.md = %q", got)
 	}
 }
 

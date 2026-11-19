@@ -132,6 +132,12 @@ func runRestore(args []string, stdout, stderr io.Writer) int {
 		// The restore is complete. Only the variable list is not available.
 		fmt.Fprintf(stderr, "restore: cannot read config.yaml for the variable list: %v\n", err)
 	} else {
+		// A bound value comes from .env only. The process environment does not count.
+		for i := range vars {
+			if vars[i].Bound {
+				vars[i].Set = dotenv[vars[i].Name] != ""
+			}
+		}
 		printRestoreVars(stdout, vars)
 	}
 	if _, err := os.Stat(envPath); errors.Is(err, fs.ErrNotExist) {
@@ -162,6 +168,8 @@ func printRestoreVars(w io.Writer, vars []backup.VarStatus) {
 		status := "not set"
 		if v.Set {
 			status = "set"
+		} else if v.Bound {
+			status = "not set (exec_secrets reads .env only)"
 		}
 		fmt.Fprintf(w, "  %-21s %s\n", v.Name, status)
 	}

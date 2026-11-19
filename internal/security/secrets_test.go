@@ -187,3 +187,58 @@ func TestChildEnvAddsPassthroughFromDotEnv(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestBoundSecretNames(t *testing.T) {
+	t.Cleanup(func() { SetBoundSecretNames(nil) })
+	names := []string{"PYPI_TOKEN", "GITHUB_PAT"}
+	SetBoundSecretNames(names)
+	names[0] = "CHANGED" // the setter keeps a copy
+	if got := BoundSecretNames(); !slices.Equal(got, []string{"GITHUB_PAT", "PYPI_TOKEN"}) {
+		t.Fatalf("got %v", got)
+	}
+	for _, n := range []string{"GITHUB_PAT", "github_pat"} {
+		if !IsSecretName(n, nil) {
+			t.Fatalf("%s must be a secret name", n)
+		}
+	}
+	if IsSecretName("CHANGED", nil) {
+		t.Fatal("the caller's slice must not change the list")
+	}
+	// ChildEnv strips a bound name that the heuristic misses.
+	if out := ChildEnv([]string{"GITHUB_PAT=x", "HOME=/h"}, nil, nil); !slices.Equal(out, []string{"HOME=/h"}) {
+		t.Fatalf("got %v", out)
+	}
+	SetBoundSecretNames(nil)
+	if IsSecretName("GITHUB_PAT", nil) || len(BoundSecretNames()) != 0 {
+		t.Fatal("the reset must clear the list")
+	}
+}
+
+func TestChildEnvBound(t *testing.T) {
+	base := []string{"PATH=/bin", "PYPI_TOKEN=process-value", "GH_TOKEN=gh-process"}
+	dotenv := map[string]string{"PYPI_TOKEN": "dotenv-value", "GH_TOKEN": "gh-dotenv"}
+	// A bound name gets the .env value, also when the process has a value. A name that this
+	// call does not give stays out.
+	out := ChildEnvBound(base, dotenv, nil, map[string]string{"PYPI_TOKEN": "dotenv-value"})
+	if want := []string{"PATH=/bin", "PYPI_TOKEN=dotenv-value"}; !slices.Equal(out, want) {
+		t.Fatalf("got %v, want %v", out, want)
+	}
+	// A name in both lists comes one time, with the bound value.
+	out = ChildEnvBound(base, dotenv, []string{"PYPI_TOKEN"}, map[string]string{"PYPI_TOKEN": "dotenv-value"})
+	if want := []string{"PATH=/bin", "PYPI_TOKEN=dotenv-value"}; !slices.Equal(out, want) {
+		t.Fatalf("got %v, want %v", out, want)
+	}
+	// The bound names come last, in sorted order.
+	out = ChildEnvBound([]string{"PATH=/bin"}, nil, nil, map[string]string{"B_TOKEN": "b", "A_TOKEN": "a"})
+	if want := []string{"PATH=/bin", "A_TOKEN=a", "B_TOKEN=b"}; !slices.Equal(out, want) {
+		t.Fatalf("got %v, want %v", out, want)
+	}
+	// A nil bound map gives the ChildEnv result.
+	if a, b := ChildEnvBound(base, dotenv, []string{"GH_TOKEN"}, nil), ChildEnv(base, dotenv, []string{"GH_TOKEN"}); !slices.Equal(a, b) {
+		t.Fatalf("%v != %v", a, b)
+	}
+	// base does not change.
+	if !slices.Equal(base, []string{"PATH=/bin", "PYPI_TOKEN=process-value", "GH_TOKEN=gh-process"}) {
+		t.Fatalf("base changed: %v", base)
+	}
+}

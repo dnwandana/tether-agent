@@ -960,3 +960,162 @@ func TestMarkRunRedactsBeforeCut(t *testing.T) {
 		t.Fatalf("stored output ends with %q", rows[0].output[len(rows[0].output)-20:])
 	}
 }
+
+func TestDraftOnlyRoundTrip(t *testing.T) {
+	c := fixedNow(2026, 11, 18, 9, 0)
+	s := store(t, c)
+	s.IsPrivate = func(_ context.Context, t Target) bool { return t.ChatID == "5" }
+	j, err := s.Create(ctx, Job{Name: "drafts", Schedule: "every 2h", Prompt: "p", DraftOnly: true,
+		Deliver: "telegram:5", Enabled: true})
+	if err != nil || !j.DraftOnly {
+		t.Fatal(j, err)
+	}
+	off := false
+	j, err = s.Update(ctx, j.ID, JobPatch{DraftOnly: &off})
+	if err != nil || j.DraftOnly {
+		t.Fatal(j, err)
+	}
+	var n int
+	if err := s.DB.QueryRowContext(ctx, `SELECT draft_only FROM cron_jobs WHERE id=?`, j.ID).Scan(&n); err != nil || n != 0 {
+		t.Fatal(n, err)
+	}
+}
+
+func TestDraftOnlySaveChecks(t *testing.T) {
+	c := fixedNow(2026, 11, 18, 9, 0)
+	private := func(_ context.Context, t Target) bool { return t.Source == "cli" || t.ChatID == "5" }
+	for _, tc := range []struct {
+		name      string
+		job       Job
+		isPrivate func(context.Context, Target) bool
+		want      error
+		wantText  string
+	}{
+		{"local", Job{Deliver: "local"}, nil, nil, ""},
+		{"private chat", Job{Deliver: "telegram:5"}, private, nil, ""},
+		{"origin private chat", Job{Origin: Origin{Source: "telegram", ChatID: "5"}}, private, nil, ""},
+		{"cli origin", Job{Origin: Origin{Source: "cli"}}, private, nil, ""},
+		{"group", Job{Deliver: "telegram:-100"}, private, ErrDraftDeliver, ""},
+		{"origin group topic", Job{Origin: Origin{Source: "telegram", ChatID: "-100", ThreadID: "9"}}, private, ErrDraftDeliver, ""},
+		{"no check function", Job{Deliver: "telegram:5"}, nil, ErrDraftDeliver, ""},
+		{"no_agent", Job{Deliver: "local", NoAgent: true, Script: "x.sh", Prompt: ""}, private, nil,
+			"cron: a no_agent job cannot be draft-only, because it has no tools to remove"},
+	} {
+		s := store(t, c)
+		s.IsPrivate = tc.isPrivate
+		j := tc.job
+		j.Schedule, j.DraftOnly, j.Enabled = "every 2h", true, true
+		if !j.NoAgent {
+			j.Prompt = "p"
+		}
+		_, err := s.Create(ctx, j)
+		switch {
+		case tc.want != nil:
+			if !errors.Is(err, tc.want) || err.Error() != "cron: A draft-only job delivers only to a private chat or local." {
+				t.Errorf("%s: %v", tc.name, err)
+			}
+		case tc.wantText != "":
+			if err == nil || err.Error() != tc.wantText {
+				t.Errorf("%s: %v", tc.name, err)
+			}
+		case err != nil:
+			t.Errorf("%s: %v", tc.name, err)
+		}
+	}
+	// An update that moves a draft-only job to a group is refused too.
+	s := store(t, c)
+	s.IsPrivate = private
+	j, err := s.Create(ctx, Job{Schedule: "every 2h", Prompt: "p", DraftOnly: true, Deliver: "local", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := "telegram:-100"
+	if _, err := s.Update(ctx, j.ID, JobPatch{Deliver: &group}); !errors.Is(err, ErrDraftDeliver) {
+		t.Fatal(err)
+	}
+	// A job that is not draft-only can deliver to a group.
+	if _, err := s.Create(ctx, Job{Schedule: "every 2h", Prompt: "p", Deliver: group, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDraftOnlyChangeResetsStreak(t *testing.T) {
+	c := fixedNow(2026, 11, 18, 9, 0)
+	s := histStore(t, c, 5)
+	j, err := s.Create(ctx, Job{Schedule: "every 2h", Prompt: "p", Deliver: "local", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkRun(ctx, j.ID, runRec("error", "boom", c.t)); err != nil {
+		t.Fatal(err)
+	}
+	on := true
+	j, err = s.Update(ctx, j.ID, JobPatch{DraftOnly: &on})
+	if err != nil || j.FailStreak != 0 {
+		t.Fatal(j.FailStreak, err)
+	}
+}
+
+// TestDraftOnlyUpdateChecksTargetOutsideTx runs a database query in IsPrivate, like the
+// pairing check of the gateway. state.db has one connection, so the query blocks while a
+// transaction holds the connection.
+func TestDraftOnlyUpdateChecksTargetOutsideTx(t *testing.T) {
+	c := fixedNow(2026, 11, 18, 9, 0)
+	s := store(t, c)
+	var qerr error
+	s.IsPrivate = func(ctx context.Context, tg Target) bool {
+		qctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		var one int
+		if err := s.DB.QueryRowContext(qctx, `SELECT 1`).Scan(&one); err != nil {
+			qerr = err
+			return false
+		}
+		return tg.ChatID == "5"
+	}
+	j, err := s.Create(ctx, Job{Schedule: "every 2h", Prompt: "p", DraftOnly: true, Deliver: "telegram:5", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := c.t.Add(time.Minute)
+	if _, err := s.Update(ctx, j.ID, JobPatch{NextRun: &next}); err != nil {
+		t.Fatalf("update: %v (query in IsPrivate: %v)", err, qerr)
+	}
+	group := "telegram:-100"
+	if _, err := s.Update(ctx, j.ID, JobPatch{Deliver: &group}); !errors.Is(err, ErrDraftDeliver) || qerr != nil {
+		t.Fatalf("a move to a group: %v (query in IsPrivate: %v)", err, qerr)
+	}
+	if got := mustGet(t, s, j.ID); got.Deliver != "telegram:5" || !got.NextRun.Equal(next) {
+		t.Fatalf("stored job: %+v", got)
+	}
+}
+
+// TestDraftOnlyUpdateSeesTargetChange covers a writer that moves a draft-only job to a group
+// after the draft target check of Update and before its transaction.
+func TestDraftOnlyUpdateSeesTargetChange(t *testing.T) {
+	c := fixedNow(2026, 11, 18, 9, 0)
+	s := store(t, c)
+	moved := false
+	var id string
+	s.IsPrivate = func(ctx context.Context, tg Target) bool {
+		if id != "" && !moved {
+			moved = true
+			if _, err := s.DB.ExecContext(ctx, `UPDATE cron_jobs SET deliver='telegram:-100' WHERE id=?`, id); err != nil {
+				t.Error(err)
+			}
+		}
+		return tg.ChatID == "5"
+	}
+	j, err := s.Create(ctx, Job{Schedule: "every 2h", Prompt: "p", DraftOnly: true, Deliver: "telegram:5", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id = j.ID
+	name := "renamed"
+	if _, err := s.Update(ctx, j.ID, JobPatch{Name: &name}); !errors.Is(err, ErrDraftDeliver) {
+		t.Fatalf("the update must check the new target: %v", err)
+	}
+	if got := mustGet(t, s, j.ID); got.Name == name {
+		t.Fatalf("stored job: %+v", got)
+	}
+}

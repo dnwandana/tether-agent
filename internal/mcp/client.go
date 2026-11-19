@@ -25,6 +25,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/security"
+	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
 // The defaults for a server entry with no timeouts. They match
@@ -181,7 +182,8 @@ func (c *Client) ListTools(ctx context.Context) ([]ToolDef, error) {
 
 // Call runs the tool with the JSON object args. Empty args send {}. It
 // returns the text parts of the result, joined with newlines. A result with
-// isError set, and each other failure, returns an error with the credentials
+// isError set returns a *tools.RemoteError, because the server wrote the text.
+// Each other failure returns an error. All error texts have the credentials
 // masked.
 func (c *Client) Call(ctx context.Context, tool string, args json.RawMessage) (string, error) {
 	if len(args) == 0 || string(args) == "null" {
@@ -201,7 +203,7 @@ func (c *Client) Call(ctx context.Context, tool string, args json.RawMessage) (s
 		if out == "" {
 			out = "the MCP tool returned an error"
 		}
-		return "", fmt.Errorf("mcp %s: %s: %s", c.name, tool, c.red.Redact(out))
+		return "", &tools.RemoteError{Text: fmt.Sprintf("mcp %s: %s: %s", c.name, tool, c.red.Redact(out))}
 	}
 	return out, nil
 }

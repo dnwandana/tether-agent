@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
@@ -746,7 +747,6 @@ func TestSecondPresetEntryKeepsFirstKey(t *testing.T) {
 	w.HC = redirectClient(prov.URL)
 	w.In = answers("2", "or-2", "m2")
 	w.cfg, _ = readConfigDoc(w.configPath())
-	w.env, _ = readEnvFile(w.envPath())
 	w.dotenv, _ = security.LoadDotEnv(w.envPath())
 	w.saved = map[string]bool{}
 	if err := w.providerStep(ctx, "openrouter-2", "OPENROUTER_2_API_KEY", nil); err != nil {
@@ -760,5 +760,49 @@ func TestSecondPresetEntryKeepsFirstKey(t *testing.T) {
 	}
 	if got := prov.lastAuth(); got != "Bearer or-2" {
 		t.Fatal(got)
+	}
+}
+
+// The wizard saves only the names that the owner changed. A value that another process saved
+// after the wizard read .env stays.
+func TestWizardSavesOnlyChangedNames(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, "providers:\n  primary:\n    preset: openrouter\n    model: z-ai/glm-5.3\n")
+	writeEnv(t, dir, "OPENROUTER_API_KEY=or-1\nGH_TOKEN=gh-old\n")
+	prov := newFakeProvider(t)
+	w, out := wizard(t, dir, nil)
+	w.HC = redirectClient(prov.URL)
+	w.In = answers("2", "or-2", "m2")
+	w.cfg, _ = readConfigDoc(w.configPath())
+	w.dotenv, _ = security.LoadDotEnv(w.envPath())
+	w.saved = map[string]bool{}
+	// The gateway saves two values after the wizard read .env.
+	envPath := filepath.Join(dir, ".env")
+	if err := security.SaveDotEnv(envPath, "PYPI_TOKEN", "pypi-from-gateway"); err != nil {
+		t.Fatal(err)
+	}
+	if err := security.SaveDotEnv(envPath, "GH_TOKEN", "gh-new"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.providerStep(ctx, "openrouter-2", "OPENROUTER_2_API_KEY", nil); err != nil {
+		t.Fatal(err, out.String())
+	}
+	got, err := security.LoadDotEnv(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"OPENROUTER_API_KEY":   "or-1",
+		"OPENROUTER_API_KEY_2": "or-2",
+		"PYPI_TOKEN":           "pypi-from-gateway",
+		"GH_TOKEN":             "gh-new",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf(".env = %v, want %v", got, want)
+	}
+	// The first write of the run copies .env to .env.bak.
+	bak, err := os.ReadFile(envPath + ".bak")
+	if err != nil || !strings.Contains(string(bak), "PYPI_TOKEN=pypi-from-gateway") || strings.Contains(string(bak), "OPENROUTER_API_KEY_2") {
+		t.Fatalf(".env.bak = %q, %v", bak, err)
 	}
 }

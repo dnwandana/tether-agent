@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"slices"
 	"strings"
+	"sync"
 )
 
 // LoadDotEnv reads the .env file at path and returns its NAME=value pairs.
@@ -116,7 +118,8 @@ func EnvLookup(dotenv map[string]string) func(string) (string, bool) {
 // IsSecretName reports whether the environment variable name holds a secret.
 //
 // A name is a secret if it is a key in dotenv, if it ends in _KEY, _TOKEN, or
-// _SECRET, or if it contains PASSWORD. The check ignores case.
+// _SECRET, or if it contains PASSWORD. A name of exec_secrets is also a secret name. The
+// check ignores case.
 func IsSecretName(name string, dotenv map[string]string) bool {
 	if _, ok := dotenv[name]; ok {
 		return true
@@ -127,6 +130,12 @@ func IsSecretName(name string, dotenv map[string]string) bool {
 		}
 	}
 	u := strings.ToUpper(name)
+	boundMu.RLock()
+	_, bound := boundNames[u]
+	boundMu.RUnlock()
+	if bound {
+		return true
+	}
 	return strings.HasSuffix(u, "_KEY") ||
 		strings.HasSuffix(u, "_TOKEN") ||
 		strings.HasSuffix(u, "_SECRET") ||
@@ -176,19 +185,79 @@ func KnownSecretNames(dotenv map[string]string, environ []string) map[string]str
 	return names
 }
 
+// KnownSecretPairs returns the name and value of each secret that the named redactor hides:
+// each .env pair, and each secret name in environ. The .env value wins for a name. An empty
+// value is not in the map. environ has the NAME=value format of os.Environ.
+func KnownSecretPairs(dotenv map[string]string, environ []string) map[string]string {
+	pairs := make(map[string]string, len(dotenv))
+	for k, v := range dotenv {
+		if v != "" {
+			pairs[k] = v
+		}
+	}
+	for _, kv := range environ {
+		name, v, ok := strings.Cut(kv, "=")
+		if !ok || v == "" || !IsSecretName(name, dotenv) {
+			continue
+		}
+		if _, ok := pairs[name]; !ok {
+			pairs[name] = v
+		}
+	}
+	return pairs
+}
+
+var (
+	boundMu    sync.RWMutex
+	boundNames map[string]string // the upper-case name of exec_secrets to its original form
+)
+
+// SetBoundSecretNames sets the names of exec_secrets. IsSecretName returns true for each of
+// them, so ChildEnv strips them from each child. app.New, tether doctor, and tether backup
+// call it after the config loads. Tests reset it with SetBoundSecretNames(nil).
+func SetBoundSecretNames(names []string) {
+	m := make(map[string]string, len(names))
+	for _, n := range names {
+		m[strings.ToUpper(n)] = n
+	}
+	boundMu.Lock()
+	boundNames = m
+	boundMu.Unlock()
+}
+
+// BoundSecretNames returns the names that SetBoundSecretNames set, sorted.
+func BoundSecretNames() []string {
+	boundMu.RLock()
+	defer boundMu.RUnlock()
+	if len(boundNames) == 0 {
+		return nil
+	}
+	return slices.Sorted(maps.Values(boundNames))
+}
+
 // ChildEnv returns the environment for a child process, as NAME=value
 // entries. It removes each secret name from base, except the names in
 // passthrough. A passthrough name that is not in base but is in dotenv gets
 // its dotenv value. ChildEnv does not change base.
 func ChildEnv(base []string, dotenv map[string]string, passthrough []string) []string {
+	return ChildEnvBound(base, dotenv, passthrough, nil)
+}
+
+// ChildEnvBound returns ChildEnv(base, dotenv, passthrough), and gives each name of bound its
+// value from bound. It removes each entry of a bound name from base, also a passthrough
+// entry, and adds the bound entries at the end in sorted name order. It does not change base.
+func ChildEnvBound(base []string, dotenv map[string]string, passthrough []string, bound map[string]string) []string {
 	pass := make(map[string]bool, len(passthrough))
 	for _, n := range passthrough {
 		pass[n] = true
 	}
 	seen := make(map[string]bool, len(passthrough))
-	out := make([]string, 0, len(base)+len(passthrough))
+	out := make([]string, 0, len(base)+len(passthrough)+len(bound))
 	for _, kv := range base {
 		name, _, _ := strings.Cut(kv, "=")
+		if _, ok := bound[name]; ok {
+			continue
+		}
 		if pass[name] {
 			seen[name] = true
 			out = append(out, kv)
@@ -203,10 +272,16 @@ func ChildEnv(base []string, dotenv map[string]string, passthrough []string) []s
 		if seen[n] {
 			continue
 		}
+		if _, ok := bound[n]; ok {
+			continue
+		}
 		if v, ok := dotenv[n]; ok {
 			seen[n] = true
 			out = append(out, n+"="+v)
 		}
+	}
+	for _, n := range slices.Sorted(maps.Keys(bound)) {
+		out = append(out, n+"="+bound[n])
 	}
 	return out
 }

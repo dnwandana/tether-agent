@@ -550,3 +550,112 @@ func TestCronjobSchemaHasRuns(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestCronDraftOnlyCreateAndList(t *testing.T) {
+	tool := cronTool(t)
+	tool.Store.IsPrivate = func(context.Context, cron.Target) bool { return true }
+	var calls []string
+	tool.PrivateTarget = func(_ context.Context, _ *Env, deliver string) bool {
+		calls = append(calls, deliver)
+		return deliver != "telegram:-100"
+	}
+	env := tgEnv("telegram:dm:5", "primary")
+	out := runToolEnv(t, tool, `{"action":"create","schedule":"every 2h","prompt":"Draft replies to new mail","draft_only":true}`, env)
+	j := onlyJob(t, tool)
+	if !j.DraftOnly || !strings.Contains(out, "agent, draft-only") || len(calls) != 1 || calls[0] != "" {
+		t.Fatal(out, j, calls)
+	}
+	list := runToolEnv(t, tool, `{"action":"list"}`, env)
+	if !strings.Contains(list, "agent, draft-only") {
+		t.Fatal(list)
+	}
+}
+
+func TestCronDraftOnlyRefusesGroup(t *testing.T) {
+	tool := cronTool(t)
+	tool.Store.IsPrivate = func(context.Context, cron.Target) bool { return true }
+	tool.PrivateTarget = func(_ context.Context, _ *Env, deliver string) bool { return deliver != "telegram:-100" }
+	env := tgEnv("telegram:group:-100", "primary")
+	out := runToolEnvErr(t, tool, `{"action":"create","schedule":"every 2h","prompt":"p","draft_only":true,"deliver":"telegram:-100"}`, env)
+	if out != "A draft-only job delivers only to a private chat or local." {
+		t.Fatalf("%q", out)
+	}
+	// An update that turns on draft_only checks the stored target.
+	runToolEnv(t, tool, `{"action":"create","schedule":"every 2h","prompt":"p","deliver":"telegram:-100"}`, env)
+	j := onlyJob(t, tool)
+	out = runToolEnvErr(t, tool, fmt.Sprintf(`{"action":"update","job_id":%q,"draft_only":true}`, j.ID), env)
+	if out != "A draft-only job delivers only to a private chat or local." {
+		t.Fatalf("%q", out)
+	}
+	// draft_only alone is a field to change.
+	out = runToolEnv(t, tool, fmt.Sprintf(`{"action":"update","job_id":%q,"draft_only":false}`, j.ID), env)
+	if !strings.HasPrefix(out, "updated job ") {
+		t.Fatal(out)
+	}
+}
+
+func TestCronDraftOnlyStoreCheckWithoutToolCheck(t *testing.T) {
+	tool := cronTool(t)
+	// No PrivateTarget and no IsPrivate: only local passes.
+	env := tgEnv("telegram:group:-100", "primary")
+	out := runToolEnvErr(t, tool, `{"action":"create","schedule":"every 2h","prompt":"p","draft_only":true}`, env)
+	if !strings.Contains(out, "A draft-only job delivers only to a private chat or local.") {
+		t.Fatalf("%q", out)
+	}
+	runToolEnv(t, tool, `{"action":"create","schedule":"every 2h","prompt":"p","draft_only":true,"deliver":"local"}`, env)
+}
+
+func TestCronUpdateNoFieldsNamesDraftOnly(t *testing.T) {
+	tool := cronTool(t)
+	env := tgEnv("telegram:dm:5", "primary")
+	runToolEnv(t, tool, `{"action":"create","schedule":"every 2h","prompt":"p"}`, env)
+	j := onlyJob(t, tool)
+	out := runToolEnvErr(t, tool, fmt.Sprintf(`{"action":"update","job_id":%q}`, j.ID), env)
+	if !strings.Contains(out, "script, no_agent, draft_only, toolsets, or workdir") {
+		t.Fatal(out)
+	}
+}
+
+func TestCronSchemaHasDraftOnly(t *testing.T) {
+	var s struct {
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(CronJobTool{}.Schema().Parameters, &s); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := s.Properties["draft_only"]
+	if !ok || p.Type != "boolean" || !strings.Contains(p.Description, "it cannot send") {
+		t.Fatalf("%+v", s.Properties["draft_only"])
+	}
+}
+
+func TestCronRunsHeldTexts(t *testing.T) {
+	tool := cronTool(t)
+	id := newRunsJob(t, tool, "prices")
+	at := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
+	for i, d := range []string{cron.DeliveryHeld, cron.DeliveryDropped, cron.DeliveryExpired} {
+		start := at.Add(time.Duration(i) * time.Hour)
+		if d == cron.DeliveryHeld {
+			// A held run keeps "held" only while its hold row waits for a tap.
+			hs := &cron.HeldStore{DB: tool.Store.DB}
+			if err := hs.Insert(context.Background(), cron.HeldSend{ID: "h1", Kind: "hold", JobID: id,
+				Target: "telegram:-100", CreatedAt: start}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		seedRun(t, tool, id, cron.RunRecord{Status: "ok", Delivery: d, Output: "report", RanAt: start, FinishedAt: start.Add(time.Second)})
+	}
+	out := runsText(t, tool, id, "")
+	for _, want := range []string{
+		"- run 3 · 2026-10-27 11:00 UTC · ok · expired · 1s · held, then expired after 24 h with no tap\n",
+		"- run 2 · 2026-10-27 10:00 UTC · ok · dropped · 1s · held, then dropped by the owner\n",
+		"- run 1 · 2026-10-27 09:00 UTC · ok · held · 1s · held: waits for the owner to tap Send or Drop\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("no %q in:\n%s", want, out)
+		}
+	}
+}

@@ -36,6 +36,9 @@ const (
 	sourceMember       = "member"
 	sourceNoPrompter   = "no-prompter"
 	sourceModeReadOnly = "mode-read-only"
+	sourceDraftOnly    = "draft-only"
+	sourceOutboundScan = "outbound-scan"
+	sourceModelGuard   = "model-guard"
 )
 
 const (
@@ -92,15 +95,62 @@ func sha256Hex(s string) string {
 }
 
 // logPreview returns the preview of a log row: one line, redacted, cut at 300 runes. A password
-// change keeps only the program word, because its arguments hold a password.
+// change keeps only the program word, because its arguments hold a password. A request with
+// findings also has its cards, IBANs, and phone numbers replaced, because state.db and the
+// backups keep the preview.
 func (g *Gate) logPreview(req ApprovalRequest) string {
 	if req.PatternID == passwordChangeRule {
 		return programWord(req.Command)
 	}
+	if req.PinName != "" {
+		return cutRunes(req.PinName+" "+req.PinPath, maxLogPreviewRunes)
+	}
 	s := strings.TrimSpace(req.Command)
 	s = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+	if len(req.Secrets) > 0 {
+		s = "[gets: " + strings.Join(req.Secrets, ", ") + "] " + s
+	}
 	s = g.Redactor.Redact(s)
+	if len(req.Findings) > 0 {
+		s = maskCutDigits(RedactFindings(s, Scan(s, nil, nil)))
+	}
 	return cutRunes(s, maxLogPreviewRunes)
+}
+
+// maskCutDigits replaces each digit of a run of digits and single separators that ends at a
+// "…". The cut of a long value can split a card or a phone number, and then the scan does not
+// find the part before the cut.
+func maskCutDigits(s string) string {
+	var mask []bool
+	for i := strings.Index(s, "…"); i >= 0; {
+		for j := i - 1; j >= 0; j-- {
+			if isDigit(s[j]) {
+				if mask == nil {
+					mask = make([]bool, len(s))
+				}
+				mask[j] = true
+			} else if !(s[j] == ' ' || s[j] == '-' || s[j] == '.') || j == 0 || !isDigit(s[j-1]) {
+				break
+			}
+		}
+		next := strings.Index(s[i+len("…"):], "…")
+		if next < 0 {
+			break
+		}
+		i += len("…") + next
+	}
+	if mask == nil {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if mask[i] {
+			b.WriteString("•")
+		} else {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
 
 // programWord returns the first program word of command that is a password-change program.

@@ -1,10 +1,14 @@
 package security
 
 import (
+	"bytes"
 	"cmp"
+	"encoding/json"
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -133,37 +137,125 @@ var (
 	formBodyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*(?:&[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*)+$`)
 )
 
+// exactOld is one text that the exact replacer finds.
+type exactOld struct {
+	text string // the value, or a second form of it
+	name string // the .env name; "" for a NewRedactor value
+	repl string // the replacement text
+}
+
+// exactSet is the exact replacer and its texts, the longest first.
+type exactSet struct {
+	repl *strings.Replacer
+	olds []exactOld
+}
+
+// newExactSet builds an exactSet. It sorts the texts by length, longest first,
+// and drops a repeated text. It returns nil when no text is left.
+func newExactSet(olds []exactOld) *exactSet {
+	olds = slices.Clone(olds)
+	// strings.Replacer tries the old strings in argument order, so the
+	// longest value goes first and wins where two values overlap.
+	slices.SortStableFunc(olds, func(a, b exactOld) int {
+		return cmp.Or(cmp.Compare(len(b.text), len(a.text)), strings.Compare(a.text, b.text))
+	})
+	olds = slices.CompactFunc(olds, func(a, b exactOld) bool { return a.text == b.text })
+	if len(olds) == 0 {
+		return nil
+	}
+	pairs := make([]string, 0, 2*len(olds))
+	for _, o := range olds {
+		pairs = append(pairs, o.text, o.repl)
+	}
+	return &exactSet{repl: strings.NewReplacer(pairs...), olds: olds}
+}
+
 // Redactor masks API keys, tokens, and credentials in text. It is safe for
 // concurrent use. A nil *Redactor applies the patterns only.
 type Redactor struct {
-	exact *strings.Replacer
+	mu    sync.Mutex               // serializes Add
+	exact atomic.Pointer[exactSet] // readers load it with no lock
 }
 
 // NewRedactor returns a Redactor that also masks each value in exactValues.
 // exactValues is the list of values from .env. Values shorter than 8
 // characters are ignored, because they match too much ordinary text.
 func NewRedactor(exactValues []string) *Redactor {
-	vals := make([]string, 0, len(exactValues))
+	olds := make([]exactOld, 0, len(exactValues))
 	for _, v := range exactValues {
 		if utf8.RuneCountInString(v) >= 8 {
-			vals = append(vals, v)
+			olds = append(olds, exactOld{text: v, repl: Mask(v)})
 		}
 	}
-	// strings.Replacer tries the old strings in argument order, so the
-	// longest value goes first and wins where two values overlap.
-	slices.SortFunc(vals, func(a, b string) int {
-		return cmp.Or(cmp.Compare(len(b), len(a)), strings.Compare(a, b))
-	})
-	vals = slices.Compact(vals)
 	r := &Redactor{}
-	if len(vals) > 0 {
-		pairs := make([]string, 0, 2*len(vals))
-		for _, v := range vals {
-			pairs = append(pairs, v, Mask(v))
-		}
-		r.exact = strings.NewReplacer(pairs...)
-	}
+	r.exact.Store(newExactSet(olds))
 	return r
+}
+
+// Label returns the label that replaces the value of the secret name: «NAME».
+func Label(name string) string {
+	return "«" + name + "»"
+}
+
+// NewNamedRedactor returns a Redactor that replaces each value of 8 or more characters, and
+// its JSON form, with the label «NAME». When two names have the same value, the first name in
+// sorted order gives the label.
+func NewNamedRedactor(values map[string]string) *Redactor {
+	names := make([]string, 0, len(values))
+	for n := range values {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	var olds []exactOld
+	for _, n := range names {
+		olds = appendNamed(olds, n, values[n])
+	}
+	r := &Redactor{}
+	r.exact.Store(newExactSet(olds))
+	return r
+}
+
+// appendNamed adds the value of name and its JSON form to olds. A value of fewer than 8
+// characters is ignored.
+func appendNamed(olds []exactOld, name, value string) []exactOld {
+	if utf8.RuneCountInString(value) < 8 {
+		return olds
+	}
+	olds = append(olds, exactOld{text: value, name: name, repl: Label(name)})
+	if j := jsonForm(value); j != value {
+		olds = append(olds, exactOld{text: j, name: name, repl: Label(name)})
+	}
+	return olds
+}
+
+// Add puts name=value into the exact replacer, so that the value is masked at once. The old
+// values of name stay masked. A value of fewer than 8 characters is ignored.
+func (r *Redactor) Add(name, value string) {
+	if r == nil || utf8.RuneCountInString(value) < 8 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var olds []exactOld
+	if cur := r.exact.Load(); cur != nil {
+		olds = slices.Clone(cur.olds)
+	}
+	// A text that the set already has gets the new name and label.
+	j := jsonForm(value)
+	olds = slices.DeleteFunc(olds, func(o exactOld) bool { return o.text == value || o.text == j })
+	r.exact.Store(newExactSet(appendNamed(olds, name, value)))
+}
+
+// jsonForm returns the JSON string text of v with no outer quotes and no HTML escapes.
+func jsonForm(v string) string {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if enc.Encode(v) != nil {
+		return v
+	}
+	out := strings.TrimSuffix(b.String(), "\n")
+	return out[1 : len(out)-1]
 }
 
 // Mask hides a token. A token of fewer than 18 characters becomes "***". A
@@ -184,10 +276,14 @@ func Mask(token string) string {
 // RedactExact returns s with only the known secret values masked, so that the
 // backup mask does not change text that only looks like a secret.
 func (r *Redactor) RedactExact(s string) string {
-	if r == nil || r.exact == nil || s == "" {
+	if r == nil || s == "" {
 		return s
 	}
-	return r.exact.Replace(s)
+	set := r.exact.Load()
+	if set == nil {
+		return s
+	}
+	return set.repl.Replace(s)
 }
 
 // LooksLikeSecret reports whether s contains a known vendor key prefix. The
@@ -224,8 +320,10 @@ func (r *Redactor) redact(s string, flags bool) string {
 	if s == "" {
 		return s
 	}
-	if r != nil && r.exact != nil {
-		s = r.exact.Replace(s)
+	if r != nil {
+		if set := r.exact.Load(); set != nil {
+			s = set.repl.Replace(s)
+		}
 	}
 	if containsAny(s, prefixLiterals) {
 		s = replaceTokens(prefixRe, s)
@@ -235,10 +333,16 @@ func (r *Redactor) redact(s string, flags bool) string {
 	}
 	if strings.Contains(s, ":") && strings.Contains(s, `"`) {
 		s = replaceSubmatch(jsonFieldRe, s, func(s string, m []int) string {
+			if isMasked(s[m[4]:m[5]]) {
+				return s[m[0]:m[1]]
+			}
 			return s[m[2]:m[3]] + `: "` + Mask(s[m[4]:m[5]]) + `"`
 		})
 	}
 	s = replaceSubmatch(authHeaderRe, s, func(s string, m []int) string {
+		if isMasked(s[m[4]:m[5]]) {
+			return s[m[0]:m[1]]
+		}
 		return s[m[2]:m[3]] + Mask(s[m[4]:m[5]])
 	})
 	s = replaceSubmatch(basicAuthRe, s, func(s string, m []int) string {
@@ -249,7 +353,7 @@ func (r *Redactor) redact(s string, flags bool) string {
 	})
 	s = replaceSubmatch(bearerRe, s, func(s string, m []int) string {
 		tok := s[m[4]:m[5]]
-		if !strings.ContainsAny(tok, "0123456789") {
+		if isMasked(tok) || !strings.ContainsAny(tok, "0123456789") {
 			return s[m[0]:m[1]]
 		}
 		return s[m[2]:m[3]] + Mask(tok)
@@ -268,6 +372,9 @@ func (r *Redactor) redact(s string, flags bool) string {
 	}
 	if strings.Contains(s, "://") {
 		s = replaceSubmatch(dbConnRe, s, func(s string, m []int) string {
+			if isMasked(s[m[4]:m[5]]) {
+				return s[m[0]:m[1]]
+			}
 			return s[m[2]:m[3]] + "***" + s[m[6]:m[7]]
 		})
 	}
@@ -307,10 +414,22 @@ func (r *Redactor) redact(s string, flags bool) string {
 	return s
 }
 
-// isMasked reports whether a value is already "***", bare or in one pair of
-// quotes. The redactor leaves such a value as it is.
+// labelOrHandleRe matches a secret label «NAME» and a handle $TMP_SECRET_<n> or ${TMP_SECRET_<n>}.
+var labelOrHandleRe = regexp.MustCompile(`^(?:\$TMP_SECRET_[0-9]+|\$\{TMP_SECRET_[0-9]+\}|«[A-Za-z_][A-Za-z0-9_]*»)$`)
+
+// IsLabelOrHandle reports whether v is exactly a secret label «NAME», or a handle
+// $TMP_SECRET_<n> or ${TMP_SECRET_<n>}. Redact leaves such a value as it is.
+func IsLabelOrHandle(v string) bool {
+	return labelOrHandleRe.MatchString(v)
+}
+
+// isMasked reports whether a value is already "***", a secret label, or a handle,
+// bare or in one pair of quotes. The redactor leaves such a value as it is.
 func isMasked(v string) bool {
-	return v == "***" || v == `"***"` || v == `'***'`
+	if n := len(v); n >= 2 && (v[0] == '"' || v[0] == '\'') && v[n-1] == v[0] {
+		v = v[1 : n-1]
+	}
+	return v == "***" || IsLabelOrHandle(v)
 }
 
 // replaceTokens masks group 1 of each prefixRe match. It restarts the scan
@@ -342,6 +461,9 @@ func replaceTokens(re *regexp.Regexp, s string) string {
 func redactEnvAssign(s string) string {
 	return replaceSubmatch(envAssignRe, s, func(s string, m []int) string {
 		name, run := s[m[2]:m[3]], s[m[4]:m[5]]
+		if isMasked(run) {
+			return s[m[0]:m[1]]
+		}
 		if q := run[0]; q == '\'' || q == '"' {
 			if k := strings.LastIndexByte(run, q); k >= 2 {
 				return name + "=" + string(q) + Mask(run[1:k]) + string(q) + run[k+1:]
@@ -356,7 +478,7 @@ func redactQuery(q string) string {
 	parts := strings.Split(q, "&")
 	for i, p := range parts {
 		k, _, ok := strings.Cut(p, "=")
-		if ok && sensitiveQueryParams[strings.ToLower(k)] {
+		if ok && sensitiveQueryParams[strings.ToLower(k)] && !isMasked(p[len(k)+1:]) {
 			parts[i] = k + "=***"
 		}
 	}
@@ -414,4 +536,196 @@ func containsAny(s string, subs []string) bool {
 		}
 	}
 	return false
+}
+
+// Match is one span of a text that Redact masks. Kind is "exact", "prefix", or "pattern".
+// Name is the .env name of an exact match, or "" when the redactor has no names.
+type Match struct {
+	Start, End int
+	Kind       string
+	Name       string
+}
+
+// cand is one span that Find may keep. rank is 0 for prefix, then 1, 2, ... in the
+// order of redact.
+type cand struct {
+	m    Match
+	rank int
+}
+
+// Find returns the spans of s that Redact masks, in the order of Start, with no overlap.
+// A label «NAME» and a handle $TMP_SECRET_<n> are not spans.
+func (r *Redactor) Find(s string) []Match {
+	if s == "" {
+		return nil
+	}
+	var cands []cand
+	if set := r.loadExact(); set != nil {
+		for _, o := range set.olds {
+			for from := 0; ; {
+				i := strings.Index(s[from:], o.text)
+				if i < 0 {
+					break
+				}
+				st := from + i
+				cands = append(cands, cand{m: Match{Start: st, End: st + len(o.text), Kind: "exact", Name: o.name}})
+				from = st + 1
+			}
+		}
+	}
+	add := func(rank, start, end int) {
+		if start < end {
+			cands = append(cands, cand{m: Match{Start: start, End: end, Kind: "pattern"}, rank: rank})
+		}
+	}
+	// addValue adds the span of a value, unless the value is masked already.
+	addValue := func(rank, start, end int) {
+		if !isMasked(s[start:end]) {
+			add(rank, start, end)
+		}
+	}
+	if containsAny(s, prefixLiterals) {
+		for pos := 0; pos < len(s); {
+			m := prefixRe.FindStringSubmatchIndex(s[pos:])
+			if m == nil {
+				break
+			}
+			start, end := pos+m[2], pos+m[3]
+			cands = append(cands, cand{m: Match{Start: start, End: end, Kind: "prefix"}})
+			pos = end
+		}
+	}
+	if strings.Contains(s, "=") {
+		for _, m := range envAssignRe.FindAllStringSubmatchIndex(s, -1) {
+			if isMasked(s[m[4]:m[5]]) {
+				continue
+			}
+			start, end := m[4], m[5]
+			if q := s[start]; q == '\'' || q == '"' {
+				if k := strings.LastIndexByte(s[start:end], q); k >= 2 {
+					start, end = start+1, start+k
+				}
+			}
+			add(1, start, end)
+		}
+	}
+	if strings.Contains(s, ":") && strings.Contains(s, `"`) {
+		for _, m := range jsonFieldRe.FindAllStringSubmatchIndex(s, -1) {
+			addValue(2, m[4], m[5])
+		}
+	}
+	for _, m := range authHeaderRe.FindAllStringSubmatchIndex(s, -1) {
+		addValue(3, m[4], m[5])
+	}
+	for _, m := range basicAuthRe.FindAllStringSubmatchIndex(s, -1) {
+		addValue(4, m[4], m[5])
+	}
+	for _, m := range bearerRe.FindAllStringSubmatchIndex(s, -1) {
+		if strings.ContainsAny(s[m[4]:m[5]], "0123456789") {
+			addValue(5, m[4], m[5])
+		}
+	}
+	if strings.Contains(s, ":") {
+		for _, m := range telegramRe.FindAllStringSubmatchIndex(s, -1) {
+			add(6, m[6], m[7])
+		}
+	}
+	if strings.Contains(s, "-----BEGIN") {
+		for _, m := range privateKeyRe.FindAllStringIndex(s, -1) {
+			add(7, m[0], m[1])
+		}
+	}
+	if strings.Contains(s, "://") {
+		for _, m := range dbConnRe.FindAllStringSubmatchIndex(s, -1) {
+			addValue(8, m[4], m[5])
+		}
+		for _, m := range urlUserinfoRe.FindAllStringSubmatchIndex(s, -1) {
+			addValue(9, m[4], m[5])
+		}
+	}
+	if strings.Contains(s, "eyJ") {
+		for _, m := range jwtRe.FindAllStringIndex(s, -1) {
+			add(10, m[0], m[1])
+		}
+	}
+	if strings.Contains(s, "--") {
+		for _, m := range flagSecretRe.FindAllStringSubmatchIndex(s, -1) {
+			start, end := m[4], m[5]
+			if isMasked(s[start:end]) {
+				continue
+			}
+			if q := s[start]; (q == '\'' || q == '"') && end-start >= 2 {
+				start, end = start+1, end-1
+			}
+			add(11, start, end)
+		}
+	}
+	if strings.Contains(s, "?") {
+		if strings.Contains(s, "://") {
+			for _, m := range urlQueryRe.FindAllStringSubmatchIndex(s, -1) {
+				cands = appendQuerySpans(cands, s, m[8], m[9], 12)
+			}
+		}
+		for _, m := range httpTargetRe.FindAllStringSubmatchIndex(s, -1) {
+			cands = appendQuerySpans(cands, s, m[4], m[5], 13)
+		}
+	}
+	if strings.Contains(s, "&") && strings.Contains(s, "=") && !strings.Contains(s, "\n") {
+		t := strings.TrimSpace(s)
+		if formBodyRe.MatchString(t) {
+			off := strings.Index(s, t)
+			cands = appendQuerySpans(cands, s, off, off+len(t), 14)
+		}
+	}
+	return keepSpans(cands)
+}
+
+// loadExact returns the exact set of r, or nil.
+func (r *Redactor) loadExact() *exactSet {
+	if r == nil {
+		return nil
+	}
+	return r.exact.Load()
+}
+
+// appendQuerySpans adds the span of each sensitive value in the k=v&k=v text s[start:end].
+func appendQuerySpans(cands []cand, s string, start, end, rank int) []cand {
+	pos := start
+	for p := range strings.SplitSeq(s[start:end], "&") {
+		if k, v, ok := strings.Cut(p, "="); ok && v != "" && sensitiveQueryParams[strings.ToLower(k)] && !isMasked(v) {
+			vs := pos + len(k) + 1
+			cands = append(cands, cand{m: Match{Start: vs, End: vs + len(v), Kind: "pattern"}, rank: rank})
+		}
+		pos += len(p) + 1
+	}
+	return cands
+}
+
+// keepSpans picks the spans that do not overlap. An exact span wins over each
+// other span. Two exact spans follow the strings.Replacer rule. Among the other
+// spans, the longer span wins, then the earlier rule.
+func keepSpans(cands []cand) []Match {
+	if len(cands) == 0 {
+		return nil
+	}
+	slices.SortStableFunc(cands, func(a, b cand) int {
+		ae, be := a.m.Kind == "exact", b.m.Kind == "exact"
+		switch {
+		case ae && be:
+			return cmp.Or(cmp.Compare(a.m.Start, b.m.Start), cmp.Compare(b.m.End-b.m.Start, a.m.End-a.m.Start))
+		case ae:
+			return -1
+		case be:
+			return 1
+		}
+		return cmp.Or(cmp.Compare(b.m.End-b.m.Start, a.m.End-a.m.Start), cmp.Compare(a.rank, b.rank), cmp.Compare(a.m.Start, b.m.Start))
+	})
+	var kept []Match
+	for _, c := range cands {
+		if !slices.ContainsFunc(kept, func(k Match) bool { return c.m.Start < k.End && k.Start < c.m.End }) {
+			kept = append(kept, c.m)
+		}
+	}
+	slices.SortFunc(kept, func(a, b Match) int { return cmp.Compare(a.Start, b.Start) })
+	return kept
 }

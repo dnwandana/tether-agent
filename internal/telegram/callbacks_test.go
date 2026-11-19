@@ -597,7 +597,7 @@ func TestApprovalKeyboardRows(t *testing.T) {
 		{false, true, []string{"✅ Once"}, []string{"once"}},
 		{true, true, []string{"✅ Once"}, []string{"once"}},
 	} {
-		kb := approvalKeyboard("abc", c.noAlways, c.noSession)
+		kb := approvalKeyboard("abc", security.ApprovalRequest{NoAlways: c.noAlways, NoSession: c.noSession})
 		if len(kb.InlineKeyboard) != 2 {
 			t.Fatalf("%v/%v: %d rows, want 2", c.noAlways, c.noSession, len(kb.InlineKeyboard))
 		}

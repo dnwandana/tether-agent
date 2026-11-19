@@ -157,7 +157,7 @@ func Create(ctx context.Context, opts Options) (*Result, error) {
 // returns the manifest and the items in archive order. The returned Result holds Stats,
 // Skipped, Replaced, and Warnings.
 func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manifest, []item, *Result, error) {
-	values := security.KnownSecretValues(opts.DotEnv, opts.Environ)
+	known := security.KnownSecretNames(opts.DotEnv, opts.Environ)
 	res := &Result{Skipped: []string{}, Replaced: []Replacement{}, Warnings: []string{}}
 	red := Redacted{ConfigKeys: []string{}, ConfigWarnings: []string{}}
 
@@ -172,7 +172,7 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 	}
 	// The cell scan and the file scan share one byte budget.
 	budget := newKeyLikeBudget(keyLikeScanLimit)
-	cells, keyCells, stats, err := prepareDBCopy(ctx, dbCopy, values, budget)
+	cells, keyCells, stats, err := prepareDBCopy(ctx, dbCopy, known, budget)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -206,7 +206,7 @@ func prepare(ctx context.Context, opts Options, live *db.DB, tmp string) (*Manif
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("list the data files: %w", err)
 	}
-	r := security.NewRedactor(values)
+	r := namedRedactor(known)
 	if err := copyItems(found, tmp, r, &red); err != nil {
 		return nil, nil, nil, err
 	}
@@ -257,10 +257,10 @@ type keyLikeCount struct {
 	partial bool
 }
 
-// prepareDBCopy masks the known values in the DB copy at path, counts the key-like cells with
+// prepareDBCopy masks the known values in the DB copy at path with the label of each name, counts the key-like cells with
 // budget, checks the copy, and reads its stats.
 // It closes the copy before it returns, so the tar step can read the file.
-func prepareDBCopy(ctx context.Context, path string, values []string, budget *keyLikeBudget) (cells int, keyLike keyLikeCount, stats DBStats, err error) {
+func prepareDBCopy(ctx context.Context, path string, known map[string]string, budget *keyLikeBudget) (cells int, keyLike keyLikeCount, stats DBStats, err error) {
 	c, err := db.OpenExisting(path)
 	if err != nil {
 		return 0, keyLikeCount{}, DBStats{}, err
@@ -270,7 +270,7 @@ func prepareDBCopy(ctx context.Context, path string, values []string, budget *ke
 			err = fmt.Errorf("close the copy of state.db: %w", cerr)
 		}
 	}()
-	if cells, err = maskDB(ctx, c, values); err != nil {
+	if cells, err = maskDB(ctx, c, known); err != nil {
 		return 0, keyLikeCount{}, DBStats{}, err
 	}
 	if keyLike.n, keyLike.partial, err = scanKeyLikeCells(ctx, c, KeyLikeMax, budget); err != nil {

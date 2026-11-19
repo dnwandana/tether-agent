@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -168,5 +170,31 @@ func TestShortPageWithoutScriptsHasNoHint(t *testing.T) {
 	out := runTool(t, fetchTool(srv), fmt.Sprintf(`{"urls":[%q]}`, srv.URL))
 	if strings.Contains(out, "browser tools") || !strings.Contains(out, "Short but real text.") {
 		t.Fatal(out)
+	}
+}
+
+func TestHTTPErrorIsRemote(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	tool := fetchTool(srv)
+	_, err := tool.Run(ctx, json.RawMessage(fmt.Sprintf(`{"urls":[%q]}`, srv.URL)), &Env{Values: map[string]any{}})
+	var re *RemoteError
+	if !errors.As(err, &re) || !strings.Contains(re.Text, "HTTP 503") {
+		t.Fatal(err)
+	}
+	res := dispatch(t, tool, fmt.Sprintf(`{"urls":[%q]}`, srv.URL), newEnv(t))
+	if !res.IsError || !res.Outside {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestLocalFetchErrorIsNotRemote(t *testing.T) {
+	srv := typedServer(t, "text/plain", "x")
+	_, err := fetchTool(srv).Run(ctx, json.RawMessage(`{"urls":["ftp://x/y"]}`), &Env{Values: map[string]any{}})
+	var re *RemoteError
+	if err == nil || errors.As(err, &re) || !errors.Is(err, ErrToolError) {
+		t.Fatal(err)
 	}
 }

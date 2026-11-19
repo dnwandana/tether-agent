@@ -48,6 +48,9 @@ type Deps struct {
 	RetryDelay time.Duration
 	// Log receives the warnings. Nil uses slog.Default.
 	Log *slog.Logger
+	// Redact masks the secrets in a text before the judge prompt gets it. Nil sends the text
+	// as it is.
+	Redact func(string) string
 	// InGateway and SudoPasswordSet feed the gate check before each run, as they feed the
 	// approval gate.
 	InGateway       bool

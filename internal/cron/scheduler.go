@@ -61,6 +61,9 @@ type Scheduler struct {
 	// Now returns the current time. Nil uses Store.Now, then time.Now.
 	Now func() time.Time
 	Log *slog.Logger
+	// Sweep runs at the start of each tick, before Due. The app sets it to the sweep of the
+	// held sends. Nil does nothing.
+	Sweep func(ctx context.Context)
 
 	initOnce sync.Once
 	sem      chan struct{}
@@ -128,6 +131,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 // Only one job with a workdir runs at a time (Hermes).
 func (s *Scheduler) TickOnce(ctx context.Context) {
 	s.init()
+	s.sweep(ctx)
 	due, err := s.Store.Due(ctx, s.now())
 	if err != nil {
 		if ctx.Err() == nil {
@@ -155,6 +159,19 @@ func (s *Scheduler) TickOnce(ctx context.Context) {
 		}(cur)
 	}
 	wg.Wait()
+}
+
+// sweep calls Sweep. A panic in it is logged, so the tick goes on.
+func (s *Scheduler) sweep(ctx context.Context) {
+	if s.Sweep == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			s.log().Error("cron: the sweep of held sends failed", "panic", r)
+		}
+	}()
+	s.Sweep(ctx)
 }
 
 // RunNow makes the job id due now and starts a tick, so the job runs at once when a slot

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -472,13 +473,13 @@ func TestTerminalChildEnvInGateway(t *testing.T) {
 	t.Setenv("TETHER_GATEWAY", "")
 	tt := &TerminalTool{InGateway: true}
 	has := func(env []string) bool { return slices.Contains(env, GatewayEnv) }
-	if !has(tt.childEnv(&Env{Kind: "chat"})) {
+	if !has(tt.childEnv(&Env{Kind: "chat"}, nil)) {
 		t.Fatal("a chat turn in the gateway must give the child TETHER_GATEWAY=1")
 	}
-	if has(tt.childEnv(&Env{Kind: "cron"})) || has(tt.childEnv(&Env{Kind: "child", RootKind: "cron"})) {
+	if has(tt.childEnv(&Env{Kind: "cron"}, nil)) || has(tt.childEnv(&Env{Kind: "child", RootKind: "cron"}, nil)) {
 		t.Fatal("a cron run keeps the usual environment")
 	}
-	if has((&TerminalTool{}).childEnv(&Env{Kind: "chat"})) {
+	if has((&TerminalTool{}).childEnv(&Env{Kind: "chat"}, nil)) {
 		t.Fatal("outside the gateway, no TETHER_GATEWAY")
 	}
 }
@@ -579,7 +580,7 @@ func TestTerminalResolvesWorkdirBeforeGate(t *testing.T) {
 		{Command: "ls", Workdir: base, Path: "/opt/fake/bin:/usr/bin:/bin", Summary: "List."},
 		{Command: "ls", Workdir: filepath.Join(base, "sub"), Path: "/opt/fake/bin:/usr/bin:/bin"},
 	}
-	if !slices.Equal(got, want) {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v\nwant %+v", got, want)
 	}
 	// No base folder gives an empty workdir, and the command gets no Always answer.
@@ -621,7 +622,7 @@ func TestGateApproverCheckMCP(t *testing.T) {
 		Values: map[string]any{"child_name": "2/3"}}
 	call := security.MCPCall{Server: "gh", Tool: "create_issue", Class: "write", ConfigHash: "0123456789abcdef",
 		Summary: "Create an \x1b[31missue.\n" + strings.Repeat("a", 300), Args: json.RawMessage(`{"title":"x"}`)}
-	err := g.CheckMCP(ctx, env, call)
+	_, err := g.CheckMCP(ctx, env, call)
 	var be *security.BlockedError
 	if !errors.As(err, &be) || !strings.Contains(be.Reason, "BLOCKED by user") || len(p.reqs) != 1 {
 		t.Fatal(err, p.reqs)
@@ -636,7 +637,46 @@ func TestGateApproverCheckMCP(t *testing.T) {
 		!strings.HasSuffix(r.Summary, "…") || strings.Contains(r.Summary, "\x1b") {
 		t.Fatalf("%q", r.Summary)
 	}
-	if err := (GateApprover{}).CheckMCP(ctx, env, call); err == nil || !strings.Contains(err.Error(), "approval gate missing") {
+	if _, err := (GateApprover{}).CheckMCP(ctx, env, call); err == nil || !strings.Contains(err.Error(), "approval gate missing") {
 		t.Fatal(err)
+	}
+}
+
+func TestGateApproverAskPinUsesOwnerPrompter(t *testing.T) {
+	chat := &recPrompter{scope: security.ScopeOnce}
+	owner := &recPrompter{scope: security.ScopeDeny}
+	g := GateApprover{Gate: &security.Gate{Mode: "manual"}, Prompter: chat, OwnerPrompter: owner}
+	env := &Env{SessionID: "s1", SessionKey: "telegram:group:-100", Kind: "chat", UserID: "5", Values: map[string]any{}}
+	ok, err := g.AskPin(ctx, env, PinRequest{Name: "PYPI_TOKEN", Path: "/home/u/.local/bin/twine",
+		SHA256: "3f2a91c0", Command: "twine upload dist/*"})
+	if ok || err != nil || len(owner.reqs) != 1 || len(chat.reqs) != 0 || owner.reqs[0].PinName != "PYPI_TOKEN" {
+		t.Fatal(ok, err, owner.reqs, chat.reqs)
+	}
+	// With no owner prompter, the prompt goes to the chat of the turn.
+	g.OwnerPrompter = nil
+	if ok, err := g.AskPin(ctx, env, PinRequest{Name: "PYPI_TOKEN", Path: "/p", SHA256: "x", Command: "twine upload"}); !ok || err != nil || len(chat.reqs) != 1 {
+		t.Fatal(ok, err, chat.reqs)
+	}
+}
+
+func TestGateApproverCheckMCPRoutesFindings(t *testing.T) {
+	chat := &recPrompter{scope: security.ScopeOnce}
+	owner := &recPrompter{scope: security.ScopeOnce}
+	g := GateApprover{Gate: &security.Gate{Mode: "manual", Redactor: security.NewRedactor(nil)}, Prompter: chat, OwnerPrompter: owner}
+	env := &Env{SessionID: "s1", SessionKey: "telegram:group:-100", Kind: "chat", Values: map[string]any{}}
+	send := security.MCPCall{Server: "gmail", Tool: "send_email", Class: "send", ConfigHash: "0123456789abcdef",
+		Args: json.RawMessage(`{"to":"vendor@acme.io","body":"Card 4111 1111 1111 1111"}`)}
+	if _, err := g.CheckMCP(ctx, env, send); err != nil {
+		t.Fatal(err)
+	}
+	if len(owner.reqs) != 1 || len(chat.reqs) != 0 || len(owner.reqs[0].Findings) != 1 {
+		t.Fatal(owner.reqs, chat.reqs)
+	}
+	send.Args = json.RawMessage(`{"to":"vendor@acme.io","body":"See you at 10."}`)
+	if _, err := g.CheckMCP(ctx, env, send); err != nil {
+		t.Fatal(err)
+	}
+	if len(owner.reqs) != 1 || len(chat.reqs) != 1 {
+		t.Fatal("a send with no finding asks in the chat of the turn:", owner.reqs, chat.reqs)
 	}
 }

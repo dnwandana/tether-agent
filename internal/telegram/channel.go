@@ -1,10 +1,14 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -12,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
@@ -72,6 +77,27 @@ type Channel struct {
 	// CronChats returns the Telegram chat ids of all cron jobs. The migration log uses it to
 	// find the old chat id in the cron jobs. Nil skips this check.
 	CronChats func(ctx context.Context) ([]string, error)
+	// Secrets sends the secret cards and takes the replies. Nil takes no reply.
+	Secrets *SecretCards
+	// SaveSecret saves a value that the owner gives to a secret card. Run gives it to Secrets.
+	SaveSecret func(name, value string) error
+	// Outbound masks the sensitive data of a send to a chat that is not private. It returns
+	// the masked text and the findings. sessionID gives the handle values of the session, and
+	// it can be "". Nil scans nothing.
+	Outbound func(sessionID string, chatID int64, text string) (masked string, findings []security.Finding)
+	// PrivateChat reports whether a chat stays with the owner. Nil counts no chat as private,
+	// so each send is scanned when Outbound is set.
+	PrivateChat func(chatID int64) bool
+	// Partial returns the byte length of the longest suffix of a tail that is the start of a
+	// known exact value. The streamed answer holds such a tail until the value is complete.
+	// Nil holds no partial value.
+	Partial func(tail string) int
+	// Held keeps the original of a masked answer for the "post the full answer" button. Run
+	// sets a new store when it is nil. Nil sends no owner note.
+	Held *HeldOriginals
+	// HeldCards posts the owner cards of held sends and handles their buttons. Nil makes
+	// each tap on such a button answer that the card is resolved.
+	HeldCards *HeldCards
 
 	// turnCtx is the context of the update handlers and the turns. Nil uses the context of
 	// Run. SetTurnContext sets it.
@@ -116,8 +142,19 @@ func (ch *Channel) Run(ctx context.Context, gw *gateway.Gateway) error {
 	if ch.UI != nil && ch.UI.Authorized == nil {
 		ch.UI.Authorized = ch.callbackAuthorized
 	}
+	if ch.UI != nil && ch.UI.Mask == nil {
+		ch.UI.Mask = ch.maskText
+	}
 	if ch.UI != nil && ch.UI.Owner == nil {
 		ch.UI.Owner = ch.callbackOwner
+	}
+	if ch.Secrets != nil && ch.Secrets.Save == nil {
+		ch.Secrets.Save = ch.SaveSecret
+	}
+	// The store is in memory only, so each channel gets one. Without it, a masked answer
+	// gives the owner no note and no button to post the full answer.
+	if ch.Held == nil {
+		ch.Held = &HeldOriginals{}
 	}
 	ch.albums.Wait = ch.albumWait()
 	p := ch.poller()
@@ -148,6 +185,9 @@ func (ch *Channel) registerMenu(ctx context.Context, p *Poller, gw *gateway.Gate
 	if gw != nil && gw.Deps != nil {
 		cmds = gw.Deps.SkillCommandsFor("telegram")
 	}
+	if ch.Secrets != nil {
+		ch.Secrets.setSkillCommands(cmds)
+	}
 	// A stop of the gateway cancels ctx while the call runs. That error is not a fault.
 	if err := p.RegisterCommands(ctx, cmds); err != nil && ctx.Err() == nil {
 		ch.logger().Warn("telegram: cannot register the bot commands", "err", err.Error())
@@ -176,6 +216,20 @@ func (ch *Channel) Send(ctx context.Context, to gateway.Target, msg gateway.Outb
 	// msg.Files come from the code, not from the model, so the media policy does not check
 	// them.
 	text, files := ch.Media.ExtractMedia(msg.Text)
+	// note sends the owner note of a masked send. It runs only after a send with no error,
+	// because a note for a message that never went out gives a false "post" button.
+	note := func() {}
+	if !msg.Raw && ch.scans(chatID) {
+		original := text
+		var found []security.Finding
+		text, found = ch.Outbound("", chatID, original)
+		var held []string
+		files, held = ch.heldByScan("", chatID, files)
+		if len(held) > 0 {
+			ch.logger().Info("telegram: files with sensitive data are not sent", "chat", chatID, "files", held)
+		}
+		note = func() { ch.noteOwner(ctx, "", chatID, to.ThreadID, "", original, found, held) }
+	}
 	for _, f := range msg.Files {
 		files = append(files, OutFile{Path: f, Kind: mediaKind(f)})
 	}
@@ -194,7 +248,65 @@ func (ch *Channel) Send(ctx context.Context, to gateway.Target, msg gateway.Outb
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	note()
+	return nil
+}
+
+// scans reports whether a send to chatID goes through the outbound scan.
+func (ch *Channel) scans(chatID int64) bool {
+	if ch.Outbound == nil {
+		return false
+	}
+	return ch.PrivateChat == nil || !ch.PrivateChat(chatID)
+}
+
+// maskText returns text with each finding replaced by its label when chatID is not private.
+func (ch *Channel) maskText(chatID int64, text string) string {
+	if !ch.scans(chatID) {
+		return text
+	}
+	masked, _ := ch.Outbound("", chatID, text)
+	return masked
+}
+
+// scanFileLimit is the largest text file that the outbound scan reads.
+const scanFileLimit = 1 << 20
+
+// heldByScan splits files into the files to send and the files with a finding. A text file of
+// at most 1 MB is scanned by content, each other file by its base name.
+func (ch *Channel) heldByScan(sessionID string, chatID int64, files []OutFile) (send []OutFile, held []string) {
+	if !ch.scans(chatID) {
+		return files, nil
+	}
+	for _, f := range files {
+		text := filepath.Base(f.Path)
+		if b, ok := readScanText(f.Path); ok {
+			text = b
+		}
+		if _, found := ch.Outbound(sessionID, chatID, text); len(found) > 0 {
+			held = append(held, f.Path)
+			continue
+		}
+		send = append(send, f)
+	}
+	return send, held
+}
+
+// readScanText returns the content of a text file: valid UTF-8, no NUL byte, at most 1 MB.
+func readScanText(path string) (string, bool) {
+	fh, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer fh.Close()
+	b, err := io.ReadAll(io.LimitReader(fh, scanFileLimit+1))
+	if err != nil || len(b) > scanFileLimit || !utf8.Valid(b) || bytes.IndexByte(b, 0) >= 0 {
+		return "", false
+	}
+	return string(b), true
 }
 
 // SendNotice sends a goal notice that has no turn, for example a restart pause or a
@@ -215,10 +327,10 @@ func (ch *Channel) SendNotice(ctx context.Context, key string, sess *sessions.Se
 	return err
 }
 
-// handleUpdate handles one update. The order is: the free-text answer hook, the gate, the
+// handleUpdate handles one update. The order is: the secret cards, the free-text answer hook, the gate, the
 // authorization, and then the session key. So an unauthorized user never creates a session
 // row. The gateway does not check the authorization again on the busy path, so this
-// function must check it before gw.Submit. The converter of a rich message runs first, before
+// function must check it before gw.Submit. The secret cards and the converter of a rich message run first, before
 // the answer hook and the gate.
 func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Update) {
 	defer func() {
@@ -230,6 +342,9 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 	if u.CallbackQuery != nil {
 		if strings.HasPrefix(u.CallbackQuery.Data, cmdPrefix+":") {
 			ch.commandCallback(ctx, gw, *u.CallbackQuery)
+			return
+		}
+		if ch.outboundCallback(ctx, *u.CallbackQuery) || ch.heldCallback(ctx, *u.CallbackQuery) {
 			return
 		}
 		if ch.UI == nil || !ch.UI.HandleCallback(ctx, *u.CallbackQuery) {
@@ -247,6 +362,16 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 	}
 	// A channel post gets no work, so this check comes before the converter.
 	if m.Chat.Type == "channel" {
+		return
+	}
+	// An edit of an older message is not a reply to a secret card. Take would delete that
+	// message and save its text as the value.
+	if ch.Secrets != nil && u.EditedMessage == nil && ch.Secrets.Take(ctx, m) {
+		return
+	}
+	// An edit of a reply to a secret card can hold a value. It must not reach the agent.
+	if u.EditedMessage != nil && isCardReply(m) {
+		ch.dropCardReplyEdit(ctx, m)
 		return
 	}
 	ch.loadRich(&m)
@@ -538,6 +663,7 @@ func (ch *Channel) dispatch(ctx context.Context, gw *gateway.Gateway, n Normaliz
 	newRenderer := func() gateway.Renderer {
 		r := ch.newRenderer(ctx, chatID, n.ThreadID, n.Kind == KindDM)
 		r.key, r.handoff, r.userID = in.Key, release, n.UserID
+		r.chatTitle = msgs[0].Chat.Title
 		return r
 	}
 	// Submit returns when the gateway has taken the message, so the next update of the chat
@@ -622,6 +748,9 @@ const memberSetHomeReply = "⛔ Only the owner can use /sethome."
 // localCommand runs the commands that only Telegram has: /start, /sethome, /approve, and
 // /deny. /sethome, /approve, and /deny need an owner. It returns false for other text. These commands skip the gateway, so they also
 // work while a run waits for an approval.
+// localCommandNames are the names of the commands that localCommand runs.
+var localCommandNames = map[string]bool{"start": true, "sethome": true, "approve": true, "deny": true}
+
 func (ch *Channel) localCommand(ctx context.Context, m Message, n Normalized, text string) bool {
 	name, args, ok := gateway.IsCommand(text)
 	if !ok {
@@ -667,6 +796,16 @@ func (ch *Channel) localCommand(ctx context.Context, m Message, n Normalized, te
 		return false
 	}
 	return true
+}
+
+// dropCardReplyEdit deletes an edit of a reply to a secret card. The edit is not a value for
+// a card, and it never reaches the agent. The log line has no text of the message.
+func (ch *Channel) dropCardReplyEdit(ctx context.Context, m Message) {
+	if err := replyClient(ch.C).DeleteMessage(ctx, m.Chat.ID, m.MessageID); err != nil {
+		ch.logger().Warn("telegram: cannot delete the edit of a reply to a secret card", "chat", m.Chat.ID, "err", err.Error())
+		return
+	}
+	ch.logger().Info("telegram: an edit of a reply to a secret card was deleted", "chat", m.Chat.ID)
 }
 
 // resolveText runs the /approve or /deny text fallback for the pending approvals of the
@@ -983,7 +1122,7 @@ func (ch *Channel) Progress(key string, batch uint64, child, tool, preview strin
 	r := ch.active[key]
 	ch.activeMu.Unlock()
 	if r != nil {
-		r.status.Add(r.ctx, Source{Batch: batch, Child: child}, tool, preview, "")
+		r.status.Add(r.ctx, Source{Batch: batch, Child: child}, tool, r.maskOut(preview), "")
 	}
 }
 
@@ -1110,6 +1249,16 @@ type tgRenderer struct {
 	stopDrain context.CancelFunc
 
 	mu sync.Mutex
+	// sessionID is the session of the turn, for the handle values of the outbound scan.
+	sessionID string
+	// chatTitle is the title of the chat of the inbound message, for the owner note.
+	chatTitle string
+	// fullClean is the full clean text of the answer that the scan read, for the owner note.
+	fullClean string
+	// findings are the findings of the full answer, for the owner note.
+	findings []security.Finding
+	// heldFiles are the files of the answer that were not sent, because they have a finding.
+	heldFiles []string
 	// stopTyping ends the typing loop of the turn. It is set at the first event of the turn.
 	stopTyping func()
 	done       bool
@@ -1125,6 +1274,7 @@ var (
 	_ gateway.GoalLineRenderer    = (*tgRenderer)(nil)
 	_ gateway.TurnContextRenderer = (*tgRenderer)(nil)
 	_ agent.PlanSink              = (*tgRenderer)(nil)
+	_ gateway.SessionRenderer     = (*tgRenderer)(nil)
 )
 
 func (ch *Channel) newRenderer(ctx context.Context, chatID int64, threadID string, isDM bool) *tgRenderer {
@@ -1135,9 +1285,35 @@ func (ch *Channel) newRenderer(ctx context.Context, chatID int64, threadID strin
 	sm := &Streamer{C: ch.C, ChatID: chatID, ThreadID: threadID, IsDM: isDM, Cfg: ch.Cfg.Streaming,
 		OnFirstMessage: st.Reset, Log: ch.Log}
 	r := &tgRenderer{ch: ch, ctx: rctx, chatID: chatID, threadID: threadID, status: st, stream: sm}
+	if ch.scans(chatID) {
+		sm.Mask = func(t string) (string, []security.Finding) { return ch.Outbound(r.session(), chatID, t) }
+		sm.Partial = ch.Partial
+	}
 	r.drainCtx, r.stopDrain = context.WithCancel(rctx)
 	sm.BeforeNewMessage = func(context.Context) { st.Drain(r.drainCtx) }
 	return r
+}
+
+// SetSession keeps the session id of the turn for the outbound scan.
+func (r *tgRenderer) SetSession(id string) {
+	r.mu.Lock()
+	r.sessionID = id
+	r.mu.Unlock()
+}
+
+func (r *tgRenderer) session() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sessionID
+}
+
+// maskOut masks a preview text of the turn. It changes nothing in a private chat.
+func (r *tgRenderer) maskOut(text string) string {
+	if !r.ch.scans(r.chatID) {
+		return text
+	}
+	masked, _ := r.ch.Outbound(r.session(), r.chatID, text)
+	return masked
 }
 
 // TurnContext ends the wait of an answer message for the send queue when ctx ends, for
@@ -1180,22 +1356,35 @@ func (r *tgRenderer) Delta(text string) {
 
 func (r *tgRenderer) ToolStart(name, preview string) {
 	if r.begin() {
-		r.status.Add(r.ctx, Source{}, name, preview, "")
+		r.status.Add(r.ctx, Source{}, name, r.maskOut(preview), "")
 	}
 }
 
 // GoalLine shows the goal line of a goal turn at the start of the turn.
 func (r *tgRenderer) GoalLine(line string) {
 	if r.begin() {
-		r.status.SetGoalLine(r.ctx, line)
+		r.status.SetGoalLine(r.ctx, r.maskOut(line))
 	}
 }
 
 // Plan sends the plan message after a todo_list call of the main agent.
 func (r *tgRenderer) Plan(before, after []tools.TodoItem) {
 	if r.begin() {
-		r.status.SetPlan(r.ctx, before, after)
+		r.status.SetPlan(r.ctx, r.maskPlan(before), r.maskPlan(after))
 	}
+}
+
+// maskPlan returns a copy of the plan items with the content masked.
+func (r *tgRenderer) maskPlan(items []tools.TodoItem) []tools.TodoItem {
+	if !r.ch.scans(r.chatID) || len(items) == 0 {
+		return items
+	}
+	out := make([]tools.TodoItem, len(items))
+	for i, it := range items {
+		it.Content = r.maskOut(it.Content)
+		out[i] = it
+	}
+	return out
 }
 
 func (r *tgRenderer) ToolEnd(string, bool) {}
@@ -1225,6 +1414,7 @@ func (r *tgRenderer) Ack(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
+	text = r.maskOut(text)
 	if _, err := r.ch.sendText(r.ctx, r.chatID, r.threadID, text, sendOpts{class: paceReply}); err != nil {
 		r.ch.logger().Warn("telegram: cannot send the reply", "chat", r.chatID, "err", err.Error())
 	}
@@ -1388,6 +1578,10 @@ func (r *tgRenderer) Done(final string, err error) {
 	}
 	// After a tool round with no new text, the final can be the text of the closed segment,
 	// which the chat shows already.
+	full := final
+	if full == "" {
+		full = cur
+	}
 	if cur == "" && prev != "" {
 		if rest, ok := strings.CutPrefix(final, prev); ok {
 			final = strings.TrimSpace(rest)
@@ -1397,8 +1591,29 @@ func (r *tgRenderer) Done(final string, err error) {
 		final = cur
 	}
 	clean, files := r.ch.Media.ExtractMedia(final)
+	// send is the text for Finish. A stream with a mask masks the final text itself, and it
+	// must get the raw text: the closed messages hold raw text in the committed part, so a
+	// masked final text does not start with it and the stream sends the full answer again.
+	send := clean
+	if r.ch.scans(r.chatID) {
+		sid := r.session()
+		// The findings cover the full answer, and the send covers the open segment.
+		fullClean := clean
+		if full != final {
+			fullClean, _ = r.ch.Media.ExtractMedia(full)
+		}
+		_, found := r.ch.Outbound(sid, r.chatID, fullClean)
+		var held []string
+		files, held = r.ch.heldByScan(sid, r.chatID, files)
+		if r.stream.Mask == nil {
+			send, _ = r.ch.Outbound(sid, r.chatID, clean)
+		}
+		r.mu.Lock()
+		r.findings, r.heldFiles, r.fullClean = found, held, fullClean
+		r.mu.Unlock()
+	}
 	if err != nil && !errors.Is(err, context.Canceled) {
-		clean = strings.TrimSpace(clean + "\n\nerror: " + err.Error())
+		send = strings.TrimSpace(send + "\n\nerror: " + err.Error())
 	}
 	// A plan message that waits goes out above the answer. With the cleanup,
 	// the messages that Close deletes do not go out.
@@ -1409,7 +1624,8 @@ func (r *tgRenderer) Done(final string, err error) {
 	// The answer waits for the queue one time only, and not at all after a /stop.
 	r.stopDrain()
 	// An empty text makes the streamer use the streamed text without the media tags.
-	if ferr := r.stream.Finish(r.ctx, clean); ferr != nil {
+	ferr := r.stream.Finish(r.ctx, send)
+	if ferr != nil {
 		r.ch.logger().Warn("telegram: cannot send the answer", "chat", r.chatID, "err", ferr.Error())
 	}
 	r.status.Close(r.ctx, err == nil)
@@ -1418,4 +1634,12 @@ func (r *tgRenderer) Done(final string, err error) {
 			r.ch.logger().Warn("telegram: cannot send the files of the answer", "chat", r.chatID, "err", serr.Error())
 		}
 	}
+	// A note for an answer that never went out gives a false "post" button.
+	if ferr != nil {
+		return
+	}
+	r.mu.Lock()
+	found, held, orig := r.findings, r.heldFiles, r.fullClean
+	r.mu.Unlock()
+	r.ch.noteOwner(r.ctx, r.userID, r.chatID, r.threadID, r.chatTitle, orig, found, held)
 }

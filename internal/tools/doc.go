@@ -44,6 +44,8 @@ func toolNeeds(name string) string {
 		return "the gateway role for background: true. The chat role runs the tasks in the foreground."
 	case name == "acp_delegate":
 		return "acp.enabled, an agent, and acp.workdir_allowlist."
+	case name == "request_secret":
+		return "a chat turn of the owner (CLI, or Telegram with interactive buttons)."
 	}
 	return ""
 }

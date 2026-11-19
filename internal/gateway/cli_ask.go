@@ -31,18 +31,53 @@ const (
 	cliRetryNoSession = "Type o or d."
 )
 
+// approvalPromptRedacted is the input prompt of an MCP send with sensitive data.
+const approvalPromptRedacted = "[r] send redacted / [o]nce / [d]eny: "
+
+// cliRetryRedacted asks again after an answer that a send with sensitive data does not permit.
+const cliRetryRedacted = "Type r, o, or d."
+
+// cliSentRedacted is the result line of the "send redacted" answer.
+const cliSentRedacted = "✅ Sent redacted"
+
 // approvalChoices returns the input prompt, the retry line, and the answers that req
-// permits. NoSession wins over NoAlways, the same rule as the Telegram keyboard.
-func approvalChoices(req security.ApprovalRequest) (prompt, retry string, session, always bool) {
+// permits. A request with findings gets the "send redacted" answer and no other. NoSession
+// wins over NoAlways, the same rule as the Telegram keyboard.
+func approvalChoices(req security.ApprovalRequest) (prompt, retry string, session, always, redacted bool) {
 	switch {
+	case len(req.Findings) > 0:
+		return approvalPromptRedacted, cliRetryRedacted, false, false, true
 	case req.NoSession:
-		return approvalPromptNoSession, cliRetryNoSession, false, false
+		return approvalPromptNoSession, cliRetryNoSession, false, false, false
 	case req.NoAlways:
-		return approvalPromptNoAlways, cliRetryNoAlways, true, false
+		return approvalPromptNoAlways, cliRetryNoAlways, true, false, false
 	default:
-		return ApprovalPrompt, cliRetry, true, true
+		return ApprovalPrompt, cliRetry, true, true, false
 	}
 }
+
+// findingItems returns the labels of the findings, each without its outer "[" and "]",
+// joined with ", ".
+func findingItems(f []security.Finding) string {
+	items := make([]string, 0, len(f))
+	for _, x := range f {
+		l := x.Label
+		if strings.HasPrefix(l, "[") && strings.HasSuffix(l, "]") {
+			l = l[1 : len(l)-1]
+		}
+		items = append(items, l)
+	}
+	return strings.Join(items, ", ")
+}
+
+// The input prompt, the retry line, and the result lines of a pin request.
+const (
+	approvalPromptPin = "[p] allow this program  [d] deny: "
+	cliRetryPin       = "Type p or d."
+	cliPinAllowed     = "✅ Program allowed"
+	cliPinDenied      = "❌ Program denied"
+	cliPinNoAnswer    = "⌛ Program denied · no answer"
+)
 
 // The result lines of the CLI approval question. The Telegram headers have the same words.
 const (
@@ -65,6 +100,11 @@ type CLIAsk struct {
 	mu sync.Mutex
 	// read reads one line through the REPL. CLI.Run sets it.
 	read func(ctx context.Context, prompt string) (string, error)
+	// Save saves a secret value to .env. Nil refuses each AskSecret.
+	Save func(name, value string) error
+	// readSecret reads one masked line through the REPL. CLI.Run sets it. Nil refuses each
+	// AskSecret.
+	readSecret func(ctx context.Context, prompt string) (string, error)
 	// pending is a read of In that did not finish. The next question gets its line.
 	pending chan lineResult
 }
@@ -72,6 +112,7 @@ type CLIAsk struct {
 var (
 	_ security.Prompter = (*CLIAsk)(nil)
 	_ tools.Asker       = (*CLIAsk)(nil)
+	_ tools.SecretAsker = (*CLIAsk)(nil)
 )
 
 // PromptApproval shows the summary, the reason for the flag, and the dangerous command,
@@ -82,48 +123,110 @@ func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalReques
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := c.out()
-	// A terminal runs ANSI escapes and bidi controls, so clean the flagged text too.
-	fmt.Fprintf(out, "%s\n  %s\n  Flagged: %s\n  %s\n", cliHeader(req),
-		cliSummary(req), security.CleanSummary(ApprovalFlagged(req)),
-		strings.ReplaceAll(security.ShowHidden(req.Command), "\n", "\n  "))
+	pin := req.PinName != ""
+	prompt, retry, session, always, redacted := approvalChoices(req)
+	allowed, denied, noAnswer := cliAllowedOnce, cliDenied, cliNoAnswer
+	if pin {
+		// A terminal runs ANSI escapes and bidi controls, so clean each line.
+		fmt.Fprintf(out, "%s\n  %s\n  sha256 %s\n  Command: %s\n", security.CleanSummary(PinQuestion(req)),
+			security.CleanSummary(req.PinPath), security.CleanSummary(ShortHash(req.PinHash)),
+			security.CleanSummary(req.Command))
+		prompt, retry = approvalPromptPin, cliRetryPin
+		allowed, denied, noAnswer = cliPinAllowed, cliPinDenied, cliPinNoAnswer
+	} else {
+		// A terminal runs ANSI escapes and bidi controls, so clean the flagged text too.
+		fmt.Fprintf(out, "%s\n  %s\n  Flagged: %s\n", cliHeader(req),
+			cliSummary(req), security.CleanSummary(ApprovalFlagged(req)))
+		for _, l := range ApprovalSecretLines(req) {
+			fmt.Fprintf(out, "  %s\n", security.CleanSummary(l))
+		}
+		fmt.Fprintf(out, "  %s\n", strings.ReplaceAll(security.ShowHidden(req.Command), "\n", "\n  "))
+	}
 	if req.ChildName != "" {
 		fmt.Fprintf(out, "  (from subagent %s)\n", req.ChildName)
 	}
-	prompt, retry, session, always := approvalChoices(req)
+	if len(req.Findings) > 0 {
+		fmt.Fprintf(out, "  ⚠️ Found: %s\n", security.CleanSummary(findingItems(req.Findings)))
+	}
 	for {
 		line, err := c.readLine(ctx, prompt)
 		switch {
 		case ctx.Err() != nil:
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				fmt.Fprintln(out, "\n"+cliNoAnswer)
+				fmt.Fprintln(out, "\n"+noAnswer)
 			}
 			return security.ScopeTimeout, ctx.Err()
 		case errors.Is(err, io.EOF):
-			fmt.Fprintln(out, "\n"+cliDenied)
+			fmt.Fprintln(out, "\n"+denied)
 			return security.ScopeDeny, nil
 		case err != nil:
 			return security.ScopeDeny, err
 		}
-		switch strings.ToLower(strings.TrimSpace(line)) {
-		case "o", "once":
-			fmt.Fprintln(out, cliAllowedOnce)
+		switch ans := strings.ToLower(strings.TrimSpace(line)); {
+		case pin && (ans == "p" || ans == "allow"), !pin && (ans == "o" || ans == "once"):
+			fmt.Fprintln(out, allowed)
 			return security.ScopeOnce, nil
-		case "s", "session":
-			if session {
-				fmt.Fprintln(out, cliAllowedSession)
-				return security.ScopeSession, nil
-			}
-		case "a", "always":
-			if always {
-				fmt.Fprintln(out, cliAllowedAlways)
-				return security.ScopeAlways, nil
-			}
-		case "d", "deny":
-			fmt.Fprintln(out, cliDenied)
+		case !pin && redacted && (ans == "r" || ans == "redacted"):
+			fmt.Fprintln(out, cliSentRedacted)
+			return security.ScopeRedacted, nil
+		case !pin && session && (ans == "s" || ans == "session"):
+			fmt.Fprintln(out, cliAllowedSession)
+			return security.ScopeSession, nil
+		case !pin && always && (ans == "a" || ans == "always"):
+			fmt.Fprintln(out, cliAllowedAlways)
+			return security.ScopeAlways, nil
+		case ans == "d" || ans == "deny":
+			fmt.Fprintln(out, denied)
 			return security.ScopeDeny, nil
 		}
 		fmt.Fprintln(out, retry)
 	}
+}
+
+// maxStagedLines is the most paths that the staged-files lines of an approval prompt show.
+const maxStagedLines = 20
+
+// PinQuestion returns the header of a pin request: "🔑 Give <name> to this program?".
+func PinQuestion(req security.ApprovalRequest) string {
+	return "🔑 Give " + req.PinName + " to this program?"
+}
+
+// ShortHash returns the first 4 and the last 4 characters of a sha256 hex with "…" between them.
+// A hash of 8 characters or fewer stays as it is.
+func ShortHash(hash string) string {
+	if len(hash) <= 8 {
+		return hash
+	}
+	return hash[:4] + "…" + hash[len(hash)-4:]
+}
+
+// ApprovalSecretLines returns the raw lines about secrets of req, in this order: the "🔑 Gets"
+// line, the "🔑 Uses a printed credential" line, and the "This turn read" line. The lines
+// about staged credential files follow. Each UI cleans or escapes them.
+func ApprovalSecretLines(req security.ApprovalRequest) []string {
+	var lines []string
+	if len(req.Secrets) > 0 {
+		lines = append(lines, "🔑 Gets: "+strings.Join(req.Secrets, ", "))
+	}
+	if len(req.HandleNames) > 0 {
+		lines = append(lines, "🔑 Uses a printed credential: "+strings.Join(req.HandleNames, ", "))
+		if len(req.OutsideSources) > 0 {
+			lines = append(lines, "This turn read: "+strings.Join(req.OutsideSources, ", "))
+		}
+	}
+	if len(req.StagedCredentials) > 0 {
+		lines = append(lines, "This stages credential files:")
+		for i, p := range req.StagedCredentials {
+			if i == maxStagedLines {
+				break
+			}
+			lines = append(lines, "• "+p)
+		}
+	}
+	if req.StageUnchecked {
+		lines = append(lines, "Tether Agent could not check which files this command stages.")
+	}
+	return lines
 }
 
 // maxFlaggedRunes is the limit of the flagged text of an approval prompt, with the final "…".
@@ -261,18 +364,66 @@ func pickChoices(line string, choices []string, multi bool) ([]string, bool) {
 	return out, true
 }
 
-// attach makes c read its lines through read and write to out, while a CLI runs. The
-// returned function restores the old input and output.
-func (c *CLIAsk) attach(out io.Writer, read func(ctx context.Context, prompt string) (string, error)) (detach func()) {
+// attach makes c read its lines through read, its masked lines through readSecret, and
+// write to out, while a CLI runs. The returned function restores the old values.
+func (c *CLIAsk) attach(out io.Writer, read, readSecret func(ctx context.Context, prompt string) (string, error)) (detach func()) {
 	c.mu.Lock()
-	oldOut, oldRead := c.Out, c.read
-	c.Out, c.read = out, read
+	oldOut, oldRead, oldSecret := c.Out, c.read, c.readSecret
+	c.Out, c.read, c.readSecret = out, read, readSecret
 	c.mu.Unlock()
 	return func() {
 		c.mu.Lock()
-		c.Out, c.read = oldOut, oldRead
+		c.Out, c.read, c.readSecret = oldOut, oldRead, oldSecret
 		c.mu.Unlock()
 	}
+}
+
+// userError is an error whose text is a full sentence for the user.
+type userError string
+
+func (e userError) Error() string { return string(e) }
+
+// AskSecret shows the card of q, reads the value with a masked read, and saves it with Save.
+// The value never comes back to the caller and never goes to the output.
+func (c *CLIAsk) AskSecret(ctx context.Context, q tools.SecretQuestion) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	busy := userError(fmt.Sprintf("The CLI is busy. Ask the owner to type /secrets set %s at the prompt.", q.Name))
+	if c.readSecret == nil || c.Save == nil {
+		return false, busy
+	}
+	out := c.out()
+	fmt.Fprintf(out, "🔑 Secret needed: %s\nFor: %s\n", q.Name, strings.Join(q.Commands, ", "))
+	if q.Reason != "" {
+		fmt.Fprintf(out, "Reason: %s\n", q.Reason)
+	}
+	line, err := c.readSecret(ctx, "Value for "+q.Name+": ")
+	switch {
+	case errors.Is(err, errFeedBusy) || errors.Is(err, errNoMaskedRead):
+		return false, busy
+	case ctx.Err() != nil:
+		return false, ctx.Err()
+	case errors.Is(err, io.EOF):
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+	value := strings.TrimSpace(line)
+	if value == "" {
+		fmt.Fprintln(out, "No value. Nothing was saved.")
+		return false, nil
+	}
+	if err := security.CheckSecretValue(value); err != nil {
+		fmt.Fprintln(out, err.Error())
+		return false, err
+	}
+	if err := c.Save(q.Name, value); err != nil {
+		err = userError(fmt.Sprintf("I could not save %s: %v. Send it again.", q.Name, err))
+		fmt.Fprintln(out, err.Error())
+		return false, err
+	}
+	fmt.Fprintf(out, "✅ Saved %s.\n", q.Name)
+	return true, nil
 }
 
 // readLine reads one answer line. The caller holds c.mu.

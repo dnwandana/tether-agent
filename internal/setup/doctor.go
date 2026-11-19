@@ -112,6 +112,11 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	dotenv, envCheck := d.checkDotEnv()
 	cfg, cfgCheck := d.checkConfig(dotenv, envCheck)
 	out = append(out, cfgCheck)
+	// Doctor does not call app.New, so it sets the bound names itself. The redactor
+	// at the end then treats a bound name as a secret name.
+	if cfg != nil {
+		security.SetBoundSecretNames(slices.Sorted(maps.Keys(cfg.ExecSecrets)))
+	}
 	if raw, err := os.ReadFile(d.configPath()); err == nil {
 		out = append(out, flatRateChecks(raw)...)
 	}
@@ -121,6 +126,9 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 		out = append(out, d.checkTelegram(ctx, cfg))
 	}
 	out = append(out, d.checkStateDB(ctx)...)
+	if cfg != nil {
+		out = append(out, d.checkSecrets(ctx, cfg, dotenv)...)
+	}
 	hostCfg := cfg
 	if hostCfg == nil {
 		def := config.Default()
@@ -142,7 +150,7 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 	// The release check needs no config, so it also runs when the config does not load.
 	out = append(out, d.checkRelease(ctx, secondsOr(hostCfg.Doctor.CheckTimeoutS, checkTimeout)))
 
-	red := app.NewRedactor(dotenv)
+	red := app.NewNamedRedactor(dotenv)
 	for i := range out {
 		out[i].Detail = red.Redact(out[i].Detail)
 		out[i].Next = red.Redact(out[i].Next)
@@ -454,6 +462,88 @@ func (d *Doctor) checkStateDB(ctx context.Context) []Check {
 		out = append(out, Check{Name: "approvals notice", Status: StatusWarn, Detail: detail})
 	}
 	return out
+}
+
+// checkSecrets reports the exec_secrets names that have no value in .env or that have an
+// auth-failure mark. It also warns when outbound.guard is on and no owner chat exists. The
+// process environment does not count as a value, because a bound value comes from .env only.
+func (d *Doctor) checkSecrets(ctx context.Context, cfg *config.Config, dotenv map[string]string) []Check {
+	var out []Check
+	names := slices.Sorted(maps.Keys(cfg.ExecSecrets))
+	var sdb *db.DB
+	if _, err := os.Stat(filepath.Join(d.DataDir, "state.db")); err == nil && (len(names) > 0 || cfg.Outbound.Guard) {
+		if o, err := db.Open(filepath.Join(d.DataDir, "state.db")); err == nil {
+			sdb = o
+			defer sdb.Close()
+		}
+	}
+	if len(names) > 0 {
+		var lines []Check
+		for _, n := range names {
+			if dotenv[n] == "" {
+				lines = append(lines, Check{Name: "exec_secrets " + n, Status: StatusWarn,
+					Detail: n + " is bound but has no value in .env",
+					Next:   "send /secrets set " + n + " in a private chat with the bot, or add the value to .env"})
+				continue
+			}
+			if sdb == nil {
+				continue
+			}
+			v, ok, err := sdb.KVGet(ctx, "secret_check:"+n)
+			if err != nil || !ok {
+				continue
+			}
+			ms, err := strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				continue
+			}
+			lines = append(lines, Check{Name: "exec_secrets " + n, Status: StatusWarn,
+				Detail: n + " is marked for a check: a command got an auth failure at " +
+					time.UnixMilli(ms).Local().Format("2006-01-02 15:04"),
+				Next: "save a new value with /secrets set " + n})
+		}
+		if len(lines) == 0 {
+			detail := fmt.Sprintf("%d bound secrets; each has a value in .env", len(names))
+			if len(names) == 1 {
+				detail = "1 bound secret; it has a value in .env"
+			}
+			out = append(out, Check{Name: "exec_secrets", Status: StatusOK, Detail: detail})
+		}
+		out = append(out, lines...)
+	}
+	// Only a Telegram target or an MCP send can be held. With neither, the guard needs no owner chat.
+	sendPath := cfg.Telegram.Enabled || len(cfg.MCP.Servers) > 0
+	if cfg.Outbound.Guard && sendPath && !d.hasOwnerChat(ctx, cfg, sdb) {
+		out = append(out, Check{Name: "outbound guard", Status: StatusWarn,
+			Detail: "outbound.guard is on, but Tether Agent has no private chat with the owner. A held send then blocks.",
+			Next:   "add your numeric Telegram user ID to telegram.allowed_users, or approve your pairing code with tether pairing approve telegram <code>"})
+	}
+	return out
+}
+
+// hasOwnerChat reports whether an owner chat exists. The rule is the rule of
+// telegram.Channel.HomeOwnerChat. A home chat counts only when its id is a numeric
+// allowed_users entry or an approved paired user, so the home chat adds no owner. "*" and
+// allow_all_users do not count. sdb can be nil.
+func (d *Doctor) hasOwnerChat(ctx context.Context, cfg *config.Config, sdb *db.DB) bool {
+	for _, u := range cfg.Telegram.AllowedUsers {
+		if id, err := strconv.ParseInt(strings.TrimSpace(u), 10, 64); err == nil && id > 0 {
+			return true
+		}
+	}
+	if sdb == nil {
+		return false
+	}
+	rows, err := (&telegram.Pairing{DB: sdb}).List(ctx, "telegram")
+	if err != nil {
+		return false
+	}
+	for _, r := range rows {
+		if id, err := strconv.ParseInt(r.UserID, 10, 64); err == nil && id > 0 && r.Status == telegram.PairApproved {
+			return true
+		}
+	}
+	return false
 }
 
 // lastAnswerCheck shows the provider and the model of the newest stored answer. An answer

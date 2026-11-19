@@ -1,7 +1,9 @@
 package telegram
 
 import (
+	"context"
 	"slices"
+	"strconv"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -88,6 +90,73 @@ func ownerByUser(cfg config.TelegramConfig, n Normalized, isPairApproved func(st
 		ids = append(ids, trimmed(cfg.GroupAllowedUsers)...)
 	}
 	return slices.Contains(ids, "*") || slices.Contains(ids, n.UserID)
+}
+
+// OwnerChat returns the private chat of the owner for a turn of userID: the chat of userID when
+// IsOwnerPrivateChat accepts it, else HomeOwnerChat. ok is false when no owner chat exists.
+// "*" and allow_all_users do not make an owner here, because the owner chat gets the original
+// of a masked answer and the secret cards.
+func (ch *Channel) OwnerChat(ctx context.Context, userID string) (chatID int64, ok bool) {
+	if id, err := strconv.ParseInt(userID, 10, 64); err == nil && ch.IsOwnerPrivateChat(ctx, id) {
+		return id, true
+	}
+	return ch.HomeOwnerChat(ctx)
+}
+
+// HomeOwnerChat returns the private chat of the owner for a send with no user: the home
+// channel when IsOwnerPrivateChat accepts it, else the first numeric allowed_users entry,
+// else the first approved paired user.
+func (ch *Channel) HomeOwnerChat(ctx context.Context) (chatID int64, ok bool) {
+	if home, found := HomeTarget(ctx, ch.DB, ch.Cfg, false); found {
+		if id, err := strconv.ParseInt(home.ChatID, 10, 64); err == nil && ch.IsOwnerPrivateChat(ctx, id) {
+			return id, true
+		}
+	}
+	for _, s := range trimmed(ch.Cfg.AllowedUsers) {
+		if id, err := strconv.ParseInt(s, 10, 64); err == nil && id > 0 {
+			return id, true
+		}
+	}
+	for _, id := range ch.pairedUserIDs(ctx) {
+		return id, true
+	}
+	return 0, false
+}
+
+// IsOwnerPrivateChat reports whether chatID is a private chat of an owner: a positive id that is
+// a numeric allowed_users entry or an approved paired user. allow_all_users and "*" do not count.
+func (ch *Channel) IsOwnerPrivateChat(ctx context.Context, chatID int64) bool {
+	if chatID <= 0 {
+		return false
+	}
+	want := strconv.FormatInt(chatID, 10)
+	if slices.Contains(trimmed(ch.Cfg.AllowedUsers), want) {
+		return true
+	}
+	return ch.Pair != nil && ch.Pair.IsApproved(ctx, "telegram", want)
+}
+
+// pairedUserIDs returns the numeric ids of the approved paired users, in the order of
+// Pairing.List. A failed list is logged and gives no ids.
+func (ch *Channel) pairedUserIDs(ctx context.Context) []int64 {
+	if ch.Pair == nil {
+		return nil
+	}
+	rows, err := ch.Pair.List(ctx, "telegram")
+	if err != nil {
+		ch.logger().Warn("owner chat: cannot list the paired users", "err", err)
+		return nil
+	}
+	var ids []int64
+	for _, r := range rows {
+		if r.Status != PairApproved {
+			continue
+		}
+		if id, err := strconv.ParseInt(r.UserID, 10, 64); err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	return ids
 }
 
 // OwnerOf returns a function that gives the owner flag and the shared flag of a session

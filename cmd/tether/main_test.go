@@ -218,6 +218,9 @@ func TestSessionsSubcommand(t *testing.T) {
 	if strings.Count(string(b), "\n") != 2 || strings.Contains(string(b), "hunter2-super-secret-value") {
 		t.Fatal(string(b))
 	}
+	if !strings.Contains(string(b), "my key is «MY_SECRET»") {
+		t.Fatal("the export must show the label of the secret:", string(b))
+	}
 	if !strings.Contains(out.String(), p) {
 		t.Fatal(out.String())
 	}
@@ -1839,5 +1842,28 @@ func TestGatewayWarnsAsRoot(t *testing.T) {
 	geteuid = func() int { return 1000 }
 	if got := runGatewayForLog(t, ""); strings.Contains(got, "gateway runs as root") {
 		t.Fatal(got)
+	}
+}
+
+// cronUsers reads a database from before the draft_only column.
+func TestCronUsersOldSchema(t *testing.T) {
+	dir := t.TempDir()
+	d, err := db.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := cron.Store{DB: d}
+	job, err := store.Create(context.Background(), cron.Job{Name: "brief", Schedule: "every 2h", Prompt: "p",
+		Skills: []string{"demo"}, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(context.Background(), `ALTER TABLE cron_jobs DROP COLUMN draft_only`); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	got := cronUsers(dir)("demo")
+	if len(got) != 1 || got[0] != fmt.Sprintf("%q (%s)", "brief", job.ID) {
+		t.Fatalf("%v", got)
 	}
 }

@@ -422,3 +422,48 @@ func TestCLIPromptHeadersAndFlaggedLines(t *testing.T) {
 		}
 	}
 }
+
+func cardSend() security.ApprovalRequest {
+	return security.ApprovalRequest{Tool: "mcp:gmail.send_email", Class: "send", Server: "gmail", ToolName: "send_email",
+		Summary: "Send the invoice.", Command: "to: vendor@acme.io", NoSession: true, NoAlways: true,
+		Findings: []security.Finding{{Kind: "card", Label: "[card ••••1111]"}}}
+}
+
+func TestCLIPromptRedacted(t *testing.T) {
+	var out bytes.Buffer
+	c := &CLIAsk{In: bufio.NewReader(strings.NewReader("r\n")), Out: &out}
+	got, err := c.PromptApproval(context.Background(), cardSend())
+	if got != security.ScopeRedacted || err != nil {
+		t.Fatal(got, err)
+	}
+	want := "📤 Send on your behalf?\n  Send the invoice.\n  Flagged: MCP send (gmail · send_email)\n  to: vendor@acme.io\n" +
+		"  ⚠️ Found: card ••••1111\n[r] send redacted / [o]nce / [d]eny: ✅ Sent redacted\n"
+	if out.String() != want {
+		t.Fatalf("got %q, want %q", out.String(), want)
+	}
+	for in, want := range map[string]security.Scope{
+		"o\n": security.ScopeOnce, "redacted\n": security.ScopeRedacted, "s\nr\n": security.ScopeRedacted, "d\n": security.ScopeDeny,
+	} {
+		out.Reset()
+		c := &CLIAsk{In: bufio.NewReader(strings.NewReader(in)), Out: &out}
+		if got, _ := c.PromptApproval(context.Background(), cardSend()); got != want {
+			t.Fatalf("%q: %s", in, got)
+		}
+		if in == "s\nr\n" && !strings.Contains(out.String(), "Type r, o, or d.\n") {
+			t.Fatalf("%q", out.String())
+		}
+	}
+}
+
+func TestCLIPromptRedactedNeedsFindings(t *testing.T) {
+	var out bytes.Buffer
+	req := cardSend()
+	req.Findings = nil
+	c := &CLIAsk{In: bufio.NewReader(strings.NewReader("r\nd\n")), Out: &out}
+	if got, _ := c.PromptApproval(context.Background(), req); got != security.ScopeDeny {
+		t.Fatal(got)
+	}
+	if !strings.Contains(out.String(), "[o]nce / [d]eny: Type o or d.\n") || strings.Contains(out.String(), "Found:") {
+		t.Fatalf("%q", out.String())
+	}
+}

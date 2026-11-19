@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/dnwandana/tether-agent/internal/db"
-	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 const maskSecret = "sk-proj-backuptest-0123456789"
@@ -127,7 +126,7 @@ func TestMaskDBFreeText(t *testing.T) {
 	maskInsertMessage(t, d, "s1", "my key is "+maskSecret+" please test it", `[{"args":"`+maskSecret+`"}]`)
 	maskExec(t, d, "INSERT INTO compactions(session_id, summary) VALUES('s1', ?)", "summary "+maskSecret)
 	maskExec(t, d, "INSERT INTO cron_jobs(id, schedule, prompt) VALUES('j1', '@daily', ?)", "use "+maskSecret)
-	n, err := maskDB(ctx, d, []string{maskSecret})
+	n, err := maskDB(ctx, d, map[string]string{maskSecret: "OPENAI_API_KEY"})
 	if err != nil || n != 4 {
 		t.Fatal(n, err)
 	}
@@ -136,7 +135,7 @@ func TestMaskDBFreeText(t *testing.T) {
 	if err := d.QueryRow("SELECT content FROM messages").Scan(&content); err != nil {
 		t.Fatal(err)
 	}
-	if content != "my key is "+security.Mask(maskSecret)+" please test it" {
+	if content != "my key is «OPENAI_API_KEY» please test it" {
 		t.Fatalf("%q", content)
 	}
 	var hits int
@@ -159,7 +158,7 @@ func TestMaskDBKeepsStateColumns(t *testing.T) {
 	maskInsertSession(t, d, "s1", "123456789")
 	maskExec(t, d, "INSERT INTO pairing(platform, user_id, status) VALUES('telegram', '123456789', 'approved')")
 	maskInsertMessage(t, d, "s1", "chat 123456789", "")
-	n, err := maskDB(context.Background(), d, []string{"123456789"})
+	n, err := maskDB(context.Background(), d, map[string]string{"123456789": "TELEGRAM_USER"})
 	if err != nil || n != 1 { // only messages.content
 		t.Fatal(n, err)
 	}
@@ -184,7 +183,7 @@ func TestMaskDBLeavesNoOldBytes(t *testing.T) {
 	maskInsertSession(t, d, "s1", "")
 	// The padding forces the message onto an overflow page.
 	maskInsertMessage(t, d, "s1", strings.Repeat("padding ", 600)+maskSecret, "")
-	if _, err := maskDB(context.Background(), d, []string{maskSecret}); err != nil {
+	if _, err := maskDB(context.Background(), d, map[string]string{maskSecret: "OPENAI_API_KEY"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Close(); err != nil {
@@ -208,7 +207,7 @@ func TestMaskDBShortValueIgnored(t *testing.T) {
 	d := maskOpenDB(t)
 	maskInsertSession(t, d, "s1", "")
 	maskInsertMessage(t, d, "s1", "value 1234567", "")
-	n, err := maskDB(context.Background(), d, []string{"1234567"})
+	n, err := maskDB(context.Background(), d, map[string]string{"1234567": "PIN"})
 	if err != nil || n != 0 {
 		t.Fatal(n, err)
 	}
@@ -218,7 +217,7 @@ func TestMaskDBNoMatch(t *testing.T) {
 	d := maskOpenDB(t)
 	maskInsertSession(t, d, "s1", "")
 	maskInsertMessage(t, d, "s1", "nothing here", "")
-	n, err := maskDB(context.Background(), d, []string{maskSecret})
+	n, err := maskDB(context.Background(), d, map[string]string{maskSecret: "OPENAI_API_KEY"})
 	if err != nil || n != 0 {
 		t.Fatal(n, err)
 	}
@@ -266,7 +265,7 @@ func TestMaskDBMasksReasoning(t *testing.T) {
 	maskInsertSession(t, d, "s1", "c1")
 	maskExec(t, d, `INSERT INTO messages (session_id, role, content, reasoning, timestamp) VALUES ('s1', 'assistant', 'x', ?, 1)`,
 		`{"Issuer":"openai http://x m","Text":"the key is `+maskSecret+`"}`)
-	n, err := maskDB(context.Background(), d, []string{maskSecret})
+	n, err := maskDB(context.Background(), d, map[string]string{maskSecret: "OPENAI_API_KEY"})
 	if err != nil || n != 1 {
 		t.Fatal(n, err)
 	}
@@ -277,7 +276,7 @@ func TestMaskDBMasksGoalState(t *testing.T) {
 	d := maskOpenDB(t)
 	maskExec(t, d, `INSERT INTO goals (session_id, state, revision, updated_at) VALUES ('s1', ?, 1, 0)`,
 		`{"goal":"deploy with `+maskSecret+`","gates":[{"command":"curl -H `+maskSecret+`"}]}`)
-	n, err := maskDB(context.Background(), d, []string{maskSecret})
+	n, err := maskDB(context.Background(), d, map[string]string{maskSecret: "OPENAI_API_KEY"})
 	if err != nil || n != 1 {
 		t.Fatal(n, err)
 	}
@@ -293,7 +292,7 @@ func TestMaskDBMasksCronRuns(t *testing.T) {
 	maskExec(t, d, `INSERT INTO cron_runs (job_id, started_at, finished_at, status, delivery, output, delivery_error, session_id)
 		VALUES ('j1', 1, 2, 'error', 'failed', ?, ?, 's1')`,
 		"curl -H "+maskSecret+" failed", "send failed: "+maskSecret)
-	n, err := maskDB(context.Background(), d, []string{maskSecret})
+	n, err := maskDB(context.Background(), d, map[string]string{maskSecret: "OPENAI_API_KEY"})
 	if err != nil || n != 2 {
 		t.Fatal(n, err)
 	}
@@ -302,5 +301,45 @@ func TestMaskDBMasksCronRuns(t *testing.T) {
 	if err := d.QueryRow(`SELECT job_id, status, delivery, session_id FROM cron_runs`).
 		Scan(&job, &status, &delivery, &sid); err != nil || job != "j1" || status != "error" || delivery != "failed" || sid != "s1" {
 		t.Fatal("the state columns must stay unchanged:", job, status, delivery, sid, err)
+	}
+}
+
+// A cell that holds only the JSON form of a value is masked too.
+func TestMaskDBJSONForm(t *testing.T) {
+	const pw = `pa"ss\word-123456`
+	d := maskOpenDB(t)
+	maskInsertSession(t, d, "s1", "")
+	maskInsertMessage(t, d, "s1", "x", `{"pw":"pa\"ss\\word-123456"}`)
+	n, err := maskDB(context.Background(), d, map[string]string{pw: "DB_PASSWORD"})
+	if err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	var calls string
+	if err := d.QueryRow("SELECT tool_calls FROM messages").Scan(&calls); err != nil {
+		t.Fatal(err)
+	}
+	if calls != `{"pw":"«DB_PASSWORD»"}` {
+		t.Fatalf("%q", calls)
+	}
+}
+
+// Two values of one name both get the label.
+func TestMaskDBTwoValuesOneName(t *testing.T) {
+	d := maskOpenDB(t)
+	maskInsertSession(t, d, "s1", "")
+	maskInsertMessage(t, d, "s1", "a dotenv-gh-0123456789 b env-gh-0123456789", "")
+	n, err := maskDB(context.Background(), d, map[string]string{
+		"dotenv-gh-0123456789": "GH_TOKEN",
+		"env-gh-0123456789":    "GH_TOKEN",
+	})
+	if err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	var content string
+	if err := d.QueryRow("SELECT content FROM messages").Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	if content != "a «GH_TOKEN» b «GH_TOKEN»" {
+		t.Fatalf("%q", content)
 	}
 }

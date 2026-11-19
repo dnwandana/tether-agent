@@ -11,7 +11,7 @@ func TestRequiredVars(t *testing.T) {
 	p := writeTmp(t, "providers:\n  openai:\n    api_key: ${OPENAI_API_KEY}\ntelegram:\n  bot_token: ${TELEGRAM_BOT_TOKEN}\n"+
 		"mcp:\n  servers:\n    gh:\n      headers:\n        Authorization: Bearer ${GITHUB_TOKEN} ${GITHUB_TOKEN}\n")
 	got, err := RequiredVars(p, func(n string) (string, bool) { return "x", n == "TELEGRAM_BOT_TOKEN" })
-	want := []VarStatus{{"GITHUB_TOKEN", false}, {"OPENAI_API_KEY", false}, {"TELEGRAM_BOT_TOKEN", true}}
+	want := []VarStatus{{Name: "GITHUB_TOKEN"}, {Name: "OPENAI_API_KEY"}, {Name: "TELEGRAM_BOT_TOKEN", Set: true}}
 	if err != nil || !slices.Equal(got, want) {
 		t.Fatal(got, err)
 	}
@@ -63,5 +63,15 @@ func TestRequiredVarsBadYAML(t *testing.T) {
 	want := []VarStatus{{Name: "A_KEY", Set: false}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatal(got, err)
+	}
+}
+
+func TestRequiredVarsBoundNames(t *testing.T) {
+	p := writeTmp(t, "telegram:\n  bot_token: ${TELEGRAM_BOT_TOKEN}\n"+
+		"exec_secrets:\n  PYPI_TOKEN:\n    commands: [\"twine upload\"]\n  TELEGRAM_BOT_TOKEN:\n    commands: [\"tg\"]\n")
+	got, err := RequiredVars(p, func(n string) (string, bool) { return "x", n == "PYPI_TOKEN" })
+	want := []VarStatus{{Name: "PYPI_TOKEN", Set: true, Bound: true}, {Name: "TELEGRAM_BOT_TOKEN", Bound: true}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("%+v %v", got, err)
 	}
 }

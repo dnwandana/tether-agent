@@ -232,3 +232,16 @@ func TestScriptLimitsStderrTail(t *testing.T) {
 		t.Fatal(txt)
 	}
 }
+
+func TestLongStdoutSpillNameIsCronSource(t *testing.T) {
+	p := script(t, "long.sh", "yes abcdefghij | head -n 500")
+	spill := t.TempDir()
+	r := RunScriptSpill(ctx, p, "", nil, ScriptLimits{Timeout: time.Minute, OutputMaxChars: 200}, spill)
+	files, err := filepath.Glob(filepath.Join(spill, "*.txt"))
+	if err != nil || len(files) != 1 {
+		t.Fatal(files, err, r.Stdout)
+	}
+	if !strings.HasPrefix(filepath.Base(files[0]), "cron_data_script-") {
+		t.Fatalf("the spill file name has no source: %s", files[0])
+	}
+}

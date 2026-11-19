@@ -279,3 +279,17 @@ func TestPruneLog(t *testing.T) {
 		t.Fatal(n, err)
 	}
 }
+
+func TestMaskCutDigits(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"no cut 4111 1111", "no cut 4111 1111"},
+		{"pay 4111 1111 11…", "pay •••• •••• ••…"},
+		{"call +94 77 12… and #3 4111-…", "call +•• •• ••… and #• ••••-…"},
+		{"word…", "word…"},
+		{"v1.26…", "v•.••…"},
+	} {
+		if got := maskCutDigits(tc.in); got != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

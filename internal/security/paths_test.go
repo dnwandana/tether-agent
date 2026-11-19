@@ -195,6 +195,7 @@ func TestProtectedPathsBackupsAndDBLock(t *testing.T) {
 		filepath.Join(data, "backups"),
 		filepath.Join(data, "backups/tether-backup-20261028-174210.tar.gz"),
 		filepath.Join(data, "state.db.lock"),
+		filepath.Join(data, ".env.lock"),
 	} {
 		if err := CheckWritable(f, p, true); !errors.Is(err, ErrProtected) {
 			t.Fatalf("%s: %v", f, err)

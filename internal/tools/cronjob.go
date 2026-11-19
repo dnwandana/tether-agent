@@ -39,6 +39,9 @@ type CronJobTool struct {
 	Tick     time.Duration
 	GraceMin time.Duration
 	GraceMax time.Duration
+	// PrivateTarget reports whether the deliver value of a call stays with the owner. Nil
+	// skips this check of the tool. The check of the store still runs.
+	PrivateTarget func(ctx context.Context, env *Env, deliver string) bool
 }
 
 // cronSpan formats d as "2 h", "2 min", or "30 s".
@@ -58,22 +61,23 @@ type cronModelArg struct {
 }
 
 type cronArgs struct {
-	Action   string        `json:"action"`
-	JobID    string        `json:"job_id"`
-	Name     *string       `json:"name"`
-	Prompt   *string       `json:"prompt"`
-	Schedule *string       `json:"schedule"`
-	Repeat   *int          `json:"repeat"`
-	Deliver  *string       `json:"deliver"`
-	Skills   *[]string     `json:"skills"`
-	Model    *cronModelArg `json:"model"`
-	Script   *string       `json:"script"`
-	NoAgent  *bool         `json:"no_agent"`
-	Toolsets *[]string     `json:"toolsets"`
-	Workdir  *string       `json:"workdir"`
-	Limit    *int          `json:"limit"`
-	Offset   *int          `json:"offset"`
-	RunID    *int64        `json:"run_id"`
+	Action    string        `json:"action"`
+	JobID     string        `json:"job_id"`
+	Name      *string       `json:"name"`
+	Prompt    *string       `json:"prompt"`
+	Schedule  *string       `json:"schedule"`
+	Repeat    *int          `json:"repeat"`
+	Deliver   *string       `json:"deliver"`
+	Skills    *[]string     `json:"skills"`
+	Model     *cronModelArg `json:"model"`
+	Script    *string       `json:"script"`
+	NoAgent   *bool         `json:"no_agent"`
+	DraftOnly *bool         `json:"draft_only"`
+	Toolsets  *[]string     `json:"toolsets"`
+	Workdir   *string       `json:"workdir"`
+	Limit     *int          `json:"limit"`
+	Offset    *int          `json:"offset"`
+	RunID     *int64        `json:"run_id"`
 }
 
 // Name returns "cronjob".
@@ -140,6 +144,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
     },
     "script": {"type": "string", "description": "Optional path to a script. A relative path resolves under ~/.tether/scripts/. .sh and .bash files run with bash, other files with python3. In an agent job, the script runs first and its stdout goes into the prompt as data. With no_agent=true, the script IS the job: empty stdout sends nothing; a failure always alerts. On update, pass an empty string to clear."},
     "no_agent": {"type": "boolean", "description": "Default false: the agent runs the prompt each tick. Set true to skip the model: the scheduler runs the script and delivers its stdout word for word, with zero tokens. Requires script."},
+    "draft_only": {"type": "boolean", "description": "Default false. Set true to make the job draft-only: it can read the web and read MCP data, and it can write drafts, but it cannot send. The run has no terminal, execute_code, browser actions, or delegate_task, and only MCP read tools and draft tools. A draft-only job delivers only to a private chat or local, and it cannot use no_agent. On update, pass false to clear."},
     "toolsets": {"type": "array", "items": {"type": "string"}, "description": "Optional list of toolset names to restrict the job's agent to (e.g. [\"web\", \"terminal\", \"file\"]). On update, pass an empty array to clear."},
     "workdir": {"type": "string", "description": "Optional absolute path of an existing folder to run the job from. On update, pass an empty string to clear."},
     "limit": {"type": "integer", "description": "For runs: the number of runs to show, newest first. Default 10, maximum 50."},
@@ -243,6 +248,9 @@ func (t CronJobTool) create(ctx context.Context, a cronArgs, env *Env) (string, 
 	if a.NoAgent != nil {
 		j.NoAgent = *a.NoAgent
 	}
+	if a.DraftOnly != nil {
+		j.DraftOnly = *a.DraftOnly
+	}
 	if a.Repeat != nil {
 		j.RepeatLeft = *a.Repeat
 	}
@@ -254,6 +262,9 @@ func (t CronJobTool) create(ctx context.Context, a cronArgs, env *Env) (string, 
 	}
 	j.Model = t.modelPin(a.Model, env)
 	if err := t.checkScript(j.Script); err != nil {
+		return "", err
+	}
+	if err := t.checkDraftDeliver(ctx, env, j.DraftOnly, j.Deliver); err != nil {
 		return "", err
 	}
 	if env != nil {
@@ -270,7 +281,7 @@ func (t CronJobTool) create(ctx context.Context, a cronArgs, env *Env) (string, 
 func (t CronJobTool) update(ctx context.Context, a cronArgs, env *Env) (string, error) {
 	p := cron.JobPatch{
 		Name: a.Name, Prompt: a.Prompt, Schedule: a.Schedule, Deliver: a.Deliver, Script: a.Script,
-		Workdir: a.Workdir, NoAgent: a.NoAgent, Skills: a.Skills, Toolsets: a.Toolsets, RepeatLeft: a.Repeat,
+		Workdir: a.Workdir, NoAgent: a.NoAgent, DraftOnly: a.DraftOnly, Skills: a.Skills, Toolsets: a.Toolsets, RepeatLeft: a.Repeat,
 	}
 	if a.Model != nil {
 		pin := t.modelPin(a.Model, env)
@@ -280,10 +291,26 @@ func (t CronJobTool) update(ctx context.Context, a cronArgs, env *Env) (string, 
 		p.Model = pin
 	}
 	if p == (cron.JobPatch{}) {
-		return "", toolErr("update has no fields to change; pass at least one of name, prompt, schedule, repeat, deliver, skills, model, script, no_agent, toolsets, or workdir")
+		return "", toolErr("update has no fields to change; pass at least one of name, prompt, schedule, repeat, deliver, skills, model, script, no_agent, draft_only, toolsets, or workdir")
 	}
 	if a.Script != nil {
 		if err := t.checkScript(*a.Script); err != nil {
+			return "", err
+		}
+	}
+	if a.DraftOnly != nil || a.Deliver != nil {
+		old, err := t.Store.Get(ctx, a.JobID)
+		if err != nil {
+			return "", cronErr(err)
+		}
+		draftOnly, deliver := old.DraftOnly, old.Deliver
+		if a.DraftOnly != nil {
+			draftOnly = *a.DraftOnly
+		}
+		if a.Deliver != nil {
+			deliver = *a.Deliver
+		}
+		if err := t.checkDraftDeliver(ctx, env, draftOnly, deliver); err != nil {
 			return "", err
 		}
 	}
@@ -409,6 +436,14 @@ func (t CronJobTool) runText(r cron.Run, output string) string {
 	if r.Delivery == cron.DeliveryFailed {
 		fmt.Fprintf(&b, " · delivery error: %s", r.DeliveryErr)
 	}
+	switch r.Delivery {
+	case cron.DeliveryHeld:
+		b.WriteString(" · held: waits for the owner to tap Send or Drop")
+	case cron.DeliveryDropped:
+		b.WriteString(" · held, then dropped by the owner")
+	case cron.DeliveryExpired:
+		b.WriteString(" · held, then expired after 24 h with no tap")
+	}
 	if output == "" {
 		output = "(no output)"
 	}
@@ -463,6 +498,8 @@ func (t CronJobTool) jobLine(j cron.Job) string {
 	kind := "agent"
 	if j.NoAgent {
 		kind = "script"
+	} else if j.DraftOnly {
+		kind = "agent, draft-only"
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "- %s · %s · %s · %s · schedule %q · next run %s", j.ID, j.Name, state, kind, j.Schedule, t.timeText(j.NextRun))
@@ -552,6 +589,18 @@ func (t CronJobTool) origin(ctx context.Context, env *Env) cron.Origin {
 		src = o.Source
 	}
 	return cron.Origin{Source: src, ChatID: sess.ChatID, ThreadID: sess.ThreadID, SessionKey: key}
+}
+
+// checkDraftDeliver refuses a draft-only job with a deliver value that is not private.
+// A nil PrivateTarget skips the check, and the store check still runs.
+func (t CronJobTool) checkDraftDeliver(ctx context.Context, env *Env, draftOnly bool, deliver string) error {
+	if !draftOnly || t.PrivateTarget == nil {
+		return nil
+	}
+	if !t.PrivateTarget(ctx, env, deliver) {
+		return toolErr("%s", cron.ErrDraftDeliver.Error())
+	}
+	return nil
 }
 
 // checkDeliver refuses an explicit delivery target outside the chat of a caller that
