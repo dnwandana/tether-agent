@@ -377,7 +377,7 @@ func (in *Installer) report(s *staged) {
 	}
 	if len(s.skill.RequiredEnv) > 0 {
 		in.printf("Required environment variables: %s\n", Sanitize(strings.Join(s.skill.RequiredEnv, ", ")))
-		in.printf("A secret reaches the terminal tool only when its name is in terminal.env_passthrough in config.yaml.\n")
+		in.printf("A secret reaches the terminal tool only when exec_secrets in config.yaml binds it to a command.\n")
 	}
 	in.printf("%s\n", Sanitize(FormatFindings(s.scan)))
 }

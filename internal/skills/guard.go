@@ -73,7 +73,7 @@ const (
 // variable out. The API call belongs in a script, where the guard does not
 // see the key.
 const scriptsHint = "Put the API call in a script under ~/.tether/scripts/ and make the skill run that script. " +
-	"The user must add the key name to terminal.env_passthrough in config.yaml. " +
+	"The user must bind the key name in exec_secrets in config.yaml to the absolute path of the script. " +
 	"Also list the name in required_environment_variables, so skill_view shows its status. " +
 	"The guard does not scan ~/.tether/scripts/."
 

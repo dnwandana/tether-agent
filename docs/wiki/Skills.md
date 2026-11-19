@@ -25,7 +25,7 @@ The frontmatter has these fields:
 |---|---|---|
 | `name` | Yes | The name of the skill. A skill that the agent writes must have the same name as its folder. |
 | `description` | Yes | The text that the agent sees in its skill list. Write when to use the skill. The list shows a maximum of 1024 characters. |
-| `required_environment_variables` | No | The names of the variables that the skill needs. A skill passes no variable. Only `terminal.env_passthrough` passes a variable to the `terminal` and `execute_code` tools. `skill_view` shows one status for each name: `passed`, `not passed: add it to terminal.env_passthrough in config.yaml`, or `not set`. |
+| `required_environment_variables` | No | The names of the variables that the skill needs. A skill passes no variable. `exec_secrets` binds a secret to a command. `terminal.env_passthrough` passes a name to each command. `skill_view` shows one status for each name: `passed`, `bound: <commands>`, `not passed: add it to terminal.env_passthrough in config.yaml`, or `not set`. |
 
 A skill folder can also have two subfolders:
 
@@ -291,8 +291,11 @@ The lockfile records the owner override.
 Do not put an API call with a key in a skill. Use this pattern:
 
 1. Put the API call in a script in `~/.tether/scripts/`.
-2. Tell the agent in the skill to run that script with `terminal`.
-3. Add the name of the key to `terminal.env_passthrough` in `config.yaml`.
+2. Give the script a `#!` line and the exec bit (`chmod +x`).
+3. Tell the agent in the skill to run that script with `terminal`, by its absolute path and
+   alone, for example `/home/you/.tether/scripts/helius.sh <wallet>`. `bash <script>`, a pipe,
+   or a `cd` before the script gets no key.
+4. Bind the name of the key in `exec_secrets` in `config.yaml` to the absolute path of the script.
 
 The [security model](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#skill-guard)
 gives the full rules.

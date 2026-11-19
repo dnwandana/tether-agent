@@ -52,15 +52,19 @@ line that contains a key variable is refused. A declaration in
 `required_environment_variables` does not change this. Use a script:
 
 1. Write the API call in a script under `~/.tether/scripts/`, for example
-   `~/.tether/scripts/helius.sh`. The script reads the key from its environment.
+   `~/.tether/scripts/helius.sh`. The script reads the key from its environment. The script
+   needs a `#!` line and the exec bit (`chmod +x`).
 2. `write_file` and `patch` cannot write in `scripts/`. Ask the user to put the script there,
    or write it with `terminal`. The approval gate then asks the user.
-3. Ask the user to add the key name to `terminal.env_passthrough` in config.yaml. Only that
-   setting passes the key to the script. Also list the name in `required_environment_variables`
-   in the frontmatter, so `skill_view` shows its status.
-4. In the skill body, tell the agent to run the script with `terminal`:
+3. Ask the user to bind the key name in `exec_secrets` in config.yaml to the absolute path of
+   the script, for example `commands: ["/home/you/.tether/scripts/helius.sh"]`. Only that
+   binding gives the key to the script, and the agent never sees the value. Also list the name
+   in `required_environment_variables` in the frontmatter, so `skill_view` shows its status.
+4. In the skill body, tell the agent to run the script by its absolute path with `terminal`:
 
-       Run `bash ~/.tether/scripts/helius.sh <wallet>`.
+       Run `/home/you/.tether/scripts/helius.sh <wallet>`.
+
+   Run the script alone. `bash <script>`, a pipe, or a `cd` before the script gets no key.
 
 The guard scans only the skill folders. It does not scan `~/.tether/scripts/`.
 

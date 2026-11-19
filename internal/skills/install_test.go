@@ -686,7 +686,7 @@ func TestInstallReportsRequiredEnv(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Required environment variables: GITHUB_TOKEN, GH_HOST\n",
-		"A secret reaches the terminal tool only when its name is in terminal.env_passthrough in config.yaml.\n",
+		"A secret reaches the terminal tool only when exec_secrets in config.yaml binds it to a command.\n",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output has no %q:\n%s", want, out)
