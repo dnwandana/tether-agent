@@ -238,7 +238,9 @@ func TestWakeAfterBeginStoppingEnqueuesNothing(t *testing.T) {
 		if !errors.Is(err, ErrStopping) {
 			t.Fatal(err)
 		}
-	case <-time.After(2 * time.Second):
+	// The bound is only a limit: the test continues at the first error. Under a full,
+	// parallel test run, the 200 ms timer can fire after 2 s.
+	case <-time.After(10 * time.Second):
 		t.Fatal("the late timer did not fire")
 	}
 	time.Sleep(50 * time.Millisecond)
