@@ -55,6 +55,7 @@ that contains all the information that the job needs.
 | `model` | A `provider` and a `model` for this job. See [Provider and reasoning effort](#provider-and-reasoning-effort). |
 | `script` | A script in the `scripts/` folder. See [Script jobs](#script-jobs). |
 | `no_agent` | `true` runs only the script, with no model call. |
+| `draft_only` | `true` makes the job draft-only: it can read and write drafts, but it cannot send. See [Draft-only jobs](#draft-only-jobs). |
 | `toolsets` | A smaller list of toolsets for this job. |
 | `workdir` | An absolute path of a folder to run the job from. |
 
@@ -93,11 +94,42 @@ delivery fails. The job gets the status `delivery_failed`, and the error tells y
 > **Note:** `telegram:<chat>` without `:<thread>` does not go to a topic. Add the thread id for a
 > forum topic.
 
+A delivery to a group, a topic, or a private chat of a member is scanned. The scan masks a secret,
+a card number, an IBAN, and a phone number. The owner gets a note with the button
+`✅ Post the full text there` for 24 h. See [Security](Security#outbound-scan) for the scan.
+
+## Held deliveries
+
+When a run read outside content (web, browser, MCP, or a network command) and delivers to a target
+that is not private, `model_guard` checks the purpose of the job and the action. A hold puts the
+delivery in a card in your private chat. The card has the buttons ❌ Drop and ✅ Send, and it waits
+for 24 h. A local-only job makes no extra model call. `outbound.guard` and
+`outbound.guard_provider` set the check. See [Security](Security#model_guard-and-draft-only-jobs).
+
+## Draft-only jobs
+
+A draft-only job can read and write drafts, but it cannot send. These rules apply to the run:
+
+- The run has no `terminal`, `execute_code`, `browser_click`, `browser_fill`, `browser_run_js`,
+  `browser_cookies`, `delegate_task`, or `acp_delegate`.
+- The run can call only MCP read tools and draft tools.
+- The job delivers only to a private chat or to `local`.
+- An alert of the job goes to your private chat.
+- The job cannot use `no_agent`.
+
+Example prompt: "Every morning at 8, read new mail and write draft replies. Make it draft-only."
+
 ## What a run does
 
 An agent run has these rules:
 
 - Each run is a fresh session with the key `cron:<job id>`.
+- The stdout of the data script goes into the prompt as untrusted data, in an
+  `untrusted_tool_result` block.
+- A long stdout of the data script goes to the spill file
+  `cache/spill/cron_data_script-<id>.txt`. A `read_file` of that file wraps the text in the same
+  block, with the source `cron data script`.
+- The `runs` action shows the delivery value of each run: `held`, `sent`, `dropped`, or `expired`.
 - The run cannot use the `cronjob` tool or the `clarify` tool. No user is present to answer.
 - The final answer goes to the target. When the run finds nothing new, the agent answers
   `[SILENT]`, and no message goes out. The run is still recorded.

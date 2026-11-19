@@ -12,7 +12,7 @@ gives the default of each key on this page.
 
 | Toolset | Purpose | Tools | Requirement |
 |---|---|---|---|
-| `terminal` | Run shell commands on the host, in the foreground or in the background. | `terminal` | None. Each command goes through the [approval gate](Security#the-approval-gate). |
+| `terminal` | Run shell commands on the host, in the foreground or in the background. | `terminal`, `request_secret` | None. Each command goes through the [approval gate](Security#the-approval-gate). |
 | `file` | Read, write, and edit files. | `read_file`, `write_file`, `patch` | None. The tools refuse [protected paths](Security#protected-paths). |
 | `web` | Search the web and read pages as Markdown. | `web_search`, `web_fetch` | None. |
 | `browser` | Control a headless Chrome. | `browser_navigate`, `browser_click`, `browser_fill`, `browser_read`, `browser_run_js`, `browser_take_screenshot`, `browser_cookies` | Chrome or Chromium on the host. |
@@ -37,6 +37,20 @@ Some tools are not registered when their requirement is missing:
 - A media tool needs a backend. `generate_image` has no default backend.
 
 A browser tool stays registered without Chrome. A call then returns an error.
+
+### Secrets for commands
+
+A secret reaches a command only when you bind it. These parts work together:
+
+- `exec_secrets` in `config.yaml` binds a secret name to the commands that may get it. Only a
+  `terminal` command that runs alone gets the secret, for example
+  `twine upload -p "$PYPI_TOKEN" dist/*`. `cd dist && twine upload *` gets no secret.
+- `request_secret` asks you in a private chat for the value of a bound secret that is missing or
+  bad. The agent never sees the value.
+- `/secrets` shows the bound names, the pins, and the marks. `/secrets set <name>` saves a value.
+  `/secrets unpin <name>` removes the pins.
+
+See [Security](Security#bound-secrets).
 
 ## Turn toolsets on or off
 
@@ -74,6 +88,9 @@ Markdown.
 When `web.block_private_networks` is `true` (the default), the web tools refuse loopback, private,
 link-local, and CGNAT addresses. The check runs on the IP address after DNS resolution.
 
+The result goes to the model inside an `untrusted_tool_result` block, so the model treats it as
+data. See [Security](Security#untrusted-content).
+
 ## Vision
 
 `view_image` sends one image and a question to a vision model. It returns the answer text.
@@ -98,6 +115,9 @@ The same vision provider describes the static stickers that you send in Telegram
 
 The browser tools control one headless Chrome through the Chrome DevTools Protocol. Each session
 has its own tab.
+
+The result goes to the model inside an `untrusted_tool_result` block, so the model treats it as
+data. See [Security](Security#untrusted-content).
 
 ### Install Chrome
 
@@ -136,6 +156,9 @@ browser:
 
 Tether Agent is an MCP client. It supports the stdio, Streamable HTTP, and SSE transports. It does
 not support OAuth.
+
+The result of an MCP tool goes to the model inside an `untrusted_tool_result` block, so the model
+treats it as data. See [Security](Security#untrusted-content).
 
 ### Add a server
 
@@ -217,6 +240,8 @@ The gate gives each MCP tool one class. It reads the tool name and the hints of 
 - Set `tools.class` to give a tool the class `read`, `write`, or `send`. It cannot change a human-only
   tool.
 - In `/mode read-only`, only `read` tools run.
+- The gate also scans the arguments of a `send` call for secrets, card numbers, IBANs, and phone
+  numbers. A finding adds the button `✅ Send redacted`.
 
 ```yaml
 tools:
@@ -423,6 +448,7 @@ A script can call only these tools: `web_search`, `web_fetch`, `read_file`, `wri
 - The script runs in a scratch folder.
 - The script gets an environment with no secrets. The only exception is the names in
   `terminal.env_passthrough`.
+- A bound secret of `exec_secrets` never reaches a script.
 - Each script needs an approval for the rule `execute_code` (`run a Python script on the
   host`). A clean script needs one approval for each session. A script with a literal
   dangerous command asks each time. Refer to

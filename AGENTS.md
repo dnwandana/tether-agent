@@ -120,7 +120,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   3. A status or preview message uses `queueClient` or `interimClient`. A full budget gives a
      `*paceHold` at once. A hold is not a flood and not a try.
 - Tests reset global state: `security.AddProtectedPathPatterns(nil)`, `security.SetHumanOnlyRules(nil)`,
-  the command table of `gateway.Register`, and `gateway.pickTip` and `gateway.nowFunc`.
+  `security.SetBoundSecretNames(nil)`, the command table of `gateway.Register`, and
+  `gateway.pickTip` and `gateway.nowFunc`.
 - `internal/skills/testdata/guard_golden.json` is the output of the Hermes threat patterns.
   No tool regenerates it.
 

@@ -149,7 +149,11 @@ func TestSecurityDocCoversTopics(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, s := range []string{"manual", "smart", "hardline", "600", "cron_mode", ".env", "0600", "pairing", "121",
-		"scripts/", "MCP", "protected", "subprocess", "container", "env_passthrough", "block_private_networks"} {
+		"scripts/", "MCP", "protected", "subprocess", "container", "env_passthrough", "block_private_networks",
+		"exec_secrets", "TMP_SECRET_", "«PYPI_TOKEN»", "request_secret", "/secrets set",
+		"human_only_stage_credential", "git ls-files", "outbound.private_chats", "Send redacted",
+		"model_guard", "outbound.guard_provider", "draft_only", "held_sends", "untrusted_tool_result",
+		"git commit -a"} {
 		if !strings.Contains(string(b), s) {
 			t.Fatal("SECURITY.md misses", s)
 		}

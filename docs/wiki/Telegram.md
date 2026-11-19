@@ -154,7 +154,8 @@ In a shared session, a busy reply to a member has no **⚡ Do this now** button,
 is owner-only there. `/help` for a member in a shared session adds the line
 `In a shared session, only the owner can use /new, /stop, and /now.`
 
-Only an owner can answer an approval and send `/sethome`, `/approve`, `/deny`, or `/approvals`.
+Only an owner can answer an approval and send `/sethome`, `/approve`, `/deny`, `/approvals`,
+`/mode`, or `/secrets`.
 Add each trusted group member to `telegram.group_allowed_users`.
 
 A member turn has less power than an owner turn:
@@ -244,7 +245,7 @@ order:
 
 `/new`, `/sessions`, `/stop`, `/steer`, `/now`, `/goal`, `/todo`, `/model`, `/effort`, `/usage`,
 `/help`, `/rename`, `/fork`, `/compact`, `/prompt`, `/archive`, `/delete`, `/approve`, `/deny`,
-`/sethome`, `/reload_mcp`, and `/restart`.
+`/approvals`, `/mode`, `/secrets`, `/sethome`, `/reload_mcp`, and `/restart`.
 
 Telegram does not permit `-` in a command name, so the menu shows `/reload-mcp` as
 `/reload_mcp`. Both names work. `/start`, `/reset`, `/resume`, and `/subgoal` are not in the
@@ -253,7 +254,7 @@ menu, but they work. See [Commands](Commands) for each command.
 After the built-in commands, the menu shows the skill commands in name order, with `_` in place
 of `-`. See [Skills](Skills#run-a-skill-with-a-slash-command). These rules apply:
 
-- The menu has a maximum of 60 entries (`telegram.menu_max_commands`, with the 22 built-in commands). Send `/help skills` to see all skill commands.
+- The menu has a maximum of 60 entries (`telegram.menu_max_commands`, with the 25 built-in commands). Send `/help skills` to see all skill commands.
 - A skill command with a name of more than 32 characters is not in the menu.
 - The gateway sets the menu only when it starts. A new skill shows in the menu after the next
   start.

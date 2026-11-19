@@ -73,11 +73,13 @@ To restart the gateway, send `/restart` in a chat, or run `systemctl --user relo
 | `web` | `web_search` and `web_fetch`: the backend, the URL limits, the private network block, the HTTP timeout, and the result counts. |
 | `browser` | The Chrome path, the idle stop time, the action timeout, the length of the page excerpt, and the settle wait. |
 | `terminal` | The command timeout and the secrets that child processes can see. |
+| `exec_secrets` | The secrets that go only to the commands that you name, for example `twine upload`. See [Security](Security#bound-secrets). |
 | `code_execution` | The limits of `execute_code`. |
 | `files` | The line limits of `read_file` and the context lines of `patch`. |
 | `todo` | The item count and the item length of the todo list. |
 | `delegation` | The limits of `delegate_task` child runs. |
 | `approvals` | The approval mode for dangerous commands, in chats and in cron runs. |
+| `outbound` | The scan of each send to a target that is not private, the chats that count as private, and `model_guard` with its provider. See [Security](Security#outbound-scan). |
 | `goals` | The `/goal` loop: the turn budget, the judge, the gates, and the waits. |
 | `toolsets` | The toolsets that each channel can use. |
 | `cron` | Parallel cron jobs, the time limits of a run, the rule for missed runs, the run history, and the limit of failures in a row. |

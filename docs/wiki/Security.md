@@ -89,6 +89,24 @@ password, purge, or bulk delete word. `approvals.human_only` raises more rules. 
 of a dangerous rule, for example `git_force_push`, or `mcp:<server>.<tool>`. See the
 [full rule list](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#human-only-actions).
 
+The rule `human_only_stage_credential` covers the staging of a credential file, for example
+`git add .env` or `git add -A` when the work tree has a credential file. For a broad form, the
+gate lists the files with `git rev-parse` and `git ls-files`. It runs the system git with safe
+`-c` options and a limit of 5 s. It compares the stat data of each tracked credential file with
+the index. The gate never runs `git add`, so git starts no filter driver.
+
+The check is "unchecked" when it cannot tell the files, for example:
+
+- The command sets a `GIT_*` variable, `HOME`, or `XDG_CONFIG_HOME`.
+- The folder is unknown, for example after `cd "$DIR"`.
+- A broad add comes after a part that can write a file.
+- git fails with an error other than "not a git repository", or the limit of 5 s ends.
+
+An unchecked command is human-only, and the prompt shows
+`Tether Agent could not check which files this command stages.` `git commit -a` stages only
+tracked files, so a credential file that git already tracks is out of scope. See the
+[details](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#human-only-actions).
+
 ### Commands that the gate cannot read
 
 The gate cannot read a command that is longer than 32 KB, has a syntax error, nests too deep,
@@ -147,6 +165,12 @@ Two cases come first. When `approvals.mode` is `off`, the command runs. When eac
 has a grant, the command runs. A child agent of a cron job follows the same rules.
 A cron run always blocks a human-only command and a command that the gate cannot read, also with
 `approve`. It also blocks an MCP `write` or `send` call under `deny`.
+
+A cron run also blocks these sends, also with `approve`:
+
+- An MCP `send` call with a scan finding. See [Outbound scan](#outbound-scan).
+- A send that `model_guard` holds. See [model_guard and draft-only jobs](#model_guard-and-draft-only-jobs).
+- Each MCP write and send of a job with `draft_only`, except a draft tool.
 
 ### Scripts of execute_code
 
@@ -436,6 +460,8 @@ entries.
 - Set the file mode to 0600. The program does not start when the group or other users have any
   permission on the file.
 - A variable in the process environment overrides the same name in `.env`.
+- A bound secret takes its value from `.env` only. `.env.lock` in the data folder is a protected
+  path.
 
 ### Child processes get no secrets
 
@@ -464,7 +490,71 @@ These names pass through to the child:
 
 A skill cannot pass a name. The `required_environment_variables` of a skill only give a
 status: `passed`, `not passed: add it to terminal.env_passthrough in config.yaml`, or
-`not set`. To give a secret to a skill, add the name to `terminal.env_passthrough`.
+`not set`. To give a secret to a skill, bind it in `exec_secrets`.
+
+### Bound secrets
+
+A bound secret goes only to the commands that you name:
+
+```yaml
+exec_secrets:
+  PYPI_TOKEN:
+    commands: ["twine upload", "uv publish"]
+```
+
+A name in both `exec_secrets` and `terminal.env_passthrough` is a config error. Use
+`terminal.env_passthrough` only for a name that each command needs.
+
+A bound secret goes only to a command text that is one simple command. The secret goes to the
+whole shell, so a second part of the text could read it. Only fixed wrappers can come before the
+bound command: `timeout`, `nice`, `nohup`, `stdbuf`, `setsid`, `ionice`, `taskset`, `chrt`,
+`flock` with a program, `time`, and `env` with a program and no option. The command words can
+name the variable, for example `twine upload -p "$PYPI_TOKEN" dist/*`.
+
+These commands get no secret:
+
+- two or more commands, for example `cd dist && twine upload *` or
+  `twine upload dist/* | tail -n 20`
+- a subshell, a group, a loop, a function, or a command substitution
+- an assignment before the command
+- another wrapper, for example `bash -c`, `sh`, `eval`, or `xargs`
+- a redirect to `/dev/tcp/` or `/dev/udp/`, because that output goes to the network
+- a redirect target that the shell builds at run time, for example `> "$LOG"`
+- a here-document or a here-string with an expansion
+
+A command that does not match still runs, but it gets no secret. The result ends with a line
+such as `[PYPI_TOKEN was not given: "curl" is not a bound command]`. To run more than one
+command with a secret, put the commands in a script. Bind the absolute path of the script, and
+run the script by that path. The script needs a `#!` line and the exec bit (`chmod +x`).
+`bash <script>` gets no secret. See the
+[reasons](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#the-match-rule).
+
+The first use of a secret with a program asks `🔑 Give PYPI_TOKEN to this program?` The prompt
+shows the real path and the hash of the program. Tap ✅ Allow this program to save the pin. A new
+path or a new hash asks again. A cron run with no pin gets no secret. In a group, the prompt goes
+to your private chat.
+
+A credential that a command prints becomes a session handle, for example `$TMP_SECRET_1`. A later
+command can use the handle. A handle lives in memory only, and it ends with the session or a
+restart. After outside content in the turn, a command with a handle asks first.
+
+When a bound secret has no value, the agent calls `request_secret`. You get the card
+`🔑 Secret needed: PYPI_TOKEN` in a private chat. Reply with the value. The bot deletes your reply
+and saves the value to `.env`. The model never sees the value.
+
+- While a card waits, a value that starts with `/` goes to the card, unless it is a known command.
+- The bot deletes an edit of your reply. The edit never reaches the agent.
+- The CLI reads the value with no echo. When the read stops, it prints
+  `The secret read stopped. Press Enter to continue.`
+
+These commands work in a private chat:
+
+- `/secrets` lists each bound name, its state, and its pins.
+- `/secrets set NAME` saves a new value.
+- `/secrets unpin NAME` deletes the pins of a name.
+
+After a failed command that got a secret, a clear auth failure (a 401, or a 403 with an auth
+word) marks the secret. The mark shows in `/secrets` and in `tether doctor`.
 
 ### Redaction
 
@@ -478,6 +568,8 @@ and in the text that goes to the model.
 - The redactor also masks the exact values from `.env` and the values of the secret names in the
   process environment. It ignores values of fewer than 8 characters. This rule also covers each
   provider key.
+- An exact value becomes its label, for example `«PYPI_TOKEN»`. A read of `.env` shows
+  `PYPI_TOKEN=«PYPI_TOKEN»`.
 
 ### Backups
 
@@ -492,6 +584,51 @@ and in the text that goes to the model.
   `config.yaml`, and the key env of each preset entry with no `api_key`.
 
 Refer to [Running as a Service](Running-as-a-Service#back-up).
+
+## Outbound scan
+
+The scan masks secrets, card numbers, IBANs, and phone numbers in a send to a target that is not
+private. A private target is the CLI, `local`, the private chat of an owner, and each chat id in
+`outbound.private_chats`. The scan covers chat answers, the files of an answer, cron deliveries,
+and MCP `send` calls.
+
+The detectors give these labels:
+
+- a secret: `[secret]`, or `«NAME»`
+- a card number: `[card ••••1111]`
+- an IBAN: `[IBAN GB82••••5432]`
+- a phone number: `[phone +94•••••4567]`
+
+On a match, the send is masked. You get a note in your private chat, for example
+`🛡️ I masked 2 items in my answer in "Home ops":`. The button `✅ Post the full answer there`
+posts the original. An MCP send with a finding asks with the button `✅ Send redacted`. In a cron
+run, the gate blocks the send. `outbound.scan: false` turns the scan off.
+
+## model_guard and draft-only jobs
+
+`model_guard` checks a cron send after the run read outside content. The send is a delivery to a
+target that is not private, or an MCP send that `approvals.cron_mode: approve` allows.
+`outbound.guard: false` turns it off. `outbound.guard_provider` names the provider entry. The
+guard gets only facts: the job name and purpose, the sources, the tool counts, and the kinds of
+findings. It never gets the answer text. An answer that is not `allow`, an error, or a timeout is
+a hold.
+
+A held delivery waits in `held_sends` for 24 h. You get the card `⏸️ Held: job "<name>"` with the
+buttons ❌ Drop and ✅ Send.
+
+A job with `draft_only` can read and write drafts, but it cannot send. The run has no `terminal`,
+`execute_code`, browser action tools, `delegate_task`, or `acp_delegate`. MCP read tools and
+draft tools run. A draft tool has a draft verb and the noun `draft`. Each other MCP write and send
+call is blocked. The job delivers only to a private chat or `local`.
+
+## Untrusted content
+
+The results of `web_fetch`, `web_search`, the browser tools, and the MCP tools go into an
+`untrusted_tool_result` block. The block tells the model to treat the content as data, not as
+instructions. A result under 32 characters is not wrapped. A forged tag in the content is
+changed. An `execute_code` script gets the raw data. The stdout of a cron data script uses the
+source `cron data script`. A `read_file` of its spill file `cache/spill/cron_data_script-<id>.txt`
+is wrapped too.
 
 ## Provider keys
 
@@ -592,6 +729,21 @@ itself. Refer to [Skills](Skills#the-skill-guard).
 - **Goal gates run with no approval prompt.** You write each gate with `/goal gate add`.
   Tether Agent checks the gate again before each run. A gate that matches a dangerous rule still
   runs.
+- **A pin covers only the entry file and its interpreter.** A process can change the file between
+  the hash and the run.
+- **The raw background log holds a printed value.** The file `cache/spill/bg-<pid>.log` has the
+  mode 0600.
+- **A bound secret goes only to a command that runs alone.** A pipe to `tail` or a `cd` before
+  the command gets no secret. Put the commands in a script, and bind the path of the script.
+- **A bound script can pass the value on.** Each command that the script runs gets the value.
+- **`git commit -a` can stage a tracked credential file.** The rule `human_only_stage_credential`
+  does not cover it.
+- **The scan does not cover each send.** It does not cover `curl -d` and other network commands,
+  `execute_code` network calls, browser form posts, `web_fetch` URLs, `web_search` queries, an MCP
+  `write` call, and a binary file or a file over 1 MB.
+- **A network program that is not on the list does not mark a run.** For example, `python
+  fetch.py` does not mark the run as a run with outside content, so `model_guard` does not
+  check the later send.
 - **A coding agent can write outside its work folder.** Its permission preset sets which actions
   it asks for. See [Coding agents](#coding-agents).
 
