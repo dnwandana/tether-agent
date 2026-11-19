@@ -16,34 +16,36 @@ import (
 
 // Config is the full content of config.yaml.
 type Config struct {
-	Providers     map[string]Provider `yaml:"providers"`
-	Provider      ProviderConfig      `yaml:"provider"`
-	Agent         AgentConfig         `yaml:"agent"`
-	Context       ContextConfig       `yaml:"context"`
-	Sessions      SessionsConfig      `yaml:"sessions"`
-	Memory        MemoryConfig        `yaml:"memory"`
-	Review        ReviewConfig        `yaml:"review"`
-	Skills        SkillsConfig        `yaml:"skills"`
-	Web           WebConfig           `yaml:"web"`
-	Browser       BrowserConfig       `yaml:"browser"`
-	Terminal      TerminalConfig      `yaml:"terminal"`
-	CodeExecution CodeExecConfig      `yaml:"code_execution"`
-	Files         FilesConfig         `yaml:"files"`
-	Todo          TodoConfig          `yaml:"todo"`
-	Delegation    DelegationConfig    `yaml:"delegation"`
-	Approvals     ApprovalsConfig     `yaml:"approvals"`
-	Goals         GoalsConfig         `yaml:"goals"`
-	Toolsets      map[string][]string `yaml:"toolsets"`
-	Cron          CronConfig          `yaml:"cron"`
-	Gateway       GatewayConfig       `yaml:"gateway"`
-	Telegram      TelegramConfig      `yaml:"telegram"`
-	MCP           MCPConfig           `yaml:"mcp"`
-	ACP           ACPConfig           `yaml:"acp"`
-	Media         MediaConfig         `yaml:"media"`
-	Pricing       PricingConfig       `yaml:"pricing"`
-	Update        UpdateConfig        `yaml:"update"`
-	Doctor        DoctorConfig        `yaml:"doctor"`
-	Log           LogConfig           `yaml:"log"`
+	Providers     map[string]Provider   `yaml:"providers"`
+	Provider      ProviderConfig        `yaml:"provider"`
+	Agent         AgentConfig           `yaml:"agent"`
+	Context       ContextConfig         `yaml:"context"`
+	Sessions      SessionsConfig        `yaml:"sessions"`
+	Memory        MemoryConfig          `yaml:"memory"`
+	Review        ReviewConfig          `yaml:"review"`
+	Skills        SkillsConfig          `yaml:"skills"`
+	Web           WebConfig             `yaml:"web"`
+	Browser       BrowserConfig         `yaml:"browser"`
+	Terminal      TerminalConfig        `yaml:"terminal"`
+	ExecSecrets   map[string]ExecSecret `yaml:"exec_secrets"`
+	CodeExecution CodeExecConfig        `yaml:"code_execution"`
+	Files         FilesConfig           `yaml:"files"`
+	Todo          TodoConfig            `yaml:"todo"`
+	Delegation    DelegationConfig      `yaml:"delegation"`
+	Approvals     ApprovalsConfig       `yaml:"approvals"`
+	Outbound      OutboundConfig        `yaml:"outbound"`
+	Goals         GoalsConfig           `yaml:"goals"`
+	Toolsets      map[string][]string   `yaml:"toolsets"`
+	Cron          CronConfig            `yaml:"cron"`
+	Gateway       GatewayConfig         `yaml:"gateway"`
+	Telegram      TelegramConfig        `yaml:"telegram"`
+	MCP           MCPConfig             `yaml:"mcp"`
+	ACP           ACPConfig             `yaml:"acp"`
+	Media         MediaConfig           `yaml:"media"`
+	Pricing       PricingConfig         `yaml:"pricing"`
+	Update        UpdateConfig          `yaml:"update"`
+	Doctor        DoctorConfig          `yaml:"doctor"`
+	Log           LogConfig             `yaml:"log"`
 }
 
 // Provider is one named model endpoint.
@@ -226,6 +228,14 @@ type TerminalConfig struct {
 	ProcessKeepS int `yaml:"process_keep_s"`
 }
 
+// ExecSecret is one entry of exec_secrets. The map key is the .env name. The value stays in
+// .env.
+type ExecSecret struct {
+	// Commands holds the command prefixes that get the value, for example "twine upload". Each
+	// entry is a list of words. A "/" in the first word makes it an absolute program path.
+	Commands []string `yaml:"commands"`
+}
+
 // CodeExecConfig sets the execute_code tool limits.
 type CodeExecConfig struct {
 	TimeoutS       int `yaml:"timeout_s"`
@@ -271,6 +281,19 @@ type ApprovalsConfig struct {
 	// LogRetentionDays is the age in days after which the gateway deletes an approval log
 	// row. 0 keeps all rows.
 	LogRetentionDays int `yaml:"log_retention_days"`
+}
+
+// OutboundConfig sets the outbound scan and model_guard.
+type OutboundConfig struct {
+	// Scan turns on the scan of each send to a target that is not private.
+	Scan bool `yaml:"scan"`
+	// PrivateChats holds the Telegram chat ids that count as private, for example an
+	// owner-only forum group.
+	PrivateChats []string `yaml:"private_chats"`
+	// Guard turns on model_guard before an unattended send after outside content.
+	Guard bool `yaml:"guard"`
+	// GuardProvider is the provider entry of the guard. "" uses the primary chain.
+	GuardProvider string `yaml:"guard_provider"`
 }
 
 // GoalsConfig sets the /goal loop.
@@ -634,6 +657,7 @@ func Default() Config {
 			EnvPassthrough:  []string{},
 			ProcessKeepS:    3600,
 		},
+		ExecSecrets: map[string]ExecSecret{},
 		CodeExecution: CodeExecConfig{
 			TimeoutS:       300,
 			MaxToolCalls:   50,
@@ -657,6 +681,7 @@ func Default() Config {
 			HumanOnly:           []string{},
 			LogRetentionDays:    180,
 		},
+		Outbound: OutboundConfig{Scan: true, PrivateChats: []string{}, Guard: true},
 		Goals: GoalsConfig{
 			MaxTurns:                  20,
 			JudgeTimeoutS:             30,

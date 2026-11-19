@@ -302,7 +302,13 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("config: goals.judge_provider names %q, which is not in providers", name))
 		}
 	}
+	if name := c.Outbound.GuardProvider; name != "" {
+		if _, ok := c.Providers[name]; !ok {
+			errs = append(errs, fmt.Errorf("config: outbound.guard_provider names %q, which is not in providers", name))
+		}
+	}
 	errs = append(errs, c.checkLimits()...)
+	errs = append(errs, c.checkExecSecrets()...)
 	errs = append(errs, checkMCPNames(c.MCP.Servers)...)
 	errs = append(errs, checkMCPTools(c.MCP.Servers)...)
 	errs = append(errs, c.ACP.validate()...)
@@ -449,6 +455,34 @@ func imageSize(v string) error {
 		}
 	}
 	return fmt.Errorf("config: media.image_size is %q. Use the form <W>x<H>, for example 1024x1024", v)
+}
+
+// execSecretName is the form of an exec_secrets name. The check ignores case.
+var execSecretName = regexp.MustCompile(`(?i)^[A-Z_][A-Z0-9_]*$`)
+
+// checkExecSecrets returns one error for each problem of exec_secrets, in name order.
+func (c *Config) checkExecSecrets() []error {
+	var errs []error
+	for _, name := range slices.Sorted(maps.Keys(c.ExecSecrets)) {
+		if !execSecretName.MatchString(name) {
+			errs = append(errs, fmt.Errorf("config: exec_secrets key %q is not a valid .env name. Use letters, digits, and \"_\", and do not start with a digit", name))
+			continue
+		}
+		cmds := c.ExecSecrets[name].Commands
+		if len(cmds) == 0 {
+			errs = append(errs, fmt.Errorf("config: exec_secrets.%s.commands is empty. Add at least one command, for example \"twine upload\"", name))
+		}
+		for i, cmd := range cmds {
+			if len(strings.Fields(cmd)) == 0 {
+				errs = append(errs, fmt.Errorf("config: exec_secrets.%s.commands[%d] has no words. Write a program and its first words, for example \"twine upload\"", name, i))
+			}
+		}
+		if slices.Contains(c.Terminal.EnvPassthrough, name) {
+			//lint:ignore ST1005 the text is a fixed user message with full sentences.
+			errs = append(errs, fmt.Errorf("config: exec_secrets.%s is also in terminal.env_passthrough. Remove it from one list.", name))
+		}
+	}
+	return errs
 }
 
 // checkLimits returns one error for each new limit key that is out of range or out of order.

@@ -242,6 +242,16 @@ The background memory and skill review.
 | `terminal.env_passthrough` | `[]` | Names of secret environment variables that child processes can see. A secret that a skill needs passes only through this list. |
 | `terminal.process_keep_s` | `3600` | The time that the program keeps the record of a background process after the process exits, in seconds. The minimum is 1. The maximum is 2592000. |
 
+## exec_secrets
+
+| Key | Default | Effect |
+|---|---|---|
+| `exec_secrets.<name>.commands` | `[]` | The command prefixes that get the `.env` value of `<name>`, for example `["twine upload", "uv publish"]`. Each entry is a list of words. A `/` in the first word makes it an absolute program path. Only a `terminal` command that is one simple command, with only fixed wrappers such as `timeout` before a matching prefix, gets the value. A command with `;`, `&&`, `\|`, or a shell wrapper gets no value. The name must not also be in `terminal.env_passthrough`. A change needs a restart. |
+
+The map is empty by default. The value stays in `.env`. Use `exec_secrets` for a secret that
+only some commands need, and `terminal.env_passthrough` for a name that each command needs.
+See "The child environment" in [SECURITY.md](SECURITY.md).
+
 ## code_execution
 
 | Key | Default | Effect |
@@ -286,6 +296,15 @@ The background memory and skill review.
 | `approvals.smart_script_max_chars` | `8000` | The smart judge gets at most this number of characters of a script. The minimum is 100. |
 | `approvals.human_only` | `[]` | More rules that need the owner to tap Approve each time. Each entry is a rule ID, for example `git_force_push`, or an MCP tool as `mcp:<server>.<tool>`. The list can only raise a rule. The built-in human-only rules always apply. |
 | `approvals.log_retention_days` | `180` | The gateway deletes an approval log row when it is older than this number of days. `0` keeps all rows. |
+
+## outbound
+
+| Key | Default | Effect |
+|---|---|---|
+| `outbound.scan` | `true` | Scan each send to a target that is not private: a group answer, a `MEDIA:` file, a cron delivery, and each MCP send. The scan masks secrets, card numbers, IBANs, and phone numbers, and offers the original to the owner. `false` turns the scan off. A cron delivery is still redacted. |
+| `outbound.private_chats` | `[]` | Telegram chat ids that count as private, for example an owner-only forum group. The owner's private chats and the CLI are always private. |
+| `outbound.guard` | `true` | Run `model_guard` before an unattended send when the run read outside content. The guard can hold a send for the owner. |
+| `outbound.guard_provider` | `""` | The provider entry of the guard. `""` uses the primary chain. The name must be an entry in `providers`. |
 
 ## goals
 
