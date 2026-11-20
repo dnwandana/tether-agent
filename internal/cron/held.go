@@ -128,6 +128,41 @@ func (s *HeldStore) DeleteJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
+// HeldLine is one held send for the status text: the job and the time of the hold.
+type HeldLine struct {
+	JobID, JobName string
+	CreatedAt      time.Time
+}
+
+// Holds returns the rows of kind "hold" that were created at or after since, with the name of
+// the job, newest first. A row of a job that does not exist is not in the result. It reads
+// and closes all rows before it returns, because state.db has one connection.
+func (s *HeldStore) Holds(ctx context.Context, since time.Time) ([]HeldLine, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT h.job_id, j.name, h.created_at FROM held_sends h
+		JOIN cron_jobs j ON j.id = h.job_id
+		WHERE h.kind = 'hold' AND h.created_at >= ? ORDER BY h.created_at DESC`, since.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("cron: read held sends: %w", err)
+	}
+	var out []HeldLine
+	for rows.Next() {
+		var l HeldLine
+		var ms int64
+		if err := rows.Scan(&l.JobID, &l.JobName, &ms); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("cron: read held sends: %w", err)
+		}
+		l.CreatedAt = time.UnixMilli(ms)
+		out = append(out, l)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("cron: read held sends: %w", err)
+	}
+	rows.Close()
+	return out, nil
+}
+
 // SetCard records the chat and the message of the owner card of the row id.
 func (s *HeldStore) SetCard(ctx context.Context, id, chat string, msgID int) error {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE held_sends SET card_chat = ?, card_msg_id = ? WHERE id = ?`,

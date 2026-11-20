@@ -115,3 +115,44 @@ func TestNewHeldID(t *testing.T) {
 		}
 	}
 }
+
+// Holds returns the hold rows of the last 24 h with the job name, newest first. It skips the
+// "original" rows, the older rows, and the rows of a job that does not exist.
+func TestHeldStoreHolds(t *testing.T) {
+	c := fixedNow(2026, 11, 18, 12, 0)
+	s := store(t, c)
+	hs := &HeldStore{DB: s.DB}
+	id := mustCreate(t, s, Job{Name: "digest", Schedule: "30m", Prompt: "x", Enabled: true})
+	now := c.Now()
+	ms := func(d time.Duration) time.Time { return time.UnixMilli(now.Add(-d).UnixMilli()) }
+	orig := heldRow("a3", id, ms(10*time.Minute))
+	orig.Kind = "original"
+	for _, h := range []HeldSend{
+		heldRow("a1", id, ms(2*time.Hour)),
+		heldRow("a2", id, ms(30*time.Minute)),
+		orig,
+		heldRow("a4", id, ms(25*time.Hour)),
+		heldRow("a5", "gone", ms(5*time.Minute)),
+	} {
+		if err := hs.Insert(ctx, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := hs.Holds(ctx, now.Add(-24*time.Hour))
+	if err != nil || len(got) != 2 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	want := []HeldLine{
+		{JobID: id, JobName: "digest", CreatedAt: ms(30 * time.Minute)},
+		{JobID: id, JobName: "digest", CreatedAt: ms(2 * time.Hour)},
+	}
+	for i := range want {
+		if got[i].JobID != want[i].JobID || got[i].JobName != want[i].JobName || !got[i].CreatedAt.Equal(want[i].CreatedAt) {
+			t.Fatalf("row %d: got %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	// The rows are closed: the next query does not wait for the one connection.
+	if _, err := s.List(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

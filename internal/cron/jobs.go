@@ -16,11 +16,19 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 )
 
 // ErrNotFound is the error for a job id that is not in cron_jobs.
 var ErrNotFound = errors.New("cron: job not found. Use list to see the job ids")
+
+// The values of Job.PauseReason. They tell why the scheduler disabled a job. "" is a job
+// that the scheduler did not pause.
+const (
+	PauseFailures = "failures" // the fail streak reached cron.fail_streak_limit
+	PauseSchedule = "schedule" // the stored schedule is not valid
+)
 
 // ErrDraftDeliver is the error for a draft-only job whose delivery target is not private.
 //
@@ -50,6 +58,27 @@ type RunRecord struct {
 	FinishedAt  time.Time
 	Pause       bool // the scheduler decided to pause the job
 	Streak      int  // with Pause: the N of the pause line, written as fail_streak
+	// Skipped is true for a run that did not wake the model. MarkRun then moves only last_run
+	// and next_run, and writes no cron_runs row.
+	Skipped bool
+	// Manual is true for a run that the owner started with Run now.
+	Manual bool
+	// ErrKey is the key of the error of a failed run. Two failures with the same key are a repeat.
+	ErrKey string
+	// AlertSent is true when the failure alert of the run went out (delivery sent or local).
+	// Only then does MarkRun write last_error and last_error_key.
+	AlertSent bool
+	// WatchHash and WatchOutput are the script output of a watch run: the SHA-256 of the raw
+	// stdout, and the stdout cut at WatchOutputMaxRunes. MarkRun can save them as the baseline.
+	WatchHash, WatchOutput string
+	// RunScript and RunWorkdir are the script and the workdir that the run used. MarkRun saves
+	// the baseline only when the job row still has the same values.
+	RunScript, RunWorkdir string
+	// CostUSD is the cost of the run. Nil means no priced call. CostMedian is the median of the
+	// job when CostFlag is true.
+	CostUSD, CostMedian *float64
+	// CostFlag is true when the run cost more than 3 times the median of the job.
+	CostFlag bool
 }
 
 // RunOutputMaxRunes is the length limit of cron_runs.output, in runes.
@@ -99,6 +128,19 @@ type Job struct {
 	FailStreak int
 	// DraftOnly is true for a job that can read and write drafts, but cannot send.
 	DraftOnly bool
+	// LastError is the redacted text of the last failure alert that went out. LastErrorKey is
+	// its key. A failure with the same key sends no new alert.
+	LastError, LastErrorKey string
+	// PauseReason is "", PauseFailures, or PauseSchedule.
+	PauseReason string
+	// Watch is true for a job that wakes the model only when the script output changes.
+	Watch bool
+	// WatchHash and WatchOutput are the baseline of a watch job. "" means no baseline (NULL).
+	WatchHash, WatchOutput string
+	// Continuity is true for a job whose prompt gets the output of its last delivered run.
+	Continuity bool
+	// Effort is the reasoning effort of the runs. "" uses the config.
+	Effort string
 }
 
 // JobPatch holds the fields that Update changes. A nil field stays the same.
@@ -115,8 +157,10 @@ type JobPatch struct {
 	RepeatLeft *int
 	Enabled    *bool
 	// NextRun moves the next run. The cronjob tool uses it to make a job due now.
-	NextRun   *time.Time
-	DraftOnly *bool
+	NextRun           *time.Time
+	DraftOnly         *bool
+	Watch, Continuity *bool
+	Effort            *string
 }
 
 // Store reads and writes cron_jobs. It does no I/O except the database and the workdir
@@ -143,7 +187,8 @@ type Store struct {
 }
 
 const jobColumns = `id, name, schedule, prompt, script, no_agent, deliver, skills, model, toolsets, workdir,
-	repeat_left, enabled, origin, created_by_session, last_run, next_run, last_status, last_output, fail_streak, draft_only`
+	repeat_left, enabled, origin, created_by_session, last_run, next_run, last_status, last_output, fail_streak, draft_only,
+	last_error, last_error_key, pause_reason, watch, watch_hash, watch_output, continuity, effort`
 
 var (
 	telegramChatRE   = regexp.MustCompile(`^(-?\d+|@[A-Za-z0-9_]+)$`)
@@ -194,6 +239,7 @@ func (s *Store) Create(ctx context.Context, j Job) (Job, error) {
 	j.NextRun = sched.Next(now)
 	j.LastRun, j.LastStatus, j.LastOutput = time.Time{}, "", ""
 	j.FailStreak = 0
+	j.LastError, j.LastErrorKey, j.PauseReason, j.WatchHash, j.WatchOutput = "", "", "", "", ""
 	for range 5 {
 		j.ID, err = newID()
 		if err != nil {
@@ -216,7 +262,7 @@ func (s *Store) insert(ctx context.Context, j Job, now time.Time) error {
 		return err
 	}
 	_, err = s.DB.ExecContext(ctx, `INSERT INTO cron_jobs(`+jobColumns+`, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append(args, now.UnixMilli())...)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append(args, now.UnixMilli())...)
 	return err
 }
 
@@ -299,6 +345,15 @@ func (s *Store) update(ctx context.Context, id string, patch JobPatch, checked d
 		}
 		if taskChanged(old, j) {
 			j.FailStreak = 0
+			j.LastError, j.LastErrorKey, j.PauseReason = "", "", ""
+		}
+		// A new script, workdir, watch flag, or no_agent flag makes the old baseline wrong.
+		if j.Script != old.Script || j.Workdir != old.Workdir || j.Watch != old.Watch || j.NoAgent != old.NoAgent {
+			j.WatchHash, j.WatchOutput = "", ""
+		}
+		// An owner pause is not a pause of the scheduler.
+		if patch.Enabled != nil && !*patch.Enabled {
+			j.PauseReason = ""
 		}
 		if patch.RepeatLeft != nil && j.RepeatLeft <= 0 {
 			j.RepeatLeft = -1
@@ -343,6 +398,9 @@ func (s *Store) SetEnabled(ctx context.Context, id string, on bool) error {
 				return err
 			}
 		}
+		if !on {
+			j.PauseReason = ""
+		}
 		j.Enabled = on
 		return s.write(ctx, tx, j)
 	})
@@ -359,6 +417,7 @@ func (s *Store) prepareResume(j *Job, now time.Time) error {
 		j.LastStatus = ""
 	}
 	j.FailStreak = 0
+	j.LastError, j.LastErrorKey, j.PauseReason = "", "", ""
 	if j.RepeatLeft == 0 {
 		j.RepeatLeft = defaultRepeat(sched)
 	}
@@ -406,17 +465,29 @@ type Run struct {
 	StartedAt, FinishedAt          time.Time
 	Status, Delivery               string
 	Output, DeliveryErr, SessionID string
+	// CostUSD and CostMedian are nil when the column is NULL.
+	CostUSD, CostMedian *float64
+	CostFlag            bool
 }
 
-const runColumns = "id, job_id, started_at, finished_at, status, delivery, output, delivery_error, session_id"
+const runColumns = "id, job_id, started_at, finished_at, status, delivery, output, delivery_error, session_id, cost_usd, cost_median, cost_flag"
 
 func (s *Store) scanRun(r scanner) (Run, error) {
 	var run Run
 	var started, finished int64
+	var cost, median sql.NullFloat64
+	var flag int
 	if err := r.Scan(&run.ID, &run.JobID, &started, &finished, &run.Status, &run.Delivery,
-		&run.Output, &run.DeliveryErr, &run.SessionID); err != nil {
+		&run.Output, &run.DeliveryErr, &run.SessionID, &cost, &median, &flag); err != nil {
 		return Run{}, err
 	}
+	if cost.Valid {
+		run.CostUSD = &cost.Float64
+	}
+	if median.Valid {
+		run.CostMedian = &median.Float64
+	}
+	run.CostFlag = flag != 0
 	run.StartedAt = time.UnixMilli(started).In(s.loc())
 	run.FinishedAt = time.UnixMilli(finished).In(s.loc())
 	return run, nil
@@ -470,7 +541,12 @@ func (s *Store) Due(ctx context.Context, now time.Time) ([]Job, error) {
 // rec.Streak as the count. In the same transaction, it adds a cron_runs row and deletes the
 // rows of the job above RunHistory. When the stored schedule cannot be parsed, MarkRun
 // disables the job, writes the cause as the last output, and returns an error that wraps
-// errBadSchedule.
+// errBadSchedule and sets PauseReason to PauseSchedule.
+//
+// A rec with Skipped changes only last_run, next_run, and enabled (when the schedule ends). It
+// writes no cron_runs row. An error with AlertSent writes last_error and last_error_key. An error
+// with no alert keeps them, and an ok run that is not skipped clears them. With rec.Pause, MarkRun
+// sets PauseReason to PauseFailures.
 func (s *Store) MarkRun(ctx context.Context, id string, rec RunRecord) error {
 	return s.markRun(ctx, id, rec, false)
 }
@@ -495,18 +571,30 @@ func (s *Store) markRun(ctx context.Context, id string, rec RunRecord, stopped b
 			return err
 		}
 		prev := j.LastStatus
-		j.LastRun, j.LastStatus, j.LastOutput = rec.RanAt, rec.LastStatus, rec.Output
-		switch rec.Status { // the count uses only the run status
-		case "error":
-			j.FailStreak++
-		case "ok":
-			j.FailStreak = 0
+		if newBaseline(j, rec) {
+			j.WatchHash, j.WatchOutput = rec.WatchHash, rec.WatchOutput
+		}
+		j.LastRun = rec.RanAt
+		if !rec.Skipped { // a skipped run keeps the output, the failure state, and (after a run) the status
+			j.LastStatus, j.LastOutput = rec.LastStatus, rec.Output
+			switch rec.Status { // the count uses only the run status
+			case "error":
+				j.FailStreak++
+				if rec.AlertSent {
+					j.LastError = TruncateRunes(s.redact(rec.Output), RunOutputMaxRunes)
+					j.LastErrorKey = rec.ErrKey
+				}
+			case "ok":
+				j.FailStreak = 0
+				j.LastError, j.LastErrorKey = "", ""
+			}
 		}
 		sched, err := parse(j.Schedule, s.loc())
 		if err != nil {
 			// The job has no next run. Disable it, so it does not run on each tick.
 			bad = fmt.Errorf("%w: job %s, schedule %q: %v", errBadSchedule, id, j.Schedule, err)
 			j.Enabled, j.NextRun, j.LastStatus = false, time.Time{}, "error"
+			j.PauseReason = PauseSchedule
 			j.LastOutput = fmt.Sprintf("⚠ Cron job %s is paused: its stored schedule %q is not valid. "+
 				"Update the schedule, then resume the job.", j.Name, j.Schedule)
 			return s.record(ctx, tx, j, rec)
@@ -516,6 +604,16 @@ func (s *Store) markRun(ctx context.Context, id string, rec RunRecord, stopped b
 			next = sched.Next(now)
 		}
 		j.NextRun = next
+		if rec.Skipped {
+			if prev == StatusStopped {
+				// The script ran to its end, so the skip ends the chain of stops in a row.
+				j.LastStatus = rec.LastStatus
+			}
+			if next.IsZero() { // the schedule has no further run
+				j.Enabled, j.NextRun = false, time.Time{}
+			}
+			return s.record(ctx, tx, j, rec)
+		}
 		if stopped {
 			if !next.IsZero() && j.RepeatLeft != 1 {
 				// A recurring job with repeats left moves to its next run. The stop does not count.
@@ -529,7 +627,10 @@ func (s *Store) markRun(ctx context.Context, id string, rec RunRecord, stopped b
 			// A second stop in a row counts as the run, so a job that restarts the gateway
 			// cannot run with no end.
 		}
-		if j.RepeatLeft > 0 {
+		// A watch job counts only the delivered model runs (a one-time watch is a wait). A stopped
+		// run here is the second stop in a row, which counts for each job.
+		counts := !j.Watch || stopped || (deliveredModelRun(rec) && !rec.Manual)
+		if counts && j.RepeatLeft > 0 {
 			j.RepeatLeft--
 		}
 		if j.RepeatLeft == 0 || next.IsZero() {
@@ -541,6 +642,7 @@ func (s *Store) markRun(ctx context.Context, id string, rec RunRecord, stopped b
 		}
 		if rec.Pause {
 			j.Enabled, j.NextRun, j.FailStreak = false, time.Time{}, rec.Streak
+			j.PauseReason = PauseFailures
 		}
 		return s.record(ctx, tx, j, rec)
 	})
@@ -550,18 +652,49 @@ func (s *Store) markRun(ctx context.Context, id string, rec RunRecord, stopped b
 	return bad
 }
 
+// deliveredModelRun reports whether rec woke the model, ended ok, and was delivered. Only
+// such a run moves the baseline of a watch job and counts toward its repeat.
+func deliveredModelRun(rec RunRecord) bool {
+	if rec.Skipped || rec.Status != "ok" {
+		return false
+	}
+	switch rec.Delivery {
+	case DeliverySent, DeliveryLocal, DeliverySilent:
+		return true
+	}
+	return false
+}
+
+// newBaseline reports whether rec gives the watch job j a new baseline. A failed, held,
+// or manual run keeps the old baseline, so the next run sees the change again. An edit of
+// the script or the workdir during the run also keeps it.
+func newBaseline(j Job, rec RunRecord) bool {
+	if !j.Watch || rec.Manual || rec.WatchHash == "" || j.Script != rec.RunScript || j.Workdir != rec.RunWorkdir {
+		return false
+	}
+	if rec.Skipped {
+		return j.WatchHash == "" // the baseline run
+	}
+	return deliveredModelRun(rec)
+}
+
 // record writes the job row, adds the cron_runs row of the run, and deletes the rows of the
 // job above RunHistory. With RunHistory 0, it deletes all rows of the job.
 func (s *Store) record(ctx context.Context, tx *sql.Tx, j Job, rec RunRecord) error {
+	if rec.Skipped { // a skipped run is not part of the run history
+		return s.write(ctx, tx, j)
+	}
 	if err := s.write(ctx, tx, j); err != nil {
 		return err
 	}
 	keep := max(s.RunHistory, 0) // SQLite reads a negative LIMIT as no limit
 	if keep > 0 {
 		res, err := tx.ExecContext(ctx, `INSERT INTO cron_runs(job_id, started_at, finished_at, status,
-			delivery, output, delivery_error, session_id) VALUES(?,?,?,?,?,?,?,?)`,
+			delivery, output, delivery_error, session_id, cost_usd, cost_median, cost_flag)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 			j.ID, rec.RanAt.UnixMilli(), rec.FinishedAt.UnixMilli(), rec.Status, rec.Delivery,
-			TruncateRunes(s.redact(j.LastOutput), RunOutputMaxRunes), rec.DeliveryErr, rec.SessionID)
+			TruncateRunes(s.redact(j.LastOutput), RunOutputMaxRunes), rec.DeliveryErr, rec.SessionID,
+			floatOrNil(rec.CostUSD), floatOrNil(rec.CostMedian), boolInt(rec.CostFlag))
 		if err != nil {
 			return fmt.Errorf("cron: record run of job %s: %w", j.ID, err)
 		}
@@ -645,6 +778,21 @@ func (s *Store) validateFields(j Job) error {
 	if !j.NoAgent && j.Prompt == "" {
 		return errors.New("cron: a job needs a prompt, or no_agent with a script")
 	}
+	if j.Watch {
+		if j.Script == "" {
+			return errors.New("cron: watch needs a script")
+		}
+		if j.NoAgent {
+			return errors.New("cron: watch cannot be used with no_agent")
+		}
+		// A bad schedule fails later in Parse with its own error.
+		if sched, err := parse(j.Schedule, s.loc()); err == nil && sched.OneShot() {
+			return errors.New("cron: watch needs a recurring schedule")
+		}
+	}
+	if j.Effort != "" && !slices.Contains(config.EffortLevels, j.Effort) {
+		return fmt.Errorf("cron: effort %q is not valid. Use one of: %s", j.Effort, strings.Join(config.EffortLevels, ", "))
+	}
 	if j.Workdir != "" {
 		if !filepath.IsAbs(j.Workdir) {
 			return fmt.Errorf("cron: workdir %q must be an absolute path", j.Workdir)
@@ -713,6 +861,7 @@ func normalize(j Job) Job {
 	j.Script = strings.TrimSpace(j.Script)
 	j.Deliver = strings.TrimSpace(j.Deliver)
 	j.Workdir = strings.TrimSpace(j.Workdir)
+	j.Effort = strings.TrimSpace(j.Effort)
 	if strings.TrimSpace(j.Prompt) == "" {
 		j.Prompt = ""
 	}
@@ -769,6 +918,13 @@ func applyPatch(j *Job, p JobPatch) {
 	if p.DraftOnly != nil {
 		j.DraftOnly = *p.DraftOnly
 	}
+	if p.Watch != nil {
+		j.Watch = *p.Watch
+	}
+	if p.Continuity != nil {
+		j.Continuity = *p.Continuity
+	}
+	set(&j.Effort, p.Effort)
 }
 
 // taskChanged reports whether the edit changes what the job does. Such an edit starts a new
@@ -783,7 +939,7 @@ func taskChanged(old, j Job) bool {
 	return j.Prompt != old.Prompt || j.Script != old.Script || j.NoAgent != old.NoAgent ||
 		!slices.Equal(j.Skills, old.Skills) || !samePin(j.Model, old.Model) ||
 		!slices.Equal(j.Toolsets, old.Toolsets) || j.Workdir != old.Workdir || j.Schedule != old.Schedule ||
-		j.DraftOnly != old.DraftOnly
+		j.DraftOnly != old.DraftOnly || j.Effort != old.Effort
 }
 
 func defaultRepeat(s Schedule) int {
@@ -871,7 +1027,8 @@ func (s *Store) write(ctx context.Context, tx *sql.Tx, j Job) error {
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE cron_jobs SET name=?, schedule=?, prompt=?, script=?, no_agent=?, deliver=?,
 		skills=?, model=?, toolsets=?, workdir=?, repeat_left=?, enabled=?, origin=?, created_by_session=?,
-		last_run=?, next_run=?, last_status=?, last_output=?, fail_streak=?, draft_only=? WHERE id=?`, append(args[1:], j.ID)...)
+		last_run=?, next_run=?, last_status=?, last_output=?, fail_streak=?, draft_only=?,
+		last_error=?, last_error_key=?, pause_reason=?, watch=?, watch_hash=?, watch_output=?, continuity=?, effort=? WHERE id=?`, append(args[1:], j.ID)...)
 	if err != nil {
 		return fmt.Errorf("cron: write job %s: %w", j.ID, err)
 	}
@@ -902,7 +1059,9 @@ func rowArgs(j Job) ([]any, error) {
 	}
 	return []any{j.ID, j.Name, j.Schedule, j.Prompt, j.Script, boolInt(j.NoAgent), j.Deliver, skills, model, toolsets,
 		j.Workdir, j.RepeatLeft, boolInt(j.Enabled), string(origin), j.CreatedBySession,
-		msOrNil(j.LastRun), msOrNil(j.NextRun), j.LastStatus, j.LastOutput, j.FailStreak, boolInt(j.DraftOnly)}, nil
+		msOrNil(j.LastRun), msOrNil(j.NextRun), j.LastStatus, j.LastOutput, j.FailStreak, boolInt(j.DraftOnly),
+		j.LastError, j.LastErrorKey, j.PauseReason, boolInt(j.Watch), strOrNil(j.WatchHash), strOrNil(j.WatchOutput),
+		boolInt(j.Continuity), j.Effort}, nil
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -913,13 +1072,18 @@ func (s *Store) scan(r scanner) (Job, error) {
 		noAgent, enabled, draftOnly     int
 		skills, model, toolsets, origin sql.NullString
 		lastRun, nextRun                sql.NullInt64
+		watch, continuity               int
+		watchHash, watchOutput          sql.NullString
 	)
 	if err := r.Scan(&j.ID, &j.Name, &j.Schedule, &j.Prompt, &j.Script, &noAgent, &j.Deliver, &skills, &model,
 		&toolsets, &j.Workdir, &j.RepeatLeft, &enabled, &origin, &j.CreatedBySession, &lastRun, &nextRun,
-		&j.LastStatus, &j.LastOutput, &j.FailStreak, &draftOnly); err != nil {
+		&j.LastStatus, &j.LastOutput, &j.FailStreak, &draftOnly,
+		&j.LastError, &j.LastErrorKey, &j.PauseReason, &watch, &watchHash, &watchOutput, &continuity, &j.Effort); err != nil {
 		return Job{}, err
 	}
 	j.NoAgent, j.Enabled, j.DraftOnly = noAgent != 0, enabled != 0, draftOnly != 0
+	j.Watch, j.Continuity = watch != 0, continuity != 0
+	j.WatchHash, j.WatchOutput = watchHash.String, watchOutput.String
 	if err := unmarshalNull(skills, &j.Skills); err != nil {
 		return Job{}, fmt.Errorf("skills: %w", err)
 	}
@@ -983,4 +1147,20 @@ func msOrNil(t time.Time) any {
 		return nil
 	}
 	return t.UnixMilli()
+}
+
+// floatOrNil returns nil for a nil p, so the column gets NULL.
+func floatOrNil(p *float64) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+// strOrNil returns nil for "", so the column gets NULL.
+func strOrNil(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

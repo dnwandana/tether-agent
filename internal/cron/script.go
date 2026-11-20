@@ -3,11 +3,14 @@ package cron
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -77,6 +80,11 @@ type ScriptResult struct {
 	TimedOut bool
 	// Timeout is the time limit that applied to the run.
 	Timeout time.Duration
+	// RawSHA256 is the hex SHA-256 of the captured stdout before the cut. A watch job compares it,
+	// because the cut marker names a new spill file on each run.
+	RawSHA256 string
+	// LastLine is the last line of the captured stdout that is not empty, with no space at the ends.
+	LastLine string
 }
 
 // ResolveScript returns the absolute path of a script. A relative path resolves under
@@ -177,6 +185,16 @@ func RunScriptSpill(ctx context.Context, path, workdir string, env []string, lim
 	res.StderrTail = lastLines(errText, lim.tailLines())
 
 	out := stdout.String()
+	raw := out
+	sum := sha256.Sum256([]byte(raw))
+	res.RawSHA256 = hex.EncodeToString(sum[:])
+	lines := strings.Split(raw, "\n")
+	for _, line := range slices.Backward(lines) {
+		if l := strings.TrimSpace(line); l != "" {
+			res.LastLine = l
+			break
+		}
+	}
 	if stdout.cut {
 		out += fmt.Sprintf("\n[stdout was cut at %d bytes]\n", scriptStdoutMaxBytes)
 	}
@@ -197,8 +215,9 @@ func RunScriptSpill(ctx context.Context, path, workdir string, env []string, lim
 const cronSpillSource = "cron_data_script"
 
 // ScriptJobMessage returns the message of a script job. Non-empty stdout goes out word for
-// word. Empty stdout after exit 0 sends nothing. A failure or a timeout always sends an
-// alert with the tail of stderr, or the tail of stdout when stderr is empty.
+// word. Empty stdout after exit 0 sends nothing. A failure or a timeout gives an alert with
+// the tail of stderr, or the tail of stdout when stderr is empty. The scheduler does not send
+// the alert again while the job fails with the same error.
 func ScriptJobMessage(j Job, r ScriptResult, lim ScriptLimits) (text string, send bool) {
 	if r.TimedOut || r.ExitCode != 0 {
 		var b strings.Builder

@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -535,6 +536,8 @@ func TestUpdateFailStreakReset(t *testing.T) {
 		{"name", JobPatch{Name: str("renamed")}, 4},
 		{"deliver", JobPatch{Deliver: str("local")}, 4},
 		{"repeat", JobPatch{RepeatLeft: &repeat}, 4},
+		{"effort", JobPatch{Effort: str("high")}, 0},
+		{"same effort", JobPatch{Effort: str("")}, 4},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			s := store(t, fixedNow(2026, 11, 16, 10, 0))
@@ -1117,5 +1120,566 @@ func TestDraftOnlyUpdateSeesTargetChange(t *testing.T) {
 	}
 	if got := mustGet(t, s, j.ID); got.Name == name {
 		t.Fatalf("stored job: %+v", got)
+	}
+}
+
+// setCols runs one UPDATE of cron_jobs for the job id, so a test can start from any state.
+func setCols(t *testing.T, s *Store, id, set string, args ...any) {
+	t.Helper()
+	if _, err := s.DB.ExecContext(ctx, `UPDATE cron_jobs SET `+set+` WHERE id=?`, append(args, id)...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// baselineIsNull reports whether watch_hash and watch_output of the job id are both NULL.
+func baselineIsNull(t *testing.T, s *Store, id string) bool {
+	t.Helper()
+	var hash, out sql.NullString
+	if err := s.DB.QueryRowContext(ctx, `SELECT watch_hash, watch_output FROM cron_jobs WHERE id=?`, id).
+		Scan(&hash, &out); err != nil {
+		t.Fatal(err)
+	}
+	return !hash.Valid && !out.Valid
+}
+
+// The new columns go through the insert, the scan, and the full-row write. Create keeps the
+// settings and clears the run state.
+func TestAttentionFieldsRoundTrip(t *testing.T) {
+	s := store(t, fixedNow(2026, 11, 19, 9, 0))
+	j, err := s.Create(ctx, Job{Name: "w", Schedule: "every 1h", Prompt: "p", Script: "check.sh",
+		Watch: true, Continuity: true, Effort: "high", Enabled: true,
+		LastError: "x", LastErrorKey: "k", PauseReason: PauseFailures, WatchHash: "h", WatchOutput: "o"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !j.Watch || !j.Continuity || j.Effort != "high" || j.LastError != "" || j.LastErrorKey != "" ||
+		j.PauseReason != "" || j.WatchHash != "" || j.WatchOutput != "" {
+		t.Fatalf("%+v", j)
+	}
+	if !baselineIsNull(t, s, j.ID) {
+		t.Fatal("a job with no baseline must have NULL in watch_hash and watch_output")
+	}
+	setCols(t, s, j.ID, `last_error=?, last_error_key=?, pause_reason=?, watch_hash=?, watch_output=?`,
+		"⚠ boom", "http 503", PauseSchedule, "abc123", "line 1\nline 2")
+	name := "renamed"
+	if _, err := s.Update(ctx, j.ID, JobPatch{Name: &name}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := s.List(ctx)
+	if err != nil || len(l) != 1 {
+		t.Fatal(l, err)
+	}
+	got := l[0]
+	if got.Name != "renamed" || !got.Watch || !got.Continuity || got.Effort != "high" || got.LastError != "⚠ boom" ||
+		got.LastErrorKey != "http 503" || got.PauseReason != PauseSchedule || got.WatchHash != "abc123" ||
+		got.WatchOutput != "line 1\nline 2" {
+		t.Fatalf("a rename keeps each field: %+v", got)
+	}
+}
+
+func TestValidateWatchAndEffort(t *testing.T) {
+	s := store(t, fixedNow(2026, 11, 19, 9, 0))
+	for _, c := range []struct {
+		job  Job
+		want string
+	}{
+		{Job{Schedule: "every 1h", Prompt: "p", Watch: true}, "cron: watch needs a script"},
+		{Job{Schedule: "every 1h", NoAgent: true, Script: "a.sh", Watch: true}, "cron: watch cannot be used with no_agent"},
+		{Job{Schedule: "2026-11-20T09:00", Prompt: "p", Script: "a.sh", Watch: true}, "cron: watch needs a recurring schedule"},
+		{Job{Schedule: "every 1h", Prompt: "p", Effort: "huge"},
+			`cron: effort "huge" is not valid. Use one of: none, minimal, low, medium, high, xhigh, max`},
+	} {
+		if _, err := s.Create(ctx, c.job); err == nil || err.Error() != c.want {
+			t.Errorf("%+v: got %v, want %q", c.job, err, c.want)
+		}
+	}
+	for _, good := range []Job{
+		{Schedule: "every 1h", Prompt: "p", Script: "a.sh", Watch: true},
+		{Schedule: "0 9 * * *", Prompt: "p", Script: "a.sh", Watch: true},
+		{Schedule: "every 1h", Prompt: "p", Script: "a.sh", Watch: true, DraftOnly: true, Deliver: "local"},
+		{Schedule: "every 1h", Prompt: "p", Effort: ""},
+	} {
+		if _, err := s.Create(ctx, good); err != nil {
+			t.Errorf("%+v: %v", good, err)
+		}
+	}
+	for _, level := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		if _, err := s.Create(ctx, Job{Schedule: "every 1h", Prompt: "p", Effort: level}); err != nil {
+			t.Errorf("effort %q: %v", level, err)
+		}
+	}
+	// An update checks the patched job.
+	j, _ := s.Create(ctx, Job{Schedule: "every 1h", Prompt: "p", Script: "a.sh", Watch: true, Enabled: true})
+	once := "2026-11-20T09:00"
+	if _, err := s.Update(ctx, j.ID, JobPatch{Schedule: &once}); err == nil || err.Error() != "cron: watch needs a recurring schedule" {
+		t.Fatal(err)
+	}
+	empty := ""
+	if _, err := s.Update(ctx, j.ID, JobPatch{Script: &empty}); err == nil || err.Error() != "cron: watch needs a script" {
+		t.Fatal(err)
+	}
+}
+
+func TestUpdateAttentionFields(t *testing.T) {
+	s := store(t, fixedNow(2026, 11, 19, 9, 0))
+	j, _ := s.Create(ctx, Job{Schedule: "every 1h", Prompt: "p", Script: "a.sh", Enabled: true})
+	on, off, high, empty, bad := true, false, "high", "", "huge"
+	got, err := s.Update(ctx, j.ID, JobPatch{Watch: &on, Continuity: &on, Effort: &high})
+	if err != nil || !got.Watch || !got.Continuity || got.Effort != "high" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	got, err = s.Update(ctx, j.ID, JobPatch{Watch: &off, Continuity: &off, Effort: &empty})
+	if err != nil || got.Watch || got.Continuity || got.Effort != "" {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if _, err := s.Update(ctx, j.ID, JobPatch{Effort: &bad}); err == nil {
+		t.Fatal("a bad effort must fail")
+	}
+}
+
+// A task edit and a resume clear last_error and last_error_key. A rename and a new target keep them.
+func TestEditAndResumeClearLastError(t *testing.T) {
+	s := store(t, fixedNow(2026, 11, 19, 9, 0))
+	j, _ := s.Create(ctx, Job{Name: "a", Schedule: "every 1h", Prompt: "x", Enabled: true})
+	str := func(v string) *string { return &v }
+	for _, c := range []struct {
+		name    string
+		patch   JobPatch
+		cleared bool
+	}{
+		{"rename", JobPatch{Name: str("b")}, false},
+		{"deliver", JobPatch{Deliver: str("local")}, false},
+		{"prompt", JobPatch{Prompt: str("y")}, true},
+		{"effort", JobPatch{Effort: str("low")}, true},
+	} {
+		setCols(t, s, j.ID, `last_error='⚠ boom', last_error_key='http 503'`)
+		got, err := s.Update(ctx, j.ID, c.patch)
+		if err != nil || (got.LastError == "") != c.cleared || (got.LastErrorKey == "") != c.cleared {
+			t.Errorf("%s: %q %q %v, cleared must be %v", c.name, got.LastError, got.LastErrorKey, err, c.cleared)
+		}
+	}
+	on := true
+	for name, resume := range map[string]func() error{
+		"SetEnabled": func() error { return s.SetEnabled(ctx, j.ID, true) },
+		"Update":     func() error { _, err := s.Update(ctx, j.ID, JobPatch{Enabled: &on}); return err },
+	} {
+		setCols(t, s, j.ID, `enabled=0, last_error='⚠ boom', last_error_key='http 503', pause_reason='failures'`)
+		if err := resume(); err != nil {
+			t.Fatal(name, err)
+		}
+		if got, _ := s.Get(ctx, j.ID); !got.Enabled || got.LastError != "" || got.LastErrorKey != "" || got.PauseReason != "" {
+			t.Errorf("%s: a resume clears the error and the pause reason: %+v", name, got)
+		}
+	}
+}
+
+// An owner pause and a task edit clear pause_reason. A rename keeps it.
+func TestPauseReasonResets(t *testing.T) {
+	s := store(t, fixedNow(2026, 11, 19, 9, 0))
+	j, _ := s.Create(ctx, Job{Name: "a", Schedule: "every 1h", Prompt: "x", Enabled: true})
+	setCols(t, s, j.ID, `enabled=0, pause_reason='failures'`)
+	if err := s.SetEnabled(ctx, j.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, j.ID); got.PauseReason != "" {
+		t.Fatalf("an owner pause clears the reason: %+v", got)
+	}
+	name, prompt, off := "b", "y", false
+	setCols(t, s, j.ID, `pause_reason='schedule'`)
+	if got, err := s.Update(ctx, j.ID, JobPatch{Name: &name}); err != nil || got.PauseReason != PauseSchedule {
+		t.Fatalf("a rename keeps the reason: %+v %v", got, err)
+	}
+	if got, err := s.Update(ctx, j.ID, JobPatch{Enabled: &off}); err != nil || got.PauseReason != "" {
+		t.Fatalf("an owner pause through Update clears the reason: %+v %v", got, err)
+	}
+	setCols(t, s, j.ID, `pause_reason='failures'`)
+	if got, err := s.Update(ctx, j.ID, JobPatch{Prompt: &prompt}); err != nil || got.PauseReason != "" {
+		t.Fatalf("a task edit clears the reason: %+v %v", got, err)
+	}
+}
+
+// An edit of script, workdir, watch, or no_agent sets the baseline to NULL. Other edits keep it.
+func TestWatchBaselineClearedByEdit(t *testing.T) {
+	dir := t.TempDir()
+	str := func(v string) *string { return &v }
+	on, off := true, false
+	watchJob := Job{Name: "w", Schedule: "every 1h", Prompt: "p", Script: "a.sh", Watch: true, Enabled: true}
+	plainJob := Job{Name: "p", Schedule: "every 1h", Prompt: "p", Script: "a.sh", Enabled: true}
+	for _, c := range []struct {
+		name    string
+		base    Job
+		patch   JobPatch
+		cleared bool
+	}{
+		{"script", watchJob, JobPatch{Script: str("b.sh")}, true},
+		{"workdir", watchJob, JobPatch{Workdir: str(dir)}, true},
+		{"watch off", watchJob, JobPatch{Watch: &off}, true},
+		{"no_agent", plainJob, JobPatch{NoAgent: &on}, true},
+		{"prompt", watchJob, JobPatch{Prompt: str("q")}, false},
+		{"rename", watchJob, JobPatch{Name: str("w2")}, false},
+		{"same script", watchJob, JobPatch{Script: str("a.sh")}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := store(t, fixedNow(2026, 11, 19, 9, 0))
+			j, err := s.Create(ctx, c.base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			setCols(t, s, j.ID, `watch_hash='abc', watch_output='old'`)
+			got, err := s.Update(ctx, j.ID, c.patch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.cleared != (got.WatchHash == "" && got.WatchOutput == "") || c.cleared != baselineIsNull(t, s, j.ID) {
+				t.Fatalf("cleared must be %v: %q %q", c.cleared, got.WatchHash, got.WatchOutput)
+			}
+		})
+	}
+}
+
+// A run that skipped the model moves last_run and next_run only. It writes no cron_runs row,
+// and it keeps the failure state, the last status, the last output, and the repeat count.
+func TestMarkRunSkippedKeepsFailureState(t *testing.T) {
+	c := fixedNow(2026, 11, 19, 9, 0)
+	s := histStore(t, c, 50)
+	j, _ := s.Create(ctx, Job{Name: "w", Schedule: "every 1h", Prompt: "p", Script: "a.sh", Watch: true,
+		RepeatLeft: 5, Enabled: true})
+	setCols(t, s, j.ID, `fail_streak=3, last_error='⚠ boom', last_error_key='http 503', last_status='error',
+		last_output='old text'`)
+	c.t = j.NextRun
+	r := runRec("ok", "", c.t)
+	r.Skipped, r.Delivery = true, DeliveryNone
+	if err := s.MarkRun(ctx, j.ID, r); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(ctx, j.ID)
+	if !got.LastRun.Equal(c.t) || !got.NextRun.Equal(c.t.Add(time.Hour)) || got.FailStreak != 3 ||
+		got.LastError != "⚠ boom" || got.LastErrorKey != "http 503" || got.LastStatus != "error" ||
+		got.LastOutput != "old text" || got.RepeatLeft != 5 || !got.Enabled {
+		t.Fatalf("%+v", got)
+	}
+	if rows := storedRuns(t, s, j.ID); len(rows) != 0 {
+		t.Fatal("a skipped run writes no cron_runs row:", rows)
+	}
+}
+
+// An alert that went out sets last_error (redacted) and last_error_key. An error with no alert
+// and a stopped run keep them. An ok run clears them.
+func TestMarkRunErrorColumns(t *testing.T) {
+	c := fixedNow(2026, 11, 19, 9, 0)
+	s := histStore(t, c, 50)
+	s.Redact = func(x string) string { return strings.ReplaceAll(x, "sk-secret", "[REDACTED]") }
+	j, _ := s.Create(ctx, Job{Name: "a", Schedule: "every 1h", Prompt: "x", Enabled: true})
+	mark := func(r RunRecord) Job {
+		t.Helper()
+		if err := s.MarkRun(ctx, j.ID, r); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := s.Get(ctx, j.ID)
+		return got
+	}
+	c.t = c.t.Add(time.Hour)
+	r := runRec("error", "⚠ Cron job a failed: key sk-secret", c.t)
+	r.ErrKey, r.AlertSent = "http 401", true
+	if got := mark(r); got.LastError != "⚠ Cron job a failed: key [REDACTED]" || got.LastErrorKey != "http 401" {
+		t.Fatalf("an alert that went out sets the columns: %q %q", got.LastError, got.LastErrorKey)
+	}
+	c.t = c.t.Add(time.Hour)
+	r = runRec("error", "⚠ Cron job a failed: connection", c.t)
+	r.ErrKey, r.Delivery, r.LastStatus = "connection", DeliveryFailed, "delivery_failed"
+	if got := mark(r); got.LastError != "⚠ Cron job a failed: key [REDACTED]" || got.LastErrorKey != "http 401" ||
+		got.FailStreak != 2 {
+		t.Fatalf("an alert that did not go out keeps the columns: %+v", got)
+	}
+	c.t = c.t.Add(time.Hour)
+	if err := s.MarkStopped(ctx, j.ID, stopRec("", c.t)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, j.ID); got.LastErrorKey != "http 401" {
+		t.Fatalf("a stopped run keeps the columns: %+v", got)
+	}
+	c.t = c.t.Add(time.Hour)
+	if got := mark(runRec("ok", "all good", c.t)); got.LastError != "" || got.LastErrorKey != "" || got.FailStreak != 0 {
+		t.Fatalf("an ok run clears the columns: %+v", got)
+	}
+}
+
+// A streak pause sets pause_reason 'failures', and a bad stored schedule sets 'schedule'. A
+// failed run with no pause and a job that ended keep an empty value.
+func TestMarkRunPauseReason(t *testing.T) {
+	c := fixedNow(2026, 11, 19, 9, 0)
+	s := histStore(t, c, 50)
+	j, _ := s.Create(ctx, Job{Name: "a", Schedule: "every 1h", Prompt: "x", Enabled: true})
+	c.t = j.NextRun
+	r := runRec("error", "⚠ Cron job a failed: boom", c.t)
+	r.ErrKey, r.AlertSent = "http 503", true
+	if err := s.MarkRun(ctx, j.ID, r); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, j.ID); got.PauseReason != "" || !got.Enabled {
+		t.Fatalf("a failed run with no pause keeps '': %+v", got)
+	}
+	c.t = c.t.Add(time.Hour)
+	r = runRec("error", "⚠ Cron job a failed: boom\n\n⏸ The job a ("+j.ID+
+		") is paused: it failed 10 runs in a row. Fix the cause. Then ask me to resume the job.", c.t)
+	r.Pause, r.Streak, r.ErrKey, r.AlertSent = true, 10, "http 503", true
+	if err := s.MarkRun(ctx, j.ID, r); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, j.ID); got.PauseReason != PauseFailures || got.Enabled {
+		t.Fatalf("a streak pause sets failures: %+v", got)
+	}
+
+	bad, _ := s.Create(ctx, Job{Name: "b", Schedule: "every 1h", Prompt: "x", Enabled: true})
+	setCols(t, s, bad.ID, `schedule='sometimes'`)
+	if err := s.MarkRun(ctx, bad.ID, runRec("ok", "run text", c.t)); !errors.Is(err, errBadSchedule) {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, bad.ID); got.PauseReason != PauseSchedule || got.Enabled {
+		t.Fatalf("a bad schedule sets schedule: %+v", got)
+	}
+
+	once, _ := s.Create(ctx, Job{Name: "c", Schedule: "every 1h", Prompt: "x", RepeatLeft: 1, Enabled: true})
+	if err := s.MarkRun(ctx, once.ID, runRec("error", "⚠ boom", c.t)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, once.ID); got.PauseReason != "" || got.Enabled {
+		t.Fatalf("a job that ended is not a pause: %+v", got)
+	}
+}
+
+// Manual changes nothing for a job without watch: the run counts and writes its row.
+func TestMarkRunManualPlainJob(t *testing.T) {
+	c := fixedNow(2026, 11, 19, 9, 0)
+	s := histStore(t, c, 50)
+	j, _ := s.Create(ctx, Job{Name: "a", Schedule: "every 1h", Prompt: "x", RepeatLeft: 3, Enabled: true})
+	r := runRec("ok", "done", c.t)
+	r.Manual = true
+	if err := s.MarkRun(ctx, j.ID, r); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, j.ID); got.RepeatLeft != 2 || len(storedRuns(t, s, j.ID)) != 1 {
+		t.Fatalf("%+v", got)
+	}
+}
+
+// watchRec is the record of a run of the watch job j that woke the model, ended ok, and was
+// sent. The run read hash and output from the script of j.
+func watchRec(j Job, at time.Time, hash, output string) RunRecord {
+	r := runRec("ok", "answer", at)
+	r.WatchHash, r.WatchOutput, r.RunScript, r.RunWorkdir = hash, output, j.Script, j.Workdir
+	return r
+}
+
+// newWatchJob creates a watch job on check.sh with repeat count repeat.
+func newWatchJob(t *testing.T, s *Store, repeat int) Job {
+	t.Helper()
+	j, err := s.Create(ctx, Job{Name: "w", Schedule: "every 1h", Prompt: "p", Script: "check.sh", Watch: true,
+		RepeatLeft: repeat, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
+// A model run saves the new baseline only when it ended ok and was delivered, and it is not a
+// manual run.
+func TestWatchBaselineSaved(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		mut   func(*RunRecord)
+		saved bool
+	}{
+		{"sent", func(*RunRecord) {}, true},
+		{"local", func(r *RunRecord) { r.Delivery = DeliveryLocal }, true},
+		{"silent", func(r *RunRecord) { r.Delivery = DeliverySilent }, true},
+		{"failed delivery", func(r *RunRecord) { r.Delivery, r.LastStatus = DeliveryFailed, "delivery_failed" }, false},
+		{"held", func(r *RunRecord) { r.Delivery = DeliveryHeld }, false},
+		{"failed turn", func(r *RunRecord) { r.Status, r.LastStatus = "error", "error" }, false},
+		{"manual", func(r *RunRecord) { r.Manual = true }, false},
+		{"no hash", func(r *RunRecord) { r.WatchHash, r.WatchOutput = "", "" }, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cl := fixedNow(2026, 11, 19, 9, 0)
+			s := histStore(t, cl, 50)
+			j := newWatchJob(t, s, 0)
+			setCols(t, s, j.ID, `watch_hash='old', watch_output='old text'`)
+			cl.t = j.NextRun
+			r := watchRec(j, cl.t, "new", "new text")
+			c.mut(&r)
+			if err := s.MarkRun(ctx, j.ID, r); err != nil {
+				t.Fatal(err)
+			}
+			got, _ := s.Get(ctx, j.ID)
+			wantHash, wantOut := "old", "old text"
+			if c.saved {
+				wantHash, wantOut = "new", "new text"
+			}
+			if got.WatchHash != wantHash || got.WatchOutput != wantOut {
+				t.Fatalf("baseline %q %q, want %q %q", got.WatchHash, got.WatchOutput, wantHash, wantOut)
+			}
+		})
+	}
+}
+
+// The owner edits the script or the workdir of a watch job during a run. The run started with
+// the old values, so its output must not become the baseline.
+func TestWatchBaselineSkipsAfterScriptEdit(t *testing.T) {
+	dir := t.TempDir()
+	str := func(v string) *string { return &v }
+	for _, c := range []struct {
+		name    string
+		patch   JobPatch
+		skipped bool
+	}{
+		{"script, model run", JobPatch{Script: str("b.sh")}, false},
+		{"workdir, model run", JobPatch{Workdir: str(dir)}, false},
+		{"script, baseline run", JobPatch{Script: str("b.sh")}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cl := fixedNow(2026, 11, 19, 9, 0)
+			s := histStore(t, cl, 50)
+			j := newWatchJob(t, s, 0)
+			setCols(t, s, j.ID, `watch_hash='old', watch_output='old text'`)
+			cl.t = j.NextRun
+			r := watchRec(j, cl.t, "new", "new text") // the run started with the old script
+			if c.skipped {
+				r.Skipped, r.Delivery = true, DeliveryNone
+			}
+			if _, err := s.Update(ctx, j.ID, c.patch); err != nil { // the edit clears the baseline
+				t.Fatal(err)
+			}
+			if err := s.MarkRun(ctx, j.ID, r); err != nil {
+				t.Fatal(err)
+			}
+			if got, _ := s.Get(ctx, j.ID); got.WatchHash != "" || got.WatchOutput != "" || !baselineIsNull(t, s, j.ID) {
+				t.Fatalf("an edit during the run must not save the old baseline: %q %q", got.WatchHash, got.WatchOutput)
+			}
+		})
+	}
+}
+
+// The first good output of a watch job is the baseline: a skipped run saves it when the job has
+// none. A later skipped run does not change it. Neither run writes a cron_runs row.
+func TestWatchFirstBaselineOnSkip(t *testing.T) {
+	cl := fixedNow(2026, 11, 19, 9, 0)
+	s := histStore(t, cl, 50)
+	j := newWatchJob(t, s, 0)
+	for i, want := range []string{"h1", "h1"} {
+		cl.t = cl.t.Add(time.Hour)
+		r := watchRec(j, cl.t, fmt.Sprintf("h%d", i+1), fmt.Sprintf("output %d", i+1))
+		r.Skipped, r.Delivery = true, DeliveryNone
+		if err := s.MarkRun(ctx, j.ID, r); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := s.Get(ctx, j.ID); got.WatchHash != want || got.WatchOutput != "output 1" {
+			t.Fatalf("run %d: baseline %q %q", i+1, got.WatchHash, got.WatchOutput)
+		}
+	}
+	if rows := storedRuns(t, s, j.ID); len(rows) != 0 {
+		t.Fatal(rows)
+	}
+}
+
+// In a watch job, repeat counts only the runs that woke the model, ended ok, and were delivered.
+// A watch with repeat 1 ends after the first such run. A plain job counts each run, as before.
+func TestWatchRepeatCountsModelRuns(t *testing.T) {
+	cl := fixedNow(2026, 11, 19, 9, 0)
+	s := histStore(t, cl, 50)
+	j := newWatchJob(t, s, 1)
+	cl.t = j.NextRun
+	for _, c := range []struct {
+		name string
+		mut  func(*RunRecord)
+	}{
+		{"skipped", func(r *RunRecord) { r.Skipped, r.Delivery = true, DeliveryNone }},
+		{"failed turn", func(r *RunRecord) { r.Status, r.LastStatus = "error", "error" }},
+		{"failed delivery", func(r *RunRecord) { r.Delivery, r.LastStatus = DeliveryFailed, "delivery_failed" }},
+		{"held", func(r *RunRecord) { r.Delivery = DeliveryHeld }},
+		{"manual", func(r *RunRecord) { r.Manual = true }},
+	} {
+		r := watchRec(j, cl.t, "h", "out")
+		c.mut(&r)
+		if err := s.MarkRun(ctx, j.ID, r); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := s.Get(ctx, j.ID); got.RepeatLeft != 1 || !got.Enabled {
+			t.Fatalf("%s: repeat %d, enabled %v", c.name, got.RepeatLeft, got.Enabled)
+		}
+		cl.t = cl.t.Add(time.Hour)
+	}
+	if err := s.MarkRun(ctx, j.ID, watchRec(j, cl.t, "h2", "changed")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, j.ID); got.RepeatLeft != 0 || got.Enabled || !got.NextRun.IsZero() {
+		t.Fatalf("the first delivered model run ends the wait: %+v", got)
+	}
+
+	plain, _ := s.Create(ctx, Job{Name: "p", Schedule: "every 1h", Prompt: "x", RepeatLeft: 2, Enabled: true})
+	if err := s.MarkRun(ctx, plain.ID, runRec("error", "⚠ boom", cl.t)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Get(ctx, plain.ID); got.RepeatLeft != 1 {
+		t.Fatalf("a failed run of a plain job still counts: %+v", got)
+	}
+}
+
+// The cron_runs row keeps the cost, the median, and the flag. No cost is NULL.
+func TestRunCostColumns(t *testing.T) {
+	cl := fixedNow(2026, 11, 19, 9, 0)
+	s := histStore(t, cl, 50)
+	j, _ := s.Create(ctx, Job{Name: "a", Schedule: "every 1h", Prompt: "x", Enabled: true})
+	cost, median := 0.42, 0.12
+	r := runRec("ok", "first", cl.t)
+	r.CostUSD, r.CostMedian, r.CostFlag = &cost, &median, true
+	if err := s.MarkRun(ctx, j.ID, r); err != nil {
+		t.Fatal(err)
+	}
+	cl.t = cl.t.Add(time.Hour)
+	if err := s.MarkRun(ctx, j.ID, runRec("ok", "second", cl.t)); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := s.Runs(ctx, j.ID, 10, 0) // newest first
+	if err != nil || len(runs) != 2 {
+		t.Fatal(runs, err)
+	}
+	if runs[0].CostUSD != nil || runs[0].CostMedian != nil || runs[0].CostFlag {
+		t.Fatalf("a run with no cost: %+v", runs[0])
+	}
+	first, err := s.Run(ctx, j.ID, runs[1].ID)
+	if err != nil || first.CostUSD == nil || *first.CostUSD != 0.42 || first.CostMedian == nil ||
+		*first.CostMedian != 0.12 || !first.CostFlag {
+		t.Fatalf("%+v %v", first, err)
+	}
+	var n int
+	if err := s.DB.QueryRowContext(ctx, `SELECT count(*) FROM cron_runs WHERE job_id=? AND cost_usd IS NULL
+		AND cost_median IS NULL AND cost_flag=0`, j.ID).Scan(&n); err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+}
+
+// A skipped watch run ends a chain of stops. Two stops with a skip between them are not two
+// stops in a row, so a wait job with repeat 1 keeps its run.
+func TestSkipBreaksStopChain(t *testing.T) {
+	c := fixedNow(2026, 11, 19, 9, 0)
+	s := histStore(t, c, 50)
+	j := newWatchJob(t, s, 1)
+	c.t = j.NextRun
+	if err := s.MarkStopped(ctx, j.ID, stopRec("", c.t)); err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(time.Hour)
+	r := runRec("ok", "", c.t)
+	r.Skipped, r.Delivery = true, DeliveryNone
+	if err := s.MarkRun(ctx, j.ID, r); err != nil {
+		t.Fatal(err)
+	}
+	c.t = c.t.Add(time.Hour)
+	if err := s.MarkStopped(ctx, j.ID, stopRec("", c.t)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := s.Get(ctx, j.ID)
+	if got.RepeatLeft != 1 || !got.Enabled {
+		t.Fatalf("a skip between two stops must keep the job: %+v", got)
 	}
 }

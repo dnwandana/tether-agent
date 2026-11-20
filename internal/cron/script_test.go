@@ -1,6 +1,8 @@
 package cron
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -243,5 +245,40 @@ func TestLongStdoutSpillNameIsCronSource(t *testing.T) {
 	}
 	if !strings.HasPrefix(filepath.Base(files[0]), "cron_data_script-") {
 		t.Fatalf("the spill file name has no source: %s", files[0])
+	}
+}
+
+func sha(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+func TestScriptHashAndLastLine(t *testing.T) {
+	p := script(t, "h.sh", `printf 'a\n  last line  \n\n'`)
+	r := RunScriptSpill(ctx, p, "", nil, ScriptLimits{Timeout: time.Minute}, "")
+	if r.RawSHA256 != sha("a\n  last line  \n\n") || r.LastLine != "last line" {
+		t.Fatalf("%+v", r)
+	}
+	p = script(t, "e.sh", "true")
+	r = RunScriptSpill(ctx, p, "", nil, ScriptLimits{Timeout: time.Minute}, "")
+	if r.RawSHA256 != sha("") || r.LastLine != "" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// The cut marker names a new spill file on each run. The hash and the last line use the stdout
+// before the cut, so they do not change.
+func TestScriptHashIgnoresCutMarker(t *testing.T) {
+	p := script(t, "big.sh", "seq 1 5000")
+	lim := ScriptLimits{Timeout: time.Minute, OutputMaxChars: 1000}
+	spill := t.TempDir()
+	r1 := RunScriptSpill(ctx, p, "", nil, lim, spill)
+	r2 := RunScriptSpill(ctx, p, "", nil, lim, spill)
+	if r1.Stdout == r2.Stdout {
+		t.Fatal("each cut must name its own spill file")
+	}
+	want, _ := exec.Command("seq", "1", "5000").Output()
+	if r1.RawSHA256 != sha(string(want)) || r1.RawSHA256 != r2.RawSHA256 || r1.LastLine != "5000" {
+		t.Fatalf("%q %q %q", r1.RawSHA256, r2.RawSHA256, r1.LastLine)
 	}
 }
