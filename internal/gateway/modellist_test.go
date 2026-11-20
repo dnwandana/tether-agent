@@ -199,7 +199,7 @@ func TestModelListLongEntry(t *testing.T) {
 func TestModelListVeryLongEntry(t *testing.T) {
 	ctx := context.Background()
 	c, _ := interactiveCtx(t)
-	long := strings.Repeat("e", modelActionMaxBytes)
+	long := strings.Repeat("e", ActionMaxBytes)
 	serveModels(t, c, long, "m1", http.StatusOK, "a/x")
 	s, _ := c.current(ctx)
 	providers := [][]Button{{{Text: "↩ Providers", Data: "/model providers"}}}

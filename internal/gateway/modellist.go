@@ -29,10 +29,10 @@ func (d *Deps) modelsPerPage() int {
 // "/model <entry> use <i> <stamp>". A longer name gets a numbered text list.
 const modelEntryMaxBytes = 20
 
-// modelActionMaxBytes is the maximum length in bytes of a button action. The callback data
+// ActionMaxBytes is the maximum length in bytes of a button action. The callback data
 // also holds "cmd:", a Telegram user ID of up to 16 digits, and ":". A longer action is cut,
 // so the reply gives no button for it.
-const modelActionMaxBytes = 64 - len("cmd:") - 16 - len(":")
+const ActionMaxBytes = 64 - len("cmd:") - 16 - len(":")
 
 // modelToolsLine is the text that tells that the list has only models with tool support.
 const modelToolsLine = "Only models with tool support."
@@ -105,7 +105,7 @@ func (c *CommandCtx) modelListReply(ctx context.Context, s *sessions.Session, en
 		lines = append(lines, note)
 	}
 	lastRow := []Button{{Text: "↩ Providers", Data: "/model providers"}}
-	if refresh := "/model " + entry + " refresh"; len(refresh) <= modelActionMaxBytes {
+	if refresh := "/model " + entry + " refresh"; len(refresh) <= ActionMaxBytes {
 		lastRow = append(lastRow, Button{Text: "↻ Refresh", Data: refresh})
 	}
 
@@ -170,7 +170,7 @@ func (c *CommandCtx) modelListFailure(entry string, pc config.Provider, err erro
 	e := EscapeMarkdown(entry)
 	use := "/model " + entry + " config"
 	// A use action that does not fit in the button data gets the typed command, as in the CLI.
-	tap := c.interactive() && len(use) <= modelActionMaxBytes
+	tap := c.interactive() && len(use) <= ActionMaxBytes
 	end := "Tap the button to use the model in config.yaml. Send /model " + e + ":<model> to use another model."
 	if !tap {
 		end = "Send /model " + e + " config to use the model in config.yaml. Send /model " + e + ":<model> to use another model."

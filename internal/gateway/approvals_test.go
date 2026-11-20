@@ -280,7 +280,7 @@ func TestApprovalsButtonLimits(t *testing.T) {
 			if strings.HasPrefix(b.Text, "Remove ") && b.Text != "🗑 Remove all" {
 				n++
 			}
-			if len(b.Data) > modelActionMaxBytes {
+			if len(b.Data) > ActionMaxBytes {
 				t.Fatal(len(b.Data), b.Data)
 			}
 		}
@@ -302,7 +302,7 @@ func TestApprovalsButtonLimits(t *testing.T) {
 		}
 	}
 	action := "/approvals remove 20 " + wantCode(longest)
-	if len(action) > modelActionMaxBytes {
+	if len(action) > ActionMaxBytes {
 		t.Fatal(len(action), action)
 	}
 }
@@ -353,7 +353,7 @@ func TestApprovalsRemoveAllTelegram(t *testing.T) {
 	code := wantListCode("recursive_delete", "git_force_push")
 
 	// The longest button action fits the callback data.
-	if a := "/approvals remove all " + code + " " + confirmWord; len(a) != 38 || len(a) > modelActionMaxBytes {
+	if a := "/approvals remove all " + code + " " + confirmWord; len(a) != 38 || len(a) > ActionMaxBytes {
 		t.Fatal(len(a), a)
 	}
 

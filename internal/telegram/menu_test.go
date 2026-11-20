@@ -49,7 +49,7 @@ func TestBotCommandsSkills(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
-	if !reflect.DeepEqual(got[:25], BotCommands(nil, 0)) {
+	if !reflect.DeepEqual(got[:27], BotCommands(nil, 0)) {
 		t.Fatal("the built-ins must come first, in the same order")
 	}
 }
@@ -60,10 +60,10 @@ func TestBotCommandsCap(t *testing.T) {
 		cmds = append(cmds, skillCmd(fmt.Sprintf("s%02d", i), "x"))
 	}
 	got := BotCommands(cmds, 0)
-	if len(got) != menuMax || got[len(got)-1].Command != "s34" {
+	if len(got) != menuMax || got[len(got)-1].Command != "s32" {
 		t.Fatalf("%d entries, last %+v", len(got), got[len(got)-1])
 	}
-	if _, hidden := botMenu(cmds, 0); hidden != 15 {
+	if _, hidden := botMenu(cmds, 0); hidden != 17 {
 		t.Fatal(hidden)
 	}
 }
@@ -97,7 +97,7 @@ func TestRegisterCommandsFallsBackToBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []int{26, 25}; !reflect.DeepEqual(*sizes, want) {
+	if want := []int{28, 27}; !reflect.DeepEqual(*sizes, want) {
 		t.Fatal(*sizes)
 	}
 	// With no skill entries, a failed call is not sent again.
@@ -154,17 +154,17 @@ func TestBotCommandsMax(t *testing.T) {
 	for i := range 50 {
 		cmds = append(cmds, skillCmd(fmt.Sprintf("s%02d", i), "x"))
 	}
-	// 25 built-in commands and 5 skill commands.
-	if got := BotCommands(cmds, 30); len(got) != 30 || got[29].Command != "s04" {
+	// 27 built-in commands and 3 skill commands.
+	if got := BotCommands(cmds, 30); len(got) != 30 || got[29].Command != "s02" {
 		t.Fatalf("%d entries, last %+v", len(got), got[len(got)-1])
 	}
-	if _, hidden := botMenu(cmds, 30); hidden != 45 {
+	if _, hidden := botMenu(cmds, 30); hidden != 47 {
 		t.Fatal(hidden)
 	}
 	if got := BotCommands(cmds, 0); len(got) != menuMax {
 		t.Fatalf("zero max: %d entries", len(got))
 	}
-	if got := BotCommands(cmds, 100); len(got) != 75 {
+	if got := BotCommands(cmds, 100); len(got) != 77 {
 		t.Fatalf("max 100: %d entries", len(got))
 	}
 }
@@ -181,11 +181,11 @@ func TestPollerMenuMax(t *testing.T) {
 	for i := range 10 {
 		cmds = append(cmds, skillCmd(fmt.Sprintf("s%02d", i), "x"))
 	}
-	if err := (&Poller{C: client(srv), MenuMax: 25}).RegisterCommands(ctx, cmds); err != nil {
+	if err := (&Poller{C: client(srv), MenuMax: 30}).RegisterCommands(ctx, cmds); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 25 {
-		t.Fatalf("%d entries, want 25", len(got))
+	if len(got) != 30 {
+		t.Fatalf("%d entries, want 30", len(got))
 	}
 	ch := &Channel{C: client(srv), Cfg: config.TelegramConfig{MenuMaxCommands: 25}}
 	if p := ch.poller(); p.MenuMax != 25 {

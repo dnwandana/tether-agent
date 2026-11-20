@@ -215,6 +215,8 @@ func TestBotCommandsMenu(t *testing.T) {
 		{Command: "approvals", Description: "See the Always answers and the log"},
 		{Command: "mode", Description: "Set the approval mode of this chat or topic"},
 		{Command: "secrets", Description: "See and save the bound secrets"},
+		{Command: "jobs", Description: "See and control the cron jobs"},
+		{Command: "brief", Description: "See what needs you"},
 		{Command: "sethome", Description: "Send cron results here"},
 		{Command: "reload_mcp", Description: "Reload the MCP servers"},
 		{Command: "restart", Description: "Restart the gateway"},
