@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/skills"
@@ -84,6 +85,9 @@ type TurnOutput struct {
 type Runner struct {
 	// Store receives the session of each agent run.
 	Store *sessions.Store
+	// Jobs is the cron store. The watch limit, the continuity block, and the retry read it.
+	// Nil turns off the watch limit.
+	Jobs *Store
 	// ScriptsDir is the folder of the job scripts. A relative script path resolves in it.
 	ScriptsDir string
 	// Turn runs the agent turn and returns its output. The output is valid also when err is not nil.
@@ -104,20 +108,101 @@ type Runner struct {
 	Script ScriptLimits
 	// Log gets the run errors. Nil means slog.Default().
 	Log *slog.Logger
+	// Sleep waits d before the retry of an agent run. It returns an error when ctx ends first.
+	// Nil uses a timer that stops when ctx ends.
+	Sleep func(ctx context.Context, d time.Duration) error
+	// Cost returns the cost of the sessions of a run. Nil leaves RunOutcome.CostUSD nil.
+	Cost func(ctx context.Context, sessionIDs []string) (*float64, error)
+}
+
+const (
+	retryWait    = 60 * time.Second // the wait before the second start
+	retryMinLeft = 2 * time.Minute  // the AgentTimeout time that a retry needs
+	retryLine    = "An earlier start of this run failed after it used tools. Check what it did before you act again."
+)
+
+// retryable reports whether err can clear with time: a connection error, or an HTTP 408,
+// 429, or 5xx.
+func retryable(err error) bool {
+	if errors.Is(err, provider.ErrConnection) {
+		return true
+	}
+	if se, ok := errors.AsType[*provider.HTTPStatusError](err); ok {
+		return se.Code == 408 || se.Code == 429 || (se.Code >= 500 && se.Code <= 599)
+	}
+	return false
+}
+
+// errKey returns the key of a failed run for the quiet repeat. It has no provider body and
+// no digits, so the same failure gives the same key.
+func errKey(err error, alert string) string {
+	var se *provider.HTTPStatusError
+	switch {
+	case errors.Is(err, provider.ErrConnection):
+		return "connection"
+	case errors.As(err, &se):
+		return fmt.Sprintf("http %d", se.Code)
+	}
+	return textKey(alert)
+}
+
+// textKey returns alert cut at partialAnswerMark, with the ASCII digits removed.
+func textKey(alert string) string {
+	if i := strings.Index(alert, partialAnswerMark); i >= 0 {
+		alert = alert[:i]
+	}
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return -1
+		}
+		return r
+	}, alert)
+}
+
+// scriptErrKey returns "script timeout" or "script exit <N>" for a failed script.
+func scriptErrKey(res ScriptResult) string {
+	if res.TimedOut {
+		return "script timeout"
+	}
+	return fmt.Sprintf("script exit %d", res.ExitCode)
+}
+
+// sleep waits d, or until ctx ends.
+func (r *Runner) sleep(ctx context.Context, d time.Duration) error {
+	if r.Sleep != nil {
+		return r.Sleep(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Run runs the job j once and returns the outcome. A script job (NoAgent) makes no model
 // call and creates no session. An agent job creates a fresh session. Its answer is not sent
 // when it is a silence marker (IsSilent). A failure gives Status "error" and an alert text
-// that is always sent.
-func (r *Runner) Run(ctx context.Context, j Job) RunOutcome {
+// that is always sent. manual is true for Run now. A manual watch run always wakes the model.
+func (r *Runner) Run(ctx context.Context, j Job, manual bool) RunOutcome {
 	if j.NoAgent {
 		return r.runScriptJob(ctx, j)
 	}
-	o, err := r.runAgentJob(ctx, j)
+	o, err := r.runAgentJob(ctx, j, manual)
 	if err != nil {
 		r.log().Error("cron job failed", "job", j.ID, "name", j.Name, "err", err)
 		o.Text, o.Send, o.Status = fmt.Sprintf("⚠ Cron job %s failed: %v", j.Name, err), true, "error"
+		o.ErrKey = errKey(err, o.Text)
+	}
+	if r.Cost != nil && len(o.SessionIDs) > 0 {
+		c, cerr := r.Cost(context.WithoutCancel(ctx), o.SessionIDs)
+		if cerr != nil {
+			r.log().Warn("cron run cost failed", "job", j.ID, "name", j.Name, "err", cerr)
+		} else {
+			o.CostUSD = c
+		}
 	}
 	return o
 }
@@ -125,23 +210,72 @@ func (r *Runner) Run(ctx context.Context, j Job) RunOutcome {
 func (r *Runner) runScriptJob(ctx context.Context, j Job) RunOutcome {
 	path, err := ResolveScript(j.Script, r.ScriptsDir)
 	if err != nil {
-		return RunOutcome{Text: fmt.Sprintf("⚠ Cron job %s failed: %v", j.Name, err), Send: true, Status: "error"}
+		text := fmt.Sprintf("⚠ Cron job %s failed: %v", j.Name, err)
+		return RunOutcome{Text: text, Send: true, Status: "error", ErrKey: textKey(text)}
 	}
 	res := RunScriptSpill(ctx, path, j.Workdir, r.Env, r.Script, r.SpillDir)
 	text, send := ScriptJobMessage(j, res, r.Script)
-	status := "ok"
+	status, key := "ok", ""
 	if res.TimedOut || res.ExitCode != 0 {
-		status = "error"
+		status, key = "error", scriptErrKey(res)
 	}
-	return RunOutcome{Text: text, Send: send, Status: status}
+	return RunOutcome{Text: text, Send: send, Status: status, ErrKey: key}
 }
 
-func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
+// watchCapText is the run output of a watch run that the limit of model runs skipped.
+const watchCapText = "Skipped: this watch job reached 24 model runs in 24 h."
+
+// scriptRun is the result of the data script of an agent job. err is the ResolveScript error.
+type scriptRun struct {
+	res ScriptResult
+	err error
+}
+
+// failed reports whether the script did not run, timed out, or exited with a code other than 0.
+func (s scriptRun) failed() bool {
+	return s.err != nil || s.res.TimedOut || s.res.ExitCode != 0
+}
+
+func (r *Runner) runAgentJob(ctx context.Context, j Job, manual bool) (RunOutcome, error) {
 	if r.Turn == nil {
 		return RunOutcome{}, errors.New("cron: no agent turn function is set")
 	}
 	if r.Store == nil {
 		return RunOutcome{}, errors.New("cron: no session store is set")
+	}
+	var sr *scriptRun
+	if j.Script != "" {
+		sr = &scriptRun{}
+		path, err := ResolveScript(j.Script, r.ScriptsDir)
+		if err != nil {
+			sr.err = err
+		} else {
+			sr.res = RunScriptSpill(ctx, path, j.Workdir, r.Env, r.Script, r.SpillDir)
+		}
+	}
+	o := RunOutcome{Manual: manual}
+	if j.Watch && sr != nil {
+		if sr.failed() {
+			o.Text, o.Send, o.Status = r.scriptAlert(j, *sr), true, "error"
+			if sr.err != nil {
+				o.ErrKey = textKey(o.Text)
+			} else {
+				o.ErrKey = scriptErrKey(sr.res)
+			}
+			return o, nil
+		}
+		o.WatchHash, o.WatchOutput = sr.res.RawSHA256, watchText(sr.res.Stdout)
+		wake, capped, err := r.watchWakes(ctx, j, sr.res, manual)
+		if err != nil {
+			return o, err
+		}
+		if !wake {
+			o.Skipped, o.Status = true, "ok"
+			if capped {
+				o.Text, o.WatchHash, o.WatchOutput = watchCapText, "", ""
+			}
+			return o, nil
+		}
 	}
 	sess, err := r.Store.Create(ctx, sessions.Session{
 		Key:           "cron:" + j.ID,
@@ -149,12 +283,13 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 		Kind:          "cron",
 		Title:         j.Name,
 		ModelOverride: modelOverride(j.Model),
+		Effort:        j.Effort,
 	})
 	if err != nil {
-		return RunOutcome{}, err
+		return o, err
 	}
-	o := RunOutcome{SessionID: sess.ID}
-	text, scriptFailed, err := r.buildText(ctx, j)
+	o.SessionID, o.SessionIDs = sess.ID, []string{sess.ID}
+	text, scriptFailed, err := r.buildText(ctx, j, sr)
 	if err != nil {
 		return o, err
 	}
@@ -168,17 +303,40 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 	if j.DraftOnly {
 		removed = append(removed, draftOnlyRemovedTools...)
 	}
-	out, err := r.Turn(tctx, CronTurn{
-		Session:     sess,
-		Text:        text,
-		Toolsets:    j.Toolsets,
-		RemoveTools: removed,
-		Model:       j.Model,
-		Workdir:     j.Workdir,
-		JobName:     j.Name,
-		JobPurpose:  j.Prompt,
-		DraftOnly:   j.DraftOnly,
-	})
+	turn := func(sess *sessions.Session, text string) (TurnOutput, error) {
+		return r.Turn(tctx, CronTurn{
+			Session:     sess,
+			Text:        text,
+			Toolsets:    j.Toolsets,
+			RemoveTools: removed,
+			Model:       j.Model,
+			Workdir:     j.Workdir,
+			JobName:     j.Name,
+			JobPurpose:  j.Prompt,
+			DraftOnly:   j.DraftOnly,
+		})
+	}
+	out, err := turn(sess, text)
+	if err != nil && r.canRetry(ctx, tctx, err) {
+		r.log().Warn("cron agent turn failed, retrying once", "job", j.ID, "name", j.Name,
+			"session", sess.ID, "err", err)
+		if retryText, ok := r.prepareRetry(tctx, j, sess.ID, text); ok {
+			sess2, cerr := r.Store.Create(ctx, sessions.Session{
+				Key:           "cron:" + j.ID,
+				Source:        "cron",
+				Kind:          "cron",
+				Title:         j.Name,
+				ModelOverride: modelOverride(j.Model),
+				Effort:        j.Effort,
+			})
+			if cerr != nil {
+				return o, cerr
+			}
+			sess = sess2
+			o.SessionID, o.SessionIDs = sess.ID, append(o.SessionIDs, sess.ID)
+			out, err = turn(sess, retryText)
+		}
+	}
 	final := out.Final
 	o.Sources, o.Hosts, o.ToolCounts, o.Handles = out.Sources, out.Hosts, out.ToolCounts, out.Handles
 	if err != nil {
@@ -189,7 +347,7 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 			if strings.TrimSpace(final) != "" {
 				o.Text += partialAnswerMark + "\n\n" + final
 			}
-			o.Send, o.Status = true, "error"
+			o.Send, o.Status, o.ErrKey = true, "error", "timeout"
 			return o, nil
 		}
 		return o, err
@@ -197,7 +355,7 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 	if strings.TrimSpace(final) == "" {
 		// An empty answer is a fault of the model or the provider, so it counts as a failure (Hermes).
 		o.Text = fmt.Sprintf("⚠ Cron job %s finished, but the model gave no text.", j.Name)
-		o.Send, o.Status = true, "error"
+		o.Send, o.Status, o.ErrKey = true, "error", "empty"
 		return o, nil
 	}
 	// The model must report a failed data script, so that run skips the silence check.
@@ -210,15 +368,62 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job) (RunOutcome, error) {
 	return o, nil
 }
 
-// buildText returns the user message of an agent job: the skills in order, the script
-// output, the prompt, and CronPreamble. scriptFailed is true when the data script failed.
-func (r *Runner) buildText(ctx context.Context, j Job) (text string, scriptFailed bool, err error) {
+// canRetry reports whether a failed first start gets a second start: the gateway did not stop,
+// the time limit did not end the turn, the error can clear with time, and enough time is left.
+func (r *Runner) canRetry(ctx, tctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(context.Cause(tctx), errAgentTimeout) || !retryable(err) {
+		return false
+	}
+	if dl, ok := tctx.Deadline(); ok && time.Until(dl) < retryMinLeft {
+		return false
+	}
+	return true
+}
+
+// prepareRetry waits, checks that the job still runs, and returns the text of the second
+// start. The text has the retry line when the first session used a tool, or when its read
+// fails. ok is false when the retry must not start.
+func (r *Runner) prepareRetry(tctx context.Context, j Job, firstID, text string) (string, bool) {
+	if err := r.sleep(tctx, retryWait); err != nil {
+		return "", false
+	}
+	if r.Jobs != nil {
+		cur, err := r.Jobs.Get(tctx, j.ID)
+		if err != nil || !cur.Enabled {
+			return "", false
+		}
+	}
+	msgs, err := r.Store.Messages(tctx, firstID)
+	if err != nil {
+		r.log().Warn("cron retry: read the first session failed", "job", j.ID, "session", firstID, "err", err)
+		// The tool calls of the first start are not known, so warn the model as if it used tools.
+		return retryLine + "\n\n" + text, true
+	}
+	for _, m := range msgs {
+		if m.Msg.Role == provider.RoleTool {
+			return retryLine + "\n\n" + text, true
+		}
+	}
+	return text, true
+}
+
+// buildText returns the user message of an agent job: the skills in order, the continuity
+// block, the script output, the prompt, and CronPreamble. sr is nil for a job with no script. scriptFailed is true
+// when the data script failed.
+func (r *Runner) buildText(ctx context.Context, j Job, sr *scriptRun) (text string, scriptFailed bool, err error) {
 	var b strings.Builder
 	if err := r.writeSkills(&b, j); err != nil {
 		return "", false, err
 	}
-	if j.Script != "" {
-		scriptFailed = r.writeScript(ctx, &b, j)
+	if err := r.writeContinuity(ctx, &b, j); err != nil {
+		return "", false, err
+	}
+	if sr != nil {
+		if j.Watch {
+			r.writeWatch(&b, j, sr.res)
+		} else {
+			scriptFailed = r.writeScript(&b, j, *sr)
+		}
 	}
 	b.WriteString(j.Prompt)
 	b.WriteString("\n\n")
@@ -228,6 +433,108 @@ func (r *Runner) buildText(ctx context.Context, j Job) (text string, scriptFaile
 		b.WriteString(draftOnlyPreamble)
 	}
 	return b.String(), scriptFailed, nil
+}
+
+// writeContinuity writes the output of the last delivered run of a job with continuity, as
+// untrusted data (Hermes continuity, cron/job_args.py). With no such run, or with a nil Jobs,
+// it writes nothing.
+func (r *Runner) writeContinuity(ctx context.Context, b *strings.Builder, j Job) error {
+	if !j.Continuity || r.Jobs == nil {
+		return nil
+	}
+	run, ok, err := r.Jobs.LastDelivered(ctx, j.ID)
+	if err != nil {
+		return fmt.Errorf("cron: read the previous run: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	fmt.Fprintf(b, "Your previous run's output (%s)\n%s\n\n",
+		run.StartedAt.In(time.Local).Format("2006-01-02 15:04"),
+		security.WrapUntrusted(security.UntrustedCronSource, run.Output))
+	return nil
+}
+
+// scriptAlert returns the alert text of a data script that failed.
+func (r *Runner) scriptAlert(j Job, sr scriptRun) string {
+	if sr.err != nil {
+		return fmt.Sprintf("⚠ Cron job %s failed: %v", j.Name, sr.err)
+	}
+	alert, _ := ScriptJobMessage(j, sr.res, r.Script)
+	return alert
+}
+
+// watchWakes applies the decision table of a watch job whose script exited with 0. capped is
+// true when the limit of model runs in 24 h skipped the run.
+func (r *Runner) watchWakes(ctx context.Context, j Job, res ScriptResult, manual bool) (wake, capped bool, err error) {
+	switch g, ok := ParseWakeGate(res.LastLine); {
+	case manual:
+		return true, false, nil
+	case ok:
+		wake = g
+	case j.WatchHash == "":
+		wake = false
+	default:
+		wake = res.RawSHA256 != j.WatchHash
+	}
+	if !wake || r.Jobs == nil {
+		return wake, false, nil
+	}
+	n, err := r.Jobs.ModelRunsSince(ctx, j.ID, time.Now().Add(-24*time.Hour))
+	if err != nil {
+		return false, false, fmt.Errorf("cron: count the watch runs: %w", err)
+	}
+	if n >= WatchModelRunsPerDay {
+		return false, true, nil
+	}
+	return true, false, nil
+}
+
+// watchText returns the stdout of a watch script with no cut marker, cut at
+// WatchOutputMaxRunes runes with no mark. It cuts at the first "\n[… " (the marker of
+// ctxmgr.TruncateNamed) or "\n[stdout was cut", so the stored text never names a spill file.
+func watchText(stdout string) string {
+	for _, m := range []string{"\n[… ", "\n[stdout was cut"} {
+		if i := strings.Index(stdout, m); i >= 0 {
+			stdout = stdout[:i]
+		}
+	}
+	if r := []rune(stdout); len(r) > WatchOutputMaxRunes {
+		stdout = string(r[:WatchOutputMaxRunes])
+	}
+	return stdout
+}
+
+// writeWatch writes the Watch change block of a woken watch job. It replaces the Script output
+// block, so the model does not get the same text two times.
+func (r *Runner) writeWatch(b *strings.Builder, j Job, res ScriptResult) {
+	wrap := func(t string) string { return security.WrapUntrusted(security.UntrustedCronSource, t) }
+	text := watchText(res.Stdout)
+	newText := strings.TrimRight(text, "\n")
+	if strings.TrimSpace(newText) == "" {
+		newText = "(the script printed nothing)"
+	}
+	if j.WatchHash != "" {
+		const head = "Watch change: the script output changed since the last run.\n"
+		switch d := WatchDiff(j.WatchOutput, text); {
+		case d == "" && res.RawSHA256 != j.WatchHash:
+			// The hash covers the full stdout, so the change is in the part that the cut removed.
+			b.WriteString(head)
+			b.WriteString(watchCutChange + "\n\n")
+		case d == "":
+		case d == watchTooLarge:
+			b.WriteString(head)
+			b.WriteString(watchTooLarge + "\n\n")
+		default:
+			b.WriteString(head)
+			b.WriteString("Diff:\n")
+			b.WriteString(wrap(strings.TrimRight(d, "\n")))
+			b.WriteString("\n\n")
+		}
+	}
+	b.WriteString("New output:\n")
+	b.WriteString(wrap(newText))
+	b.WriteString("\n\n")
 }
 
 // writeSkills writes each skill of the job as "[Skill: <name>]\n<body>\n". A skill that is
@@ -270,16 +577,15 @@ func (r *Runner) writeSkills(b *strings.Builder, j Job) error {
 	return nil
 }
 
-// writeScript runs the script of an agent job and writes its stdout as untrusted data inside the untrusted block. A failure
+// writeScript writes the stdout of the data script as untrusted data inside the untrusted block. A failure
 // goes into the prompt too, so that the model reports it (Hermes). It returns true when it
 // wrote a "Script error:" block.
-func (r *Runner) writeScript(ctx context.Context, b *strings.Builder, j Job) (failed bool) {
-	path, err := ResolveScript(j.Script, r.ScriptsDir)
-	if err != nil {
-		fmt.Fprintf(b, "Script error: the data-collection script did not run. Report this to the user.\n%v\n\n", err)
+func (r *Runner) writeScript(b *strings.Builder, j Job, sr scriptRun) (failed bool) {
+	if sr.err != nil {
+		fmt.Fprintf(b, "Script error: the data-collection script did not run. Report this to the user.\n%v\n\n", sr.err)
 		return true
 	}
-	res := RunScriptSpill(ctx, path, j.Workdir, r.Env, r.Script, r.SpillDir)
+	res := sr.res
 	if res.TimedOut || res.ExitCode != 0 {
 		alert, _ := ScriptJobMessage(j, res, r.Script)
 		fmt.Fprintf(b, "Script error: the data-collection script failed. Report this to the user.\n%s\n\n",

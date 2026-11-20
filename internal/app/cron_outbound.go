@@ -199,7 +199,7 @@ func (a *App) sendCronNote(ctx context.Context, n cron.Note) error {
 	if err != nil {
 		return err
 	}
-	p := telegram.SendMessageParams{ChatID: chat, Text: cronNoteText(n)}
+	p := telegram.SendMessageParams{ChatID: chat, Text: cronNoteText(n), DisableNotification: n.NoSound}
 	if n.HeldID != "" {
 		p.ReplyMarkup = &telegram.InlineKeyboardMarkup{InlineKeyboard: [][]telegram.InlineKeyboardButton{
 			{{Text: "✅ Post the full text there", CallbackData: "hs:" + n.HeldID + ":s"}}}}

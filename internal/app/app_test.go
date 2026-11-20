@@ -647,7 +647,7 @@ func TestAddTelegramWiresChannelCronAndPrompts(t *testing.T) {
 		t.Fatalf("%+v", ch)
 	}
 	// The cron deliverer sends through the channel and finds the home channel.
-	if err := a.Sched.Deliver.Send(ctx, cron.Target{Source: "telegram", ChatID: "5"}, "done", nil); err != nil {
+	if err := a.Sched.Deliver.Send(ctx, cron.Target{Source: "telegram", ChatID: "5"}, "done", nil, false); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()

@@ -24,6 +24,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/acp"
 	"github.com/dnwandana/tether-agent/internal/agent"
+	"github.com/dnwandana/tether-agent/internal/brief"
 	"github.com/dnwandana/tether-agent/internal/browser"
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/cron"
@@ -321,6 +322,13 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if opts.Gateway {
 		a.Sched = a.newScheduler()
 	}
+	// The chat role has no scheduler: Run now in /jobs makes the job due, and the gateway runs it.
+	var jobsRunNow func(context.Context, string) error
+	if a.Sched != nil {
+		jobsRunNow = a.Sched.RunNow
+	}
+	gateway.Register(gateway.JobsCommand(a.Cron, jobsRunNow))
+	gateway.Register(gateway.BriefCommand(a.briefText))
 
 	a.Registry = tools.NewRegistry()
 	a.gatewayRole = opts.Gateway
@@ -542,7 +550,7 @@ func (a *App) newScheduler() *cron.Scheduler {
 	if a.Gate != nil {
 		guard = a.Gate.Guard
 	}
-	return &cron.Scheduler{
+	s := &cron.Scheduler{
 		Sweep: a.sweepHeld,
 		Store: a.Cron,
 		Runner: &cron.Runner{
@@ -553,6 +561,8 @@ func (a *App) newScheduler() *cron.Scheduler {
 			Env:        security.ChildEnv(os.Environ(), a.DotEnv.Snapshot(), cfg.Terminal.EnvPassthrough),
 			SpillDir:   filepath.Join(a.DataDir, "cache", "spill"),
 			Log:        a.Log,
+			Jobs:       a.Cron,
+			Cost:       a.cronCost,
 			Script: cron.ScriptLimits{
 				Timeout:         time.Duration(cfg.Cron.ScriptTimeoutS) * time.Second,
 				OutputMaxChars:  cfg.Cron.ScriptOutputMaxChars,
@@ -571,6 +581,61 @@ func (a *App) newScheduler() *cron.Scheduler {
 		Missed:      cfg.Cron.MissedRuns,
 		Log:         a.Log,
 	}
+	if cfg.Cron.QuietHours != "" {
+		if w, err := config.ParseWindow(cfg.Cron.QuietHours); err != nil {
+			a.Log.Warn("cron: cannot read cron.quiet_hours; cron sends keep the sound", "err", err.Error())
+		} else {
+			s.Quiet = w.Contains
+		}
+	}
+	if cfg.Cron.BriefAt != "" {
+		if m, err := config.ParseClock(cfg.Cron.BriefAt); err != nil {
+			a.Log.Warn("cron: cannot read cron.brief_at; no daily status", "err", err.Error())
+		} else {
+			s.BriefAt = m
+			s.Brief = a.briefText
+		}
+	}
+	return s
+}
+
+// cronCost returns the cost of a cron run: the sum of the priced calls of each session of the
+// run, with its hidden child sessions (obs.UsageReport). It returns nil when no call has a price.
+func (a *App) cronCost(ctx context.Context, sessionIDs []string) (*float64, error) {
+	var sum float64
+	priced := false
+	for _, id := range sessionIDs {
+		rows, _, err := obs.UsageReport(ctx, a.DB, time.Time{}, id)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			if r.CostKnown {
+				sum, priced = sum+r.CostUSD, true
+			}
+		}
+	}
+	if !priced {
+		return nil, nil
+	}
+	return &sum, nil
+}
+
+// briefText returns the status text of /brief and of the daily send, with the secrets masked.
+// empty is true when nothing needs the owner.
+func (a *App) briefText(ctx context.Context) (text string, empty bool, err error) {
+	st, err := brief.Build(ctx, brief.Deps{Jobs: a.Cron, Held: &cron.HeldStore{DB: a.DB},
+		Goals: &goals.Store{DB: a.DB}, Sessions: a.Store, DB: a.DB}, a.Cfg.Cron.RunHistory == 0, time.Now())
+	if err != nil {
+		return "", false, err
+	}
+	// Redact before the format: the Markdown escape turns "_" into "\_", so a mask can miss.
+	for i := range st.Lines {
+		st.Lines[i].Name = a.Redactor.Redact(st.Lines[i].Name)
+		st.Lines[i].Detail = a.Redactor.Redact(st.Lines[i].Detail)
+	}
+	text, empty = gateway.FormatBrief(st)
+	return text, empty, nil
 }
 
 // cronTurn runs the agent turn of a cron job. The kind "cron" makes the gate apply
@@ -698,9 +763,9 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		a.heldCards = &telegram.HeldCards{C: c, Log: a.Log,
 			Store: heldSendStore{held: a.Sched.Deliver.Held, jobs: a.Cron}, Send: a.sendHeld}
 		ch.HeldCards = a.heldCards
-		a.Sched.Deliver.Send = func(ctx context.Context, to cron.Target, text string, files []string) error {
+		a.Sched.Deliver.Send = func(ctx context.Context, to cron.Target, text string, files []string, noSound bool) error {
 			return ch.Send(ctx, gateway.Target{Source: "telegram", ChatID: to.ChatID, ThreadID: to.ThreadID},
-				gateway.Outbound{Text: text, Files: files})
+				gateway.Outbound{Text: text, Files: files, NoSound: noSound})
 		}
 		a.Sched.Deliver.OwnerHome = func(ctx context.Context) (cron.Target, bool) {
 			id, ok := ch.HomeOwnerChat(ctx)

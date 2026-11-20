@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -24,15 +25,16 @@ func homeAt(chat, cronThread string) func(context.Context, bool) (Target, bool) 
 }
 
 type sent struct {
-	to   Target
-	text string
+	to      Target
+	text    string
+	noSound bool
 }
 
 func recorder(home func(context.Context, bool) (Target, bool)) (*Deliverer, *[]sent) {
 	var calls []sent
 	return &Deliverer{
-		Send: func(_ context.Context, to Target, text string, _ []string) error {
-			calls = append(calls, sent{to, text})
+		Send: func(_ context.Context, to Target, text string, _ []string, noSound bool) error {
+			calls = append(calls, sent{to, text, noSound})
 			return nil
 		},
 		Home: home,
@@ -129,11 +131,11 @@ func TestDeliverSendsText(t *testing.T) {
 
 func TestSendErrorReturnedNotPanic(t *testing.T) {
 	j := Job{ID: "j2", Name: "n", Origin: Origin{Source: "telegram", ChatID: "1"}}
-	d := &Deliverer{Send: func(context.Context, Target, string, []string) error { return errors.New("flood wait") }}
+	d := &Deliverer{Send: func(context.Context, Target, string, []string, bool) error { return errors.New("flood wait") }}
 	if got, err := d.Deliver(ctx, j, RunOutcome{Text: "x", Send: true}); err == nil || got != DeliveryFailed || !strings.Contains(err.Error(), "flood wait") {
 		t.Fatal(got, err)
 	}
-	d.Send = func(context.Context, Target, string, []string) error { panic("bad channel") }
+	d.Send = func(context.Context, Target, string, []string, bool) error { panic("bad channel") }
 	if got, err := d.Deliver(ctx, j, RunOutcome{Text: "x", Send: true}); err == nil || got != DeliveryFailed {
 		t.Fatal("a panic in Send must become an error")
 	}
@@ -145,8 +147,8 @@ func TestSendErrorReturnedNotPanic(t *testing.T) {
 // Deliver returns the delivery value of each case. Silent comes before Send.
 func TestDeliverReturnsDelivery(t *testing.T) {
 	var sends int
-	okSend := func(context.Context, Target, string, []string) error { sends++; return nil }
-	fail := func(context.Context, Target, string, []string) error { return errors.New("flood wait") }
+	okSend := func(context.Context, Target, string, []string, bool) error { sends++; return nil }
+	fail := func(context.Context, Target, string, []string, bool) error { return errors.New("flood wait") }
 	chat := Job{ID: "j3", Name: "n", Origin: Origin{Source: "telegram", ChatID: "1"}}
 	local := Job{ID: "j4", Name: "n", Deliver: "local"}
 	for _, c := range []struct {
@@ -185,7 +187,7 @@ func TestLocalPauseGoesHome(t *testing.T) {
 		(*calls)[0].to != (Target{Source: "telegram", ChatID: "-100", ThreadID: "99"}) || (*calls)[0].text != o.Text {
 		t.Fatal(got, err, *calls)
 	}
-	d.Send = func(context.Context, Target, string, []string) error { return errors.New("flood wait") }
+	d.Send = func(context.Context, Target, string, []string, bool) error { return errors.New("flood wait") }
 	if got, err := d.Deliver(ctx, j, o); err == nil || got != DeliveryFailed {
 		t.Fatal(got, err)
 	}
@@ -266,5 +268,157 @@ func TestDraftOnlyAlertsGoToOwner(t *testing.T) {
 	d.OwnerHome = nil
 	if got, err := d.Deliver(ctx, Job{ID: "j5", Name: "n", Deliver: "telegram:-100", DraftOnly: true}, alert); got != DeliveryFailed || err == nil || len(*calls) != 0 {
 		t.Fatal(got, err, *calls)
+	}
+}
+
+const (
+	recLine  = "✅ Cron job n works again after 2 failed runs."
+	costLine = "💸 This run cost $0.50, 5.0× the usual $0.10 of this job."
+)
+
+// A repeat alert sends nothing. The pause alert always goes out, also on a repeat.
+func TestDeliverRepeatSendsNothing(t *testing.T) {
+	d, calls := recorder(homeAt("-100", ""))
+	chat := Job{ID: "j1", Name: "n", Origin: Origin{Source: "telegram", ChatID: "1"}}
+	o := RunOutcome{Text: "⚠ Cron job n failed: provider down", Send: true, Status: "error", Repeat: true}
+	if got, err := d.Deliver(ctx, chat, o); err != nil || got != DeliveryRepeat || len(*calls) != 0 {
+		t.Fatal(got, err, *calls)
+	}
+	local := Job{ID: "j2", Name: "n", Deliver: "local"}
+	if got, err := d.Deliver(ctx, local, o); err != nil || got != DeliveryRepeat || len(*calls) != 0 {
+		t.Fatal(got, err, *calls)
+	}
+	o.Pause = true
+	if got, err := d.Deliver(ctx, chat, o); err != nil || got != DeliverySent || len(*calls) != 1 {
+		t.Fatal(got, err, *calls)
+	}
+}
+
+// The recovered line goes after the result. A silent run and a local job send only the line.
+// A draft-only job sends the line to the owner chat.
+func TestDeliverRecoveredLine(t *testing.T) {
+	chat := Job{ID: "j1", Name: "n", Origin: Origin{Source: "telegram", ChatID: "1"}}
+	local := Job{ID: "j2", Name: "n", Deliver: "local"}
+	draftLocal := Job{ID: "j3", Name: "n", Deliver: "local", DraftOnly: true}
+	ok := RunOutcome{Text: "report", Send: true, Status: "ok", RecoveredLine: recLine}
+	silent := RunOutcome{Text: "[SILENT]", Status: "ok", Silent: true, RecoveredLine: recLine}
+	origin := Target{Source: "telegram", ChatID: "1"}
+	home := Target{Source: "telegram", ChatID: "-100", ThreadID: "99"}
+	owner := Target{Source: "telegram", ChatID: "5"}
+	for _, c := range []struct {
+		name string
+		j    Job
+		o    RunOutcome
+		want string
+		to   Target
+		text string
+	}{
+		{"result and line", chat, ok, DeliverySent, origin, "report\n\n" + recLine},
+		{"silent sends only the line", chat, silent, DeliverySilent, origin, recLine},
+		{"local sends only the line home", local, ok, DeliveryLocal, home, recLine},
+		{"local silent", local, silent, DeliverySilent, home, recLine},
+		{"draft-only line to the owner", draftLocal, ok, DeliveryLocal, owner, recLine},
+	} {
+		d, calls := draftDeliverer("1", "5")
+		got, err := d.Deliver(ctx, c.j, c.o)
+		if err != nil || got != c.want || len(*calls) != 1 || (*calls)[0].to != c.to || (*calls)[0].text != c.text {
+			t.Errorf("%s: got %q, %v, %+v", c.name, got, err, *calls)
+		}
+	}
+	// A failed send of the line only logs. The run keeps its delivery value.
+	d, _ := recorder(homeAt("-100", "99"))
+	d.Send = func(context.Context, Target, string, []string, bool) error { return errors.New("flood wait") }
+	if got, err := d.Deliver(ctx, local, ok); err != nil || got != DeliveryLocal {
+		t.Fatal(got, err)
+	}
+	if got, err := d.Deliver(ctx, chat, silent); err != nil || got != DeliverySilent {
+		t.Fatal(got, err)
+	}
+}
+
+// A message that is only the recovered line skips the scan and model_guard.
+func TestDeliverLineSkipsGuard(t *testing.T) {
+	r := outbound(t, false)
+	g := &guardRec{allow: false, reason: "no"}
+	r.d.Guard = g
+	o := RunOutcome{Text: "[SILENT]", Status: "ok", Silent: true, Sources: []string{"web_fetch"}, RecoveredLine: recLine}
+	got, err := r.d.Deliver(ctx, groupJob, o)
+	if err != nil || got != DeliverySilent || len(g.got) != 0 || len(r.scanned) != 0 || len(r.holds) != 0 ||
+		!reflect.DeepEqual(r.sent, []string{recLine}) {
+		t.Fatal(got, err, g.got, r.scanned, r.sent)
+	}
+}
+
+// The cost line goes only to a private target, after the recovered line. It never goes alone.
+func TestDeliverCostLineOnlyPrivate(t *testing.T) {
+	o := RunOutcome{Text: "report", Send: true, Status: "ok", RecoveredLine: recLine, CostLine: costLine}
+	priv := outbound(t, true)
+	if got, err := priv.d.Deliver(ctx, groupJob, o); err != nil || got != DeliverySent ||
+		!reflect.DeepEqual(priv.sent, []string{"report\n\n" + recLine + "\n\n" + costLine}) {
+		t.Fatal(got, err, priv.sent)
+	}
+	group := outbound(t, false)
+	if got, err := group.d.Deliver(ctx, groupJob, o); err != nil || got != DeliverySent ||
+		!reflect.DeepEqual(group.sent, []string{"report\n\n" + recLine}) {
+		t.Fatal(got, err, group.sent)
+	}
+	alone := outbound(t, true)
+	silent := RunOutcome{Text: "[SILENT]", Status: "ok", Silent: true, CostLine: costLine}
+	if got, err := alone.d.Deliver(ctx, groupJob, silent); err != nil || got != DeliverySilent || len(alone.sent) != 0 {
+		t.Fatal(got, err, alone.sent)
+	}
+	local := Job{ID: "j2", Name: "n", Deliver: "local"}
+	localRun := RunOutcome{Text: "report", Send: true, Status: "ok", CostLine: costLine}
+	if got, err := alone.d.Deliver(ctx, local, localRun); err != nil || got != DeliveryLocal || len(alone.sent) != 0 {
+		t.Fatal(got, err, alone.sent)
+	}
+}
+
+// NoSound reaches each send: the result, the line, and the alert to the owner chat. The owner
+// note of a masked delivery gets the flag too.
+func TestDeliverNoSound(t *testing.T) {
+	d, calls := draftDeliverer("1", "5")
+	chat := Job{ID: "j1", Name: "n", Origin: Origin{Source: "telegram", ChatID: "1"}}
+	draft := Job{ID: "j2", Name: "n", Deliver: "telegram:-100", DraftOnly: true}
+	for _, c := range []struct {
+		j Job
+		o RunOutcome
+	}{
+		{chat, RunOutcome{Text: "report", Send: true, Status: "ok", NoSound: true}},
+		{chat, RunOutcome{Text: "[SILENT]", Status: "ok", Silent: true, RecoveredLine: recLine, NoSound: true}},
+		{chat, RunOutcome{Text: "⚠ alert", Send: true, Status: "error", NoSound: true}},
+		{draft, RunOutcome{Text: "⚠ alert", Send: true, Status: "error", NoSound: true}},
+	} {
+		if _, err := d.Deliver(ctx, c.j, c.o); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(*calls) != 4 {
+		t.Fatal(*calls)
+	}
+	for _, c := range *calls {
+		if !c.noSound {
+			t.Fatalf("%+v", c)
+		}
+	}
+	if _, err := d.Deliver(ctx, chat, RunOutcome{Text: "report", Send: true, Status: "ok"}); err != nil || (*calls)[4].noSound {
+		t.Fatal(err, *calls)
+	}
+	r := outbound(t, false)
+	if _, err := r.d.Deliver(ctx, groupJob, RunOutcome{Text: cardText, Send: true, Status: "ok", NoSound: true}); err != nil ||
+		len(r.notes) != 1 || !r.notes[0].NoSound {
+		t.Fatal(err, r.notes)
+	}
+}
+
+// A result that model_guard holds still sends the recovered line, so the owner learns that
+// the job works again.
+func TestDeliverHoldSendsRecoveredLine(t *testing.T) {
+	r := outbound(t, false)
+	r.d.Guard = &guardRec{allow: false, reason: "no"}
+	o := RunOutcome{Text: "report", Send: true, Status: "ok", Sources: []string{"web_fetch"}, RecoveredLine: recLine}
+	got, err := r.d.Deliver(ctx, groupJob, o)
+	if err != nil || got != DeliveryHeld || len(r.holds) != 1 || !reflect.DeepEqual(r.sent, []string{recLine}) {
+		t.Fatal(got, err, r.holds, r.sent)
 	}
 }

@@ -69,6 +69,8 @@ type schedFixture struct {
 	turn *fakeTurn
 	mu   sync.Mutex
 	sent []string
+	// noSound holds the no-sound flag of each send.
+	noSound []bool
 	// sendErr is the error of each send.
 	sendErr error
 }
@@ -93,13 +95,14 @@ func scheduler(t *testing.T) (*schedFixture, *clock) {
 			Turn:       f.turn.turn,
 		},
 		Deliver: &Deliverer{
-			Send: func(_ context.Context, _ Target, text string, _ []string) error {
+			Send: func(_ context.Context, _ Target, text string, _ []string, noSound bool) error {
 				f.mu.Lock()
 				defer f.mu.Unlock()
 				if f.sendErr != nil {
 					return f.sendErr
 				}
 				f.sent = append(f.sent, text)
+				f.noSound = append(f.noSound, noSound)
 				return nil
 			},
 			Home: homeAt("100", ""),
@@ -734,10 +737,12 @@ func TestTenthFailurePausesJob(t *testing.T) {
 	if j := mustGet(t, s.Store, id); !j.Enabled || j.FailStreak != 9 || strings.Contains(j.LastOutput, "⏸") {
 		t.Fatalf("%+v", j)
 	}
+	if r := newestRunRow(t, s.Store, id); r.delivery != DeliveryRepeat {
+		t.Fatalf("%+v", r)
+	}
 	failTicks(s, clk, 1)
 	sends := s.sends()
-	if len(sends) != 10 || strings.Contains(sends[8], "⏸") ||
-		sends[9] != "⚠ Cron job a failed: provider down"+wantPause(id, 10) {
+	if len(sends) != 2 || sends[0] != firstAlert || sends[1] != "⚠ Cron job a failed: provider down"+wantPause(id, 10) {
 		t.Fatalf("%q", sends)
 	}
 	j := mustGet(t, s.Store, id)
@@ -797,7 +802,7 @@ func TestPauseAlertSendFailureDoesNotPause(t *testing.T) {
 	j = mustGet(t, s.Store, id)
 	sends := s.sends()
 	if j.Enabled || j.FailStreak != 11 || !strings.HasSuffix(j.LastOutput, wantPause(id, 11)) ||
-		len(sends) != 10 || !strings.HasSuffix(sends[9], wantPause(id, 11)) {
+		len(sends) != 2 || !strings.HasSuffix(sends[1], wantPause(id, 11)) {
 		t.Fatalf("%+v %q", j, sends)
 	}
 }
@@ -842,7 +847,7 @@ func TestDeliveryErrorStillCountsFailure(t *testing.T) {
 	s.sendErr = errors.New("telegram down")
 	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Deliver: "telegram:123", Enabled: true})
 	failTicks(s, clk, 2)
-	if j := mustGet(t, s.Store, id); !j.Enabled || j.FailStreak != 2 || j.LastStatus != "delivery_failed" {
+	if j := mustGet(t, s.Store, id); !j.Enabled || j.FailStreak != 2 || j.LastStatus != "delivery_failed" || j.LastErrorKey != "" {
 		t.Fatalf("%+v", j)
 	}
 	if r := newestRunRow(t, s.Store, id); r.status != "error" || r.delivery != DeliveryFailed {
@@ -854,7 +859,7 @@ func TestDeliveryErrorStillCountsFailure(t *testing.T) {
 func TestRunDurationEndsBeforeDelivery(t *testing.T) {
 	s, clk := scheduler(t)
 	s.Store.RunHistory = 50
-	s.Deliver.Send = func(context.Context, Target, string, []string) error {
+	s.Deliver.Send = func(context.Context, Target, string, []string, bool) error {
 		clk.t = clk.t.Add(time.Minute) // a slow send
 		return nil
 	}
@@ -890,5 +895,251 @@ func TestSweepRunsBeforeDue(t *testing.T) {
 	s.TickOnce(ctx)
 	if runs(t, s, id) != 2 {
 		t.Fatal("a panic in the sweep must not stop the tick")
+	}
+}
+
+// firstAlert is the first alert of the job a with the error "provider down".
+const firstAlert = "⚠ Cron job a failed: provider down\n\nI send no new alert while the job fails with the same error."
+
+// runRowCount returns the number of cron_runs rows of the job id.
+func runRowCount(t *testing.T, s *Store, id string) int {
+	t.Helper()
+	var n int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM cron_runs WHERE job_id=?`, id).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// writeScript writes the script name with the body into the scripts folder of s.
+func writeScript(t *testing.T, s *schedFixture, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(s.Runner.ScriptsDir, name), []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The same error key sends no new alert, and its row has delivery repeat. A new key sends.
+func TestRepeatAlertNotSent(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = failTurn
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 3)
+	if sends := s.sends(); len(sends) != 1 || sends[0] != firstAlert {
+		t.Fatalf("%q", sends)
+	}
+	if j := mustGet(t, s.Store, id); j.FailStreak != 3 || j.LastErrorKey == "" || j.LastStatus != "error" {
+		t.Fatalf("%+v", j)
+	}
+	if r := newestRunRow(t, s.Store, id); r.status != "error" || r.delivery != DeliveryRepeat {
+		t.Fatalf("%+v", r)
+	}
+	s.Runner.Turn = func(context.Context, CronTurn) (TurnOutput, error) { return TurnOutput{}, errors.New("disk full") }
+	failTicks(s, clk, 1)
+	if sends := s.sends(); len(sends) != 2 || sends[1] != "⚠ Cron job a failed: disk full" {
+		t.Fatalf("%q", sends)
+	}
+}
+
+// The first alert of an error fails to send. The next run with the same error sends an alert.
+func TestRepeatAfterFailedAlertSends(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = failTurn
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	s.mu.Lock()
+	s.sendErr = errors.New("telegram down")
+	s.mu.Unlock()
+	failTicks(s, clk, 1)
+	if j := mustGet(t, s.Store, id); j.LastErrorKey != "" || newestRunRow(t, s.Store, id).delivery != DeliveryFailed {
+		t.Fatalf("a failed alert must not keep the key: %+v", j)
+	}
+	s.mu.Lock()
+	s.sendErr = nil
+	s.mu.Unlock()
+	failTicks(s, clk, 1)
+	if sends := s.sends(); len(sends) != 1 || sends[0] != firstAlert {
+		t.Fatalf("%q", sends)
+	}
+	if j := mustGet(t, s.Store, id); j.LastErrorKey == "" || j.FailStreak != 2 {
+		t.Fatalf("%+v", j)
+	}
+	failTicks(s, clk, 1)
+	if len(s.sends()) != 1 || newestRunRow(t, s.Store, id).delivery != DeliveryRepeat {
+		t.Fatalf("%q", s.sends())
+	}
+}
+
+// An ok run after failed runs adds the line to the result. The stored output keeps only the answer.
+func TestRecoveredLineAfterFailures(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = failTurn
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 2)
+	s.Runner.Turn = s.turn.turn
+	failTicks(s, clk, 1)
+	if sends := s.sends(); len(sends) != 2 || sends[1] != "report\n\n✅ Cron job a works again after 2 failed runs." {
+		t.Fatalf("%q", sends)
+	}
+	if j := mustGet(t, s.Store, id); j.FailStreak != 0 || j.LastOutput != "report" || j.LastErrorKey != "" {
+		t.Fatalf("%+v", j)
+	}
+	if r := newestRunRow(t, s.Store, id); r.output != "report" || r.delivery != DeliverySent {
+		t.Fatalf("%+v", r)
+	}
+	failTicks(s, clk, 1)
+	if sends := s.sends(); len(sends) != 3 || sends[2] != "report" {
+		t.Fatalf("the next ok run has no line: %q", sends)
+	}
+}
+
+// A silent run after a failed run sends only the line, and keeps delivery silent.
+func TestRecoveredSilentSendsOnlyLine(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = failTurn
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 1)
+	s.Runner.Turn = func(context.Context, CronTurn) (TurnOutput, error) { return TurnOutput{Final: "[SILENT]"}, nil }
+	failTicks(s, clk, 1)
+	if sends := s.sends(); len(sends) != 2 || sends[1] != "✅ Cron job a works again after 1 failed runs." {
+		t.Fatalf("%q", sends)
+	}
+	if r := newestRunRow(t, s.Store, id); r.status != "ok" || r.delivery != DeliverySilent || r.output != "[SILENT]" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// A run that skips the model sends nothing and writes no cron_runs row. It keeps the fail
+// streak, so it makes no recovered line.
+func TestSkippedRunNoDeliveryNoLine(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Jobs = s.Store
+	writeScript(t, s, "w.sh", "exit 3\n")
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Script: "w.sh", Watch: true, Enabled: true})
+	failTicks(s, clk, 1)
+	rows := runRowCount(t, s.Store, id)
+	if j := mustGet(t, s.Store, id); j.FailStreak != 1 || len(s.sends()) != 1 || rows != 1 {
+		t.Fatalf("%+v %q %d", j, s.sends(), rows)
+	}
+	writeScript(t, s, "w.sh", "echo v1\n")
+	failTicks(s, clk, 1)
+	j := mustGet(t, s.Store, id)
+	if runs(t, s, id) != 0 || len(s.sends()) != 1 || j.FailStreak != 1 || runRowCount(t, s.Store, id) != rows ||
+		!j.LastRun.Equal(clk.t) {
+		t.Fatalf("%+v %q", j, s.sends())
+	}
+}
+
+// A broken one-time watch pauses, so the owner gets the pause alert.
+func TestBrokenOneTimeWatchPauses(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 1
+	s.Runner.Jobs = s.Store
+	writeScript(t, s, "w.sh", "exit 3\n")
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Script: "w.sh", Watch: true,
+		RepeatLeft: 1, Enabled: true})
+	failTicks(s, clk, 1)
+	j := mustGet(t, s.Store, id)
+	if sends := s.sends(); j.Enabled || j.RepeatLeft != 1 || len(sends) != 1 || !strings.HasSuffix(sends[0], wantPause(id, 1)) {
+		t.Fatalf("%+v %q", j, sends)
+	}
+}
+
+func (f *schedFixture) noSounds() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.noSound...)
+}
+
+// In the quiet window, the result and the failure alert go out with no sound.
+func TestQuietWindowSendsNoSound(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory = 50
+	s.Quiet = func(t time.Time) bool { return t.Hour() >= 22 }
+	mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 1) // 10:31
+	clk.t = time.Date(2026, 10, 27, 22, 0, 0, 0, time.UTC)
+	failTicks(s, clk, 1) // 22:31
+	s.Runner.Turn = failTurn
+	failTicks(s, clk, 1) // 23:02
+	if got := fmt.Sprint(s.noSounds()); got != "[false true true]" {
+		t.Fatalf("%s %q", got, s.sends())
+	}
+}
+
+// A run that costs more than 3 times the median of the last priced runs gets the flag and the
+// 💸 line. With fewer than 3 priced runs, no run is flagged.
+func TestCostFlagAfterThreePricedRuns(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory = 50
+	costs, i := []float64{0.10, 0.12, 0.08, 0.50}, 0
+	s.Runner.Cost = func(context.Context, []string) (*float64, error) { c := costs[i]; i++; return &c, nil }
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 3)
+	if got := fmt.Sprint(s.sends()); got != "[report report report]" {
+		t.Fatal(got)
+	}
+	failTicks(s, clk, 1)
+	want := "report\n\n💸 This run cost $0.50, 5.0× the usual $0.10 of this job."
+	if sends := s.sends(); len(sends) != 4 || sends[3] != want {
+		t.Fatalf("%q", sends)
+	}
+	got, err := s.Store.Runs(ctx, id, 1, 0)
+	if err != nil || len(got) != 1 || !got[0].CostFlag || got[0].CostUSD == nil || *got[0].CostUSD != 0.50 ||
+		got[0].CostMedian == nil || *got[0].CostMedian != 0.10 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if j := mustGet(t, s.Store, id); j.LastOutput != "report" {
+		t.Fatalf("the 💸 line is not stored: %q", j.LastOutput)
+	}
+}
+
+// Run now on a watch job wakes the model with no change. It keeps the baseline and
+// repeat_left. The next scheduled run with no change skips the model again.
+func TestRunNowWatchIsManual(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory = 50
+	s.Runner.Jobs = s.Store
+	if err := os.WriteFile(filepath.Join(s.Runner.ScriptsDir, "w.sh"), []byte("echo v1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Script: "w.sh", Watch: true,
+		RepeatLeft: 1, Enabled: true})
+	failTicks(s, clk, 1)
+	base := mustGet(t, s.Store, id)
+	if runs(t, s, id) != 0 || base.WatchHash == "" {
+		t.Fatalf("the baseline run saves the hash and skips the model: %+v", base)
+	}
+	if err := s.RunNow(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	s.wg.Wait()
+	j := mustGet(t, s.Store, id)
+	if runs(t, s, id) != 1 || fmt.Sprint(s.sends()) != "[report]" || !j.Enabled || j.RepeatLeft != 1 ||
+		j.WatchHash != base.WatchHash {
+		t.Fatalf("%+v %q", j, s.sends())
+	}
+	failTicks(s, clk, 1)
+	if runs(t, s, id) != 1 {
+		t.Fatal("the manual flag must end with its run")
+	}
+}
+
+// A panic in each run sends one alert. The next panics are repeats.
+func TestPanicAlertRepeats(t *testing.T) {
+	s, clk := scheduler(t)
+	s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+	s.Runner.Turn = func(context.Context, CronTurn) (TurnOutput, error) { panic("boom") }
+	id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+	failTicks(s, clk, 3)
+	if sends := s.sends(); len(sends) != 1 {
+		t.Fatalf("%q", sends)
+	}
+	if j := mustGet(t, s.Store, id); j.LastErrorKey != "internal error" {
+		t.Fatalf("%+v", j)
 	}
 }

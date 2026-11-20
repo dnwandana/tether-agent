@@ -33,6 +33,8 @@ const (
 	DeliveryDropped = "dropped"
 	// DeliveryExpired means that the held text waited 24 h with no tap.
 	DeliveryExpired = "expired"
+	// DeliveryRepeat means that the error key is the key of the last alert that went out. Nothing is sent.
+	DeliveryRepeat = "repeat"
 )
 
 // partialAnswerMark joins the failure alert of a timed-out run to the partial answer of the run.
@@ -47,6 +49,8 @@ type Note struct {
 	Findings    []security.Finding
 	Original    string
 	HeldID      string
+	// NoSound sends the note with no sound.
+	NoSound bool
 }
 
 // TargetInfo describes a target for the guard and the owner cards. Kind is "group", "topic",
@@ -80,13 +84,35 @@ type RunOutcome struct {
 	Handles []string
 	// RunID is the cron_runs row of the run. It is 0 when the row does not exist yet.
 	RunID int64
+	// Skipped is true when the run did not call the model: a watch with no change, the baseline,
+	// a wakeAgent false, or the watch limit. The run writes no cron_runs row.
+	Skipped bool
+	// Manual is true for a run that the owner started with Run now.
+	Manual bool
+	// ErrKey is the key of a failed run. The quiet repeat compares it with the key of the last alert.
+	ErrKey string
+	// SessionIDs holds each session of the run. A retry gives two. SessionID is the last one.
+	SessionIDs []string
+	// CostUSD is the cost of the sessions of the run. Nil means that no call has a price.
+	CostUSD *float64
+	// WatchHash and WatchOutput are the hash and the cut stdout of a watch script that ran with exit 0.
+	WatchHash, WatchOutput string
+	// Repeat is true when the alert has the same error key as the last alert, so it is not sent.
+	Repeat bool
+	// RecoveredLine is the "works again" line. It goes into the sent text only.
+	RecoveredLine string
+	// CostLine is the line about a costly run. It goes into the sent text only.
+	CostLine string
+	// NoSound is true in the cron.quiet_hours window. The send makes no sound.
+	NoSound bool
 }
 
 // Deliverer sends the outcome of a job run. internal/app sets the function fields, so cron
 // does not import gateway or telegram.
 type Deliverer struct {
-	// Send sends text and files to a target.
-	Send func(ctx context.Context, to Target, text string, files []string) error
+	// Send sends text and files to a target. With noSound, the send makes no sound (Telegram
+	// disable_notification).
+	Send func(ctx context.Context, to Target, text string, files []string, noSound bool) error
 	// Home returns the Telegram home channel. With forCron, the thread is cron_thread when
 	// it is set. The bool is false when no home channel is set.
 	Home func(ctx context.Context, forCron bool) (Target, bool)
@@ -156,7 +182,13 @@ func resolveTarget(ctx context.Context, j Job, home func(context.Context, bool) 
 // Redact, asks the guard after an outside source, and returns DeliveryHeld when the guard
 // holds the text. Deliver never panics.
 func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (delivery string, err error) {
+	if o.Repeat && !o.Pause {
+		return DeliveryRepeat, nil
+	}
 	if o.Silent {
+		if o.RecoveredLine != "" {
+			d.sendLine(ctx, j, o)
+		}
 		return DeliverySilent, nil
 	}
 	if !o.Send {
@@ -183,10 +215,16 @@ func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (delivery 
 	if local {
 		// resolveTarget returns local before it calls Home, so the pause alert asks Home here.
 		if !o.Pause || d.Home == nil || d.Send == nil {
+			if o.RecoveredLine != "" {
+				d.sendLine(ctx, j, o)
+			}
 			return DeliveryLocal, nil
 		}
 		h, ok := d.Home(ctx, true)
 		if !ok || h.ChatID == "" {
+			if o.RecoveredLine != "" {
+				d.sendLine(ctx, j, o)
+			}
 			return DeliveryLocal, nil
 		}
 		if h.Source == "" {
@@ -198,7 +236,7 @@ func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (delivery 
 		return DeliveryFailed, fmt.Errorf("cron: deliver job %s: no send function is set", j.ID)
 	}
 	if d.IsPrivate == nil || d.IsPrivate(ctx, t) {
-		return d.send(ctx, j, t, d.redact(o.Text))
+		return d.send(ctx, j, t, d.redact(withLines(o.Text, o.RecoveredLine, o.CostLine)), o.NoSound)
 	}
 	// Scan reads the raw text. Redact first would leave 10 characters of a token, and the scan would miss it.
 	masked, findings := o.Text, []security.Finding(nil)
@@ -213,11 +251,15 @@ func (d *Deliverer) Deliver(ctx context.Context, j Job, o RunOutcome) (delivery 
 			Action:   "deliver the final text to the Telegram " + info.Kind + ` "` + info.Title + `"`})
 		if !allow {
 			d.logDecision(ctx, j, security.DecisionBlocked, reason)
+			if o.RecoveredLine != "" {
+				// The line is a fixed text, so it goes out while the result waits for the owner.
+				d.sendLine(ctx, j, o)
+			}
 			return d.hold(ctx, j, o, t, info, reason)
 		}
 		d.logDecision(ctx, j, security.DecisionAllowed, reason)
 	}
-	delivery, err = d.send(ctx, j, t, d.redact(masked))
+	delivery, err = d.send(ctx, j, t, d.redact(withLines(masked, o.RecoveredLine)), o.NoSound)
 	if err == nil && len(findings) > 0 {
 		d.noteOriginal(ctx, j, o, t, info, findings)
 	}
@@ -249,10 +291,13 @@ func (d *Deliverer) deliverDraftOnly(ctx context.Context, j Job, o RunOutcome, t
 		if home.Source == "" {
 			home.Source = "telegram"
 		}
-		delivery, err = d.send(ctx, j, home, d.redact(o.Text))
+		delivery, err = d.send(ctx, j, home, d.redact(o.Text), o.NoSound)
 		return delivery, true, err
 	}
 	if local {
+		if o.RecoveredLine != "" {
+			d.sendLine(ctx, j, o)
+		}
 		return DeliveryLocal, true, nil
 	}
 	return DeliveryFailed, true, fmt.Errorf("cron: deliver job %s: %w", j.ID, ErrDraftDeliver)
@@ -271,8 +316,8 @@ func (d *Deliverer) redact(s string) string {
 	return d.Redact(s)
 }
 
-func (d *Deliverer) send(ctx context.Context, j Job, t Target, text string) (string, error) {
-	if err := d.Send(ctx, t, text, nil); err != nil {
+func (d *Deliverer) send(ctx context.Context, j Job, t Target, text string, noSound bool) (string, error) {
+	if err := d.Send(ctx, t, text, nil, noSound); err != nil {
 		return DeliveryFailed, fmt.Errorf("cron: deliver job %s to %s:%s: %w", j.ID, t.Source, t.ChatID, err)
 	}
 	return DeliverySent, nil
@@ -331,7 +376,7 @@ func (d *Deliverer) noteOriginal(ctx context.Context, j Job, o RunOutcome, t Tar
 		return
 	}
 	original := d.redact(o.Text)
-	n := Note{Job: j, Target: t, TargetTitle: info.Title, Findings: findings, Original: original}
+	n := Note{Job: j, Target: t, TargetTitle: info.Title, Findings: findings, Original: original, NoSound: o.NoSound}
 	if d.Held != nil {
 		id, err := newHeldID()
 		if err == nil {
@@ -354,4 +399,55 @@ func (d *Deliverer) log() *slog.Logger {
 		return d.Log
 	}
 	return slog.Default()
+}
+
+// withLines returns text and each non-empty line, with a blank line before each line.
+func withLines(text string, lines ...string) string {
+	for _, l := range lines {
+		if l != "" {
+			text += "\n\n" + l
+		}
+	}
+	return text
+}
+
+// sendLine sends only o.RecoveredLine. A draft-only job sends it to OwnerHome, and a local
+// job to the home channel. The line is a fixed text, so it skips the scan and model_guard. A
+// failure or a panic only logs, so the run keeps its delivery value.
+func (d *Deliverer) sendLine(ctx context.Context, j Job, o RunOutcome) {
+	defer func() {
+		if r := recover(); r != nil {
+			d.log().Error("cron recovered line failed", "job", j.ID, "err", fmt.Sprint(r))
+		}
+	}()
+	var t Target
+	ok := false
+	switch {
+	case d.Send == nil:
+	case j.DraftOnly:
+		if d.OwnerHome != nil {
+			t, ok = d.OwnerHome(ctx)
+		}
+	default:
+		rt, local, err := resolveTarget(ctx, j, d.Home)
+		switch {
+		case err != nil:
+		case local:
+			if d.Home != nil {
+				t, ok = d.Home(ctx, true)
+			}
+		default:
+			t, ok = rt, true
+		}
+	}
+	if !ok || t.ChatID == "" {
+		d.log().Warn("cron recovered line has no target", "job", j.ID, "name", j.Name)
+		return
+	}
+	if t.Source == "" {
+		t.Source = "telegram"
+	}
+	if err := d.Send(ctx, t, o.RecoveredLine, nil, o.NoSound); err != nil {
+		d.log().Error("cron recovered line failed", "job", j.ID, "name", j.Name, "err", err)
+	}
 }

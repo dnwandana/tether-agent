@@ -2,10 +2,12 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -249,5 +251,46 @@ func TestDraftOnlyAppWiring(t *testing.T) {
 	}
 	if !pt(ctx, a.NewEnv(nil, "cli"), "") {
 		t.Fatal("a CLI job is checked again at the run")
+	}
+}
+
+// The owner note of a masked cron delivery has no sound when the delivery has no sound.
+func TestCronNoteNoSound(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+		w.Header().Set("Content-Type", "application/json")
+		switch method {
+		case "getMe":
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":99,"is_bot":true,"username":"tether_bot"}}`))
+		case "sendMessage":
+			var b map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&b)
+			mu.Lock()
+			bodies = append(bodies, b)
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":7,"chat":{"id":5}}}`))
+		default:
+			_, _ = w.Write([]byte(`{"ok":true,"result":true}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	a := gatewayApp(t, srv.URL, outboundTG)
+	if _, err := a.AddTelegram(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, quiet := range []bool{false, true} {
+		n := cron.Note{Job: cron.Job{ID: "j1", Name: "prices"}, Target: cron.Target{Source: "telegram", ChatID: "-100"},
+			TargetTitle: "Pricing team", Findings: []security.Finding{{Kind: "card", Label: "[card ••••1111]"}}, NoSound: quiet}
+		if err := a.sendCronNote(ctx, n); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		last := bodies[len(bodies)-1]
+		mu.Unlock()
+		if (last["disable_notification"] == true) != quiet {
+			t.Fatalf("quiet %v: %v", quiet, last)
+		}
 	}
 }

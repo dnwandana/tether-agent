@@ -38,7 +38,7 @@ func outbound(t *testing.T, private bool) *outboundRec {
 	t.Helper()
 	r := &outboundRec{}
 	r.d = &Deliverer{
-		Send: func(_ context.Context, _ Target, text string, _ []string) error {
+		Send: func(_ context.Context, _ Target, text string, _ []string, _ bool) error {
 			r.sent = append(r.sent, text)
 			return nil
 		},
