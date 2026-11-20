@@ -574,3 +574,45 @@ func TestSessionScopeStopsAtParentCycle(t *testing.T) {
 		t.Fatalf("%+v %v", rows, err)
 	}
 }
+
+// SpendSince sums the stored cost of the assistant calls since the time. A call with no
+// price sets unpriced. User rows and older rows do not count.
+func TestSpendSince(t *testing.T) {
+	ctx := context.Background()
+	d := openUsageDB(t)
+	now := time.Now()
+	insertUsage(t, d, usageRow{model: "m", prov: "p", cost: 0.25, at: now.Add(-time.Hour)})
+	insertUsage(t, d, usageRow{model: "m", prov: "p", cost: 0.5, at: now.Add(-23 * time.Hour)})
+	insertUsage(t, d, usageRow{model: "m", prov: "p", cost: 9.0, at: now.Add(-25 * time.Hour)})
+	if _, err := d.Exec(`INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'user', 'hi', ?)`,
+		now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	since := now.Add(-24 * time.Hour)
+	if usd, unpriced, err := SpendSince(ctx, d, since); err != nil || usd != 0.75 || unpriced {
+		t.Fatal(usd, unpriced, err)
+	}
+	insertUsage(t, d, usageRow{model: "mystery", prov: "local", at: now.Add(-time.Minute)})
+	if usd, unpriced, err := SpendSince(ctx, d, since); err != nil || usd != 0.75 || !unpriced {
+		t.Fatal(usd, unpriced, err)
+	}
+	if usd, unpriced, err := SpendSince(ctx, d, now.Add(time.Hour)); err != nil || usd != 0 || unpriced {
+		t.Fatal("an empty window:", usd, unpriced, err)
+	}
+}
+
+// SpendSince uses the scope of UsageReport, so the copies of a fork do not count two times.
+func TestSpendSinceSkipsForkCopies(t *testing.T) {
+	ctx := context.Background()
+	d := openUsageDB(t)
+	t0 := time.Now().Add(-30 * time.Minute)
+	insertKindSession(t, d, "o", "chat", "", t0)
+	insertKindSession(t, d, "f", "chat", "o", t0.Add(10*time.Second))
+	for _, s := range []string{"o", "f"} {
+		insertUsage(t, d, usageRow{session: s, model: "m", prov: "p", cost: 0.25, at: t0.Add(time.Second)})
+	}
+	insertUsage(t, d, usageRow{session: "f", model: "m", prov: "p", cost: 0.5, at: t0.Add(11 * time.Second)})
+	if usd, unpriced, err := SpendSince(ctx, d, t0.Add(-time.Minute)); err != nil || usd != 0.75 || unpriced {
+		t.Fatal(usd, unpriced, err)
+	}
+}

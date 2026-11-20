@@ -102,6 +102,23 @@ func UsageReport(ctx context.Context, d *db.DB, since time.Time, sessionID strin
 	return out, compactions, nil
 }
 
+// SpendSince returns the sum of the stored cost of the model calls since the time, for all
+// sessions. unpriced is true when one or more calls in the window have no stored cost. It
+// uses the scope of UsageReport with no session, so a fork copy does not count. It makes
+// one query and does not count the compactions.
+func SpendSince(ctx context.Context, d *db.DB, since time.Time) (usd float64, unpriced bool, err error) {
+	q := `SELECT COALESCE(SUM(m.cost_usd), 0), COUNT(*) - COUNT(m.cost_usd)
+		FROM messages m
+		WHERE m.role = 'assistant' AND m.model != '' AND m.timestamp >= ?`
+	filter, fargs := usageScope("m.session_id", "m.timestamp", "")
+	args := append([]any{since.UnixMilli()}, fargs...)
+	var missing int
+	if err := d.QueryRowContext(ctx, q+filter, args...).Scan(&usd, &missing); err != nil {
+		return 0, false, fmt.Errorf("spend since: %w", err)
+	}
+	return usd, missing > 0, nil
+}
+
 // usageScope returns the WHERE conditions that the two report queries share, and their args
 // in the order of the placeholders. idCol and timeCol name the session ID and the time of
 // the row.
