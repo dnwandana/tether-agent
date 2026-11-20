@@ -282,9 +282,11 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
 If skills are provided on create, the future cron run loads those skills in order, then follows the prompt as the task instruction.
 On update, passing skills=[] clears attached skills.
 
-NOTE: The agent's final response is auto-delivered to the target. When a run finds nothing new, the agent answers [SILENT], and nothing is sent. A failed run always sends an alert, except with deliver='local'. Put the primary user-facing content in the final response. Cron jobs run autonomously with no user present — they cannot ask questions or request clarification.
+NOTE: The agent's final response is auto-delivered to the target. When a run finds nothing new, the agent answers [SILENT], and nothing is sent. A failed run sends an alert, except with deliver='local'. When the next runs fail with the same error, they send no new alert. Put the primary user-facing content in the final response. Cron jobs run autonomously with no user present — they cannot ask questions or request clarification.
 
-SCRIPT JOBS (no_agent=true): the scheduler runs the script with no model call and sends its stdout word for word. Empty stdout sends nothing, so make the script quiet when there is nothing to report. A failure (non-zero exit or timeout) always alerts.
+SCRIPT JOBS (no_agent=true): the scheduler runs the script with no model call and sends its stdout word for word. Empty stdout sends nothing, so make the script quiet when there is nothing to report. A failure (non-zero exit or timeout) sends an alert. The next runs that fail with the same error send no new alert.
+
+WATCH JOBS (watch=true): the script runs each tick, and the model runs only when the script output changes. The prompt then gets a diff of the old and the new output. The first run saves the output as the baseline and sends nothing. A last stdout line {"wakeAgent": false} skips the model, and {"wakeAgent": true} runs it also with no change. In a watch job, repeat counts only the runs that woke the model. To wait until something changes, create a watch job with repeat 1. To fire at once when the condition is true, print {"wakeAgent": true} as the last line.
 
 Important safety rule: cron-run sessions should not recursively schedule more cron jobs.
 
@@ -324,7 +326,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
     },
     "repeat": {
       "type": "integer",
-      "description": "Optional repeat count. Omit for defaults (once for one-shot, forever for recurring)."
+      "description": "Optional repeat count. Omit for defaults (once for one-shot, forever for recurring). In a watch job, it counts only the runs that woke the model."
     },
     "deliver": {
       "type": "string",
@@ -356,7 +358,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
     },
     "script": {
       "type": "string",
-      "description": "Optional path to a script. A relative path resolves under ~/.tether/scripts/. .sh and .bash files run with bash, other files with python3. In an agent job, the script runs first and its stdout goes into the prompt as data. With no_agent=true, the script IS the job: empty stdout sends nothing; a failure always alerts. On update, pass an empty string to clear."
+      "description": "Optional path to a script. A relative path resolves under ~/.tether/scripts/. .sh and .bash files run with bash, other files with python3. In an agent job, the script runs first and its stdout goes into the prompt as data. With no_agent=true, the script IS the job: empty stdout sends nothing; a failure sends an alert, and the next runs that fail with the same error send no new alert. On update, pass an empty string to clear."
     },
     "no_agent": {
       "type": "boolean",
@@ -376,6 +378,18 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
     "workdir": {
       "type": "string",
       "description": "Optional absolute path of an existing folder to run the job from. On update, pass an empty string to clear."
+    },
+    "watch": {
+      "type": "boolean",
+      "description": "Default false. Set true to wake the model only when the script output changes. The prompt gets the diff. The first run saves the baseline and sends nothing. Needs script and a recurring schedule. Cannot be used with no_agent. A last stdout line {\"wakeAgent\": false} skips the model; {\"wakeAgent\": true} wakes it. With repeat 1, the job waits until a change, runs one time, and ends. On update, pass false to clear."
+    },
+    "continuity": {
+      "type": "boolean",
+      "description": "Default false. Set true to put the output of the last delivered run into the prompt of the next run. Needs a run history: cron.run_history above 0. On update, pass false to clear."
+    },
+    "effort": {
+      "type": "string",
+      "description": "Optional reasoning effort of the job: none, minimal, low, medium, high, xhigh, or max. Omit it to use the effort of the provider entry. On update, pass an empty string to clear."
     },
     "limit": {
       "type": "integer",

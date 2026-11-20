@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -281,8 +282,9 @@ func TestScriptPathChecked(t *testing.T) {
 func TestDescriptionHasSilentNote(t *testing.T) {
 	d := CronJobTool{}.Schema().Description
 	const note = "NOTE: The agent's final response is auto-delivered to the target. When a run finds nothing new, " +
-		"the agent answers [SILENT], and nothing is sent. A failed run always sends an alert, except with " +
-		"deliver='local'. Put the primary user-facing content in the final response. Cron jobs run autonomously " +
+		"the agent answers [SILENT], and nothing is sent. A failed run sends an alert, except with " +
+		"deliver='local'. When the next runs fail with the same error, they send no new alert. Put the primary " +
+		"user-facing content in the final response. Cron jobs run autonomously " +
 		"with no user present — they cannot ask questions or request clarification."
 	if !strings.Contains(d, note) || !strings.Contains(d, "[SILENT]") {
 		t.Fatal("the description has no [SILENT] NOTE:", d)
@@ -290,7 +292,7 @@ func TestDescriptionHasSilentNote(t *testing.T) {
 	if strings.Contains(d, "context_from") || strings.Contains(d, "on every run") {
 		t.Fatal(d)
 	}
-	for _, w := range []string{"Never guess job IDs", "self-contained", "empty stdout sends nothing", "always alerts"} {
+	for _, w := range []string{"Never guess job IDs", "self-contained", "empty stdout sends nothing", "same error send no new alert"} {
 		if !strings.Contains(CronJobTool{}.Schema().Description+string(CronJobTool{}.Schema().Parameters), w) {
 			t.Errorf("the description has no %q", w)
 		}
@@ -611,7 +613,7 @@ func TestCronUpdateNoFieldsNamesDraftOnly(t *testing.T) {
 	runToolEnv(t, tool, `{"action":"create","schedule":"every 2h","prompt":"p"}`, env)
 	j := onlyJob(t, tool)
 	out := runToolEnvErr(t, tool, fmt.Sprintf(`{"action":"update","job_id":%q}`, j.ID), env)
-	if !strings.Contains(out, "script, no_agent, draft_only, toolsets, or workdir") {
+	if !strings.Contains(out, "script, no_agent, draft_only, toolsets, workdir, watch, continuity, or effort") {
 		t.Fatal(out)
 	}
 }
@@ -656,6 +658,152 @@ func TestCronRunsHeldTexts(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("no %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestRunWithoutGatewayRefusesPausedJob(t *testing.T) {
+	tool := cronTool(t)
+	env := tgEnv("cli:user", "primary")
+	runToolEnv(t, tool, `{"action":"create","schedule":"0 1 * * *","prompt":"p"}`, env)
+	id := onlyJob(t, tool).ID
+	if err := tool.Store.SetEnabled(context.Background(), id, false); err != nil {
+		t.Fatal(err)
+	}
+	out := runToolEnvErr(t, tool, fmt.Sprintf(`{"action":"run","job_id":%q}`, id), env)
+	if !strings.Contains(out, "job "+id+" is paused; resume it first") {
+		t.Fatal(out)
+	}
+}
+
+// create and list carry watch, continuity, and effort. The job line shows watch and effort.
+func TestCronWatchFieldsCreateAndList(t *testing.T) {
+	tool := cronTool(t)
+	env := tgEnv("cli:user", "primary")
+	out := runToolEnv(t, tool, `{"action":"create","name":"release","schedule":"every 1h","prompt":"Tell me what is new.",`+
+		`"script":"release.sh","watch":true,"continuity":true,"effort":"high","repeat":1}`, env)
+	j := onlyJob(t, tool)
+	if !j.Watch || !j.Continuity || j.Effort != "high" || j.RepeatLeft != 1 {
+		t.Fatalf("%+v", j)
+	}
+	list := runToolEnv(t, tool, `{"action":"list"}`, env)
+	for _, text := range []string{out, list} {
+		for _, want := range []string{" · watch", " · effort high"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("no %q in %q", want, text)
+			}
+		}
+	}
+}
+
+// update changes each field. An empty effort uses the config again.
+func TestCronUpdateWatchFields(t *testing.T) {
+	tool := cronTool(t)
+	env := tgEnv("cli:user", "primary")
+	runToolEnv(t, tool, `{"action":"create","schedule":"every 1h","prompt":"p","script":"a.sh","watch":true,"continuity":true}`, env)
+	id := onlyJob(t, tool).ID
+	runToolEnv(t, tool, fmt.Sprintf(`{"action":"update","job_id":%q,"effort":"low","continuity":false}`, id), env)
+	if j := onlyJob(t, tool); j.Effort != "low" || j.Continuity || !j.Watch {
+		t.Fatalf("%+v", j)
+	}
+	out := runToolEnv(t, tool, fmt.Sprintf(`{"action":"update","job_id":%q,"effort":"","watch":false}`, id), env)
+	if j := onlyJob(t, tool); j.Effort != "" || j.Watch || strings.Contains(out, " · effort") || strings.Contains(out, " · watch") {
+		t.Fatalf("%+v %q", j, out)
+	}
+}
+
+// The store errors for watch and effort reach the model.
+func TestCronWatchValidationReachesModel(t *testing.T) {
+	tool := cronTool(t)
+	env := tgEnv("cli:user", "primary")
+	for args, want := range map[string]string{
+		`{"action":"create","schedule":"every 1h","prompt":"p","watch":true}`:                            "cron: watch needs a script",
+		`{"action":"create","schedule":"every 1h","script":"a.sh","no_agent":true,"watch":true}`:         "cron: watch cannot be used with no_agent",
+		`{"action":"create","schedule":"2026-11-01T09:00:00","prompt":"p","script":"a.sh","watch":true}`: "cron: watch needs a recurring schedule",
+		`{"action":"create","schedule":"every 1h","prompt":"p","effort":"huge"}`:                         `cron: effort "huge" is not valid. Use one of: none, minimal, low, medium, high, xhigh, max`,
+	} {
+		if out := runToolEnvErr(t, tool, args, env); !strings.Contains(out, want) {
+			t.Errorf("%s: %s", args, out)
+		}
+	}
+}
+
+// With cron.run_history 0, the reply of create and update says that continuity gets nothing.
+func TestCronContinuityNeedsHistory(t *testing.T) {
+	const note = "Note: continuity needs the run history, but cron.run_history is 0. The job gets no previous output."
+	tool := cronTool(t)
+	env := tgEnv("cli:user", "primary")
+	if out := runToolEnv(t, tool, `{"action":"create","schedule":"every 1h","prompt":"p","continuity":true}`, env); strings.Contains(out, note) {
+		t.Fatalf("a run history of 50 gives no note: %q", out)
+	}
+	tool.Store.RunHistory = 0
+	id := onlyJob(t, tool).ID
+	if out := runToolEnv(t, tool, fmt.Sprintf(`{"action":"update","job_id":%q,"name":"n"}`, id), env); !strings.Contains(out, note) {
+		t.Fatalf("update: %q", out)
+	}
+	if out := runToolEnv(t, tool, `{"action":"create","schedule":"every 1h","prompt":"p","continuity":true}`, env); !strings.Contains(out, note) {
+		t.Fatalf("create: %q", out)
+	}
+	if out := runToolEnv(t, tool, `{"action":"create","schedule":"every 1h","prompt":"p"}`, env); strings.Contains(out, note) {
+		t.Fatalf("no continuity gives no note: %q", out)
+	}
+}
+
+// The runs action explains the delivery "repeat" and shows the cost of a priced run.
+func TestCronRunsRepeatAndCost(t *testing.T) {
+	tool := cronTool(t)
+	id := newRunsJob(t, tool, "feed")
+	at := time.Date(2026, 10, 27, 9, 0, 0, 0, time.UTC)
+	cost := 0.1234
+	seedRun(t, tool, id, cron.RunRecord{Status: "ok", Delivery: cron.DeliverySent, Output: "report",
+		CostUSD: &cost, RanAt: at, FinishedAt: at.Add(time.Second)})
+	seedRun(t, tool, id, cron.RunRecord{Status: "error", Delivery: cron.DeliveryRepeat, Output: "⚠ Cron job feed failed",
+		RanAt: at.Add(time.Hour), FinishedAt: at.Add(time.Hour + time.Second)})
+	out := runsText(t, tool, id, "")
+	for _, want := range []string{
+		"- run 2 · 2026-10-27 10:00 UTC · error · repeat · 1s · repeat: the same error as the last alert, so no new alert was sent\n",
+		"- run 1 · 2026-10-27 09:00 UTC · ok · sent · 1s · cost $0.12\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("no %q in:\n%s", want, out)
+		}
+	}
+	if strings.Count(out, "cost $") != 1 {
+		t.Fatalf("a run with no price shows no cost:\n%s", out)
+	}
+}
+
+// The schema has the three fields, and the description tells the one-time watch.
+func TestCronSchemaHasWatchFields(t *testing.T) {
+	var s struct {
+		Properties map[string]struct {
+			Type        string `json:"type"`
+			Description string `json:"description"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(CronJobTool{}.Schema().Parameters, &s); err != nil {
+		t.Fatal(err)
+	}
+	if p := s.Properties["watch"]; p.Type != "boolean" || !strings.Contains(p.Description, "wakeAgent") ||
+		!strings.Contains(p.Description, "only when the script output changes") {
+		t.Fatalf("watch: %+v", p)
+	}
+	if p := s.Properties["continuity"]; p.Type != "boolean" || !strings.Contains(p.Description, "cron.run_history") {
+		t.Fatalf("continuity: %+v", p)
+	}
+	p := s.Properties["effort"]
+	for _, lvl := range config.EffortLevels {
+		if p.Type != "string" || !strings.Contains(p.Description, lvl) {
+			t.Fatalf("effort has no %q: %+v", lvl, p)
+		}
+	}
+	d := CronJobTool{}.Schema().Description
+	for _, w := range []string{
+		"To wait until something changes, create a watch job with repeat 1.",
+		`To fire at once when the condition is true, print {"wakeAgent": true} as the last line.`,
+	} {
+		if !strings.Contains(d, w) {
+			t.Errorf("the description has no %q", w)
 		}
 	}
 }

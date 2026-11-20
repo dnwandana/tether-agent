@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -61,23 +62,26 @@ type cronModelArg struct {
 }
 
 type cronArgs struct {
-	Action    string        `json:"action"`
-	JobID     string        `json:"job_id"`
-	Name      *string       `json:"name"`
-	Prompt    *string       `json:"prompt"`
-	Schedule  *string       `json:"schedule"`
-	Repeat    *int          `json:"repeat"`
-	Deliver   *string       `json:"deliver"`
-	Skills    *[]string     `json:"skills"`
-	Model     *cronModelArg `json:"model"`
-	Script    *string       `json:"script"`
-	NoAgent   *bool         `json:"no_agent"`
-	DraftOnly *bool         `json:"draft_only"`
-	Toolsets  *[]string     `json:"toolsets"`
-	Workdir   *string       `json:"workdir"`
-	Limit     *int          `json:"limit"`
-	Offset    *int          `json:"offset"`
-	RunID     *int64        `json:"run_id"`
+	Action     string        `json:"action"`
+	JobID      string        `json:"job_id"`
+	Name       *string       `json:"name"`
+	Prompt     *string       `json:"prompt"`
+	Schedule   *string       `json:"schedule"`
+	Repeat     *int          `json:"repeat"`
+	Deliver    *string       `json:"deliver"`
+	Skills     *[]string     `json:"skills"`
+	Model      *cronModelArg `json:"model"`
+	Script     *string       `json:"script"`
+	NoAgent    *bool         `json:"no_agent"`
+	DraftOnly  *bool         `json:"draft_only"`
+	Toolsets   *[]string     `json:"toolsets"`
+	Workdir    *string       `json:"workdir"`
+	Watch      *bool         `json:"watch"`
+	Continuity *bool         `json:"continuity"`
+	Effort     *string       `json:"effort"`
+	Limit      *int          `json:"limit"`
+	Offset     *int          `json:"offset"`
+	RunID      *int64        `json:"run_id"`
 }
 
 // Name returns "cronjob".
@@ -117,9 +121,11 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
 If skills are provided on create, the future cron run loads those skills in order, then follows the prompt as the task instruction.
 On update, passing skills=[] clears attached skills.
 
-NOTE: The agent's final response is auto-delivered to the target. When a run finds nothing new, the agent answers [SILENT], and nothing is sent. A failed run always sends an alert, except with deliver='local'. Put the primary user-facing content in the final response. Cron jobs run autonomously with no user present — they cannot ask questions or request clarification.
+NOTE: The agent's final response is auto-delivered to the target. When a run finds nothing new, the agent answers [SILENT], and nothing is sent. A failed run sends an alert, except with deliver='local'. When the next runs fail with the same error, they send no new alert. Put the primary user-facing content in the final response. Cron jobs run autonomously with no user present — they cannot ask questions or request clarification.
 
-SCRIPT JOBS (no_agent=true): the scheduler runs the script with no model call and sends its stdout word for word. Empty stdout sends nothing, so make the script quiet when there is nothing to report. A failure (non-zero exit or timeout) always alerts.
+SCRIPT JOBS (no_agent=true): the scheduler runs the script with no model call and sends its stdout word for word. Empty stdout sends nothing, so make the script quiet when there is nothing to report. A failure (non-zero exit or timeout) sends an alert. The next runs that fail with the same error send no new alert.
+
+WATCH JOBS (watch=true): the script runs each tick, and the model runs only when the script output changes. The prompt then gets a diff of the old and the new output. The first run saves the output as the baseline and sends nothing. A last stdout line {"wakeAgent": false} skips the model, and {"wakeAgent": true} runs it also with no change. In a watch job, repeat counts only the runs that woke the model. To wait until something changes, create a watch job with repeat 1. To fire at once when the condition is true, print {"wakeAgent": true} as the last line.
 
 Important safety rule: cron-run sessions should not recursively schedule more cron jobs.`,
 		Parameters: json.RawMessage(`{
@@ -130,7 +136,7 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
     "prompt": {"type": "string", "description": "For create: the full self-contained prompt. If skills are also provided, this becomes the task instruction paired with those skills."},
     "schedule": {"type": "string", "description": "REQUIRED for action=create. For create/update: '30m', 'every 2h', '0 9 * * *', or ISO timestamp. Examples: '30m' (every 30 minutes), 'every 2h' (every 2 hours), '0 9 * * *' (daily at 9am), '2026-06-01T09:00:00' (one-shot). The time zone is the host time zone."},
     "name": {"type": "string", "description": "Optional human-friendly name"},
-    "repeat": {"type": "integer", "description": "Optional repeat count. Omit for defaults (once for one-shot, forever for recurring)."},
+    "repeat": {"type": "integer", "description": "Optional repeat count. Omit for defaults (once for one-shot, forever for recurring). In a watch job, it counts only the runs that woke the model."},
     "deliver": {"type": "string", "description": "Omit this parameter to auto-deliver back to the current chat and topic (recommended). Only set it when the user asks to deliver somewhere else. Values: 'origin' (same as omitting), 'local' (no delivery, save only), or telegram:<chat_id>[:<thread_id>] for a specific destination, for example 'telegram:-1001234567890:17585'. WARNING: 'telegram:<chat_id>' without :<thread_id> loses topic targeting."},
     "skills": {"type": "array", "items": {"type": "string"}, "description": "Optional ordered list of skill names to load before executing the cron prompt. On update, pass an empty array to clear attached skills."},
     "model": {
@@ -142,11 +148,14 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
       },
       "required": ["model"]
     },
-    "script": {"type": "string", "description": "Optional path to a script. A relative path resolves under ~/.tether/scripts/. .sh and .bash files run with bash, other files with python3. In an agent job, the script runs first and its stdout goes into the prompt as data. With no_agent=true, the script IS the job: empty stdout sends nothing; a failure always alerts. On update, pass an empty string to clear."},
+    "script": {"type": "string", "description": "Optional path to a script. A relative path resolves under ~/.tether/scripts/. .sh and .bash files run with bash, other files with python3. In an agent job, the script runs first and its stdout goes into the prompt as data. With no_agent=true, the script IS the job: empty stdout sends nothing; a failure sends an alert, and the next runs that fail with the same error send no new alert. On update, pass an empty string to clear."},
     "no_agent": {"type": "boolean", "description": "Default false: the agent runs the prompt each tick. Set true to skip the model: the scheduler runs the script and delivers its stdout word for word, with zero tokens. Requires script."},
     "draft_only": {"type": "boolean", "description": "Default false. Set true to make the job draft-only: it can read the web and read MCP data, and it can write drafts, but it cannot send. The run has no terminal, execute_code, browser actions, or delegate_task, and only MCP read tools and draft tools. A draft-only job delivers only to a private chat or local, and it cannot use no_agent. On update, pass false to clear."},
     "toolsets": {"type": "array", "items": {"type": "string"}, "description": "Optional list of toolset names to restrict the job's agent to (e.g. [\"web\", \"terminal\", \"file\"]). On update, pass an empty array to clear."},
     "workdir": {"type": "string", "description": "Optional absolute path of an existing folder to run the job from. On update, pass an empty string to clear."},
+    "watch": {"type": "boolean", "description": "Default false. Set true to wake the model only when the script output changes. The prompt gets the diff. The first run saves the baseline and sends nothing. Needs script and a recurring schedule. Cannot be used with no_agent. A last stdout line {\"wakeAgent\": false} skips the model; {\"wakeAgent\": true} wakes it. With repeat 1, the job waits until a change, runs one time, and ends. On update, pass false to clear."},
+    "continuity": {"type": "boolean", "description": "Default false. Set true to put the output of the last delivered run into the prompt of the next run. Needs a run history: cron.run_history above 0. On update, pass false to clear."},
+    "effort": {"type": "string", "description": "Optional reasoning effort of the job: none, minimal, low, medium, high, xhigh, or max. Omit it to use the effort of the provider entry. On update, pass an empty string to clear."},
     "limit": {"type": "integer", "description": "For runs: the number of runs to show, newest first. Default 10, maximum 50."},
     "offset": {"type": "integer", "description": "For runs: the number of newest runs to skip. Use it to see older runs. Default 0."},
     "run_id": {"type": "integer", "description": "For runs: one run id from the runs list. The result shows the full stored output of that run."}
@@ -251,6 +260,13 @@ func (t CronJobTool) create(ctx context.Context, a cronArgs, env *Env) (string, 
 	if a.DraftOnly != nil {
 		j.DraftOnly = *a.DraftOnly
 	}
+	if a.Watch != nil {
+		j.Watch = *a.Watch
+	}
+	if a.Continuity != nil {
+		j.Continuity = *a.Continuity
+	}
+	setStr(&j.Effort, a.Effort)
 	if a.Repeat != nil {
 		j.RepeatLeft = *a.Repeat
 	}
@@ -275,13 +291,14 @@ func (t CronJobTool) create(ctx context.Context, a cronArgs, env *Env) (string, 
 	if err != nil {
 		return "", cronErr(err)
 	}
-	return "created job " + created.ID + "\n" + t.jobLine(created), nil
+	return "created job " + created.ID + "\n" + t.jobLine(created) + t.continuityNote(created), nil
 }
 
 func (t CronJobTool) update(ctx context.Context, a cronArgs, env *Env) (string, error) {
 	p := cron.JobPatch{
 		Name: a.Name, Prompt: a.Prompt, Schedule: a.Schedule, Deliver: a.Deliver, Script: a.Script,
 		Workdir: a.Workdir, NoAgent: a.NoAgent, DraftOnly: a.DraftOnly, Skills: a.Skills, Toolsets: a.Toolsets, RepeatLeft: a.Repeat,
+		Watch: a.Watch, Continuity: a.Continuity, Effort: a.Effort,
 	}
 	if a.Model != nil {
 		pin := t.modelPin(a.Model, env)
@@ -291,7 +308,7 @@ func (t CronJobTool) update(ctx context.Context, a cronArgs, env *Env) (string, 
 		p.Model = pin
 	}
 	if p == (cron.JobPatch{}) {
-		return "", toolErr("update has no fields to change; pass at least one of name, prompt, schedule, repeat, deliver, skills, model, script, no_agent, draft_only, toolsets, or workdir")
+		return "", toolErr("update has no fields to change; pass at least one of name, prompt, schedule, repeat, deliver, skills, model, script, no_agent, draft_only, toolsets, workdir, watch, continuity, or effort")
 	}
 	if a.Script != nil {
 		if err := t.checkScript(*a.Script); err != nil {
@@ -318,7 +335,19 @@ func (t CronJobTool) update(ctx context.Context, a cronArgs, env *Env) (string, 
 	if err != nil {
 		return "", cronErr(err)
 	}
-	return "updated job " + j.ID + "\n" + t.jobLine(j), nil
+	return "updated job " + j.ID + "\n" + t.jobLine(j) + t.continuityNote(j), nil
+}
+
+// cronContinuityNote tells the model that continuity has no source.
+const cronContinuityNote = "Note: continuity needs the run history, but cron.run_history is 0. The job gets no previous output."
+
+// continuityNote returns "\n" and cronContinuityNote when j has continuity and the store keeps
+// no runs. Else it returns "".
+func (t CronJobTool) continuityNote(j cron.Job) string {
+	if j.Continuity && t.Store.RunHistory == 0 {
+		return "\n" + cronContinuityNote
+	}
+	return ""
 }
 
 func (t CronJobTool) run(ctx context.Context, id string) (string, error) {
@@ -332,14 +361,10 @@ func (t CronJobTool) run(ctx context.Context, id string) (string, error) {
 		}
 		return fmt.Sprintf("started job %s (%s); the result goes to its delivery target, unless the run answers [SILENT]", j.ID, j.Name), nil
 	}
-	if !j.Enabled {
-		return "", toolErr("job %s is paused; resume it first", id)
-	}
-	now := time.Now()
-	if t.Store.Now != nil {
-		now = t.Store.Now()
-	}
-	if _, err := t.Store.Update(ctx, id, cron.JobPatch{NextRun: &now}); err != nil {
+	if _, err := t.Store.RunSoon(ctx, id); err != nil {
+		if errors.Is(err, cron.ErrJobPaused) {
+			return "", toolErr("job %s is paused; resume it first", id)
+		}
 		return "", cronErr(err)
 	}
 	tick, graceMin, graceMax := t.Tick, t.GraceMin, t.GraceMax
@@ -443,6 +468,11 @@ func (t CronJobTool) runText(r cron.Run, output string) string {
 		b.WriteString(" · held, then dropped by the owner")
 	case cron.DeliveryExpired:
 		b.WriteString(" · held, then expired after 24 h with no tap")
+	case cron.DeliveryRepeat:
+		b.WriteString(" · repeat: the same error as the last alert, so no new alert was sent")
+	}
+	if r.CostUSD != nil {
+		fmt.Fprintf(&b, " · cost $%.2f", *r.CostUSD)
 	}
 	if output == "" {
 		output = "(no output)"
@@ -522,6 +552,13 @@ func (t CronJobTool) jobLine(j cron.Job) string {
 	}
 	if j.Model != nil {
 		fmt.Fprintf(&b, " · model %s/%s", j.Model.Provider, j.Model.Model)
+	}
+	if j.Watch {
+		b.WriteString(" · watch")
+	}
+	if j.Effort != "" {
+		b.WriteString(" · effort ")
+		b.WriteString(j.Effort)
 	}
 	b.WriteString("\n")
 	return b.String()
