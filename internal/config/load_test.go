@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeTemp writes body to a config file in a new temp folder and returns its path.
@@ -838,5 +839,120 @@ func TestValidateMCPTools(t *testing.T) {
 	// A plain name and a pattern with "*" are valid.
 	if _, err := Load(writeTemp(t, mcpTools+"        include: [get_issue, \"list_*\"]\n"), mapEnv(nil)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParseClock(t *testing.T) {
+	for in, want := range map[string]int{"00:00": 0, "07:30": 450, "08:00": 480, "23:59": 1439} {
+		got, err := ParseClock(in)
+		if err != nil || got != want {
+			t.Errorf("ParseClock(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "7:30", "24:00", "12:60", "12:5", " 08:00", "08:00 ", "ab:cd",
+		"08-00", "+8:00", "0800", "08:00:00"} {
+		if _, err := ParseClock(bad); err == nil || !strings.Contains(err.Error(), "HH:MM") {
+			t.Errorf("ParseClock(%q) must fail with a hint of HH:MM, got %v", bad, err)
+		}
+	}
+}
+
+func TestParseWindow(t *testing.T) {
+	for in, want := range map[string]Window{
+		"22:00-07:00": {Start: 1320, End: 420},
+		"09:00-17:30": {Start: 540, End: 1050},
+		"00:00-23:59": {Start: 0, End: 1439},
+	} {
+		got, err := ParseWindow(in)
+		if err != nil || got != want {
+			t.Errorf("ParseWindow(%q) = %+v, %v; want %+v", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "22:00", "22:00-", "-07:00", "22:00-7:00", "22:00 - 07:00",
+		"22:00-07:00-08:00", "25:00-07:00"} {
+		if _, err := ParseWindow(bad); err == nil {
+			t.Errorf("ParseWindow(%q) must fail", bad)
+		}
+	}
+	if _, err := ParseWindow("22:00-22:00"); err == nil || !strings.Contains(err.Error(), "the same") {
+		t.Errorf("a start equal to the end must fail, got %v", err)
+	}
+}
+
+func TestWindowContains(t *testing.T) {
+	at := func(h, m int) time.Time { return time.Date(2026, 11, 19, h, m, 0, 0, time.UTC) }
+	night := Window{Start: 22 * 60, End: 7 * 60} // 22:00-07:00 crosses midnight
+	for _, c := range []struct {
+		t    time.Time
+		want bool
+	}{
+		{at(21, 59), false}, {at(22, 0), true}, {at(23, 30), true}, {at(0, 0), true},
+		{at(6, 59), true}, {at(7, 0), false}, {at(12, 0), false},
+	} {
+		if got := night.Contains(c.t); got != c.want {
+			t.Errorf("22:00-07:00 at %s: got %v, want %v", c.t.Format("15:04"), got, c.want)
+		}
+	}
+	day := Window{Start: 9 * 60, End: 17*60 + 30} // 09:00-17:30
+	for _, c := range []struct {
+		t    time.Time
+		want bool
+	}{
+		{at(8, 59), false}, {at(9, 0), true}, {at(17, 29), true}, {at(17, 30), false}, {at(23, 0), false},
+	} {
+		if got := day.Contains(c.t); got != c.want {
+			t.Errorf("09:00-17:30 at %s: got %v, want %v", c.t.Format("15:04"), got, c.want)
+		}
+	}
+	// Contains reads the clock in the location of t. 23:00 at UTC+7 is 16:00 UTC.
+	plus7 := time.Date(2026, 11, 19, 23, 0, 0, 0, time.FixedZone("UTC+7", 7*3600))
+	if !night.Contains(plus7) || night.Contains(plus7.UTC()) {
+		t.Fatal("Contains must use the clock of the location of t")
+	}
+}
+
+func TestValidateCronClockKeys(t *testing.T) {
+	c := validBase()
+	eq(t, c.Cron.QuietHours, "")
+	eq(t, c.Cron.BriefAt, "")
+	if err := c.Validate(); err != nil {
+		t.Fatalf("the empty defaults turn the features off and are valid: %v", err)
+	}
+	c.Cron.QuietHours, c.Cron.BriefAt = "22:00-07:00", "08:00"
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		mut  func(*Config)
+		want string
+	}{
+		{func(c *Config) { c.Cron.QuietHours = "22:00" }, "cron.quiet_hours"},
+		{func(c *Config) { c.Cron.QuietHours = "22:00-22:00" }, "cron.quiet_hours"},
+		{func(c *Config) { c.Cron.QuietHours = "10pm-7am" }, "cron.quiet_hours"},
+		{func(c *Config) { c.Cron.BriefAt = "8:00" }, "cron.brief_at"},
+		{func(c *Config) { c.Cron.BriefAt = "24:00" }, "cron.brief_at"},
+	} {
+		c := validBase()
+		tc.mut(&c)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: got %v", tc.want, err)
+		}
+	}
+	got, err := Load(writeTemp(t, minimal+"cron:\n  quiet_hours: \"22:00-07:00\"\n  brief_at: \"08:00\"\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, got.Cron.QuietHours, "22:00-07:00")
+	eq(t, got.Cron.BriefAt, "08:00")
+}
+
+// A window with the same start and end contains no time.
+func TestWindowEmptyContainsNothing(t *testing.T) {
+	for _, w := range []Window{{}, {Start: 600, End: 600}} {
+		for _, h := range []int{0, 10, 23} {
+			if w.Contains(time.Date(2026, 11, 19, h, 0, 0, 0, time.UTC)) {
+				t.Errorf("%+v contains %02d:00", w, h)
+			}
+		}
 	}
 }

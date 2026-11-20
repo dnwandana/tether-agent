@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -307,6 +308,16 @@ func (c *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("config: outbound.guard_provider names %q, which is not in providers", name))
 		}
 	}
+	if v := c.Cron.QuietHours; v != "" {
+		if _, err := ParseWindow(v); err != nil {
+			errs = append(errs, fmt.Errorf(`config: cron.quiet_hours is %q: %v. Use HH:MM-HH:MM, for example 22:00-07:00, or "" to turn it off`, v, err))
+		}
+	}
+	if v := c.Cron.BriefAt; v != "" {
+		if _, err := ParseClock(v); err != nil {
+			errs = append(errs, fmt.Errorf(`config: cron.brief_at is %q: %v. Use HH:MM, for example 08:00, or "" to turn it off`, v, err))
+		}
+	}
 	errs = append(errs, c.checkLimits()...)
 	errs = append(errs, c.checkExecSecrets()...)
 	errs = append(errs, checkMCPNames(c.MCP.Servers)...)
@@ -417,6 +428,62 @@ func intRange(key string, v, lo, hi int) error {
 		return nil
 	}
 	return fmt.Errorf("config: %s is %d. Use a value from %d to %d", key, v, lo, hi)
+}
+
+// ParseClock returns the minutes after midnight of a time "HH:MM" (00:00 to 23:59). The hour
+// and the minute have two digits each, and no space is permitted.
+func ParseClock(s string) (minute int, err error) {
+	bad := fmt.Errorf("%q is not a time. Use HH:MM from 00:00 to 23:59", s)
+	if len(s) != 5 || s[2] != ':' {
+		return 0, bad
+	}
+	for _, i := range []int{0, 1, 3, 4} {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, bad
+		}
+	}
+	h := int(s[0]-'0')*10 + int(s[1]-'0')
+	m := int(s[3]-'0')*10 + int(s[4]-'0')
+	if h > 23 || m > 59 {
+		return 0, bad
+	}
+	return h*60 + m, nil
+}
+
+// Window is a part of the day, in minutes after midnight. A Start after End crosses midnight.
+type Window struct{ Start, End int }
+
+// ParseWindow returns the window of "HH:MM-HH:MM". A start equal to the end is an error.
+func ParseWindow(s string) (Window, error) {
+	a, b, ok := strings.Cut(s, "-")
+	if !ok {
+		return Window{}, fmt.Errorf("%q is not a window. Use the form HH:MM-HH:MM", s)
+	}
+	start, err := ParseClock(a)
+	if err != nil {
+		return Window{}, fmt.Errorf("the start of %q is wrong. %v. Use the form HH:MM-HH:MM", s, err)
+	}
+	end, err := ParseClock(b)
+	if err != nil {
+		return Window{}, fmt.Errorf("the end of %q is wrong. %v. Use the form HH:MM-HH:MM", s, err)
+	}
+	if start == end {
+		return Window{}, fmt.Errorf("the start and the end of %q are the same. Use two different times", s)
+	}
+	return Window{Start: start, End: end}, nil
+}
+
+// Contains reports whether the clock of t, in the location of t, is in the window. The start
+// is in the window, and the end is not. A window with the same start and end is empty.
+func (w Window) Contains(t time.Time) bool {
+	m := t.Hour()*60 + t.Minute()
+	if w.Start == w.End {
+		return false
+	}
+	if w.Start < w.End {
+		return w.Start <= m && m < w.End
+	}
+	return m >= w.Start || m < w.End
 }
 
 // secondsFloat returns an error that names key when v is not finite, not above 0, or above

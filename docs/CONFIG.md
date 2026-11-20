@@ -359,6 +359,8 @@ stops the start, for example `config: toolsets.member: unknown toolset "<name>"`
 | `cron.grace_max_s` | `7200` | The maximum grace window of a late recurring run, in seconds. The minimum is 1. The maximum is 2592000. |
 | `cron.run_history` | `50` | The number of runs that `state.db` keeps for each cron job, in the table `cron_runs`. The scheduler deletes the oldest runs of a job when it records a new run of that job. A lower value applies to each job at its next run. `0` keeps no runs. The maximum is 1000. |
 | `cron.fail_streak_limit` | `10` | The number of failed runs in a row after which a cron job pauses itself. The last alert tells why. A good run, a resume, or an edit of the task (prompt, script, skills, model, toolsets, workdir, or schedule) sets the count to 0. When the last alert cannot be sent, the job does not pause, and the next failure tries again. A delivery failure alone does not count as a failed run. A stopped run does not change the count. `0` turns the pause off. The maximum is 10000. |
+| `cron.quiet_hours` | `""` | A window in the host time zone, `HH:MM-HH:MM`, for example `22:00-07:00`. In the window, cron sends go out with no sound. Nothing is held. The window can cross midnight. `""` turns it off. |
+| `cron.brief_at` | `""` | A time in the host time zone, `HH:MM`. Each day from that time, for 2 hours, the gateway tries to send the status text of `/brief`, when one or more things need the owner. `""` turns it off. |
 
 One run of an agent job can last `cron.script_timeout_s` plus `cron.agent_timeout_s`. For that time,
 the run holds one slot of `cron.max_parallel_jobs`.
@@ -445,7 +447,7 @@ the variable and the key, and the key gives the value.
 | `telegram.inline_text_max_bytes` | `102400` | A `.md` or `.txt` file up to this size, in bytes, goes inline into the message text. The minimum is 1024. |
 | `telegram.sticker_describe_timeout_s` | `30` | The time limit of the vision call that describes a sticker, in seconds. The minimum is 1. The maximum is 2592000. |
 | `telegram.voice_convert_timeout_s` | `60` | The time limit of one voice conversion with `ffmpeg`, in seconds. The minimum is 1. The maximum is 2592000. |
-| `telegram.menu_max_commands` | `60` | The maximum number of entries in the bot menu. The count includes the 22 built-in commands. The minimum is 22. The maximum is 100. |
+| `telegram.menu_max_commands` | `60` | The maximum number of entries in the bot menu. The count includes the 27 built-in commands. The minimum is 22. A value below 27 shows all built-in commands and no skill commands. The maximum is 100. |
 | `telegram.status_interval_s` | `1.5` | The minimum time between two edits of the tool status message, in seconds. The value must be above 0. The maximum is 2592000. |
 | `telegram.pairing_code_ttl_s` | `3600` | The time until a pairing code of the bot expires, in seconds. `tether pairing` and `tether setup` always use 3600. The minimum is 1. The maximum is 2592000. |
 

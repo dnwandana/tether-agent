@@ -356,6 +356,12 @@ type CronConfig struct {
 	RunHistory int `yaml:"run_history"`
 	// FailStreakLimit is the number of failed runs in a row that pause a job. 0 turns the pause off.
 	FailStreakLimit int `yaml:"fail_streak_limit"`
+	// QuietHours is a window "HH:MM-HH:MM" in the host time zone. In the window, cron sends go
+	// out with no sound. "" turns it off.
+	QuietHours string `yaml:"quiet_hours"`
+	// BriefAt is a time "HH:MM" in the host time zone. From that time, for 2 hours, the
+	// gateway tries to send the daily status. "" turns it off.
+	BriefAt string `yaml:"brief_at"`
 }
 
 // GatewayConfig sets the gateway: the message queue, the command lists, the housekeeping, and
@@ -712,6 +718,8 @@ func Default() Config {
 			GraceMaxS:             7200,
 			RunHistory:            50,
 			FailStreakLimit:       10,
+			QuietHours:            "",
+			BriefAt:               "",
 		},
 		Gateway: GatewayConfig{
 			MaxQueuedMessages:     20,
