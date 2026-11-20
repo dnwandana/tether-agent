@@ -681,7 +681,97 @@ func TestMigrationDraftOnlyFrom011(t *testing.T) {
 	if err := d.QueryRowContext(ctx, `SELECT draft_only FROM cron_jobs WHERE id = 'j1'`).Scan(&v); err != nil || v != 0 {
 		t.Fatal("an old job must read draft_only as 0:", v, err)
 	}
-	if v, err := d.SchemaVersion(ctx); err != nil || v != 12 || v != LatestVersion() {
+	if v, err := d.SchemaVersion(ctx); err != nil || v != LatestVersion() {
+		t.Fatal(v, LatestVersion(), err)
+	}
+}
+
+// A database at schema version 12 gains the attention columns of migration 013. A job that the
+// fail streak paused gets pause_reason 'failures'. An owner pause, an enabled job, and a job
+// with no failures keep an empty reason.
+func TestMigrationCronAttentionFrom012(t *testing.T) {
+	ctx := context.Background()
+	p := filepath.Join(t.TempDir(), "state.db")
+	sdb, err := sql.Open("sqlite", p+dsnParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sdb.SetMaxOpenConns(1)
+	old := &DB{DB: sdb}
+	if _, err := old.ExecContext(ctx, `CREATE TABLE schema_version (version INTEGER PRIMARY KEY,
+		name TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range ms {
+		if m.version <= 12 {
+			if err := old.apply(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	paused := "⚠ Cron job a failed: boom\n\n⏸ The job a (j1) is paused: it failed 10 runs in a row. " +
+		"Fix the cause. Then ask me to resume the job."
+	badSched := `⚠ Cron job e is paused: its stored schedule "x" is not valid. Update the schedule, then resume the job.`
+	for _, row := range []struct {
+		id      string
+		enabled int
+		streak  int
+		output  string
+	}{
+		{"j1", 0, 10, paused},      // paused by the streak
+		{"j2", 0, 3, "other text"}, // an owner pause after 3 failures
+		{"j3", 1, 10, paused},      // resumed, then failed again
+		{"j4", 0, 0, paused},       // an edit cleared the count
+		{"j5", 0, 0, badSched},     // paused by a bad schedule
+		{"j6", 1, 0, badSched},     // resumed after a schedule fix
+	} {
+		if _, err := old.ExecContext(ctx, `INSERT INTO cron_jobs (id, schedule, enabled, fail_streak, last_output)
+			VALUES (?, 'every 1h', ?, ?, ?)`, row.id, row.enabled, row.streak, row.output); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := old.ExecContext(ctx, `INSERT INTO cron_runs (job_id, started_at, finished_at, status, delivery)
+		VALUES ('j1', 1, 2, 'error', 'sent')`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+	d, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	for id, want := range map[string]string{"j1": "failures", "j2": "", "j3": "", "j4": "", "j5": "schedule", "j6": ""} {
+		var reason string
+		if err := d.QueryRowContext(ctx, `SELECT pause_reason FROM cron_jobs WHERE id = ?`, id).Scan(&reason); err != nil || reason != want {
+			t.Errorf("%s: pause_reason %q, want %q (%v)", id, reason, want, err)
+		}
+	}
+	var (
+		lastErr, errKey, effort string
+		watch, continuity       int
+		hash, output            sql.NullString
+	)
+	if err := d.QueryRowContext(ctx, `SELECT last_error, last_error_key, watch, watch_hash, watch_output,
+		continuity, effort FROM cron_jobs WHERE id = 'j2'`).Scan(&lastErr, &errKey, &watch, &hash, &output,
+		&continuity, &effort); err != nil {
+		t.Fatal(err)
+	}
+	if lastErr != "" || errKey != "" || watch != 0 || hash.Valid || output.Valid || continuity != 0 || effort != "" {
+		t.Fatal(lastErr, errKey, watch, hash, output, continuity, effort)
+	}
+	var (
+		cost, median sql.NullFloat64
+		flag         int
+	)
+	if err := d.QueryRowContext(ctx, `SELECT cost_usd, cost_median, cost_flag FROM cron_runs WHERE job_id = 'j1'`).
+		Scan(&cost, &median, &flag); err != nil || cost.Valid || median.Valid || flag != 0 {
+		t.Fatal("an old run has no cost:", cost, median, flag, err)
+	}
+	if v, err := d.SchemaVersion(ctx); err != nil || v != 13 || v != LatestVersion() {
 		t.Fatal(v, LatestVersion(), err)
 	}
 }
