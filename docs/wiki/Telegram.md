@@ -155,7 +155,7 @@ is owner-only there. `/help` for a member in a shared session adds the line
 `In a shared session, only the owner can use /new, /stop, and /now.`
 
 Only an owner can answer an approval and send `/sethome`, `/approve`, `/deny`, `/approvals`,
-`/mode`, or `/secrets`.
+`/mode`, `/secrets`, `/jobs`, or `/brief`.
 Add each trusted group member to `telegram.group_allowed_users`.
 
 A member turn has less power than an owner turn:
@@ -238,6 +238,17 @@ with a restart. The chat that sent `/restart` gets "♻ The gateway restarted. Y
 continues." If you sent `/restart` from the home chat, that chat gets only this second
 message.
 
+## Cron sends at night
+
+`cron.quiet_hours` sets a window, for example `22:00-07:00`. In the window, Telegram shows the
+cron results, the alerts, and the daily status with no sound. Nothing waits for the end of the
+window. The held-send cards and the approval prompts keep the sound. See
+[Cron](Cron#no-sound-hours).
+
+`/jobs` shows the cron jobs with buttons: Pause or Resume, Run now, Runs, and Delete.
+`/brief` shows what needs you. The daily status of `cron.brief_at` goes to your private chat,
+not to the home channel. See [Cron](Cron#jobs-and-status-from-the-chat).
+
 ## The command menu
 
 The gateway sets the bot command menu when it starts. The menu shows these commands, in this
@@ -245,7 +256,7 @@ order:
 
 `/new`, `/sessions`, `/stop`, `/steer`, `/now`, `/goal`, `/todo`, `/model`, `/effort`, `/usage`,
 `/help`, `/rename`, `/fork`, `/compact`, `/prompt`, `/archive`, `/delete`, `/approve`, `/deny`,
-`/approvals`, `/mode`, `/secrets`, `/sethome`, `/reload_mcp`, and `/restart`.
+`/approvals`, `/mode`, `/secrets`, `/jobs`, `/brief`, `/sethome`, `/reload_mcp`, and `/restart`.
 
 Telegram does not permit `-` in a command name, so the menu shows `/reload-mcp` as
 `/reload_mcp`. Both names work. `/start`, `/reset`, `/resume`, and `/subgoal` are not in the
@@ -254,7 +265,7 @@ menu, but they work. See [Commands](Commands) for each command.
 After the built-in commands, the menu shows the skill commands in name order, with `_` in place
 of `-`. See [Skills](Skills#run-a-skill-with-a-slash-command). These rules apply:
 
-- The menu has a maximum of 60 entries (`telegram.menu_max_commands`, with the 25 built-in commands). Send `/help skills` to see all skill commands.
+- The menu has a maximum of 60 entries (`telegram.menu_max_commands`, with the 27 built-in commands). Send `/help skills` to see all skill commands.
 - A skill command with a name of more than 32 characters is not in the menu.
 - The gateway sets the menu only when it starts. A new skill shows in the menu after the next
   start.

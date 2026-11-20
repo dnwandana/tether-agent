@@ -68,7 +68,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   `goals` cannot import `gateway`, `agent`, or `app`. `app` gives it the provider, cost, and
   batch functions. `internal/acp` imports only `config`, `security`, `db`, the SDK
   `github.com/coder/acp-go-sdk`, and the standard library. `tools` reaches it through the
-  `tools.ACPDelegator` interface.
+  `tools.ACPDelegator` interface. `internal/brief` imports only `cron`, `goals`, `obs`, `db`,
+  `sessions`, and the standard library. `cron` cannot import `brief`, `gateway`, or `app`.
 - The browser, MCP servers, media programs, and ACP adapters (`claude-agent-acp`,
   `codex-acp`) start on the first call and stop when idle. `app.New` must not do network work, because `TestStartupUnder100ms` measures startup. For
   example, `provider.ModelCache` makes no call before the first `/model <entry>`.
@@ -100,8 +101,8 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   2. Check `c.interactive()`. The CLI shows no buttons, so give it a line with the command to
      send.
   3. Keep a button action short. Telegram callback data has a limit of 64 bytes, and
-     `telegram.encodeCmd` cuts a longer action. The `/model` buttons stay under the limit
-     through `modelEntryMaxBytes` and `modelActionMaxBytes` in `internal/gateway/modellist.go`.
+     `telegram.encodeCmd` cuts a longer action. Keep each action at most `ActionMaxBytes`
+     bytes (`internal/gateway/modellist.go`). The `/model` buttons also use `modelEntryMaxBytes`.
      A tap runs the action as a typed command through `Gateway.Submit`.
 - A new provider preset needs these steps:
   1. Add a row to `presets` in `internal/config/presets.go`. The table order is the wizard

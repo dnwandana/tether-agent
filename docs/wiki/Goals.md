@@ -190,6 +190,9 @@ When a turn fails or gives no answer, it uses no turn. The next goal turn starts
   gate that fails, a parked goal, and a failed turn.
 - Each message about a pause has **Resume** and **Clear** buttons. **Resume** starts the next
   goal turn, the same as `/goal resume`.
+- `/brief` lists each paused goal with its reason and its age. It leaves out a goal that
+  paused because the session changed or the chat ended, and a goal that paused more than 7
+  days ago. See [Cron](Cron#brief).
 
 ## Stop a goal
 

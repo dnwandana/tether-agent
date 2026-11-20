@@ -169,6 +169,8 @@ These keys are the ones that most users change. The full list is in
 | `approvals.log_retention_days` | `180` | The gateway deletes an approval log row when it is older than this number of days. `0` keeps all rows. |
 | `cron.script_timeout_s` | `120` | The time limit of one cron script run, in seconds. It applies to a script job and to the data script of an agent job. At the limit, the program stops the script. A script job sends an alert. In an agent job, the failure goes into the prompt, and the model reports it. The minimum is 1. |
 | `cron.agent_timeout_s` | `0` | The time limit of the agent turn of one cron job, in seconds. `0` means no limit. At the limit, the program stops the turn and sends an alert. A partial answer follows the alert. The script of the job does not count. The maximum is 2592000. |
+| `cron.quiet_hours` | `""` | A window in the host time zone, `HH:MM-HH:MM`, for example `22:00-07:00`. In the window, cron sends go out with no sound. Nothing is held. The window can cross midnight. `""` turns it off. |
+| `cron.brief_at` | `""` | A time in the host time zone, `HH:MM`. Each day from that time, for 2 hours, the gateway tries to send the status text of `/brief`, when one or more things need the owner. `""` turns it off. |
 | `goals.max_turns` | `20` | The turn budget of a new goal. |
 | `goals.judge_provider` | `""` | The provider entry of the goal judge and of `/goal draft`. `""` uses the chain of the session. |
 | `goals.judge_timeout_s` | `30` | The timeout of one judge call or draft call, in seconds. |
