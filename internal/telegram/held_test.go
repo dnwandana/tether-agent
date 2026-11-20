@@ -73,7 +73,7 @@ func TestNoteMaskedAndPostTap(t *testing.T) {
 		{Kind: "secret", Start: 4, End: 24, Label: "[secret]"},
 		{Kind: "iban", Start: 34, End: len(orig), Label: "[IBAN GB82••••5432]"},
 	}
-	ch.noteMasked(context.Background(), 5, -100, "7", "Home ops", orig, f, nil)
+	ch.noteMasked(context.Background(), 5, -100, "7", "Home ops", orig, f, nil, false)
 	texts, data := keyboardOf(api, 0)
 	if len(data) != 1 || texts[0] != "✅ Post the full answer there" || !strings.HasPrefix(data[0], "ob:") {
 		t.Fatal(texts, data)

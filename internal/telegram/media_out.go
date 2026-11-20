@@ -553,19 +553,30 @@ type Sender struct {
 	ConvertVoice func(ctx context.Context, in string) (string, error)
 }
 
-// SendFiles sends each file by its kind. A failed file does not stop the
-// others. The error names each file that failed.
+// FileOpts are the options of SendFilesOpts.
+type FileOpts struct {
+	// NoSound sends each file with no sound.
+	NoSound bool
+}
+
+// SendFiles sends each file by its kind, with the sound. It calls SendFilesOpts with the zero FileOpts.
 func (s *Sender) SendFiles(ctx context.Context, chatID int64, threadID string, files []OutFile) error {
+	return s.SendFilesOpts(ctx, chatID, threadID, files, FileOpts{})
+}
+
+// SendFilesOpts sends each file by its kind, with the options o. A failed file does not stop
+// the others. The error names each file that failed.
+func (s *Sender) SendFilesOpts(ctx context.Context, chatID int64, threadID string, files []OutFile, o FileOpts) error {
 	var errs []error
 	for _, f := range files {
-		if err := s.sendFile(ctx, chatID, threadID, f); err != nil {
+		if err := s.sendFile(ctx, chatID, threadID, f, o); err != nil {
 			errs = append(errs, fmt.Errorf("send %s: %w", filepath.Base(f.Path), err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (s *Sender) sendFile(ctx context.Context, chatID int64, threadID string, f OutFile) error {
+func (s *Sender) sendFile(ctx context.Context, chatID int64, threadID string, f OutFile, o FileOpts) error {
 	st, err := os.Stat(f.Path)
 	if err != nil {
 		return err
@@ -576,6 +587,9 @@ func (s *Sender) sendFile(ctx context.Context, chatID int64, threadID string, f 
 	fields := map[string]string{"chat_id": strconv.FormatInt(chatID, 10)}
 	if id, ok := ThreadParam(threadID, false); ok {
 		fields["message_thread_id"] = strconv.Itoa(id)
+	}
+	if o.NoSound {
+		fields["disable_notification"] = "true"
 	}
 	ext := strings.ToLower(filepath.Ext(f.Path))
 	switch f.Kind {

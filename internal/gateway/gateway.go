@@ -37,6 +37,8 @@ type Outbound struct {
 	ReplyTo  string
 	// Raw skips the outbound scan of the channel. The owner chose to post the full text.
 	Raw bool
+	// NoSound sends the message and its files with no sound.
+	NoSound bool
 }
 
 // Channel is a source of inbound messages and a place to send answers.

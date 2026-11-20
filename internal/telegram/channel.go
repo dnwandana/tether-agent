@@ -228,12 +228,12 @@ func (ch *Channel) Send(ctx context.Context, to gateway.Target, msg gateway.Outb
 		if len(held) > 0 {
 			ch.logger().Info("telegram: files with sensitive data are not sent", "chat", chatID, "files", held)
 		}
-		note = func() { ch.noteOwner(ctx, "", chatID, to.ThreadID, "", original, found, held) }
+		note = func() { ch.noteOwner(ctx, "", chatID, to.ThreadID, "", original, found, held, msg.NoSound) }
 	}
 	for _, f := range msg.Files {
 		files = append(files, OutFile{Path: f, Kind: mediaKind(f)})
 	}
-	opts := sendOpts{keyboard: keyboardMarkup(msg.Keyboard)}
+	opts := sendOpts{keyboard: keyboardMarkup(msg.Keyboard), noSound: msg.NoSound}
 	if id, err := strconv.Atoi(msg.ReplyTo); err == nil && id > 0 {
 		opts.replyTo = id
 	}
@@ -244,7 +244,7 @@ func (ch *Channel) Send(ctx context.Context, to gateway.Target, msg gateway.Outb
 		}
 	}
 	if len(files) > 0 && ch.Out != nil {
-		if err := ch.Out.SendFiles(ctx, chatID, to.ThreadID, files); err != nil {
+		if err := ch.Out.SendFilesOpts(ctx, chatID, to.ThreadID, files, FileOpts{NoSound: msg.NoSound}); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -1064,6 +1064,8 @@ type sendOpts struct {
 	replyTo  int
 	// class is the pace class of the sends. Zero is the default class, which waits for the group window.
 	class paceClass
+	// noSound sends each part with no sound.
+	noSound bool
 }
 
 // sendText sends text as MarkdownV2 parts with "(i/n)" numbers. A part that Telegram
@@ -1074,7 +1076,7 @@ func (ch *Channel) sendText(ctx context.Context, chatID int64, threadID, text st
 	last := 0
 	c := withClass(ch.C, o.class)
 	for i, part := range parts {
-		p := SendMessageParams{ChatID: chatID, Text: part, ParseMode: "MarkdownV2"}
+		p := SendMessageParams{ChatID: chatID, Text: part, ParseMode: "MarkdownV2", DisableNotification: o.noSound}
 		if id, ok := ThreadParam(threadID, false); ok {
 			p.MessageThreadID = id
 		}
@@ -1641,5 +1643,5 @@ func (r *tgRenderer) Done(final string, err error) {
 	r.mu.Lock()
 	found, held, orig := r.findings, r.heldFiles, r.fullClean
 	r.mu.Unlock()
-	r.ch.noteOwner(r.ctx, r.userID, r.chatID, r.threadID, r.chatTitle, orig, found, held)
+	r.ch.noteOwner(r.ctx, r.userID, r.chatID, r.threadID, r.chatTitle, orig, found, held, false)
 }

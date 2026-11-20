@@ -789,3 +789,26 @@ func TestMediaPolicyTrustOffGivesZeroWindow(t *testing.T) {
 		t.Fatalf("seconds 0: window %s", pol.TrustRecent)
 	}
 }
+
+// SendFilesOpts with NoSound adds disable_notification to each upload. SendFiles keeps the sound.
+func TestSendFilesOptsNoSound(t *testing.T) {
+	s, api := sender(t)
+	files := []OutFile{{Path: tempFile(t, "a.png"), Kind: "photo"}, {Path: tempFile(t, "d.pdf"), Kind: "document"}}
+	if err := s.SendFilesOpts(ctx, 42, "", files, FileOpts{NoSound: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range api.all() {
+		if c.Body["disable_notification"] != "true" {
+			t.Fatal(c.Method, c.Body)
+		}
+	}
+	n := len(api.all())
+	if err := s.SendFiles(ctx, 42, "", files); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range api.all()[n:] {
+		if _, ok := c.Body["disable_notification"]; ok {
+			t.Fatal(c.Method, c.Body)
+		}
+	}
+}

@@ -160,7 +160,7 @@ func maskedNote(title string, findings []security.Finding, files []string) strin
 // noteOwner finds the owner chat of userID and calls noteMasked. With no owner chat it logs
 // one line and sends nothing.
 func (ch *Channel) noteOwner(ctx context.Context, userID string, chatID int64, threadID, title, original string,
-	findings []security.Finding, files []string) {
+	findings []security.Finding, files []string, noSound bool) {
 	if len(findings) == 0 && len(files) == 0 {
 		return
 	}
@@ -172,13 +172,13 @@ func (ch *Channel) noteOwner(ctx context.Context, userID string, chatID int64, t
 	if title == "" {
 		title = strconv.FormatInt(chatID, 10)
 	}
-	ch.noteMasked(ctx, owner, chatID, threadID, title, original, findings, files)
+	ch.noteMasked(ctx, owner, chatID, threadID, title, original, findings, files, noSound)
 }
 
 // noteMasked keeps the original and sends the note with the button to noteChat. findings
 // must come from original. Only the secret findings are masked in the kept text.
 func (ch *Channel) noteMasked(ctx context.Context, noteChat, chatID int64, threadID, title, original string,
-	findings []security.Finding, files []string) {
+	findings []security.Finding, files []string, noSound bool) {
 	if ch.Held == nil {
 		ch.logger().Warn("telegram: no store for the originals of a masked answer", "chat", chatID)
 		return
@@ -193,7 +193,7 @@ func (ch *Channel) noteMasked(ctx context.Context, noteChat, chatID int64, threa
 	kb := &InlineKeyboardMarkup{InlineKeyboard: [][]InlineKeyboardButton{{
 		{Text: postOriginalButton, CallbackData: originalPrefix + ":" + id},
 	}}}
-	msgID, err := ch.sendText(ctx, noteChat, "", maskedNote(title, findings, files), sendOpts{keyboard: kb})
+	msgID, err := ch.sendText(ctx, noteChat, "", maskedNote(title, findings, files), sendOpts{keyboard: kb, noSound: noSound})
 	if err != nil {
 		ch.logger().Warn("telegram: cannot send the note of a masked answer", "chat", noteChat, "err", err.Error())
 		return

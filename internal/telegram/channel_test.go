@@ -1856,3 +1856,42 @@ func TestAlbumWaitFromConfig(t *testing.T) {
 		t.Fatal("0 keeps the default of AlbumBuffer:", got)
 	}
 }
+
+// NoSound sends each text part, the plain text fallback, and each file with no sound.
+func TestChannelSendNoSound(t *testing.T) {
+	h := harness(t, &tgProv{}, nil)
+	to := gateway.Target{Source: "telegram", ChatID: "-100"}
+	if err := h.ch.Send(ctx, to, gateway.Outbound{Text: strings.Repeat("a", 5000),
+		Files: []string{tempFile(t, "r.pdf")}, NoSound: true}); err != nil {
+		t.Fatal(err)
+	}
+	h.api.setReply(rejectMarkdown)
+	if err := h.ch.Send(ctx, to, gateway.Outbound{Text: "**Done** 1.5", NoSound: true}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := 0
+	for _, c := range h.api.all() {
+		switch c.Method {
+		case "sendMessage":
+			msgs++
+			if c.Body["disable_notification"] != true {
+				t.Fatalf("%s %v", c.Method, c.Body)
+			}
+		case "sendDocument":
+			if c.Body["disable_notification"] != "true" {
+				t.Fatalf("%s %v", c.Method, c.Body)
+			}
+		}
+	}
+	// Two parts, then one rejected part and its plain text fallback.
+	if msgs != 4 || h.api.count("sendDocument") != 1 {
+		t.Fatal(h.api.methods())
+	}
+	h.api.setReply(nil)
+	if err := h.ch.Send(ctx, to, gateway.Outbound{Text: "loud"}); err != nil {
+		t.Fatal(err)
+	}
+	if c := h.api.lastCall("sendMessage"); c.Body["disable_notification"] != nil {
+		t.Fatalf("a send without NoSound keeps the sound: %v", c.Body)
+	}
+}

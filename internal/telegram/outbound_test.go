@@ -236,3 +236,21 @@ func TestGroupLongAnswerWithCardNoDuplicate(t *testing.T) {
 		t.Fatalf("the answer must show one time: %d messages with the start, %d with the end", starts, ends)
 	}
 }
+
+// The owner note of a masked send has no sound only when the send has no sound.
+func TestMaskedNoteFollowsNoSound(t *testing.T) {
+	for _, quiet := range []bool{false, true} {
+		h, _ := outboundHarness(t)
+		h.ch.Cfg.AllowedUsers = []string{"5"}
+		h.ch.Held = &HeldOriginals{}
+		text := "IBAN GB82 WEST 1234 5698 7654 32"
+		if err := h.ch.Send(ctx, gateway.Target{Source: "telegram", ChatID: "-100"},
+			gateway.Outbound{Text: text, NoSound: quiet}); err != nil {
+			t.Fatal(err)
+		}
+		note := h.api.lastCall("sendMessage")
+		if fmt.Sprint(note.Body["chat_id"]) != "5" || (note.Body["disable_notification"] == true) != quiet {
+			t.Fatalf("quiet %v: %v", quiet, note.Body)
+		}
+	}
+}
