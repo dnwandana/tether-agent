@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
 )
@@ -183,5 +184,38 @@ func TestStoreGateFillFromFields(t *testing.T) {
 		if a.SessionID == "bare" && a.State.Gates[0].TimeoutSeconds != 600 {
 			t.Fatalf("Active uses the same fill: %+v", a.State.Gates)
 		}
+	}
+}
+
+// Paused returns only the paused goals, in the order of the session ID, with updated_at.
+// A row from an older program has no paused_at.
+func TestStorePaused(t *testing.T) {
+	ctx := context.Background()
+	d := openGoalsDB(t)
+	s := &Store{DB: d}
+	reason := "stopped by /stop"
+	for id, st := range map[string]State{
+		"s1": {Goal: "a", Status: StatusActive, Epoch: 1},
+		"s2": {Goal: "b", Status: StatusPaused, PausedReason: &reason, PausedAt: 1794988800.5, Epoch: 2},
+		"s3": {Goal: "c", Status: StatusDone, Epoch: 3},
+	} {
+		if _, err := s.Put(ctx, id, st, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.Exec(`INSERT INTO goals (session_id, state, revision, updated_at) VALUES ('s4', ?, 1, 1794988800000)`,
+		`{"goal":"d","status":"paused","paused_reason":"the chat ended"}`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Paused(ctx)
+	if err != nil || len(got) != 2 {
+		t.Fatal(got, err)
+	}
+	if got[0].SessionID != "s2" || got[0].State.Goal != "b" || got[0].State.PausedAt != 1794988800.5 || got[0].UpdatedAt.IsZero() {
+		t.Fatalf("%+v", got[0])
+	}
+	if got[1].SessionID != "s4" || got[1].State.PausedAt != 0 || !got[1].UpdatedAt.Equal(time.UnixMilli(1794988800000)) ||
+		got[1].State.PausedReason == nil || *got[1].State.PausedReason != ReasonChatEnded {
+		t.Fatalf("%+v", got[1])
 	}
 }

@@ -135,6 +135,52 @@ func (s *Store) Active(ctx context.Context) ([]ActiveGoal, error) {
 	return out, nil
 }
 
+// PausedGoal is one paused goal and the last write time of its row.
+type PausedGoal struct {
+	SessionID string
+	State     State
+	UpdatedAt time.Time
+}
+
+// Paused returns the paused goals in the order of the session ID. UpdatedAt comes from
+// updated_at (Unix milliseconds), for an old row with no PausedAt.
+func (s *Store) Paused(ctx context.Context) ([]PausedGoal, error) {
+	type row struct {
+		id, raw string
+		upd     int64
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT session_id, state, updated_at FROM goals ORDER BY session_id`)
+	if err != nil {
+		return nil, fmt.Errorf("goals: list the paused goals: %w", err)
+	}
+	var all []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.raw, &r.upd); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("goals: list the paused goals: %w", err)
+		}
+		all = append(all, r)
+	}
+	err = rows.Err()
+	// state.db has one connection. Close the rows before the next query can need it.
+	rows.Close()
+	if err != nil {
+		return nil, fmt.Errorf("goals: list the paused goals: %w", err)
+	}
+	var out []PausedGoal
+	for _, r := range all {
+		st, err := decodeState(r.raw, s.GateTimeoutS, s.GateMaxRetries)
+		if err != nil {
+			return nil, fmt.Errorf("goals: decode the goal of session %s: %w", r.id, err)
+		}
+		if st.Status == StatusPaused {
+			out = append(out, PausedGoal{SessionID: r.id, State: st, UpdatedAt: time.UnixMilli(r.upd)})
+		}
+	}
+	return out, nil
+}
+
 // decodeState decodes a goal row and applies the defaults of Hermes GoalState.from_json and
 // GoalGate.from_dict, so a row from Hermes or from an older program loads. A gate with no
 // time limit or retry count gets gateTimeoutS and gateMaxRetries. A value of 0 or less uses

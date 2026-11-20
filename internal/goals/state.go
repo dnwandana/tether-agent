@@ -4,7 +4,13 @@
 // gateway, agent, or app. app gives it the provider, cost, batch, exec, and todo functions.
 package goals
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+// nowFunc gives the time of a pause. Tests replace it.
+var nowFunc = time.Now
 
 // The values of State.Status, as in Hermes.
 const (
@@ -12,6 +18,13 @@ const (
 	StatusPaused  = "paused"
 	StatusDone    = "done"
 	StatusCleared = "cleared"
+)
+
+// The paused reasons that the gateway sets when the session of a goal changes or the chat
+// ends. The status text leaves out these pauses.
+const (
+	ReasonSessionChanged = "the session changed"
+	ReasonChatEnded      = "the chat ended"
 )
 
 // Contract is the completion contract of a goal, the Hermes GoalContract. Each field is
@@ -71,6 +84,8 @@ type State struct {
 	LastReason *string `json:"last_reason"`
 	// PausedReason is the reason of a pause, or nil.
 	PausedReason *string `json:"paused_reason"`
+	// PausedAt is the time of the pause, or 0. Hermes does not have this field.
+	PausedAt float64 `json:"paused_at,omitempty"`
 	// ConsecutiveParseFailures counts the judge replies in a row that did not parse.
 	ConsecutiveParseFailures int `json:"consecutive_parse_failures"`
 	// ConsecutiveTransportFailures counts the judge API errors in a row.
@@ -105,12 +120,17 @@ type State struct {
 }
 
 // SetStatus sets the status and adds 1 to Epoch. A pause keeps reason as PausedReason, and an
-// empty reason gives nil. Each other status clears PausedReason.
+// empty reason gives nil. Each other status clears PausedReason. A pause also sets PausedAt, and each other status
+// clears it.
 func (st *State) SetStatus(status, reason string) {
 	st.Status = status
 	st.PausedReason = nil
-	if status == StatusPaused && reason != "" {
-		st.PausedReason = &reason
+	st.PausedAt = 0
+	if status == StatusPaused {
+		st.PausedAt = float64(nowFunc().UnixMilli()) / 1000
+		if reason != "" {
+			st.PausedReason = &reason
+		}
 	}
 	st.Epoch++
 }

@@ -1,6 +1,9 @@
 package goals
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestContractEmpty(t *testing.T) {
 	if !(Contract{}).Empty() || !(Contract{Outcome: "  ", StopWhen: "\n"}).Empty() {
@@ -51,5 +54,33 @@ func TestResumeKeepsJudgeCounters(t *testing.T) {
 	}
 	if st.ConsecutiveParseFailures != 2 || st.ConsecutiveTransportFailures != 4 {
 		t.Fatalf("Resume must keep the judge counters, like Hermes: %+v", st)
+	}
+}
+
+// A pause keeps the time of the pause. Each other status clears it.
+func TestSetStatusPausedAt(t *testing.T) {
+	at := time.Date(2026, 11, 19, 8, 0, 0, 0, time.UTC)
+	old := nowFunc
+	nowFunc = func() time.Time { return at }
+	t.Cleanup(func() { nowFunc = old })
+	st := State{Goal: "g", Status: StatusActive}
+	st.SetStatus(StatusPaused, "stopped by /stop")
+	if st.PausedAt != float64(at.UnixMilli())/1000 {
+		t.Fatalf("%+v", st)
+	}
+	st.SetStatus(StatusActive, "")
+	if st.PausedAt != 0 {
+		t.Fatalf("an active goal has no pause time: %+v", st)
+	}
+	st.SetStatus(StatusPaused, "")
+	st.Resume()
+	if st.PausedAt != 0 {
+		t.Fatalf("a resume clears the pause time: %+v", st)
+	}
+}
+
+func TestPauseReasonTexts(t *testing.T) {
+	if ReasonSessionChanged != "the session changed" || ReasonChatEnded != "the chat ended" {
+		t.Fatal(ReasonSessionChanged, ReasonChatEnded)
 	}
 }

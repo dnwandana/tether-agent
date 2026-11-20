@@ -14,6 +14,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/goals"
 	"github.com/dnwandana/tether-agent/internal/provider"
 )
 
@@ -1472,5 +1473,13 @@ func TestDebounceFromConfig(t *testing.T) {
 	def := config.Default()
 	if d := (&Gateway{Deps: &Deps{Cfg: &def}}).debouncer(); d.window != 350*time.Millisecond || d.hardCap != time.Second {
 		t.Fatalf("defaults: window %s, hard cap %s", d.window, d.hardCap)
+	}
+}
+
+// The gateway names of the two pause reasons are the goals constants, so the status text can
+// leave out these pauses without an import of gateway.
+func TestGoalReasonsComeFromGoals(t *testing.T) {
+	if ReasonSessionChanged != goals.ReasonSessionChanged || ReasonChatEnded != goals.ReasonChatEnded {
+		t.Fatal(ReasonSessionChanged, ReasonChatEnded)
 	}
 }

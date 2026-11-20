@@ -52,11 +52,12 @@ const GoalPausedLine = "⏸ Goal paused. Use /goal resume to continue."
 // busy from one goal turn to the next.
 const GoalBusyLine = "A goal runs. Send /goal pause first."
 
-// The paused reasons of the goal code.
+// The paused reasons of the goal code. The session and chat reasons live in goals, so the
+// status text can read them.
 const (
 	ReasonStopped        = "stopped by /stop"
-	ReasonSessionChanged = "the session changed"
-	ReasonChatEnded      = "the chat ended"
+	ReasonSessionChanged = goals.ReasonSessionChanged
+	ReasonChatEnded      = goals.ReasonChatEnded
 	ReasonLoop           = "the turn crashed the gateway 3 times"
 )
 
