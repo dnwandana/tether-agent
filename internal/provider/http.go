@@ -35,7 +35,7 @@ var billingTexts = []string{"credit balance", "spend limit", "insufficient balan
 // postJSON sends body as JSON to url and returns the response when the
 // status is 2xx. These failures wrap ErrBeforeFirstByte, so that the
 // caller can try the next provider:
-//   - a connection error
+//   - a connection error, which also wraps ErrConnection
 //   - an HTTP 5xx, 429, 401, 402, 403, or 408
 //   - an HTTP 400 whose body tells of a billing or quota failure
 //
@@ -66,7 +66,7 @@ func postJSON(ctx context.Context, hc *http.Client, name, url string, header htt
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("provider %s: %w", name, ctx.Err())
 		}
-		return nil, fmt.Errorf("provider %s: %w: %s", name, ErrBeforeFirstByte, redact(err.Error(), apiKey))
+		return nil, fmt.Errorf("provider %s: %w: %w: %s", name, ErrBeforeFirstByte, ErrConnection, redact(err.Error(), apiKey))
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		return resp, nil

@@ -27,6 +27,11 @@ type Provider interface {
 // tries the next entry only for this error.
 var ErrBeforeFirstByte = errors.New("provider failed before the first byte")
 
+// ErrConnection marks a transport failure, for example a refused connection or a reset. It is
+// always wrapped with ErrBeforeFirstByte. A cron run retries it, but not an unusable entry or
+// the vision error, which also wrap ErrBeforeFirstByte.
+var ErrConnection = errors.New("provider connection failed")
+
 // endpoint holds the settings that the adapters share: the entry name, the
 // wire format, the connection, the quirks of the preset, and the effort
 // style.

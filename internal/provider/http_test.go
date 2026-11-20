@@ -59,3 +59,23 @@ func TestHTTPStatusErrorBodyIsRedacted(t *testing.T) {
 		t.Fatal(se.Error())
 	}
 }
+
+// A transport failure wraps ErrConnection and ErrBeforeFirstByte. A bad status and an
+// unusable entry do not wrap ErrConnection.
+func TestConnectionErrorIsErrConnection(t *testing.T) {
+	srv := bodyServer(t, 503, "down")
+	_, err := NewOpenAI("p", srv.URL, "k", "m", srv.Client()).Stream(ctx, Request{})
+	if !errors.Is(err, ErrBeforeFirstByte) || errors.Is(err, ErrConnection) {
+		t.Fatal(err)
+	}
+	url := srv.URL
+	srv.Close()
+	_, err = NewOpenAI("p", url, "k", "m", http.DefaultClient).Stream(ctx, Request{})
+	if !errors.Is(err, ErrBeforeFirstByte) || !errors.Is(err, ErrConnection) {
+		t.Fatal(err)
+	}
+	u := &unusable{name: "x", reason: "no key"}
+	if _, err := u.Stream(ctx, Request{}); errors.Is(err, ErrConnection) {
+		t.Fatal(err)
+	}
+}
