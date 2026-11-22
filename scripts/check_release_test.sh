@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
-# Checks the release build: the cross builds, the version string, and the
-# README quick start. "make test-release" runs this script.
+# Checks the release build: the built dashboard page, the cross builds, the
+# version string, and the README quick start. "make test-release" runs this script.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# The release binaries embed the page of the web dashboard. GoReleaser runs
+# "make web" before it builds, so the cross builds of this check must have the page too.
+test -f internal/dashboard/dist/index.html || {
+  echo "check_release: internal/dashboard/dist/index.html is missing, so the binaries have no dashboard page. Run make web first."
+  exit 1
+}
 
 make cross VERSION=test
 for f in bin/tether-linux-amd64 bin/tether-linux-arm64 bin/tether-darwin-arm64; do

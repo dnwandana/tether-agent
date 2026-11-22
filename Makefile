@@ -51,8 +51,9 @@ test-race:
 	go test -race ./...
 
 # The web dashboard. "make web" needs Node and npm. It builds web/ into
-# internal/dashboard/dist/, which is in the repository, so "make build" and the
-# release do not need Node.
+# internal/dashboard/dist/, and the binary embeds it. Git keeps only the
+# placeholder dist/.keep, so the release (the GoReleaser "before" hook) runs
+# this target and needs Node too.
 web:
 	rm -rf internal/dashboard/dist
 	npm --prefix web ci
