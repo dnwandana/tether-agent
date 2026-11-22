@@ -319,6 +319,29 @@ func recordPairFailure(ctx context.Context, tx *sql.Tx, platform string, now tim
 	return kvSetTx(ctx, tx, key, strconv.Itoa(fails))
 }
 
+// TriesLeft returns the number of failed approvals that the platform can still have before
+// the lockout. It returns 0 while the platform is locked. It makes no network call.
+func (p *Pairing) TriesLeft(ctx context.Context, platform string) (int, error) {
+	tx, err := p.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("pairing: tries left: %w", err)
+	}
+	defer tx.Rollback()
+	until, err := kvTime(ctx, tx, pairLockoutKey(platform))
+	if err != nil {
+		return 0, err
+	}
+	if p.now().Before(until) {
+		return 0, nil
+	}
+	v, _, err := kvGetTx(ctx, tx, pairFailuresKey(platform))
+	if err != nil {
+		return 0, err
+	}
+	fails, _ := strconv.Atoi(v)
+	return max(PairMaxFailures-fails, 0), nil
+}
+
 // IsApproved reports whether pairing approved the user on the platform. It
 // reads the table on each call. A database error gives false.
 func (p *Pairing) IsApproved(ctx context.Context, platform, userID string) bool {

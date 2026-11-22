@@ -32,8 +32,8 @@ func TestNewBuildsGoalManager(t *testing.T) {
 	if a.Agent.Compactor.Todo == nil {
 		t.Fatal("the compactor needs the todo hook")
 	}
-	if a.Deps().SendNotice != nil {
-		t.Fatal("the chat role has no Telegram notice path")
+	if a.Deps().SendNotice == nil {
+		t.Fatal("SendNotice routes by the session source, so it is set also in the chat role")
 	}
 }
 

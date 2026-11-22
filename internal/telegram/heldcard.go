@@ -23,17 +23,8 @@ const (
 	heldDropButton   = "❌ Drop"
 	heldPostButton   = "✅ Post the full text there"
 	heldReadFailed   = "⚠️ The held text cannot be read now. Try again."
-	heldNoSendFunc   = "no send function is set"
 	heldKindOriginal = "original"
 )
-
-// HeldSendStore is the part of cron.HeldStore that the taps of a held card use. MarkRun
-// sets the delivery of the cron_runs row of the held send.
-type HeldSendStore interface {
-	Claim(ctx context.Context, id string) (cron.HeldSend, bool, error)
-	Restore(ctx context.Context, h cron.HeldSend) error
-	MarkRun(ctx context.Context, runID int64, delivery string) error
-}
 
 // HeldCard is one owner card. Kind "hold" is a delivery that model_guard held. Kind
 // "original" is the note of a masked cron delivery: Text is then the full note text.
@@ -46,10 +37,11 @@ type HeldCard struct {
 // HeldCards posts the owner cards of the held sends and handles their taps. Send sends a
 // held row to its target. It scans a row of kind "hold" and sends a row of kind "original" as is.
 type HeldCards struct {
-	C     *Client
-	Log   *slog.Logger
-	Store HeldSendStore
-	Send  func(ctx context.Context, h cron.HeldSend) error
+	C   *Client
+	Log *slog.Logger
+	// Jobs is the store of the held rows and the run rows. Nil answers each tap as resolved.
+	Jobs *cron.Store
+	Send func(ctx context.Context, h cron.HeldSend) error
 }
 
 func (hc *HeldCards) logger() *slog.Logger {
@@ -132,13 +124,13 @@ func (hc *HeldCards) tap(ctx context.Context, cq CallbackQuery, id, arg string) 
 			hc.logger().Debug("telegram: cannot answer the button press", "err", err.Error())
 		}
 	}
-	if hc.Store == nil {
+	if hc.Jobs == nil {
 		answer(resolvedText)
 		return
 	}
-	h, ok, err := hc.Store.Claim(ctx, id)
+	h, ok, err := (&cron.HeldStore{DB: hc.Jobs.DB}).Get(ctx, id)
 	if err != nil {
-		hc.logger().Warn("telegram: cannot claim a held send", "id", id, "err", err.Error())
+		hc.logger().Warn("telegram: cannot read a held send", "id", id, "err", err.Error())
 		answer(heldReadFailed)
 		return
 	}
@@ -146,50 +138,31 @@ func (hc *HeldCards) tap(ctx context.Context, cq CallbackQuery, id, arg string) 
 		answer(resolvedText)
 		return
 	}
-	restore := func() {
-		if err := hc.Store.Restore(ctx, h); err != nil {
-			hc.logger().Error("telegram: cannot put a held send back", "id", id, "err", err.Error())
-		}
-	}
 	if cq.Message == nil || strconv.FormatInt(cq.Message.Chat.ID, 10) != h.CardChat {
-		restore()
 		answer(wrongChat)
 		return
 	}
-	mark := func(delivery string) {
-		if h.Kind != "hold" || h.RunID <= 0 {
-			return
-		}
-		if err := hc.Store.MarkRun(ctx, h.RunID, delivery); err != nil {
-			hc.logger().Warn("telegram: cannot mark the run of a held send", "id", id, "err", err.Error())
-		}
-	}
+	var action string
 	switch arg {
 	case "s":
-		answer("")
-		send := hc.Send
-		if send == nil {
-			send = func(context.Context, cron.HeldSend) error { return errors.New(heldNoSendFunc) }
-		}
-		if err := send(ctx, h); err != nil {
-			restore()
-			hc.edit(ctx, cq, "Not sent: "+err.Error()+". Tap Send to try again.",
-				heldKeyboard(h.ID, h.Kind, h.TargetTitle))
-			return
-		}
-		mark(cron.DeliverySent)
-		done := "Sent."
-		if h.Kind == heldKindOriginal {
-			done = "Posted."
-		}
-		hc.edit(ctx, cq, done, nil)
+		action = "post"
 	case "d":
-		answer("")
-		mark(cron.DeliveryDropped)
-		hc.edit(ctx, cq, "Dropped.", nil)
+		action = "drop"
 	default:
-		restore()
 		answer(invalidCallback)
+		return
+	}
+	answer("")
+	result, err := cron.ResolveHeld(ctx, hc.Jobs, id, action, hc.Send, func(_ cron.HeldSend, result string) {
+		hc.edit(ctx, cq, result, nil)
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, cron.ErrHeldNotSent):
+		hc.edit(ctx, cq, result+" Tap Send to try again.", heldKeyboard(h.ID, h.Kind, h.TargetTitle))
+	case errors.Is(err, cron.ErrHeldGone):
+	default:
+		hc.logger().Warn("telegram: cannot finish a held send answer", "id", id, "err", err.Error())
 	}
 }
 

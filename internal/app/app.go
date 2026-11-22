@@ -29,10 +29,12 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
+	"github.com/dnwandana/tether-agent/internal/dashboard"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/goals"
 	"github.com/dnwandana/tether-agent/internal/mcp"
+	"github.com/dnwandana/tether-agent/internal/media"
 	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/pricing"
@@ -64,6 +66,9 @@ type Options struct {
 	LogLevel string
 	// LogWriter receives the logs with LogStderr. Nil uses os.Stderr.
 	LogWriter io.Writer
+	// LogRing keeps the last redacted log lines for the log viewer of the dashboard. Nil
+	// keeps no lines. Only the gateway role sets it.
+	LogRing *obs.Ring
 	// Gateway builds the cron scheduler and the background delegation batches. Only the
 	// gateway role sets it.
 	Gateway bool
@@ -75,8 +80,12 @@ type Options struct {
 
 // App holds the shared parts of one process.
 type App struct {
-	Cfg      *config.Config
-	DataDir  string
+	Cfg     *config.Config
+	DataDir string
+	// cfgPath is the config file that New loaded. The dashboard shows and backs up this file.
+	cfgPath string
+	// version is Options.Version. The dashboard shows it.
+	version  string
 	DB       *db.DB
 	Store    *sessions.Store
 	Agent    *agent.Agent
@@ -137,6 +146,8 @@ type App struct {
 	heldCards *telegram.HeldCards
 	// Telegram is the Telegram channel. AddTelegram sets it in the gateway role.
 	Telegram *telegram.Channel
+	// Dashboard is the dashboard channel. AddDashboard sets it in the gateway role.
+	Dashboard *dashboard.Channel
 	// Delegator runs the children of delegate_task.
 	Delegator *agent.Delegator
 	// Batches runs the background delegation batches. It is nil outside the gateway role,
@@ -189,7 +200,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 		return nil, fmt.Errorf("app: cannot make the data folder %s: %w", dir, err)
 	}
 	a := &App{DataDir: dir, values: map[string]map[string]any{}, telegramBaseURL: opts.TelegramBaseURL,
-		restarts: make(chan StopRequest, 1)}
+		restarts: make(chan StopRequest, 1), version: opts.Version}
 	defer func() {
 		if err != nil {
 			a.Close()
@@ -203,6 +214,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	if cfgPath == "" {
 		cfgPath = filepath.Join(dir, "config.yaml")
 	}
+	a.cfgPath = cfgPath
 	if a.Cfg, err = config.Load(cfgPath, security.EnvLookup(dotenv)); err != nil {
 		return nil, err
 	}
@@ -717,12 +729,15 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 		// Media sets the local files that an answer can send (a port of Hermes
 		// validate_media_delivery_path). The gateway.media_* keys set the policy.
 		// A set TETHER_MEDIA_* variable wins. A nil policy sends no file.
-		Media: telegram.NewMediaPolicyWith(a.DataDir, security.EnvLookup(a.DotEnv.Snapshot()), telegram.MediaPolicyConfig{
+		Media: media.NewPolicy(media.PolicyConfig{
+			DataDir:      a.DataDir,
+			Lookup:       security.EnvLookup(a.DotEnv.Snapshot()),
+			Log:          a.Log,
 			Strict:       a.Cfg.Gateway.MediaDeliveryStrict,
 			AllowDirs:    a.Cfg.Gateway.MediaAllowDirs,
 			TrustRecent:  a.Cfg.Gateway.MediaTrustRecentFiles,
 			TrustRecentS: a.Cfg.Gateway.MediaTrustRecentS,
-		}, a.Log),
+		}),
 		Bot: me,
 		Log: a.Log,
 		// The approval message shows the wait of the gate. Zero config means the gate default.
@@ -760,8 +775,7 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 	}
 	if a.Sched != nil {
 		a.titles = &chatTitles{C: c, TTL: time.Hour}
-		a.heldCards = &telegram.HeldCards{C: c, Log: a.Log,
-			Store: heldSendStore{held: a.Sched.Deliver.Held, jobs: a.Cron}, Send: a.sendHeld}
+		a.heldCards = &telegram.HeldCards{C: c, Log: a.Log, Jobs: a.Cron, Send: a.sendHeld}
 		ch.HeldCards = a.heldCards
 		a.Sched.Deliver.Send = func(ctx context.Context, to cron.Target, text string, files []string, noSound bool) error {
 			return ch.Send(ctx, gateway.Target{Source: "telegram", ChatID: to.ChatID, ThreadID: to.ThreadID},
@@ -924,7 +938,11 @@ func (a *App) openLog(opts Options) error {
 	if opts.LogLevel != "" {
 		level = opts.LogLevel
 	}
-	a.Log = obs.NewLogger(w, level, a.Redactor)
+	if opts.LogRing != nil {
+		a.Log = obs.NewLoggerRing(w, level, a.Redactor, opts.LogRing)
+	} else {
+		a.Log = obs.NewLogger(w, level, a.Redactor)
+	}
 	return nil
 }
 
@@ -1115,7 +1133,8 @@ func (a *App) currentProvider(env *tools.Env) string {
 // for a session across turns, because the read tracker of the file tools lives there.
 // The terminal tool checks each command with the approval gate. On the CLI, the gate and
 // the clarify tool ask on the terminal. On Telegram, they ask with buttons in the chat of the
-// session. Other channels, for example cron, have no prompt, so the gate blocks each
+// session. On the dashboard, they ask with cards on the open pages. Other channels,
+// for example cron, have no prompt, so the gate blocks each
 // dangerous command that needs a question.
 func (a *App) NewEnv(sess *sessions.Session, channel string) *tools.Env {
 	return a.NewTurnEnv(sess, channel, "")
@@ -1158,6 +1177,15 @@ func (a *App) NewTurnEnv(sess *sessions.Session, channel, userID string) *tools.
 		key := sess.Key
 		env.Progress = func(batch uint64, child, tool, preview string) {
 			ch.Progress(key, batch, child, tool, preview)
+		}
+	case channel == "dashboard" && a.Dashboard != nil:
+		// The dashboard has one owner, so every prompt is an owner prompt.
+		cards := a.Dashboard.Cards()
+		gate.Prompter, gate.OwnerPrompter, env.Ask = cards, cards, cards
+		hub := a.Dashboard.Hub()
+		env.Progress = func(batch uint64, child, tool, preview string) {
+			hub.Publish(dashboard.Event{Name: "progress", Data: map[string]any{
+				"batch": batch, "child": child, "tool": tool, "preview": a.Redactor.Redact(preview)}})
 		}
 	}
 	env.Gate = gate
@@ -1212,10 +1240,10 @@ func (a *App) Deps() *gateway.Deps {
 		EnvStatus: func(names []string) []string { return envStatus(a.Cfg, a.DotEnv, names) },
 		ModeOf:    a.Gate.ModeOf,
 	}
-	// A goal notice with no turn goes to Telegram with its buttons. AddTelegram sets
-	// a.Telegram before its first call of Gateway, so the gateway gets this path.
+	// A notice with no turn goes to the channel of its session, with the buttons when
+	// the channel has them. sendNotice reads a.Telegram and a.Dashboard at call time.
+	d.SendNotice = a.sendNotice
 	if a.Telegram != nil {
-		d.SendNotice = a.Telegram.SendNotice
 		// A resumed turn with no sender gets the owner flag of its session from the
 		// current allowlists. AddTelegram sets a.Telegram before its first call of
 		// Gateway, so the gateway gets the hook.

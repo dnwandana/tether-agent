@@ -229,22 +229,36 @@ func (a *App) holdDelivery(ctx context.Context, h cron.HeldSend, card cron.HeldC
 	return a.Sched.Deliver.Held.SetCard(ctx, h.ID, strconv.FormatInt(chat, 10), id)
 }
 
-// heldSendStore gives telegram.HeldCards the held rows and the run row of each one.
-type heldSendStore struct {
-	held *cron.HeldStore
-	jobs *cron.Store
+// errHeldTelegramOff is the answer of a dashboard Post when Telegram is off.
+//
+//lint:ignore ST1005 The dashboard shows this text to the owner as it is.
+var errHeldTelegramOff = errors.New("Telegram is off, so the text cannot be posted. Drop it, or turn Telegram on.")
+
+// editHeldCard replaces the text of the Telegram card of h with result and removes the
+// buttons. It does nothing when Telegram is off or the row has no card.
+func (a *App) editHeldCard(h cron.HeldSend, result string) {
+	if h.CardMsgID == 0 || a.Telegram == nil {
+		return
+	}
+	chat, err := strconv.ParseInt(h.CardChat, 10, 64)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := a.Telegram.C.EditMessageText(ctx, telegram.EditMessageTextParams{
+		ChatID: chat, MessageID: h.CardMsgID, Text: result}); err != nil {
+		a.Log.Warn("cron: cannot edit the card of a held send", "job", h.JobID, "err", err.Error())
+	}
 }
 
-func (s heldSendStore) Claim(ctx context.Context, id string) (cron.HeldSend, bool, error) {
-	return s.held.Claim(ctx, id)
-}
-
-func (s heldSendStore) Restore(ctx context.Context, h cron.HeldSend) error {
-	return s.held.Restore(ctx, h)
-}
-
-func (s heldSendStore) MarkRun(ctx context.Context, runID int64, delivery string) error {
-	return s.jobs.UpdateRunDelivery(ctx, runID, delivery)
+// resolveHeld posts or drops a held send for the dashboard. It skips the card-chat check of
+// the Telegram tap, and it edits the Telegram card of the row.
+func (a *App) resolveHeld(ctx context.Context, id, action string) (string, error) {
+	if action == "post" && a.Telegram == nil {
+		return "", errHeldTelegramOff
+	}
+	return cron.ResolveHeld(ctx, a.Cron, id, action, a.sendHeld, a.editHeldCard)
 }
 
 // sendHeld sends a held row to its target. A row of kind "original" skips the channel scan.
@@ -279,17 +293,7 @@ func (a *App) sweepHeld(ctx context.Context) {
 				a.Log.Warn("cron: cannot mark the run of an expired held send", "job", h.JobID, "err", err.Error())
 			}
 		}
-		if h.CardMsgID == 0 || a.Telegram == nil {
-			continue
-		}
-		chat, err := strconv.ParseInt(h.CardChat, 10, 64)
-		if err != nil {
-			continue
-		}
-		if _, err := a.Telegram.C.EditMessageText(ctx, telegram.EditMessageTextParams{
-			ChatID: chat, MessageID: h.CardMsgID, Text: "Expired."}); err != nil {
-			a.Log.Warn("cron: cannot edit the card of an expired held send", "job", h.JobID, "err", err.Error())
-		}
+		a.editHeldCard(h, "Expired.")
 	}
 }
 

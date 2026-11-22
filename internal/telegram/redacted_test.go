@@ -32,8 +32,8 @@ func TestRedactedKeyboard(t *testing.T) {
 	if got := headerFor(security.ScopeRedacted, 0).plain(); got != "✅ Sent redacted" {
 		t.Fatalf("%q", got)
 	}
-	if fitScope(security.ScopeRedacted, true, true) != security.ScopeRedacted {
-		t.Fatal("fitScope must keep redacted")
+	if security.FitScope(security.ScopeRedacted, true, true) != security.ScopeRedacted {
+		t.Fatal("FitScope must keep redacted")
 	}
 }
 

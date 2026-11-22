@@ -22,6 +22,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/media"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -64,7 +65,7 @@ type Channel struct {
 	Out   *Sender
 	// Media decides which local files of an answer go to the chat (MEDIA tags and bare
 	// paths). Nil sends no such file.
-	Media *MediaPolicy
+	Media *media.Policy
 	// ToolPreviewChars is the preview limit of the tool status lines (agent.tool_preview_chars).
 	// Cfg holds only the telegram block, so the app sets this field. 0 uses 40.
 	ToolPreviewChars int
@@ -98,6 +99,14 @@ type Channel struct {
 	// HeldCards posts the owner cards of held sends and handles their buttons. Nil makes
 	// each tap on such a button answer that the card is resolved.
 	HeldCards *HeldCards
+
+	// SignInHours is the life of a dashboard session in hours. When it is more than 0, the Allow
+	// button of a sign-in card shows it.
+	SignInHours int
+
+	// signIns holds the open dashboard sign-in cards by id. signInMu guards it.
+	signInMu sync.Mutex
+	signIns  map[string]*signInCard
 
 	// turnCtx is the context of the update handlers and the turns. Nil uses the context of
 	// Run. SetTurnContext sets it.
@@ -231,7 +240,7 @@ func (ch *Channel) Send(ctx context.Context, to gateway.Target, msg gateway.Outb
 		note = func() { ch.noteOwner(ctx, "", chatID, to.ThreadID, "", original, found, held, msg.NoSound) }
 	}
 	for _, f := range msg.Files {
-		files = append(files, OutFile{Path: f, Kind: mediaKind(f)})
+		files = append(files, media.OutFile{Path: f, Kind: media.SendKind(f)})
 	}
 	opts := sendOpts{keyboard: keyboardMarkup(msg.Keyboard), noSound: msg.NoSound}
 	if id, err := strconv.Atoi(msg.ReplyTo); err == nil && id > 0 {
@@ -277,7 +286,7 @@ const scanFileLimit = 1 << 20
 
 // heldByScan splits files into the files to send and the files with a finding. A text file of
 // at most 1 MB is scanned by content, each other file by its base name.
-func (ch *Channel) heldByScan(sessionID string, chatID int64, files []OutFile) (send []OutFile, held []string) {
+func (ch *Channel) heldByScan(sessionID string, chatID int64, files []media.OutFile) (send []media.OutFile, held []string) {
 	if !ch.scans(chatID) {
 		return files, nil
 	}
@@ -344,7 +353,8 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 			ch.commandCallback(ctx, gw, *u.CallbackQuery)
 			return
 		}
-		if ch.outboundCallback(ctx, *u.CallbackQuery) || ch.heldCallback(ctx, *u.CallbackQuery) {
+		if ch.outboundCallback(ctx, *u.CallbackQuery) || ch.heldCallback(ctx, *u.CallbackQuery) ||
+			ch.signInCallback(ctx, *u.CallbackQuery) {
 			return
 		}
 		if ch.UI == nil || !ch.UI.HandleCallback(ctx, *u.CallbackQuery) {

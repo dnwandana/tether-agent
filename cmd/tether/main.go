@@ -29,6 +29,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/app"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/dashboard"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
@@ -39,6 +40,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/telegram"
 	"github.com/dnwandana/tether-agent/internal/tools"
+	"github.com/dnwandana/tether-agent/internal/update"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -120,6 +122,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runSessions(args[1:], stdout, stderr)
 	case "pairing":
 		return runPairing(args[1:], stdout, stderr)
+	case "dashboard":
+		return runDashboard(args[1:], stdout, stderr)
 	case "usage":
 		return runUsage(args[1:], stdout, stderr)
 	case "backup":
@@ -137,6 +141,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "gen-tools-doc":
 		// A hidden command for the developers. It does not show in the help text.
 		return runGenToolsDoc(args[1:], stdout, stderr)
+	case "gen-dashboard-types":
+		// A hidden command for the developers. It does not show in the help text.
+		return runGenDashboardTypes(args[1:], stdout, stderr)
+	case "gen-dashboard-hash":
+		// A hidden command for make web. It does not show in the help text.
+		return runGenDashboardHash(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
 		if s := suggestCommand(args[0]); s != "" {
@@ -295,9 +305,10 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	reload := make(chan os.Signal, 1)
 	notifySignal(reload, syscall.SIGUSR1)
 	defer signal.Stop(reload)
+	ring := obs.NewRing(2000)
 	// Only the gateway role builds the cron scheduler and polls Telegram.
 	a, err := app.New(ctx, app.Options{DataDir: dir, LogStderr: *logStderr, LogLevel: *logLevel, LogWriter: stderr,
-		Gateway: true, TelegramBaseURL: telegramBaseURL, Version: version})
+		LogRing: ring, Gateway: true, TelegramBaseURL: telegramBaseURL, Version: version})
 	if err != nil {
 		fmt.Fprintf(stderr, "gateway: %v\n", err)
 		return 1
@@ -313,6 +324,19 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		}
 	} else {
 		log.Info("telegram is disabled, so a cron job cannot deliver to a chat", "setting", "telegram.enabled")
+	}
+	// The dashboard comes after Telegram, so its sign-in cards also go to Telegram, and
+	// before BootNotice and Housekeeping, so resumed turns find the channel. A bad value
+	// or an error never stops the gateway.
+	if a.Cfg.Dashboard.Enabled {
+		if ch, err := a.AddDashboard(ctx, dashboardFuncs(a, dir)); err != nil {
+			fmt.Fprintf(stderr, "gateway: %v\n", err)
+		} else {
+			ch.AddRoutes(dashboard.NewLogsAPI(ring, ch.Hub()))
+			notice := dashboardNotice(a.Cfg.Dashboard)
+			fmt.Fprint(stderr, notice)
+			log.Warn(strings.TrimRight(notice, "\n"))
+		}
 	}
 	warnOldUnit(log, a.Cfg)
 	if geteuid() == 0 {
@@ -394,6 +418,11 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 	}
 	if a.Batches != nil {
 		waits = append(waits, stopWait{name: "background delegations", wait: a.Batches.Wait})
+	}
+	if a.Dashboard != nil {
+		// The SSE streams end with workCtx. Shutdown then closes the server before a.Close
+		// closes the database.
+		waits = append(waits, dashboardStopWait(base, a.Dashboard))
 	}
 	gatewayStop{
 		drain: drain,
@@ -527,6 +556,209 @@ func waitChan(done <-chan struct{}) func(time.Duration) bool {
 	}
 }
 
+// dashboardNotice returns the start notice of the dashboard. It adds the plain HTTP part
+// when the server uses plain HTTP, the listen host is not a loopback name or address,
+// and public_url is empty.
+func dashboardNotice(c config.DashboardConfig) string {
+	origin := c.Origin()
+	out := "⚠ dashboard: on at " + origin + "\n" +
+		"  A signed-in device can chat, approve commands, and change settings as the owner.\n" +
+		"  Sign in: open the address and tap \"Request access\", or run\n" +
+		"  tether dashboard link in a terminal on this host.\n"
+	host, _, err := net.SplitHostPort(c.Listen)
+	if err != nil {
+		host = c.Listen
+	}
+	loopback := host == "localhost"
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil && ip.IsLoopback() {
+		loopback = true
+	}
+	if !c.TLS() && !loopback && c.PublicURL == "" {
+		out += "⚠ dashboard: plain HTTP on " + c.Listen + ".\n" +
+			"  Limit access with a VPN or a firewall. Voice notes, Copy, and notifications need HTTPS:\n" +
+			"  set dashboard.tls_cert and dashboard.tls_key, or put a TLS proxy in front and set\n" +
+			"  dashboard.public_url.\n"
+	}
+	return out
+}
+
+// dashboardStopWait returns the stop part that shuts down the dashboard server. The
+// server stops when Shutdown returns or the timeout ends.
+func dashboardStopWait(base context.Context, srv interface {
+	Shutdown(ctx context.Context) error
+}) stopWait {
+	return stopWait{name: "dashboard", wait: func(timeout time.Duration) bool {
+		ctx, cancel := context.WithTimeout(base, timeout)
+		defer cancel()
+		return srv.Shutdown(ctx) == nil
+	}}
+}
+
+// doctorChecks converts the doctor checks for the dashboard.
+func doctorChecks(in []setup.Check) []dashboard.DoctorCheck {
+	out := make([]dashboard.DoctorCheck, 0, len(in))
+	for _, c := range in {
+		out = append(out, dashboard.DoctorCheck{Status: string(c.Status), Name: c.Name, Detail: c.Detail, Next: c.Next})
+	}
+	return out
+}
+
+// pairingRows converts the pairing rows for the dashboard. Since is ApprovedAt for an
+// approved user, else CreatedAt.
+func pairingRows(in []telegram.PairRow) []dashboard.PairingRow {
+	out := make([]dashboard.PairingRow, 0, len(in))
+	for _, r := range in {
+		since := r.CreatedAt
+		if r.Status == telegram.PairApproved {
+			since = r.ApprovedAt
+		}
+		out = append(out, dashboard.PairingRow{Platform: r.Platform, UserID: r.UserID, Name: r.UserName,
+			Status: r.Status, Since: since, Expires: r.ExpiresAt})
+	}
+	return out
+}
+
+// updateInfo converts an update check. writable is the result of update.CheckWritable.
+func updateInfo(res update.Result, path string, writable error) dashboard.UpdateInfo {
+	return dashboard.UpdateInfo{Current: res.Current, Latest: res.Available, Newer: res.State == update.StateNewer,
+		NotesURL: "https://github.com/dnwandana/tether-agent/releases/tag/v" + res.Available,
+		Writable: writable == nil, Path: path}
+}
+
+// notWritableError is the error of an update when this user cannot write the binary.
+func notWritableError(path string) error {
+	//lint:ignore ST1005 The page shows this text to the user as it is.
+	return fmt.Errorf("The binary at %s is not writable by this user. Run `tether update` as a user who can write it.", path)
+}
+
+// setupSteps returns the Getting started steps from the running config and the last
+// doctor result. It runs no check.
+func setupSteps(cfg *config.Config, last []setup.Check) []dashboard.SetupStep {
+	const open, done, unknown = "open", "done", "unknown"
+	step := func(name string, ok bool, detail, cmd string) dashboard.SetupStep {
+		if ok {
+			return dashboard.SetupStep{Name: name, State: done}
+		}
+		return dashboard.SetupStep{Name: name, State: open, Detail: detail, Command: cmd}
+	}
+	find := func(name string) (setup.Check, bool) {
+		for _, c := range last {
+			if c.Name == name {
+				return c, true
+			}
+		}
+		return setup.Check{}, false
+	}
+	noDoctor := func(name string) dashboard.SetupStep {
+		return dashboard.SetupStep{Name: name, State: unknown, Detail: "Run the doctor on the System page.", Command: "tether doctor"}
+	}
+	steps := []dashboard.SetupStep{
+		step("Primary provider", cfg.Providers["primary"].Model != "", "No primary provider.", "tether setup"),
+		step("Fallback entries", len(cfg.Agent.Fallback) > 0, "No fallback entry. A failed primary stops the turns.", "tether setup"),
+		step("Telegram", cfg.Telegram.Enabled, "Telegram is off.", "tether setup"),
+	}
+	if last == nil {
+		steps = append(steps, noDoctor("Host programs"), noDoctor("Service unit"))
+	} else {
+		hostOK, hostDetail := true, ""
+		for _, n := range []string{"chrome", "ffmpeg"} {
+			if c, ok := find(n); ok && c.Status != setup.StatusOK {
+				hostOK, hostDetail = false, n+": "+c.Detail
+				break
+			}
+		}
+		steps = append(steps, step("Host programs", hostOK, hostDetail, "tether doctor"))
+		unitOK, unitDetail := true, ""
+		if c, ok := find("systemd unit"); ok && c.Status != setup.StatusOK {
+			unitOK, unitDetail = false, c.Detail
+		}
+		steps = append(steps, step("Service unit", unitOK, unitDetail, "tether doctor"))
+	}
+	steps = append(steps,
+		step("Dashboard", cfg.Dashboard.Enabled, "The dashboard is off.", "tether setup"),
+		step("HTTPS", cfg.Dashboard.TLS() || strings.HasPrefix(cfg.Dashboard.PublicURL, "https://"),
+			"Set dashboard.tls_cert and dashboard.tls_key, for example to the files of tailscale cert.",
+			"tailscale cert <name>.<tailnet>.ts.net"))
+	return steps
+}
+
+// dashboardFuncs builds the functions of the dashboard that live in package main.
+func dashboardFuncs(a *app.App, dir string) app.DashboardFuncs {
+	doc := &setup.Doctor{DataDir: dir, HC: &http.Client{}, TelegramBase: telegramBaseURL, Version: version,
+		ReleaseAPI: doctorReleaseAPI, InProcess: true, Cfg: a.Cfg}
+	var mu sync.Mutex
+	var last []setup.Check
+	// With Telegram off, nobody can send /start, so the Access page shows pairing as off.
+	var pairing dashboard.PairingFuncs
+	if a.Telegram != nil {
+		store := a.Telegram.Pair
+		if store == nil {
+			store = &telegram.Pairing{DB: a.DB, CodeTTL: time.Duration(a.Cfg.Telegram.PairingCodeTTLS) * time.Second}
+		}
+		pairing = dashboard.PairingFuncs{
+			List: func(ctx context.Context) ([]dashboard.PairingRow, error) {
+				rows, err := store.List(ctx, defaultPairPlatform)
+				if err != nil {
+					return nil, err
+				}
+				return pairingRows(rows), nil
+			},
+			Approve: func(ctx context.Context, code string) error {
+				_, err := store.Approve(ctx, defaultPairPlatform, code)
+				return err
+			},
+			Revoke: func(ctx context.Context, platform, userID string) error {
+				return store.Revoke(ctx, platform, userID)
+			},
+			TriesLeft: func(ctx context.Context) (int, error) {
+				return store.TriesLeft(ctx, defaultPairPlatform)
+			},
+		}
+	}
+	updater := newUpdater(io.Discard, time.Duration(a.Cfg.Update.DownloadTimeoutS)*time.Second,
+		time.Duration(a.Cfg.Update.APITimeoutS)*time.Second)
+	return app.DashboardFuncs{
+		Doctor: func(ctx context.Context) ([]dashboard.DoctorCheck, time.Time, error) {
+			checks, at, err := doc.RunLimited(ctx, time.Now())
+			if err == nil {
+				mu.Lock()
+				last = checks
+				mu.Unlock()
+			}
+			return doctorChecks(checks), at, err
+		},
+		UpdateCheck: func(ctx context.Context) (dashboard.UpdateInfo, error) {
+			res, err := updater.Run(ctx, update.Options{Check: true})
+			if err != nil {
+				return dashboard.UpdateInfo{}, err
+			}
+			path, err := update.ExecutablePath()
+			if err != nil {
+				return dashboard.UpdateInfo{}, err
+			}
+			return updateInfo(res, path, update.CheckWritable(path)), nil
+		},
+		UpdateRun: func(ctx context.Context) error {
+			path, err := update.ExecutablePath()
+			if err != nil {
+				return err
+			}
+			if update.CheckWritable(path) != nil {
+				return notWritableError(path)
+			}
+			_, err = updater.Run(ctx, update.Options{})
+			return err
+		},
+		Pairing: pairing,
+		SetupState: func(ctx context.Context) []dashboard.SetupStep {
+			mu.Lock()
+			cp := slices.Clone(last)
+			mu.Unlock()
+			return setupSteps(a.Cfg, cp)
+		},
+	}
+}
+
 // startPprof serves net/http/pprof on addr. The host of addr must be a loopback address,
 // because the profiles show the memory of the process.
 func startPprof(addr string) (*http.Server, error) {
@@ -646,7 +878,11 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		req := skills.InstallRequest{Source: rest[1], Skill: *skillFlag, Ref: *refFlag, Yes: *yesFlag, Force: *forceFlag}
-		if _, err := newInstaller(ctx, dir, stdout, stderr).Install(ctx, req); err != nil {
+		in, err := newInstaller(ctx, dir, stdout, stderr)
+		if err != nil {
+			return skillsError(stderr, "install", err)
+		}
+		if _, err := in.Install(ctx, req); err != nil {
 			return skillsError(stderr, "install", err)
 		}
 		return 0
@@ -690,8 +926,12 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		req := skills.UninstallRequest{Name: rest[1], Yes: *yesFlag, CronUsers: cronUsers(dir)}
-		if err := newInstaller(ctx, dir, stdout, stderr).Uninstall(ctx, req); err != nil {
+		req := skills.UninstallRequest{Name: rest[1], Yes: *yesFlag}
+		in, err := newInstaller(ctx, dir, stdout, stderr)
+		if err != nil {
+			return skillsError(stderr, "uninstall", err)
+		}
+		if err := in.Uninstall(ctx, req); err != nil {
 			return skillsError(stderr, "uninstall", err)
 		}
 		return 0
@@ -709,7 +949,11 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 		if cfgErr != nil {
 			fmt.Fprintf(stderr, "warning: the config did not load, so the check uses the default git time limit: %v\n", cfgErr)
 		}
-		rows, err := skills.Check(ctx, skillsDir, findGitWithin(cfg), name)
+		checker, err := skills.NewInstaller(dir, &cfg, nil, io.Discard, nil)
+		if err != nil {
+			return skillsError(stderr, "check", err)
+		}
+		rows, err := skills.Check(ctx, skillsDir, checker.FindGit, name)
 		if err != nil {
 			// A bad lockfile or an unknown name means that no skill was
 			// checked. Exit code 1 means "an update is available", so a
@@ -725,7 +969,11 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		req := skills.UpdateRequest{Names: rest[1:], Yes: *yesFlag, Force: *forceFlag}
-		if err := newInstaller(ctx, dir, stdout, stderr).Update(ctx, req); err != nil {
+		in, err := newInstaller(ctx, dir, stdout, stderr)
+		if err != nil {
+			return skillsError(stderr, "update", err)
+		}
+		if err := in.Update(ctx, req); err != nil {
 			return skillsError(stderr, "update", err)
 		}
 		return 0
@@ -748,59 +996,50 @@ func skillsConfig(dir string) (config.Config, error) {
 	return *loaded, nil
 }
 
-// cronUsers returns a function that names the cron jobs that use a skill, as
-// `"<job name>" (<job id>)`. It reads the jobs of <dir>/state.db once. The
-// line is only a warning, so a missing state.db or a failed query gives a
-// function that returns nil.
-func cronUsers(dir string) func(name string) []string {
-	none := func(string) []string { return nil }
-	// The gateway can have this database open, and the query only reads, so
-	// the handle neither creates the file nor applies the migrations.
-	d, err := db.OpenReadOnly(filepath.Join(dir, "state.db"))
-	if err != nil {
-		return none
-	}
-	defer d.Close()
-	// The query names only the columns that every schema version has, so a
-	// database from before a later migration still works.
-	rows, err := d.QueryContext(context.Background(), `SELECT id, name, skills FROM cron_jobs ORDER BY created_at, id`)
-	if err != nil {
-		return none
-	}
-	type cronUse struct {
-		id, name string
-		skills   []string
-	}
-	var jobs []cronUse
-	for rows.Next() {
-		var id, name string
-		var raw sql.NullString
-		if err := rows.Scan(&id, &name, &raw); err != nil {
-			rows.Close()
-			return none
+// cronUsers returns a function that names the cron jobs that use each skill. The map key is
+// the skill name. Each line is `"<job name>" (<job id>)`. The function reads the jobs of
+// <dir>/state.db. The line is only a warning, so a missing state.db or a failed query gives
+// nil and no error.
+func cronUsers(dir string) func(ctx context.Context) (map[string][]string, error) {
+	return func(ctx context.Context) (map[string][]string, error) {
+		// The gateway can have this database open, and the query only reads, so
+		// the handle neither creates the file nor applies the migrations.
+		d, err := db.OpenReadOnly(filepath.Join(dir, "state.db"))
+		if err != nil {
+			return nil, nil
 		}
-		u := cronUse{id: id, name: name}
-		if raw.Valid && raw.String != "" {
-			if err := json.Unmarshal([]byte(raw.String), &u.skills); err != nil {
+		defer d.Close()
+		// The query names only the columns that every schema version has, so a
+		// database from before a later migration still works.
+		rows, err := d.QueryContext(ctx, `SELECT id, name, skills FROM cron_jobs ORDER BY created_at, id`)
+		if err != nil {
+			return nil, nil
+		}
+		users := map[string][]string{}
+		for rows.Next() {
+			var id, name string
+			var raw sql.NullString
+			if err := rows.Scan(&id, &name, &raw); err != nil {
 				rows.Close()
-				return none
+				return nil, nil
+			}
+			var names []string
+			if raw.Valid && raw.String != "" {
+				if err := json.Unmarshal([]byte(raw.String), &names); err != nil {
+					rows.Close()
+					return nil, nil
+				}
+			}
+			for _, n := range names {
+				users[n] = append(users[n], fmt.Sprintf("%q (%s)", name, id))
 			}
 		}
-		jobs = append(jobs, u)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return none
-	}
-	return func(name string) []string {
-		var lines []string
-		for _, j := range jobs {
-			if slices.Contains(j.skills, name) {
-				lines = append(lines, fmt.Sprintf("%q (%s)", j.name, j.id))
-			}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, nil
 		}
-		return lines
+		return users, nil
 	}
 }
 
@@ -1008,38 +1247,21 @@ func (p *termPrompter) readLine() (string, error) {
 	}
 }
 
-// findGitWithin returns a function that gives the git program with the
-// skills.git_timeout_s limit for each git call of a tether skills command.
-func findGitWithin(cfg config.Config) func() (skills.Git, error) {
-	return func() (skills.Git, error) {
-		g, err := skills.FindGit()
-		if err != nil {
-			return g, err
-		}
-		if cfg.Skills.GitTimeoutS > 0 {
-			g.Timeout = time.Duration(cfg.Skills.GitTimeoutS) * time.Second
-		}
-		return g, nil
-	}
-}
-
 // newInstaller returns an installer for the data folder dir. It asks its
 // questions on stdin and stdout, and a question stops when ctx ends. A config
 // error is a warning on stderr, because the install needs the config only for
 // the external skill folders.
-func newInstaller(ctx context.Context, dir string, stdout, stderr io.Writer) *skills.Installer {
+func newInstaller(ctx context.Context, dir string, stdout, stderr io.Writer) (*skills.Installer, error) {
 	cfg, err := skillsConfig(dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "warning: the config did not load, so the install does not check the external skills: %v\n", err)
 	}
-	return &skills.Installer{
-		SkillsDir: filepath.Join(dir, "skills"),
-		External:  cfg.Skills.ExternalDirs,
-		FindGit:   findGitWithin(cfg),
-		Prompt:    &termPrompter{ctx: ctx, r: bufio.NewReader(stdin), out: stdout},
-		Out:       stdout,
-		Err:       stderr,
+	in, err := skills.NewInstaller(dir, &cfg, &termPrompter{ctx: ctx, r: bufio.NewReader(stdin), out: stdout}, stdout, cronUsers(dir))
+	if err != nil {
+		return nil, err
 	}
+	in.Err = stderr
+	return in, nil
 }
 
 // skillsError prints err of the skills command cmd and returns the exit
@@ -1190,7 +1412,7 @@ func runSessions(args []string, stdout, stderr io.Writer) int {
 
 // sessionsList prints the 50 newest sessions in tab-separated columns.
 func sessionsList(ctx context.Context, st *sessions.Store, stdout, stderr io.Writer) int {
-	list, err := st.ListAll(ctx, 50)
+	list, err := st.ListNewest(ctx, 50)
 	if err != nil {
 		fmt.Fprintf(stderr, "sessions list: %v\n", err)
 		return 1
@@ -1522,4 +1744,61 @@ func runGenToolsDoc(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// runGenDashboardTypes writes web/src/api/types.gen.ts from the API structs of the dashboard.
+// Run: go run ./cmd/tether gen-dashboard-types
+func runGenDashboardTypes(args []string, _, stderr io.Writer) int {
+	const name = "gen-dashboard-types"
+	if len(args) > 0 {
+		fmt.Fprintln(stderr, "usage: tether "+name)
+		return 2
+	}
+	if !inRepoRoot(name, stderr) {
+		return 1
+	}
+	return writeGenFile(name, filepath.Join("web", "src", "api", "types.gen.ts"), dashboard.GenerateTypes(), stderr)
+}
+
+// runGenDashboardHash writes internal/dashboard/dist/.source-hash. make web runs it.
+func runGenDashboardHash(args []string, _, stderr io.Writer) int {
+	const name = "gen-dashboard-hash"
+	if len(args) > 0 {
+		fmt.Fprintln(stderr, "usage: tether "+name)
+		return 2
+	}
+	if !inRepoRoot(name, stderr) {
+		return 1
+	}
+	h, err := dashboard.SourceHash(".")
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", name, err)
+		return 1
+	}
+	return writeGenFile(name, filepath.Join("internal", "dashboard", "dist", ".source-hash"), h+"\n", stderr)
+}
+
+// writeGenFile makes the parent folder of path and writes text to it.
+func writeGenFile(name, path, text string, stderr io.Writer) int {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", name, err)
+		return 1
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", name, err)
+		return 1
+	}
+	return 0
+}
+
+// inRepoRoot reports whether the current folder is the root of the tether-agent module. It
+// writes "<name>: run this command in the repository root." to stderr when it is not.
+func inRepoRoot(name string, stderr io.Writer) bool {
+	data, err := os.ReadFile("go.mod")
+	first, _, _ := strings.Cut(string(data), "\n")
+	if err != nil || strings.TrimSpace(first) != "module github.com/dnwandana/tether-agent" {
+		fmt.Fprintf(stderr, "%s: run this command in the repository root.\n", name)
+		return false
+	}
+	return true
 }

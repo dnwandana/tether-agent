@@ -2,54 +2,55 @@ package telegram
 
 import (
 	"context"
-	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/cron"
+	"github.com/dnwandana/tether-agent/internal/db"
 )
 
-// memHeld is a HeldSendStore in memory. Claim takes a row under one lock.
-type memHeld struct {
-	mu    sync.Mutex
-	rows  map[string]cron.HeldSend
-	marks []string
-}
-
-func (m *memHeld) Claim(_ context.Context, id string) (cron.HeldSend, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	h, ok := m.rows[id]
-	delete(m.rows, id)
-	return h, ok, nil
-}
-
-func (m *memHeld) Restore(_ context.Context, h cron.HeldSend) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rows[h.ID] = h
-	return nil
-}
-
-func (m *memHeld) MarkRun(_ context.Context, runID int64, delivery string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.marks = append(m.marks, fmt.Sprintf("%d=%s", runID, delivery))
-	return nil
-}
-
-func heldCards(t *testing.T) (*Channel, *HeldCards, *memHeld, *fakeBot) {
+// heldCards returns a channel whose held cards use a state.db with the hold row h1 and its run
+// row 41 (delivery held).
+func heldCards(t *testing.T) (*Channel, *HeldCards, *cron.Store, *fakeBot) {
 	t.Helper()
 	api := newFakeBot(t)
-	store := &memHeld{rows: map[string]cron.HeldSend{"h1": {ID: "h1", Kind: "hold", JobID: "j1", RunID: 41,
-		Target: "telegram:-100:7", TargetTitle: "Pricing team", Text: "the report", CardChat: "5", CardMsgID: 101}}}
-	hc := &HeldCards{Store: store, C: api.client()}
+	d, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	if _, err := d.Exec(`INSERT INTO cron_runs (id, job_id, started_at, finished_at, status, delivery)
+		VALUES (41, 'j1', 0, 0, 'ok', 'held')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&cron.HeldStore{DB: d}).Insert(context.Background(), cron.HeldSend{ID: "h1", Kind: "hold",
+		JobID: "j1", RunID: 41, Target: "telegram:-100:7", TargetTitle: "Pricing team", Text: "the report",
+		CardChat: "5", CardMsgID: 101, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	st := &cron.Store{DB: d}
+	hc := &HeldCards{Jobs: st, C: api.client()}
 	ch := &Channel{C: api.client(), Cfg: config.TelegramConfig{AllowedUsers: []string{"5"}}, HeldCards: hc}
-	return ch, hc, store, api
+	return ch, hc, st, api
+}
+
+// heldState reports whether the row h1 exists, and returns the delivery of run 41.
+func heldState(t *testing.T, st *cron.Store) (exists bool, delivery string) {
+	t.Helper()
+	_, ok, err := (&cron.HeldStore{DB: st.DB}).Get(context.Background(), "h1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DB.QueryRow(`SELECT delivery FROM cron_runs WHERE id = 41`).Scan(&delivery); err != nil {
+		t.Fatal(err)
+	}
+	return ok, delivery
 }
 
 func tap(ch *Channel, chat int64, data string) {
@@ -100,7 +101,7 @@ func TestHeldCardText(t *testing.T) {
 }
 
 func TestHeldCardSendErrorPutsRowBack(t *testing.T) {
-	ch, hc, store, api := heldCards(t)
+	ch, hc, st, api := heldCards(t)
 	var sends atomic.Int32
 	hc.Send = func(context.Context, cron.HeldSend) error {
 		sends.Add(1)
@@ -112,7 +113,7 @@ func TestHeldCardSendErrorPutsRowBack(t *testing.T) {
 		edit.Body["reply_markup"] == nil {
 		t.Fatalf("%v", edit.Body)
 	}
-	if _, ok := store.rows["h1"]; !ok || len(store.marks) != 0 {
+	if ok, del := heldState(t, st); !ok || del != "held" {
 		t.Fatal("the row must come back, and the run row must not change")
 	}
 	hc.Send = func(_ context.Context, h cron.HeldSend) error {
@@ -125,8 +126,8 @@ func TestHeldCardSendErrorPutsRowBack(t *testing.T) {
 	if e := api.lastCall("editMessageText"); e.Body["text"] != "Sent." || e.Body["reply_markup"] != nil {
 		t.Fatalf("%v", e.Body)
 	}
-	if !reflect.DeepEqual(store.marks, []string{"41=sent"}) || sends.Load() != 1 {
-		t.Fatal(store.marks)
+	if ok, del := heldState(t, st); ok || del != "sent" || sends.Load() != 1 {
+		t.Fatal(ok, del)
 	}
 }
 
@@ -145,25 +146,25 @@ func TestHeldCardTwoTapsSendOnce(t *testing.T) {
 }
 
 func TestHeldCardDropAndChecks(t *testing.T) {
-	ch, hc, store, api := heldCards(t)
+	ch, hc, st, api := heldCards(t)
 	hc.Send = func(context.Context, cron.HeldSend) error { t.Error("no send"); return nil }
 	// Not the chat of the card: the row stays.
 	tap(ch, 6, "hs:h1:d")
-	if _, ok := store.rows["h1"]; !ok || api.lastCall("answerCallbackQuery").Body["text"] != wrongChat {
+	if ok, _ := heldState(t, st); !ok || api.lastCall("answerCallbackQuery").Body["text"] != wrongChat {
 		t.Fatal("a tap in another chat changes nothing")
 	}
 	// Not an owner: no claim.
 	cq := pressFrom(5, 9, "hs:h1:d")
 	ch.handleUpdate(context.Background(), nil, Update{CallbackQuery: &cq})
-	if _, ok := store.rows["h1"]; !ok || api.lastCall("answerCallbackQuery").Body["text"] != notAuthorized {
+	if ok, _ := heldState(t, st); !ok || api.lastCall("answerCallbackQuery").Body["text"] != notAuthorized {
 		t.Fatal("a tap of a user who is not an owner changes nothing")
 	}
 	tap(ch, 5, "hs:h1:d")
 	if e := api.lastCall("editMessageText"); e.Body["text"] != "Dropped." || e.Body["reply_markup"] != nil {
 		t.Fatalf("%v", e.Body)
 	}
-	if !reflect.DeepEqual(store.marks, []string{"41=dropped"}) {
-		t.Fatal(store.marks)
+	if ok, del := heldState(t, st); ok || del != "dropped" {
+		t.Fatal(ok, del)
 	}
 	tap(ch, 5, "hs:h1:s")
 	if got := api.lastCall("answerCallbackQuery").Body["text"]; got != resolvedText {

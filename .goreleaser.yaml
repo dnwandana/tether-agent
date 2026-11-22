@@ -8,6 +8,8 @@ project_name: tether-agent
 before:
   hooks:
     - go mod download
+    # Git keeps no built page, so the release builds it first. This step needs Node and npm.
+    - make web
 
 builds:
   - id: tether

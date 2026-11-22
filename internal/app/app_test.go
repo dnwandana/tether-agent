@@ -29,6 +29,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
 	"github.com/dnwandana/tether-agent/internal/memory"
+	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -428,6 +429,12 @@ func TestNewEnvSetsGateAndAsk(t *testing.T) {
 	ga, ok = tg.Gate.(tools.GateApprover)
 	if !ok || ga.Gate != a.Gate || ga.Prompter != nil || tg.Ask != nil {
 		t.Fatalf("%+v", tg)
+	}
+	// With no dashboard channel, a dashboard turn gets the gate with no prompt.
+	dash := a.NewEnv(&sessions.Session{ID: "s3", Key: "dashboard:owner", Source: "dashboard", ChatID: "owner", Kind: "chat"}, "dashboard")
+	ga, ok = dash.Gate.(tools.GateApprover)
+	if !ok || ga.Gate != a.Gate || ga.Prompter != nil || dash.Ask != nil || dash.Progress != nil {
+		t.Fatalf("%+v", dash)
 	}
 	if none := a.NewEnv(nil, "cli"); none.Gate == nil {
 		t.Fatal("an env with no session must have the gate too")
@@ -2039,5 +2046,21 @@ func TestCronTurnReturnsOutput(t *testing.T) {
 		Outside: []string{"web_fetch"}})
 	if err != nil || out.Final != "Hello, world." || !reflect.DeepEqual(out.Sources, []string{"web_fetch"}) {
 		t.Fatalf("%+v %v", out, err)
+	}
+}
+
+// Options.LogRing gets each line that the logger writes, also with the log file.
+func TestNewWritesLogsToTheRing(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, fakeProviderURL(t))
+	ring := obs.NewRing(10)
+	a, err := New(ctx, Options{DataDir: dir, LogRing: ring})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	a.Log.Warn("ring check")
+	if lines := ring.Lines("", "ring check", 10); len(lines) != 1 || lines[0].Msg != "ring check" {
+		t.Fatalf("%+v", lines)
 	}
 }

@@ -1,0 +1,2 @@
+This folder holds the built page of the web dashboard. Run make web to build it.
+Git keeps only this file, so the Go build works before make web runs.

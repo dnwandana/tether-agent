@@ -23,13 +23,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/app"
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/cron"
+	"github.com/dnwandana/tether-agent/internal/dashboard"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
+	"github.com/dnwandana/tether-agent/internal/setup"
 	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/telegram"
+	"github.com/dnwandana/tether-agent/internal/update"
 )
 
 func TestVersionSubcommand(t *testing.T) {
@@ -1478,8 +1482,9 @@ func TestSkillsUninstallCronWarning(t *testing.T) {
 
 func TestCronUsersNoStateDB(t *testing.T) {
 	dir := t.TempDir()
-	if got := cronUsers(dir)("demo"); got != nil {
-		t.Fatalf("got %v", got)
+	got, err := cronUsers(dir)(context.Background())
+	if got != nil || err != nil {
+		t.Fatalf("got %v, %v", got, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "state.db")); !os.IsNotExist(err) {
 		t.Fatalf("cronUsers must not create state.db: %v", err)
@@ -1751,23 +1756,6 @@ func fakeGitOnPath(t *testing.T) string {
 	return p
 }
 
-func TestFindGitWithinConfig(t *testing.T) {
-	path := fakeGitOnPath(t)
-	cfg := config.Default()
-	cfg.Skills.GitTimeoutS = 45
-	g, err := findGitWithin(cfg)()
-	if err != nil || g.Path != path || g.Timeout != 45*time.Second || len(g.Protocols) == 0 {
-		t.Fatalf("%+v %v", g, err)
-	}
-	if g, _ := findGitWithin(config.Default())(); g.Timeout != 120*time.Second {
-		t.Fatalf("default: %s", g.Timeout)
-	}
-	cfg.Skills.GitTimeoutS = 0
-	if g, _ := findGitWithin(cfg)(); g.Timeout != 120*time.Second {
-		t.Fatalf("zero key: %s", g.Timeout)
-	}
-}
-
 func TestNewInstallerGitTimeoutFromConfig(t *testing.T) {
 	fakeGitOnPath(t)
 	home := skillsHome(t)
@@ -1779,7 +1767,10 @@ func TestNewInstallerGitTimeoutFromConfig(t *testing.T) {
 	if err := os.WriteFile(path, append(raw, "skills:\n  git_timeout_s: 45\n"...), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	in := newInstaller(context.Background(), home, io.Discard, io.Discard)
+	in, err := newInstaller(context.Background(), home, io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if in.FindGit == nil {
 		t.Fatal("the installer must get a FindGit function")
 	}
@@ -1862,8 +1853,175 @@ func TestCronUsersOldSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.Close()
-	got := cronUsers(dir)("demo")
+	users, err := cronUsers(dir)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := users["demo"]
 	if len(got) != 1 || got[0] != fmt.Sprintf("%q (%s)", "brief", job.ID) {
 		t.Fatalf("%v", got)
+	}
+}
+func TestDashboardNotice(t *testing.T) {
+	on := func(origin string) string {
+		return "⚠ dashboard: on at " + origin + "\n" +
+			"  A signed-in device can chat, approve commands, and change settings as the owner.\n" +
+			"  Sign in: open the address and tap \"Request access\", or run\n" +
+			"  tether dashboard link in a terminal on this host.\n"
+	}
+	plain := "⚠ dashboard: plain HTTP on 10.8.0.1:8787.\n" +
+		"  Limit access with a VPN or a firewall. Voice notes, Copy, and notifications need HTTPS:\n" +
+		"  set dashboard.tls_cert and dashboard.tls_key, or put a TLS proxy in front and set\n" +
+		"  dashboard.public_url.\n"
+	for _, c := range []struct {
+		cfg  config.DashboardConfig
+		want string
+	}{
+		{config.DashboardConfig{Enabled: true, Listen: "127.0.0.1:8787"}, on("http://127.0.0.1:8787")},
+		{config.DashboardConfig{Enabled: true, Listen: "localhost:8787"}, on("http://localhost:8787")},
+		{config.DashboardConfig{Enabled: true, Listen: "10.8.0.1:8787"}, on("http://10.8.0.1:8787") + plain},
+		{config.DashboardConfig{Enabled: true, Listen: "10.8.0.1:8787", TLSCert: "/etc/t/cert.pem", TLSKey: "/etc/t/key.pem"},
+			on("https://10.8.0.1:8787")},
+		{config.DashboardConfig{Enabled: true, Listen: "10.8.0.1:8787", PublicURL: "https://agent.tail1234.ts.net:8787"},
+			on("https://agent.tail1234.ts.net:8787")},
+	} {
+		if got := dashboardNotice(c.cfg); got != c.want {
+			t.Errorf("%+v:\ngot  %q\nwant %q", c.cfg, got, c.want)
+		}
+	}
+}
+
+// fakeShutdown is a dashboard server that stops at once, or only when its context ends.
+type fakeShutdown struct {
+	block, called bool
+}
+
+func (f *fakeShutdown) Shutdown(ctx context.Context) error {
+	f.called = true
+	if f.block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func TestDashboardStopWait(t *testing.T) {
+	ok := &fakeShutdown{}
+	w := dashboardStopWait(context.Background(), ok)
+	if w.name != "dashboard" || !w.wait(time.Second) || !ok.called {
+		t.Fatalf("%+v %+v", w, ok)
+	}
+	stuck := &fakeShutdown{block: true}
+	start := time.Now()
+	if dashboardStopWait(context.Background(), stuck).wait(20*time.Millisecond) || time.Since(start) > 5*time.Second {
+		t.Fatal("a stuck shutdown must end at the timeout and report false")
+	}
+}
+
+func TestDashboardFuncMaps(t *testing.T) {
+	got := doctorChecks([]setup.Check{{Name: "ffmpeg", Status: setup.StatusWarn, Detail: "not found", Next: "Install ffmpeg."}})
+	if !reflect.DeepEqual(got, []dashboard.DoctorCheck{{Status: "warn", Name: "ffmpeg", Detail: "not found", Next: "Install ffmpeg."}}) {
+		t.Fatalf("%+v", got)
+	}
+	at := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	rows := pairingRows([]telegram.PairRow{
+		{Platform: "telegram", UserID: "42", UserName: "ann", Status: telegram.PairApproved, CreatedAt: at, ApprovedAt: at.Add(time.Hour)},
+		{Platform: "telegram", UserID: "43", UserName: "bob", Status: telegram.PairPending, CreatedAt: at, ExpiresAt: at.Add(time.Hour)},
+	})
+	wantRows := []dashboard.PairingRow{
+		{Platform: "telegram", UserID: "42", Name: "ann", Status: "approved", Since: at.Add(time.Hour)},
+		{Platform: "telegram", UserID: "43", Name: "bob", Status: "pending", Since: at, Expires: at.Add(time.Hour)},
+	}
+	if !reflect.DeepEqual(rows, wantRows) {
+		t.Fatalf("%+v", rows)
+	}
+	newer := update.Result{Current: "0.23.0", Available: "0.24.0", State: update.StateNewer}
+	if got, want := updateInfo(newer, "/usr/local/bin/tether", nil), (dashboard.UpdateInfo{Current: "0.23.0",
+		Latest: "0.24.0", Newer: true, NotesURL: "https://github.com/dnwandana/tether-agent/releases/tag/v0.24.0",
+		Writable: true, Path: "/usr/local/bin/tether"}); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+	same := update.Result{Current: "0.24.0", Available: "0.24.0", State: update.StateSame}
+	if got := updateInfo(same, "/usr/local/bin/tether", errors.New("permission denied")); got.Newer || got.Writable {
+		t.Fatalf("%+v", got)
+	}
+	if got := notWritableError("/usr/local/bin/tether").Error(); got !=
+		"The binary at /usr/local/bin/tether is not writable by this user. Run `tether update` as a user who can write it." {
+		t.Fatal(got)
+	}
+}
+
+func TestSetupSteps(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{"primary": {Model: "m"}}
+	cfg.Agent.Fallback = nil
+	cfg.Telegram.Enabled = false
+	cfg.Dashboard = config.DashboardConfig{Enabled: true, Listen: "127.0.0.1:8787"}
+	last := []setup.Check{
+		{Name: "chrome", Status: setup.StatusOK},
+		{Name: "ffmpeg", Status: setup.StatusWarn, Detail: "not found"},
+		{Name: "systemd unit", Status: setup.StatusOK, Detail: "/home/u/.config/systemd/user/tether.service is current"},
+	}
+	https := dashboard.SetupStep{Name: "HTTPS", State: "open",
+		Detail:  "Set dashboard.tls_cert and dashboard.tls_key, for example to the files of tailscale cert.",
+		Command: "tailscale cert <name>.<tailnet>.ts.net"}
+	want := []dashboard.SetupStep{
+		{Name: "Primary provider", State: "done"},
+		{Name: "Fallback entries", State: "open", Detail: "No fallback entry. A failed primary stops the turns.", Command: "tether setup"},
+		{Name: "Telegram", State: "open", Detail: "Telegram is off.", Command: "tether setup"},
+		{Name: "Host programs", State: "open", Detail: "ffmpeg: not found", Command: "tether doctor"},
+		{Name: "Service unit", State: "done"},
+		{Name: "Dashboard", State: "done"},
+		https,
+	}
+	if got := setupSteps(&cfg, last); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+	// With no doctor result, the steps that need the doctor are unknown.
+	unknown := dashboard.SetupStep{State: "unknown", Detail: "Run the doctor on the System page.", Command: "tether doctor"}
+	got := setupSteps(&cfg, nil)
+	for _, i := range []int{3, 4} {
+		u := unknown
+		u.Name = want[i].Name
+		if got[i] != u {
+			t.Fatalf("step %d: %+v", i, got[i])
+		}
+	}
+	cfg.Dashboard.TLSCert, cfg.Dashboard.TLSKey = "/etc/t/cert.pem", "/etc/t/key.pem"
+	if got := setupSteps(&cfg, last); got[6] != (dashboard.SetupStep{Name: "HTTPS", State: "done"}) {
+		t.Fatalf("%+v", got[6])
+	}
+}
+
+func TestGatewayDashboardStart(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "")
+	if on := runGatewayForLog(t, "dashboard:\n  enabled: true\n  listen: 127.0.0.1:0\n"); !strings.Contains(on, "dashboard: on at http://127.0.0.1:0") {
+		t.Fatal(on)
+	}
+	if off := runGatewayForLog(t, ""); strings.Contains(off, "dashboard: on at") {
+		t.Fatal(off)
+	}
+	// A wildcard listen with no public_url and no allowed_hosts does not stop the gateway.
+	bad := runGatewayForLog(t, "dashboard:\n  enabled: true\n  listen: 0.0.0.0:8787\n")
+	if !strings.Contains(bad, "dashboard: cannot start, so the gateway runs without it") || strings.Contains(bad, "dashboard: on at") {
+		t.Fatal(bad)
+	}
+}
+
+// With Telegram off, nobody can send /start, so the Access page gets no pairing funcs.
+func TestDashboardFuncsPairingOffWithoutTelegram(t *testing.T) {
+	dir := t.TempDir()
+	cfg := "providers:\n  primary:\n    format: openai\n    base_url: http://127.0.0.1:1\n    api_key: x\n    model: m\npricing:\n  sources: []\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := app.New(context.Background(), app.Options{DataDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	f := dashboardFuncs(a, dir)
+	if f.Pairing.List != nil || f.Pairing.Approve != nil || f.Pairing.Revoke != nil || f.Pairing.TriesLeft != nil {
+		t.Fatal("pairing funcs must be nil when Telegram is off")
 	}
 }

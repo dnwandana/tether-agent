@@ -680,27 +680,6 @@ func TestApprovalTapScopeChange(t *testing.T) {
 	}
 }
 
-func TestFitScope(t *testing.T) {
-	for _, c := range []struct {
-		in                  security.Scope
-		noAlways, noSession bool
-		want                security.Scope
-	}{
-		{security.ScopeAlways, false, false, security.ScopeAlways},
-		{security.ScopeAlways, true, false, security.ScopeSession},
-		{security.ScopeSession, true, false, security.ScopeSession},
-		{security.ScopeSession, true, true, security.ScopeOnce},
-		{security.ScopeAlways, true, true, security.ScopeOnce},
-		{security.ScopeSession, false, true, security.ScopeOnce},
-		{security.ScopeDeny, true, true, security.ScopeDeny},
-		{security.ScopeOnce, true, true, security.ScopeOnce},
-	} {
-		if got := fitScope(c.in, c.noAlways, c.noSession); got != c.want {
-			t.Errorf("fitScope(%v, %v, %v) = %v, want %v", c.in, c.noAlways, c.noSession, got, c.want)
-		}
-	}
-}
-
 func TestApproveAlwaysOnNoAlwaysRequest(t *testing.T) {
 	it, api := interactions(t)
 	ch := &Channel{UI: it}

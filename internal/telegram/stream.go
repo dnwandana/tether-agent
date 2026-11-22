@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/media"
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
@@ -219,7 +220,7 @@ func (s *Streamer) init(ctx context.Context) {
 // masks the open segment and holds back a tail that can still grow into a
 // match, until the segment ends.
 func (s *Streamer) view() string {
-	full := cleanForDisplay(s.acc)
+	full := media.CleanForDisplay(s.acc)
 	if s.Mask != nil {
 		return s.maskedView(full)
 	}
@@ -273,7 +274,7 @@ func (s *Streamer) commit(n int) {
 	if s.Mask != nil {
 		n = rawOffset(s.lastFindings, n)
 	}
-	full := cleanForDisplay(s.acc)
+	full := media.CleanForDisplay(s.acc)
 	rest := full[len(s.committed):]
 	lead := len(rest) - len(strings.TrimLeft(rest, "\n"))
 	s.committed = full[:len(s.committed)+lead+n]
@@ -362,7 +363,7 @@ func (s *Streamer) streamFlush(ctx context.Context) {
 		if s.msgID == 0 {
 			// No message to edit: send numbered parts now (Hermes).
 			chunks := s.splitView(v, safe-numberRoom)
-			base, pos := s.viewStart(cleanForDisplay(s.acc)), 0
+			base, pos := s.viewStart(media.CleanForDisplay(s.acc)), 0
 			for i, text := range NumberParts(chunks, false) {
 				pos += len(chunks[i])
 				s.parts = append(s.parts, previewPart{text: text, end: base + s.rawAt(pos)})
@@ -401,7 +402,7 @@ func (s *Streamer) sendParts(ctx context.Context) {
 		s.parts = s.parts[1:]
 		// The end of the part is a raw offset already. A new view can have other
 		// findings, so do not map it again.
-		if full := cleanForDisplay(s.acc); p.end <= len(full) {
+		if full := media.CleanForDisplay(s.acc); p.end <= len(full) {
 			s.committed = full[:p.end]
 		}
 		s.msgID, s.lastSent, s.msgCreated = 0, "", time.Time{}
@@ -721,7 +722,7 @@ func (s *Streamer) visiblePrefix() string {
 	if s.msgID == 0 {
 		return ""
 	}
-	return cleanForDisplay(strings.TrimSuffix(s.lastSent, s.Cfg.Cursor))
+	return media.CleanForDisplay(strings.TrimSuffix(s.lastSent, s.Cfg.Cursor))
 }
 
 // continuation returns the part of text that the open message does not show.

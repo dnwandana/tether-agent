@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dnwandana/tether-agent/internal/dashboard"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/security"
@@ -97,12 +98,26 @@ func (a *App) secretsDeps() gateway.SecretsDeps {
 }
 
 // startSecret begins the save of a new value for name. The CLI reads the value in the command.
-// Telegram sends a card and returns at once.
+// Telegram and the dashboard send a card and return at once.
 func (a *App) startSecret(ctx context.Context, c *gateway.CommandCtx, name string) error {
 	q := tools.SecretQuestion{Name: name, Commands: a.Cfg.ExecSecrets[name].Commands}
 	if strings.HasPrefix(c.Key, "cli:") && a.CLIAsk != nil {
 		_, err := a.CLIAsk.AskSecret(ctx, q)
 		return err
+	}
+	if strings.HasPrefix(c.Key, dashboard.ChannelName+":") {
+		if a.Dashboard == nil {
+			return errors.New("no channel can ask for the value")
+		}
+		// The card waits longer than the command. The work context of the channel lives
+		// until the gateway stops, and an HTTP request never owns the wait.
+		cards, cardCtx := a.Dashboard.Cards(), a.Dashboard.WorkCtx()
+		go func() {
+			if _, err := cards.AskSecret(cardCtx, q); err != nil {
+				a.Log.Warn("secrets: the dashboard card failed", "name", name, "err", err.Error())
+			}
+		}()
+		return nil
 	}
 	if a.Telegram != nil && a.Telegram.Secrets != nil && c.Session != nil {
 		chatID, err := strconv.ParseInt(c.Session.ChatID, 10, 64)

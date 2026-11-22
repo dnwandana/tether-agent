@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -292,5 +293,55 @@ func TestCronNoteNoSound(t *testing.T) {
 		if (last["disable_notification"] == true) != quiet {
 			t.Fatalf("quiet %v: %v", quiet, last)
 		}
+	}
+}
+
+// The dashboard resolves a held send with the shared function, and the Telegram card changes.
+func TestResolveHeldEditsTelegramCard(t *testing.T) {
+	url, calls, mu := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, outboundTG)
+	if _, err := a.AddTelegram(ctx); err != nil {
+		t.Fatal(err)
+	}
+	j, err := a.Cron.Create(ctx, cron.Job{Name: "n", Schedule: "every 2h", Prompt: "p", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Sched.Deliver.Held.Insert(ctx, cron.HeldSend{ID: "h1", Kind: "hold", JobID: j.ID,
+		Target: "telegram:-100", TargetTitle: "Family", Text: "report", Reason: "r", CardChat: "5", CardMsgID: 7,
+		CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.resolveHeld(ctx, "h1", "drop"); err != nil || got != "Dropped." {
+		t.Fatal(got, err)
+	}
+	mu.Lock()
+	sent := strings.Join(*calls, " ")
+	mu.Unlock()
+	if !strings.Contains(sent, "editMessageText") {
+		t.Fatal(sent)
+	}
+	if _, err := a.resolveHeld(ctx, "h1", "drop"); !errors.Is(err, cron.ErrHeldGone) {
+		t.Fatal(err)
+	}
+}
+
+// With Telegram off, Post is refused before the claim, and Drop still works.
+func TestResolveHeldPostNeedsTelegram(t *testing.T) {
+	a := gatewayApp(t, "", "")
+	j, err := a.Cron.Create(ctx, cron.Job{Name: "n", Schedule: "every 2h", Prompt: "p", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&cron.HeldStore{DB: a.DB}).Insert(ctx, cron.HeldSend{ID: "h1", Kind: "hold", JobID: j.ID,
+		Target: "telegram:-100", TargetTitle: "Family", Text: "report", Reason: "r", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.resolveHeld(ctx, "h1", "post"); err == nil ||
+		err.Error() != "Telegram is off, so the text cannot be posted. Drop it, or turn Telegram on." {
+		t.Fatal(err)
+	}
+	if got, err := a.resolveHeld(ctx, "h1", "drop"); err != nil || got != "Dropped." {
+		t.Fatal(got, err)
 	}
 }

@@ -1028,3 +1028,22 @@ func TestStickerDescribeTimeoutFromField(t *testing.T) {
 		t.Fatalf("deadline in %s, want about 30s", left)
 	}
 }
+
+func TestUnknownSizeTextDocumentInlined(t *testing.T) {
+	in, api := inbox(t)
+	api.addFile("d-a.txt", "documents/a.txt", []byte("hello"))
+	txt, _, files, _ := in.Build(ctx, []Message{docMsg("a.txt", "text/plain", 0)})
+	if len(files) != 1 || txt != textDocNote("a.txt", files[0])+"\n\n[Content of a.txt]:\nhello" {
+		t.Fatalf("%q", txt)
+	}
+}
+
+func TestUnknownSizeLargeTextDocumentSaved(t *testing.T) {
+	in, api := inbox(t)
+	body := strings.Repeat("x", 200*1024)
+	api.addFile("d-big.txt", "documents/big.txt", []byte(body))
+	txt, _, files, _ := in.Build(ctx, []Message{docMsg("big.txt", "text/plain", 0)})
+	if len(files) != 1 || txt != docNote("big.txt", files[0]) {
+		t.Fatalf("%q", txt[:min(len(txt), 120)])
+	}
+}

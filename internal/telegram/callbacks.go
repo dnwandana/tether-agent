@@ -276,7 +276,7 @@ func (it *Interactions) HandleCallback(ctx context.Context, cq CallbackQuery) bo
 			answerCB(invalidCallback)
 			return true
 		}
-		applied := fitScope(scope, p.noAlways, p.noSession)
+		applied := security.FitScope(scope, p.noAlways, p.noSession)
 		it.mu.Unlock()
 		// A pop-up shows plain text, so it gets the plain header. deliverLocked applies the
 		// same scope rule, so deliver gets the tapped scope.
@@ -349,7 +349,7 @@ func (it *Interactions) ResolveApprovals(chatID int64, threadID string, scope se
 }
 
 // resolveApprovals does the work of ResolveApprovals. It also returns the scope that the
-// last answered approval got after fitScope. With no pending approval, applied is scope.
+// last answered approval got after security.FitScope. With no pending approval, applied is scope.
 // An /approve all leaves each human-only prompt open and counts it in waiting. A deny
 // answers all prompts.
 func (it *Interactions) resolveApprovals(chatID int64, threadID string, scope security.Scope, all bool) (n int, applied security.Scope, waiting int) {
@@ -378,24 +378,10 @@ func (it *Interactions) resolveApprovals(chatID int64, threadID string, scope se
 		list = list[:1]
 	}
 	for _, p := range list {
-		applied = fitScope(scope, p.noAlways, p.noSession)
+		applied = security.FitScope(scope, p.noAlways, p.noSession)
 		it.deliverLocked(p.id, promptReply{scope: scope})
 	}
 	return len(list), applied, waiting
-}
-
-// fitScope returns the scope that an approval request permits for the answer s. With
-// noSession, "this session" and "always" give "once". noSession also hides "always",
-// because "always" is wider than "this session". Else with noAlways, "always" gives
-// "this session". It never changes ScopeRedacted.
-func fitScope(s security.Scope, noAlways, noSession bool) security.Scope {
-	switch {
-	case noSession && (s == security.ScopeSession || s == security.ScopeAlways):
-		return security.ScopeOnce
-	case noAlways && s == security.ScopeAlways:
-		return security.ScopeSession
-	}
-	return s
 }
 
 // TakeText gives text to the oldest open question with no choices in the chat and the
@@ -464,7 +450,7 @@ func (it *Interactions) deliver(id string, r promptReply) bool {
 
 // deliverLocked gives r to the waiter of the prompt id and removes the prompt. The caller
 // holds it.mu. The reply channel has room for one answer, so the send never blocks. For
-// an approval, it changes the scope with fitScope to a scope that the request permits.
+// an approval, it changes the scope with security.FitScope to a scope that the request permits.
 // This is the one place of that change, so a tap, an old button, and /approve agree.
 func (it *Interactions) deliverLocked(id string, r promptReply) bool {
 	p, ok := it.pending[id]
@@ -473,7 +459,7 @@ func (it *Interactions) deliverLocked(id string, r promptReply) bool {
 	}
 	delete(it.pending, id)
 	if p.kind == approvalPrefix {
-		r.scope = fitScope(r.scope, p.noAlways, p.noSession)
+		r.scope = security.FitScope(r.scope, p.noAlways, p.noSession)
 	}
 	p.reply <- r
 	return true
@@ -594,7 +580,7 @@ func parseCallback(data string) (kind, id, arg string, ok bool) {
 	if len(parts) == 2 && parts[0] == originalPrefix && parts[1] != "" {
 		return originalPrefix, parts[1], "", true
 	}
-	if len(parts) != 3 || (parts[0] != approvalPrefix && parts[0] != askPrefix && parts[0] != heldPrefix) || parts[1] == "" {
+	if len(parts) != 3 || (parts[0] != approvalPrefix && parts[0] != askPrefix && parts[0] != heldPrefix && parts[0] != signInPrefix) || parts[1] == "" {
 		return "", "", "", false
 	}
 	return parts[0], parts[1], parts[2], true

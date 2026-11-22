@@ -1,0 +1,21 @@
+usage: tether dashboard <command> [flags]
+
+Sign in a device to the web dashboard of the gateway, and control the
+signed-in devices. Run these commands in a terminal on the host. The agent
+cannot run them.
+
+Commands:
+  link          Print a sign-in link with a one-time code. The code expires
+                in 5 minutes. Use it when no signed-in device can approve a
+                new device.
+  devices       Show the signed-in devices.
+  signout-all   End the session of each device.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+
+Examples:
+  tether dashboard link
+  tether dashboard devices
+  tether dashboard signout-all

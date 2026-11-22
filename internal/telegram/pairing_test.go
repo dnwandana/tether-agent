@@ -335,3 +335,25 @@ func TestPairReplyShowsTTL(t *testing.T) {
 		}
 	}
 }
+
+func TestTriesLeft(t *testing.T) {
+	p, clk := pairStore(t)
+	if n, err := p.TriesLeft(ctx, "telegram"); err != nil || n != PairMaxFailures {
+		t.Fatal(n, err)
+	}
+	_, _ = p.Approve(ctx, "telegram", "AAAAAAAA")
+	_, _ = p.Approve(ctx, "telegram", "AAAAAAAA")
+	if n, err := p.TriesLeft(ctx, "telegram"); err != nil || n != PairMaxFailures-2 {
+		t.Fatal(n, err)
+	}
+	for range PairMaxFailures - 2 {
+		_, _ = p.Approve(ctx, "telegram", "AAAAAAAA")
+	}
+	if n, err := p.TriesLeft(ctx, "telegram"); err != nil || n != 0 {
+		t.Fatalf("locked: %d %v", n, err)
+	}
+	clk.advance(61 * time.Minute)
+	if n, err := p.TriesLeft(ctx, "telegram"); err != nil || n != PairMaxFailures {
+		t.Fatalf("after the lockout: %d %v", n, err)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,6 +25,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/app"
 	"github.com/dnwandana/tether-agent/internal/browser"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/dashboard"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/hostos"
 	"github.com/dnwandana/tether-agent/internal/mcp"
@@ -95,6 +97,18 @@ type Doctor struct {
 	// UnitPaths are the unit files that the unit check reads. Nil uses the user unit path, then
 	// the system unit path.
 	UnitPaths []string
+	// InProcess is true for the doctor of the dashboard in the gateway process. With Cfg set,
+	// Run uses Cfg and does not load config.yaml, and it never changes the bound secret names.
+	InProcess bool
+	// Cfg is the running config of the gateway. Only InProcess uses it.
+	Cfg *config.Config
+
+	// limitMu guards running, lastStart, last, and lastAt, for RunLimited.
+	limitMu   sync.Mutex
+	running   bool
+	lastStart time.Time
+	last      []Check
+	lastAt    time.Time
 
 	// freeBytes returns the free disk space of a folder. Tests replace it.
 	freeBytes func(dir string) (uint64, error)
@@ -110,22 +124,45 @@ type Doctor struct {
 func (d *Doctor) Run(ctx context.Context) []Check {
 	var out []Check
 	dotenv, envCheck := d.checkDotEnv()
-	cfg, cfgCheck := d.checkConfig(dotenv, envCheck)
+	var cfg *config.Config
+	var cfgCheck Check
+	if d.InProcess && d.Cfg != nil {
+		cfg = d.Cfg
+		cfgCheck = Check{Name: "config", Status: StatusOK, Detail: "uses the running config of the gateway; a change to " +
+			d.configPath() + " applies after a restart"}
+	} else {
+		cfg, cfgCheck = d.checkConfig(dotenv, envCheck)
+	}
 	out = append(out, cfgCheck)
-	// Doctor does not call app.New, so it sets the bound names itself. The redactor
-	// at the end then treats a bound name as a secret name.
-	if cfg != nil {
+	// The CLI doctor does not call app.New, so it sets the bound names itself. The redactor
+	// at the end then treats a bound name as a secret name. The gateway already set the names
+	// at its start, so the in-process doctor must not change them.
+	if cfg != nil && !d.InProcess {
 		security.SetBoundSecretNames(slices.Sorted(maps.Keys(cfg.ExecSecrets)))
 	}
 	if raw, err := os.ReadFile(d.configPath()); err == nil {
 		out = append(out, flatRateChecks(raw)...)
 	}
 	out = append(out, envCheck)
+	// Open state.db once for the dashboard row and the state.db checks. A missing file
+	// gives a nil handle and no error.
+	var sdb *db.DB
+	var openErr error
+	if path := filepath.Join(d.DataDir, "state.db"); fileExists(path) {
+		sdb, openErr = db.Open(path)
+		if openErr != nil {
+			sdb = nil
+		} else {
+			defer sdb.Close()
+		}
+	}
 	if cfg != nil {
 		out = append(out, d.checkProviders(ctx, cfg)...)
 		out = append(out, d.checkTelegram(ctx, cfg))
+		// A database that does not open counts as no signed-in device (nil sdb).
+		out = append(out, d.checkDashboard(ctx, cfg, sdb, time.Now()))
 	}
-	out = append(out, d.checkStateDB(ctx)...)
+	out = append(out, d.checkStateDB(ctx, sdb, openErr)...)
 	if cfg != nil {
 		out = append(out, d.checkSecrets(ctx, cfg, dotenv)...)
 	}
@@ -156,6 +193,33 @@ func (d *Doctor) Run(ctx context.Context) []Check {
 		out[i].Next = red.Redact(out[i].Next)
 	}
 	return out
+}
+
+// ErrDoctorTooSoon is the error of RunLimited when the last run started less than one minute
+// earlier, or when a run is in progress.
+//
+//lint:ignore ST1005 the text is a full sentence for the owner
+var ErrDoctorTooSoon = errors.New("doctor: it ran less than a minute ago. Wait, then run it again.")
+
+// RunLimited runs Run at most once a minute. A call that is too soon runs nothing. It
+// returns a copy of the last result, its time, and ErrDoctorTooSoon.
+func (d *Doctor) RunLimited(ctx context.Context, now time.Time) ([]Check, time.Time, error) {
+	d.limitMu.Lock()
+	if d.running || (!d.lastStart.IsZero() && now.Sub(d.lastStart) < time.Minute) {
+		last, at := slices.Clone(d.last), d.lastAt
+		d.limitMu.Unlock()
+		return last, at, ErrDoctorTooSoon
+	}
+	d.running, d.lastStart = true, now
+	d.limitMu.Unlock()
+
+	checks := d.Run(ctx)
+
+	d.limitMu.Lock()
+	d.last, d.lastAt, d.running = checks, now, false
+	out := slices.Clone(checks)
+	d.limitMu.Unlock()
+	return out, now, nil
 }
 
 // HasFail reports whether any check failed.
@@ -415,23 +479,88 @@ func needsAllGroupMessages(tg config.TelegramConfig) bool {
 		tg.ObserveUnmentionedGroupMessages || len(tg.MentionPatterns) > 0
 }
 
-// checkStateDB opens state.db, which also applies the missing migrations. A missing file
-// is valid: the first run makes it. When a stored model answer exists, it also gives the
+// checkDashboard reports the dashboard listener: the config, the certificate, and the count
+// of devices that are signed in. It never shows a session value or a code. A nil sdb counts 0 devices.
+func (d *Doctor) checkDashboard(ctx context.Context, cfg *config.Config, sdb *db.DB, now time.Time) Check {
+	c := Check{Name: "dashboard", Status: StatusOK}
+	dc := cfg.Dashboard
+	if !dc.Enabled {
+		c.Detail = "off"
+		return c
+	}
+	if err := dc.Check(); err != nil {
+		c.Status, c.Detail = StatusFail, err.Error()
+		c.Next = "Fix dashboard.* in config.yaml, then restart the gateway."
+		return c
+	}
+	devices := 0
+	if sdb != nil {
+		if list, err := dashboard.NewStore(sdb).List(ctx, now); err == nil {
+			devices = len(list)
+		}
+	}
+	signed := fmt.Sprintf("%d devices signed in", devices)
+	if dc.TLS() {
+		cr, err := dashboard.NewCertReloader(dc.TLSCert, dc.TLSKey)
+		if err != nil {
+			c.Status, c.Detail = StatusFail, err.Error()
+			c.Next = "Check dashboard.tls_cert and dashboard.tls_key."
+			return c
+		}
+		na := cr.NotAfter()
+		c.Detail = fmt.Sprintf("https on %s, %s", dc.Listen, signed)
+		if na.Sub(now) < 14*24*time.Hour {
+			c.Status = StatusWarn
+			c.Detail = fmt.Sprintf("https on %s, certificate expires %s, %s", dc.Listen, na.Format("2006-01-02"), signed)
+			c.Next = "Renew the certificate, for example with tailscale cert."
+		}
+		return c
+	}
+	c.Detail = fmt.Sprintf("http on %s, %s", dc.Listen, signed)
+	if dc.PublicURL == "" && !listenIsLoopback(dc.Listen) {
+		c.Status = StatusWarn
+		c.Detail = fmt.Sprintf("plain HTTP on %s, %s", dc.Listen, signed)
+		c.Next = "Voice notes, Copy, and notifications need HTTPS: set dashboard.tls_cert and dashboard.tls_key."
+	}
+	return c
+}
+
+// listenIsLoopback reports whether the host of a listen address is localhost or a loopback IP.
+func listenIsLoopback(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// fileExists reports whether the path exists. A stat error other than not-exist counts as
+// exists, so db.Open reports the real cause.
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !errors.Is(err, fs.ErrNotExist)
+}
+
+// checkStateDB reports the state.db that Run opened. The open also applies the missing
+// migrations. A nil sdb with a nil openErr means the file does not exist, which is valid:
+// the first run makes it. When a stored model answer exists, it also gives the
 // "last answer" check.
-func (d *Doctor) checkStateDB(ctx context.Context) []Check {
+func (d *Doctor) checkStateDB(ctx context.Context, sdb *db.DB, openErr error) []Check {
 	c := Check{Name: "state.db", Status: StatusOK}
 	path := filepath.Join(d.DataDir, "state.db")
-	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+	if sdb == nil && openErr == nil {
 		c.Detail = "does not exist yet; the first chat or gateway run makes it"
 		return []Check{c}
 	}
-	sdb, err := db.Open(path)
-	if err != nil {
-		c.Status, c.Detail = StatusFail, err.Error()
+	if openErr != nil {
+		c.Status, c.Detail = StatusFail, openErr.Error()
 		c.Next = "stop the gateway, keep a copy of " + path + ", and run tether doctor again"
 		return []Check{c}
 	}
-	defer sdb.Close()
 	var version int
 	if err := sdb.QueryRowContext(ctx, "SELECT coalesce(max(version), 0) FROM schema_version").Scan(&version); err != nil {
 		c.Status, c.Detail = StatusFail, "cannot read schema_version: "+err.Error()

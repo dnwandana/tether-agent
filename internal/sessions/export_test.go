@@ -104,14 +104,14 @@ func TestListAllNewestFirst(t *testing.T) {
 	old := seedSessionWithTool(t, s)
 	time.Sleep(2 * time.Millisecond)
 	newer, _ := s.Create(ctx, Session{Kind: "cron", Title: "nightly"})
-	got, err := s.ListAll(ctx, 50)
+	got, err := s.ListNewest(ctx, 50)
 	if err != nil || len(got) != 2 {
 		t.Fatal(got, err)
 	}
 	if got[0].ID != newer.ID || got[0].MessageCount != 0 || got[1].ID != old.ID || got[1].MessageCount != 4 || got[1].Title != "env check" {
 		t.Fatalf("%+v", got)
 	}
-	if one, _ := s.ListAll(ctx, 1); len(one) != 1 {
+	if one, _ := s.ListNewest(ctx, 1); len(one) != 1 {
 		t.Fatal(one)
 	}
 }
@@ -142,7 +142,7 @@ func TestListAllSkipsAuxSessions(t *testing.T) {
 	judge, _ := s.Create(ctx, Session{Source: "telegram", Kind: KindGoalJudge, ParentID: chat.ID})
 	time.Sleep(2 * time.Millisecond)
 	aux, _ := s.Create(ctx, Session{Source: "telegram", Kind: KindAux, ParentID: chat.ID, Title: "side calls"})
-	got, err := s.ListAll(ctx, 50)
+	got, err := s.ListNewest(ctx, 50)
 	if err != nil || len(got) != 2 {
 		t.Fatal(got, err)
 	}
@@ -151,7 +151,7 @@ func TestListAllSkipsAuxSessions(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 	// The aux session is the newest, so it must not take the place of a real session.
-	if one, _ := s.ListAll(ctx, 1); len(one) != 1 || one[0].ID == aux.ID {
+	if one, _ := s.ListNewest(ctx, 1); len(one) != 1 || one[0].ID == aux.ID {
 		t.Fatal(one)
 	}
 }

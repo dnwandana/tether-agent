@@ -12,6 +12,14 @@ CLAUDE.local.md
 # "go build ./cmd/tether" writes the binary to the repo root.
 /tether
 
+# The npm packages and the Vitest coverage output of the web dashboard.
+web/node_modules/
+web/coverage/
+# The built page of the web dashboard. make web writes it, and the binary embeds it. Git keeps
+# only the placeholder, so the Go build works before make web runs.
+/internal/dashboard/dist/*
+!/internal/dashboard/dist/.keep
+
 # Go test and profile output
 *.test
 *.out

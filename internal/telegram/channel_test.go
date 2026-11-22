@@ -19,6 +19,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/agent"
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/media"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -773,7 +774,7 @@ func TestTTSFileNotDuplicatedWhenAnswerHasTag(t *testing.T) {
 func TestTTSFileRefusedByPolicyStaysRefused(t *testing.T) {
 	h := harness(t, &tgProv{}, nil)
 	ogg := tempFile(t, "tts-1.ogg")
-	h.ch.Media = &MediaPolicy{Denied: []string{filepath.Dir(ogg)}}
+	h.ch.Media = &media.Policy{Denied: []string{filepath.Dir(ogg)}}
 	ttsTurn(t, h, ogg, "Here is your audio.")
 	if sends := fileSends(h.api); len(sends) != 0 {
 		t.Fatalf("file sends = %+v, want none", sends)

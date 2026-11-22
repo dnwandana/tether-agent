@@ -1,0 +1,2 @@
+# make web writes the files of the dashboard page. Git folds them as generated files.
+internal/dashboard/dist/** linguist-generated=true -diff

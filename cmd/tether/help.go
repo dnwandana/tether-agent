@@ -243,6 +243,32 @@ Examples:
 `,
 	},
 	{
+		Name:    "dashboard",
+		Group:   "Manage data",
+		Summary: "Make a sign-in link for the web dashboard, or end its sessions.",
+		Usage:   "tether dashboard <command> [flags]",
+		Body: `Sign in a device to the web dashboard of the gateway, and control the
+signed-in devices. Run these commands in a terminal on the host. The agent
+cannot run them.
+
+Commands:
+  link          Print a sign-in link with a one-time code. The code expires
+                in 5 minutes. Use it when no signed-in device can approve a
+                new device.
+  devices       Show the signed-in devices.
+  signout-all   End the session of each device.
+
+Flags:
+  --data-dir DIR       The data folder. The default is TETHER_HOME, then
+                       ~/.tether.
+
+Examples:
+  tether dashboard link
+  tether dashboard devices
+  tether dashboard signout-all
+`,
+	},
+	{
 		Name:    "usage",
 		Group:   "Manage data",
 		Summary: "Show the calls, the tokens, and the cost of each model.",

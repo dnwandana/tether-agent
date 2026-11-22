@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/media"
 )
 
 // streamer returns a Streamer for a group chat (or a DM) on a fake Bot API
@@ -762,11 +763,11 @@ func TestCleanForDisplay(t *testing.T) {
 		{"Unknown MEDIA:/tmp/x.unknownext stays", "Unknown MEDIA:/tmp/x.unknownext stays"},
 	}
 	for _, c := range cases {
-		if got := cleanForDisplay(c.in); got != c.want {
-			t.Errorf("cleanForDisplay(%q) = %q, want %q", c.in, got, c.want)
+		if got := media.CleanForDisplay(c.in); got != c.want {
+			t.Errorf("media.CleanForDisplay(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
-	if got := cleanForDisplay("Before\n\n\nMEDIA:/tmp/file.png\n\n\nAfter"); strings.Contains(got, "\n\n\n") {
+	if got := media.CleanForDisplay("Before\n\n\nMEDIA:/tmp/file.png\n\n\nAfter"); strings.Contains(got, "\n\n\n") {
 		t.Fatal(got)
 	}
 }

@@ -2,8 +2,15 @@ package setup
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1352,5 +1359,165 @@ func TestDoctorOutboundGuardNeedsASendPath(t *testing.T) {
 	}
 	if !slices.ContainsFunc(d.Run(ctx), func(c Check) bool { return c.Name == "outbound guard" }) {
 		t.Fatal("no guard warning with an MCP server and no owner chat")
+	}
+}
+
+// loadRunning loads the config of d, as the gateway does at its start.
+func loadRunning(t *testing.T, d *Doctor) *config.Config {
+	t.Helper()
+	dotenv, err := security.LoadDotEnv(filepath.Join(d.DataDir, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(d.ConfigPath, security.EnvLookup(dotenv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// The in-process doctor uses the running config, also when the file on disk is broken.
+func TestInProcessUsesRunningConfig(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	d.Cfg, d.InProcess = loadRunning(t, d), true
+	if err := os.WriteFile(d.ConfigPath, []byte("providers: [\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := d.Run(ctx)
+	c := find(t, checks, "config")
+	want := "uses the running config of the gateway; a change to " + d.ConfigPath + " applies after a restart"
+	if c.Status != StatusOK || c.Detail != want {
+		t.Fatal(c)
+	}
+	if c := find(t, checks, "provider primary"); c.Status != StatusOK {
+		t.Fatal(c)
+	}
+	find(t, checks, "telegram")
+	// The CLI doctor reads the broken file.
+	d.InProcess = false
+	if c := find(t, d.Run(ctx), "config"); c.Status != StatusFail {
+		t.Fatal(c)
+	}
+}
+
+// The in-process doctor does not change the bound secret names. The CLI doctor sets them.
+func TestInProcessKeepsBoundNames(t *testing.T) {
+	security.SetBoundSecretNames([]string{"GH_TOKEN"})
+	t.Cleanup(func() { security.SetBoundSecretNames(nil) })
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	cfg := loadRunning(t, d)
+	cfg.ExecSecrets = map[string]config.ExecSecret{"DEPLOY_TOKEN": {Commands: []string{"deploy"}}}
+	d.Cfg, d.InProcess = cfg, true
+	d.Run(ctx)
+	if got := security.BoundSecretNames(); !slices.Equal(got, []string{"GH_TOKEN"}) {
+		t.Fatalf("the in-process doctor changed the bound names: %q", got)
+	}
+	d.Cfg, d.InProcess = nil, false
+	d.Run(ctx)
+	if got := security.BoundSecretNames(); len(got) != 0 {
+		t.Fatalf("the CLI doctor sets the names of config.yaml: %q", got)
+	}
+}
+
+// RunLimited runs at most once a minute and gives the last result to a call that is too soon.
+func TestRunLimitedOnceAMinute(t *testing.T) {
+	d := doctorWithFakes(t, okProvider(t), okTelegram(t), allPrograms)
+	d.Cfg, d.InProcess = loadRunning(t, d), true
+	t0 := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	first, at, err := d.RunLimited(ctx, t0)
+	if err != nil || !at.Equal(t0) || len(first) == 0 {
+		t.Fatal(len(first), at, err)
+	}
+	again, at2, err := d.RunLimited(ctx, t0.Add(59*time.Second))
+	if !errors.Is(err, ErrDoctorTooSoon) || !at2.Equal(t0) || len(again) != len(first) {
+		t.Fatal(len(again), at2, err)
+	}
+	if err.Error() != "doctor: it ran less than a minute ago. Wait, then run it again." {
+		t.Fatal(err)
+	}
+	if _, at3, err := d.RunLimited(ctx, t0.Add(time.Minute)); err != nil || !at3.Equal(t0.Add(time.Minute)) {
+		t.Fatal(at3, err)
+	}
+}
+
+// writeTestCert writes a self-signed certificate pair that expires after life.
+func writeTestCert(t *testing.T, life time.Duration) (certFile, keyFile string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "tether-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(life),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	certFile, keyFile = filepath.Join(dir, "c.pem"), filepath.Join(dir, "k.pem")
+	if err := os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return certFile, keyFile
+}
+
+func TestDoctorDashboardRow(t *testing.T) {
+	soonCert, soonKey := writeTestCert(t, 10*24*time.Hour)
+	farCert, farKey := writeTestCert(t, 90*24*time.Hour)
+	badCert := filepath.Join(t.TempDir(), "missing.pem")
+	soonDate := time.Now().Add(10 * 24 * time.Hour).Format("2006-01-02")
+	tests := []struct {
+		name         string
+		edit         func(c *config.DashboardConfig)
+		status       string
+		detail, next string
+	}{
+		{"off", func(c *config.DashboardConfig) { c.Enabled = false }, StatusOK, "off", ""},
+		{"bad config", func(c *config.DashboardConfig) { c.Listen = "nonsense" }, StatusFail, `dashboard.listen "nonsense" is not a host:port address`,
+			"Fix dashboard.* in config.yaml, then restart the gateway."},
+		{"cert fails", func(c *config.DashboardConfig) { c.TLSCert, c.TLSKey = badCert, badCert }, StatusFail, "dashboard: cannot load the TLS files " + badCert + " and " + badCert + ": stat " + badCert + ": no such file or directory",
+			"Check dashboard.tls_cert and dashboard.tls_key."},
+		{"cert soon", func(c *config.DashboardConfig) { c.TLSCert, c.TLSKey = soonCert, soonKey }, StatusWarn,
+			"https on 127.0.0.1:8787, certificate expires " + soonDate + ", 0 devices signed in",
+			"Renew the certificate, for example with tailscale cert."},
+		{"cert far", func(c *config.DashboardConfig) { c.TLSCert, c.TLSKey = farCert, farKey }, StatusOK,
+			"https on 127.0.0.1:8787, 0 devices signed in", ""},
+		{"plain non-loopback", func(c *config.DashboardConfig) { c.Listen = "10.8.0.1:8787" }, StatusWarn,
+			"plain HTTP on 10.8.0.1:8787, 0 devices signed in",
+			"Voice notes, Copy, and notifications need HTTPS: set dashboard.tls_cert and dashboard.tls_key."},
+		{"plain non-loopback with public_url", func(c *config.DashboardConfig) {
+			c.Listen, c.PublicURL = "10.8.0.1:8787", "https://agent.example.com"
+		}, StatusOK, "http on 10.8.0.1:8787, 0 devices signed in", ""},
+		{"plain loopback", func(c *config.DashboardConfig) {}, StatusOK, "http on 127.0.0.1:8787, 0 devices signed in", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Dashboard.Enabled = true
+			tc.edit(&cfg.Dashboard)
+			sdb, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sdb.Close()
+			got := (&Doctor{}).checkDashboard(ctx, &cfg, sdb, time.Now())
+			if got.Name != "dashboard" || got.Status != tc.status || got.Next != tc.next {
+				t.Fatalf("got %+v, want status %q next %q", got, tc.status, tc.next)
+			}
+			if got.Detail != tc.detail {
+				t.Fatalf("detail %q, want %q", got.Detail, tc.detail)
+			}
+		})
 	}
 }

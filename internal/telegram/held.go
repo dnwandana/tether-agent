@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/gateway"
+	"github.com/dnwandana/tether-agent/internal/media"
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
@@ -243,9 +244,9 @@ func (ch *Channel) outboundCallback(ctx context.Context, cq CallbackQuery) bool 
 		}
 	}
 	if len(files) > 0 && ch.Out != nil {
-		out := make([]OutFile, 0, len(files))
+		out := make([]media.OutFile, 0, len(files))
 		for _, f := range files {
-			out = append(out, OutFile{Path: f, Kind: mediaKind(f)})
+			out = append(out, media.OutFile{Path: f, Kind: media.SendKind(f)})
 		}
 		if err := ch.Out.SendFiles(ctx, chatID, threadID, out); err != nil {
 			ch.logger().Warn("telegram: cannot post the files of the original answer", "chat", chatID, "err", err.Error())

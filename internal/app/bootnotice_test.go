@@ -174,4 +174,72 @@ func TestBootNoticeTelegramOff(t *testing.T) {
 	if rec.n != 0 {
 		t.Fatalf("sent %q", rec.sent)
 	}
+	if v, _, _ := a.DB.KVGet(ctx, LastVersionKey); v != "0.6.4" {
+		t.Fatalf("the version is saved also when Telegram is off: %q", v)
+	}
+}
+
+func TestBootNoticeDashboardRestart(t *testing.T) {
+	owner := gateway.Target{Source: "dashboard", ChatID: "owner"}
+	home := gateway.Target{Source: "telegram", ChatID: "100"}
+	for _, c := range []struct {
+		name          string
+		telegram      bool
+		last, version string
+		wantDash      string
+		wantTG        map[gateway.Target]string
+	}{
+		{"same version, Telegram off", false, "0.6.4", "0.6.4",
+			"♻ The gateway restarted. Your session continues.", map[gateway.Target]string{}},
+		{"new version, Telegram off", false, "0.6.3", "0.6.4",
+			"♻ The gateway restarted on tether 0.6.4 (before: 0.6.3). Your session continues.", map[gateway.Target]string{}},
+		{"new version, Telegram on", true, "0.6.3", "0.6.4",
+			"♻ The gateway restarted on tether 0.6.4 (before: 0.6.3). Your session continues.",
+			map[gateway.Target]string{home: "♻ Tether updated from 0.6.3 to 0.6.4 and restarted."}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a, tg := bootApp(t, true)
+			a.Cfg.Telegram.Enabled = c.telegram
+			dash := &sendRecorder{}
+			a.Gateway().Channels["dashboard"] = dash
+			setNotify(t, a, owner, time.Minute)
+			if err := a.DB.KVSet(ctx, LastVersionKey, c.last); err != nil {
+				t.Fatal(err)
+			}
+			a.BootNotice(ctx, c.version)
+			if dash.n != 1 || dash.sent[owner] != c.wantDash {
+				t.Fatalf("dashboard got %d: %q, want %q", dash.n, dash.sent, c.wantDash)
+			}
+			got := maps.Clone(tg.sent)
+			if got == nil {
+				got = map[gateway.Target]string{}
+			}
+			if !maps.Equal(got, c.wantTG) || tg.n != len(c.wantTG) {
+				t.Fatalf("telegram got %d: %q, want %q", tg.n, got, c.wantTG)
+			}
+			if _, ok, _ := a.DB.KVGet(ctx, RestartNotifyKey); ok {
+				t.Fatal("restart notify is still set")
+			}
+			if v, _, _ := a.DB.KVGet(ctx, LastVersionKey); v != c.version {
+				t.Fatalf("last version %q", v)
+			}
+		})
+	}
+}
+
+// A restart from the dashboard, with the dashboard now off, sends nothing and clears the key.
+func TestBootNoticeDashboardOff(t *testing.T) {
+	a, tg := bootApp(t, false)
+	a.Cfg.Telegram.Enabled = false
+	setNotify(t, a, gateway.Target{Source: "dashboard", ChatID: "owner"}, time.Minute)
+	a.BootNotice(ctx, "0.6.4")
+	if tg.n != 0 {
+		t.Fatalf("sent %q", tg.sent)
+	}
+	if _, ok, _ := a.DB.KVGet(ctx, RestartNotifyKey); ok {
+		t.Fatal("restart notify is still set")
+	}
+	if v, _, _ := a.DB.KVGet(ctx, LastVersionKey); v != "0.6.4" {
+		t.Fatalf("last version %q", v)
+	}
 }

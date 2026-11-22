@@ -90,7 +90,7 @@ func TestSuggestCommand(t *testing.T) {
 }
 
 func TestHelpTableOrder(t *testing.T) {
-	want := []string{"setup", "doctor", "chat", "gateway", "sessions", "skills", "pairing", "usage", "backup", "restore", "update", "version", "help"}
+	want := []string{"setup", "doctor", "chat", "gateway", "sessions", "skills", "pairing", "dashboard", "usage", "backup", "restore", "update", "version", "help"}
 	if len(commandHelps) != len(want) {
 		t.Fatalf("got %d entries, want %d", len(commandHelps), len(want))
 	}
@@ -101,6 +101,11 @@ func TestHelpTableOrder(t *testing.T) {
 	}
 	if _, ok := findHelp("gen-tools-doc"); ok {
 		t.Fatal("gen-tools-doc must stay out of the help table")
+	}
+	for _, name := range []string{"gen-dashboard-types", "gen-dashboard-hash"} {
+		if _, ok := findHelp(name); ok {
+			t.Fatalf("%s must stay out of the help table", name)
+		}
 	}
 }
 
@@ -291,6 +296,9 @@ func TestHelpTableMatchesSwitch(t *testing.T) {
 		t.Fatal("the switch of run has no case gen-tools-doc; the parse found the wrong switch")
 	}
 	delete(cases, "gen-tools-doc")
+	// The hidden commands of the dashboard build have no help entry.
+	delete(cases, "gen-dashboard-types")
+	delete(cases, "gen-dashboard-hash")
 	for _, h := range commandHelps {
 		if !cases[h.Name] {
 			t.Errorf("help entry %q has no case in the switch of run", h.Name)

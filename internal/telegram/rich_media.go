@@ -3,6 +3,8 @@ package telegram
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/dnwandana/tether-agent/internal/media"
 )
 
 // media returns the lines of a media block: one media part, or the caption
@@ -28,7 +30,7 @@ func (c *richCtx) media(b map[string]any, depth int) []richLine {
 		}
 		m.Placeholder = "[" + m.Kind + "]"
 		if ok && m.Kind == "video" && v.FileName != "" {
-			m.Placeholder = "[video: " + displayName(v.FileName, "") + "]"
+			m.Placeholder = "[video: " + media.DisplayName(v.FileName, "") + "]"
 		}
 	case "audio":
 		var a Audio
@@ -37,7 +39,7 @@ func (c *richCtx) media(b map[string]any, depth int) []richLine {
 			ok = true
 			m.Placeholder = "[audio]"
 			if a.FileName != "" {
-				m.Placeholder = "[audio: " + displayName(a.FileName, "") + "]"
+				m.Placeholder = "[audio: " + media.DisplayName(a.FileName, "") + "]"
 			}
 		}
 	case "document":
@@ -47,9 +49,9 @@ func (c *richCtx) media(b map[string]any, depth int) []richLine {
 			ok = true
 			ext := strings.ToLower(filepath.Ext(d.FileName))
 			if ext == "" {
-				ext = extByMime[strings.ToLower(d.MimeType)]
+				ext = media.ExtByMime(d.MimeType)
 			}
-			m.Placeholder = "[document: " + displayName(d.FileName, ext) + "]"
+			m.Placeholder = "[document: " + media.DisplayName(d.FileName, ext) + "]"
 		}
 	case "voice_note":
 		var v Voice
