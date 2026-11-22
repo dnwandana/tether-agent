@@ -44,6 +44,11 @@ archives:
       - NOTICE
       - README.md
 
+release:
+  # A tag with a pre-release part, for example v0.25.0-rc.1, makes a GitHub pre-release.
+  # /releases/latest skips a pre-release, so "tether update" with no --tag does not install it.
+  prerelease: auto
+
 checksum:
   name_template: checksums.txt
   algorithm: sha256
