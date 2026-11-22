@@ -85,6 +85,7 @@ To restart the gateway, send `/restart` in a chat, or run `systemctl --user relo
 | `cron` | Parallel cron jobs, the time limits of a run, the rule for missed runs, the run history, and the limit of failures in a row. |
 | `gateway` | The message queue, the debounce wait, the page sizes of `/model` and `/sessions`, the skill count of `/help`, the cleanup interval, and the files that an answer can send. |
 | `telegram` | The bot: who can use it, group rules, home chat, streaming, status lines, the Bot API timeouts, the media limits, the menu size, and the pairing code time. |
+| `dashboard` | The web dashboard: the listen address, the optional TLS files, the proxies and hosts that count, the session life, and the upload limit. |
 | `mcp` | The MCP servers and the dial tries of each server. |
 | `acp` | Coding agents for the `acp_delegate` tool: the adapter programs, the permission presets, the folders where they can work, and the result size limit. |
 | `media` | The backends of text to speech, speech to text, and image generation, their timeouts, the image size, and the limits of `view_image`. |
@@ -174,7 +175,7 @@ These keys are the ones that most users change. The full list is in
 | `goals.max_turns` | `20` | The turn budget of a new goal. |
 | `goals.judge_provider` | `""` | The provider entry of the goal judge and of `/goal draft`. `""` uses the chain of the session. |
 | `goals.judge_timeout_s` | `30` | The timeout of one judge call or draft call, in seconds. |
-| `toolsets.<channel>` | `[all]` | The toolsets for the channels `cli`, `telegram`, and `cron`. |
+| `toolsets.<channel>` | `[all]` | The toolsets for the channels `cli`, `telegram`, `dashboard`, and `cron`. |
 | `toolsets.member` | `[web, ask, todo]` | The toolsets that a member turn can use. A member is a user that only `telegram.group_allowed_chats` admits. An empty list gives no tools. |
 | `telegram.enabled` | `false` | When `true`, the gateway runs the Telegram channel. |
 | `telegram.allowed_users` | `[]` | The Telegram user ids that can use the bot. |
@@ -189,6 +190,7 @@ toolsets. Each channel has a list of toolsets:
 
 - `cli`: the `tether chat` terminal chat.
 - `telegram`: the Telegram bot.
+- `dashboard`: the web dashboard.
 - `cron`: the scheduled jobs.
 
 The default for each channel is `[all]`. A hidden tool is removed from the request, so the model

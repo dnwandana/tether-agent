@@ -5,6 +5,7 @@
 - [Getting Started](Getting-Started)
 - [Providers](Providers)
 - [Telegram](Telegram)
+- [Dashboard](Dashboard)
 - [Configuration](Configuration)
 
 **Use**

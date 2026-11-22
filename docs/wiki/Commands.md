@@ -40,11 +40,12 @@ You can put flags after the positional arguments.
 | `setup` | Runs the setup wizard in five steps: the primary provider (a preset or Custom), the fallback chain, Telegram, the host programs, and the systemd unit. See [Providers](Providers). | `--system` writes a system unit instead of a user unit. Under `sudo`, the data dir and its files belong to the user who called `sudo`. | `tether setup` |
 | `doctor` | Checks the config, `.env`, each provider entry, Telegram, `state.db`, the last answer, the data folder, the memory, the host programs, the systemd unit, MCP, the coding agents of `acp` (when `acp.enabled` is `true`), the disk, and the release. Exits with 1 if a check fails. | | `tether doctor` |
 | `chat` | Starts a chat in the terminal. | `--log-stderr`, `--log-level` | `tether chat` |
-| `gateway` | Runs Telegram and cron until it gets SIGINT or SIGTERM. | `--log-stderr`, `--log-level` | `tether gateway` |
+| `gateway` | Runs Telegram, cron, and the dashboard (when it is on) until it gets SIGINT or SIGTERM. | `--log-stderr`, `--log-level` | `tether gateway` |
 | `sessions list` | Shows the 50 newest sessions. | | `tether sessions list` |
 | `sessions export <id>` | Writes one session as redacted JSONL. The default file is `<data dir>/exports/<id>.jsonl`. | `--out FILE` | `tether sessions export <id> --out chat.jsonl` |
 | `skills` | The subcommands are `list`, `install`, `uninstall`, `check`, `update`, and `reset`. See [Skills](Skills). | `--available`, `--skill`, `--ref`, `--yes`, `--force` | `tether skills install openai/skills --skill playwright` |
 | `pairing` | The subcommands are `list`, `approve`, and `revoke`. See [Telegram](Telegram#pairing). | | `tether pairing approve K7Q2MXRP` |
+| `dashboard` | The subcommands are `link` (a one-time sign-in link, 5 minutes), `devices` (the signed-in devices), and `signout-all` (ends every device session). Each needs a terminal: the agent cannot run them. See [Dashboard](Dashboard). | | `tether dashboard link` |
 | `usage [today\|7d\|30d\|all]` | Shows the calls, the tokens, the cached input tokens, the cache hit rate, the speed, and the cost of each model. A line under the table shows the total cache and hit rate. A range counts all chats and all groups. The default range is `today`. `all` shows all stored usage. The cost comes from the price that Tether Agent stored with each call. | | `tether usage 7d` |
 | `backup` | Writes a backup archive of the data dir. | `--out PATH` or `--out -` | `tether backup` |
 | `restore FILE` | Restores a backup archive. `-` reads from stdin. | `--yes` | `tether restore --yes backup.tar.gz` |
@@ -66,13 +67,13 @@ task runs.
 | `/new`, `/reset` | | Stops the task, clears the queue, and starts a new session. The new session has no `/model` pin, no `/effort` level, and no `/prompt` text. Only `/fork` copies them. The reply shows the model and the context size. An active goal of the old session pauses. The coding agent sessions of the old session close. | | yes |
 | `/sessions` | `[page] [search]` or `archived` | Lists the sessions of this chat, 8 for each page (`gateway.session_page_size`). | A number button for each session. ◀ Prev and Next ▶. | yes |
 | `/resume` | `[<id>]` or `[page] [search]` | Changes to another session. With no ID, it shows the list. It also takes a session out of the archive. An active goal of the current session pauses. An active goal of the session that you change to continues. | Number buttons | no |
-| `/rename` | `<title>` | Changes the title of the session. With no argument, it shows the title. | | no |
-| `/archive` | | Hides the session from `/sessions`. An active goal of the current session pauses. | ↩️ Undo, 🆕 New session | no |
-| `/delete` | `[<id>] [confirm]` | Deletes a session after a confirmation. With no ID, it shows the list. It also deletes the goal of the session and closes its coding agent sessions. | 🗑 Delete, Cancel | no |
+| `/rename` | `[<id>] <title>` | Changes the title of the session. With no argument, it shows the title. The dashboard can name the ID of another dashboard session. | | no |
+| `/archive` | | Hides the session from `/sessions`. An active goal of the current session pauses. The dashboard can name the ID of another dashboard session. | ↩️ Undo, 🆕 New session | no |
+| `/delete` | `[<id>] [confirm]` | Deletes a session after a confirmation. With no ID, it shows the list. It also deletes the goal of the session and closes its coding agent sessions. The dashboard can name the ID of another dashboard session. | 🗑 Delete, Cancel | no |
 | `/model` | `[<provider>[:<model>]]`, `<provider> config`, `providers`, or `clear` | With no argument or with `providers`, it shows the provider entries and the model that answers now. `/model <provider>` shows the model list of the entry. A model from the list, `config`, or `<provider>:<model>` sets the model for this session. `clear` uses the primary provider again. | One button for each provider entry. The list has 8 model buttons for each page (`gateway.model_page_size`), ◀ Prev and Next ▶, ↩ Providers, and ↻ Refresh. After a change, ↺ Use the default. | no |
 | `/effort` | `[<level>]` or `default` | Sets the reasoning effort for this session. See [/model and /effort](#model-and-effort). | `default` and the seven levels. After a change, ↺ Use the default. | no |
 | `/prompt` | `set <text>`, `show`, or `clear` | Replaces the base prompt for this session only. | 🧹 Use the base prompt | no |
-| `/fork` | `[title]` | Copies the session and changes to the copy. An active goal of the current session pauses. | `↩️ Back to "<title>"` | no |
+| `/fork` | `[title]` or `from <id> [title]` | Copies the session and changes to the copy. An active goal of the current session pauses. On the dashboard, `/fork from <id>` copies any session, also a Telegram or CLI session, into a new dashboard session and changes to it. | `↩️ Back to "<title>"` | no |
 | `/compact` | | Summarizes the older messages now. The reply shows the number of replaced messages and the context size before and after. | | no |
 | `/reload-mcp` | | Reloads the MCP servers. The next request does not use the prompt cache. | | no |
 | `/usage` | `[today\|7d\|30d\|all\|session]` | Shows the tokens, the cached input tokens, the cache hit rate, and the cost for each model. The default range is `today`. A range counts all chats and all groups, and the header says "all chats". `all` shows all stored usage. `session` counts the current session and its subagents, reviews, goal judge calls, and side calls (compaction, `view_image`, and smart approval). A fork counts only the calls after the fork. `session` also shows the number of compactions. In the terminal, the last line shows the ranges. A member gets the `session` form. See [Owners and members](#owners-and-members). | Today, 7 days, and 30 days in the first row. All and Session in the second row. | yes |
@@ -92,7 +93,7 @@ In the Telegram command menu, `/reload-mcp` is `/reload_mcp`, because Telegram d
 ### Owners and members
 
 In Telegram, the bot has owners and members. A user that only
-`telegram.group_allowed_chats` admits is a member. The CLI is always the owner. See
+`telegram.group_allowed_chats` admits is a member. The CLI and the dashboard are always the owner. See
 [Telegram](Telegram#owners-and-members).
 
 A member can run `/help`, `/new`, `/reset`, `/stop`, `/steer`, `/now`, `/todo`, `/sessions`,
@@ -210,8 +211,9 @@ restarted. Your session continues." The reply also names each running coding tas
 |---|---|---|
 | `/start` | Telegram only | Shows a welcome message with 📋 Sessions, 🧠 Model, and 📊 Usage buttons. |
 | `/sethome` | Telegram only | Owner only. Makes this chat or topic the home channel for cron results. |
-| `/approve` | Telegram only | Owner only. Answers only the approvals of the same topic. `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. `all` leaves the human-only requests open, and the reply says "N human-only requests still wait for a tap." On a coding agent request, `always` gives `session`, or `once` when the request has no session answer. |
-| `/deny` | Telegram only | Owner only. Answers only the approvals of the same topic. `[all]`. Denies the oldest waiting command, or all of them. |
+| `/approve` | Telegram and the dashboard | Owner only. Answers only the approvals of the same topic. On the dashboard, it answers the open cards of the dashboard. `[session\|always] [all]`. Approves the oldest waiting command, or all of them with `all`. `all` leaves the human-only requests open, and the reply says "N human-only requests still wait for a tap." On a coding agent request, `always` gives `session`, or `once` when the request has no session answer. |
+| `/deny` | Telegram and the dashboard | Owner only. Answers only the approvals of the same topic. `[all]`. Denies the oldest waiting command, or all of them. On the dashboard, it answers the open cards of the dashboard. `all` leaves the human-only cards and the sign-in cards open. |
+| `/fork from <id>` | Dashboard only | Copies a session of another channel into the dashboard. |
 | `/mode` | All channels | Owner only. Works while a task runs. Shows the mode of this chat or topic and three buttons. `/mode read-only` and `/mode guarded` set the mode at once. `/mode full` asks for a confirm tap first. In the CLI, it asks a y/N question, or you send `/mode full confirm`. See [Security](Security#modes-for-a-chat-or-a-topic). |
 | `/approvals` | All channels | Owner only. Lists the `always` answers of the approval gate. Each row shows the rule, the date, the code, and the command preview with its workdir. A group shows no preview and no workdir. The text shows the newest 20 rows. `log [all]` shows the last 15 approval decisions of this topic, or of all topics in a private chat or the CLI. `remove <number> <code>` removes one answer. `remove all <list code>` removes all answers in the list. It asks first, unless the last word is `confirm`. A removed answer makes the gate ask again. |
 | `/secrets` | All channels | Owner only. Works while a task runs. Lists each bound secret of `exec_secrets`, its state, its commands, and its allowed programs. `set NAME` saves a new value: Telegram sends a card in the private chat, and the CLI reads the value with no echo. `unpin NAME` removes the allowed programs of a name, so the next use asks again. In a group, it replies "Send /secrets in a private chat with me." See [Security](Security#bound-secrets). |
@@ -221,7 +223,10 @@ restarted. Your session continues." The reply also names each running coding tas
 | `/exit`, `/quit` | CLI only | Ends the chat. |
 
 `/start`, `/sethome`, `/approve`, and `/deny` do not go through the gateway queue. Thus they
-work also while a task waits for an approval.
+work also while a task waits for an approval. On the dashboard, `/approve` and `/deny` work the
+same way.
+
+On the dashboard, `/help` shows `/approve` and `/deny`, and not `/sethome`.
 
 ### Buttons in the CLI
 

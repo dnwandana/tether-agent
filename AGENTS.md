@@ -24,18 +24,31 @@ CGO_ENABLED=0 go test ./internal/agent/ -run '^TestName$' -v   # one test
 go test -short ./...                         # skips the startup test, which builds a binary
 make fuzz FUZZTIME=30s                       # the targets in FUZZ_TARGETS of the Makefile
 go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
+make web                                     # builds web/ into internal/dashboard/dist/ (needs Node)
+make web-test                                # the Vitest tests of web/
+make web-lint                                # oxlint and the Prettier check of web/
+make web-format                              # formats web/ with Prettier
+go run ./cmd/tether gen-dashboard-types      # writes web/src/api/types.gen.ts
+go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.source-hash (make web runs it)
 ```
 
 ## Architecture
 
 - `cmd/tether/main.go`: `run()` returns an exit code and never calls `os.Exit`, so tests
   call it directly. The subcommands are `chat`, `gateway`, `setup`, `doctor`, `skills`,
-  `sessions`, `pairing`, `usage`, `backup`, `restore`, `update`, `version`, `help`, and the
-  hidden `gen-tools-doc`.
+  `sessions`, `pairing`, `dashboard`, `usage`, `backup`, `restore`, `update`, `version`, `help`, and the
+  hidden `gen-tools-doc`, `gen-dashboard-types`, and `gen-dashboard-hash`.
 - `internal/app` is the composition root. `app.New` builds config, DB, providers, tools, MCP,
   and the agent. When `acp.enabled` is true, it also builds the ACP manager (`acp.Manager`) and
   its idle reaper, but it starts no adapter process. Only `Options.Gateway` builds the cron scheduler and the background
   `delegate_task` batches. Only the gateway role polls Telegram.
+- `internal/dashboard` is one more gateway channel, `dashboard`. It has its own `net/http`
+  server, device sessions, an SSE event hub, and JSON routes. `App.AddDashboard` builds it only
+  in the gateway role, and `runGateway` starts the listener. `web/` holds the page (Vue and
+  TypeScript). Run `make web` before `make build`, because git keeps only the placeholder
+  `internal/dashboard/dist/.keep`. `TestDashboardTypesCurrent` fails when `types.gen.ts` is
+  old. `TestDashboardAssetsCurrent` fails with "Run make web" when the built page is older than
+  `web/`. Both tests skip when no page is built.
 - Message flow:
   1. `telegram.Channel` or `gateway.CLI` receives the message.
   2. `gateway.Gateway` runs one turn per session key. On a busy key, a plain text goes into
@@ -69,7 +82,9 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
   batch functions. `internal/acp` imports only `config`, `security`, `db`, the SDK
   `github.com/coder/acp-go-sdk`, and the standard library. `tools` reaches it through the
   `tools.ACPDelegator` interface. `internal/brief` imports only `cron`, `goals`, `obs`, `db`,
-  `sessions`, and the standard library. `cron` cannot import `brief`, `gateway`, or `app`.
+  `sessions`, and the standard library. `cron` cannot import `brief`, `gateway`, or `app`. `internal/dashboard` cannot import `app`,
+  `telegram`, or `setup`. `gateway` cannot import `dashboard`. `internal/media` cannot import
+  `gateway`.
 - The browser, MCP servers, media programs, and ACP adapters (`claude-agent-acp`,
   `codex-acp`) start on the first call and stop when idle. `app.New` must not do network work, because `TestStartupUnder100ms` measures startup. For
   example, `provider.ModelCache` makes no call before the first `/model <entry>`.
@@ -90,6 +105,11 @@ go run ./cmd/tether gen-tools-doc > docs/TOOLS.md
      or give it a `ReadOnlyCall` method. `TestEachToolIsInOneReadOnlyList` in `internal/tools`
      fails until the tool is in one list.
   4. Generate `docs/TOOLS.md` again. `TestGeneratedDocIsCurrent` fails when it is out of date.
+- A change to a struct in an `internal/dashboard/api*.go` file needs
+  `go run ./cmd/tether gen-dashboard-types` and then `make web`.
+- A change in `web/` must pass `make web-lint` (oxlint and Prettier) and `make web-test`.
+  `make web-format` fixes the format. Prettier skips `web/src/api/types.gen.ts`, because
+  `TestDashboardTypesCurrent` compares it byte for byte with the generator output.
 - A new config key goes into the structs and `Default()` in `internal/config/config.go`. Add
   its row to `docs/CONFIG.md`. `internal/config/docs_test.go` compares each yaml key and its
   default with that table.

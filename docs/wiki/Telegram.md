@@ -108,6 +108,9 @@ The default platform for `approve` and `revoke` is `telegram`. `tether pairing l
 platform lists all platforms. A running gateway sees a change at once. You do not have to
 restart it.
 
+You can also approve a code on the Access page of the dashboard. The page asks for a confirm first,
+because the person becomes an owner. The same lockout applies.
+
 ## Who can talk to the bot
 
 The bot checks a sender in this order:
@@ -452,6 +455,19 @@ Only an owner can answer an approval, with a button or with a command. A member 
 `⛔ Only the owner can answer this prompt.` Any owner can answer each approval. `/approve` and
 `/deny` answer only the approvals of the same topic.
 
+### Dashboard sign-in cards
+
+When the dashboard is on, a new device can ask to sign in. Each owner gets this card in the
+private chat with the bot:
+
+```text
+🔑 New dashboard sign-in · Chrome on Android · 10.8.0.5 · code 4821
+```
+
+The card is human-only. ❌ Deny is alone on row 1, and ✅ Allow for 24 h is on row 2. Compare the
+code with the code on the device. The first answer wins, also against a signed-in dashboard page.
+The request expires after 5 minutes. See [Dashboard](Dashboard).
+
 ### While the agent is busy
 
 The gateway runs one turn at a time for each session. A message that you send during a turn
@@ -578,3 +594,4 @@ full rule.
 - [Commands](Commands): all slash commands and the busy behavior.
 - [Cron](Cron): scheduled jobs that send results to Telegram.
 - [Security](Security): the approval gate.
+- [Dashboard](Dashboard): the web dashboard and its sign-in.

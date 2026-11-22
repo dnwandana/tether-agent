@@ -21,8 +21,10 @@ copied from Hermes Agent. These parts include:
   leave the request over the threshold (internal/ctxmgr/compactor.go, from
   agent/context_compressor.py), and its warning to the user (from
   agent/conversation_compression.py).
-- The Telegram message format, stream, group gate, incoming media notes, sticker
-  cache, and media delivery rules (internal/telegram/, from gateway/).
+- The Telegram message format, stream, group gate, and sticker cache
+  (internal/telegram/, from gateway/).
+- The incoming media notes and the media delivery rules (internal/media/, from
+  gateway/). Telegram and the dashboard share them.
 - The rich message reader: the plain text, the addressing text, and the Markdown
   conversion with its media parts (internal/telegram/rich*.go, from gateway/).
 - The fuzzy match of the patch tool (internal/tools/patch.go).
@@ -75,3 +77,18 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+The web dashboard page in internal/dashboard/dist/ bundles these packages.
+Each package uses the MIT License, with the same terms as the license above:
+
+- vue and its @vue/* packages (https://github.com/vuejs/core)
+  Copyright (c) 2018-present, Yuxi (Evan) You
+- vue-router (https://github.com/vuejs/router)
+  Copyright (c) 2019-present Eduardo San Martin Morote
+- marked (https://github.com/markedjs/marked)
+  Copyright (c) 2018+, MarkedJS (https://github.com/markedjs/)
+  Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/)
+  The LICENSE file of marked also has a BSD notice for the code of John Gruber
+  (Copyright (c) 2004, John Gruber).

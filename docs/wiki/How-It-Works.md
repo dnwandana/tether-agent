@@ -12,8 +12,10 @@ Tether Agent is one static Go binary, `tether`. It has no runtime that you must 
 uses no C code (`CGO_ENABLED=0`). The binary has two roles:
 
 - **`tether chat`** is an interactive chat in the terminal.
-- **`tether gateway`** is the long-running service. It polls Telegram and runs the cron
-  scheduler.
+- **`tether gateway`** is the long-running service. It polls Telegram, runs the cron scheduler,
+  and serves the dashboard when `dashboard.enabled` is `true`. See [Dashboard](Dashboard).
+
+`tether chat` builds no dashboard.
 
 The two roles use the same data folder and the same database, `state.db`. A chat can run next to
 the gateway. Only one gateway can run for each data folder, because the gateway holds a file
@@ -33,12 +35,17 @@ The code is in `internal/`. These are the main packages:
 | `config` | The config file, the defaults, and the table of provider presets. |
 | `provider` | The adapters for the `openai`, `anthropic`, and `responses` wire formats, streaming, the fallback chain, the reasoning effort, and the model lists of `/model` with their cache. |
 | `telegram` | The Telegram channel over the Bot API with plain `net/http`. |
+| `dashboard` | The web dashboard channel: the HTTP server, the device sign-in, the event stream (SSE), the cards, the JSON routes, and the embedded page from `web/`. |
 | `cron` | The scheduler, the job runs, and the delivery of results. |
 | `ctxmgr` | Compaction and the truncation of long tool output. |
 | `memory` | The two memory files and the memory notes. |
 | `skills` | The skill loader, the skill install, and the skill guard. |
 | `security` | The approval gate, protected paths, and secret redaction. |
 | `acp` | The client of the coding agents of `acp_delegate` over the Agent Client Protocol: the adapter processes, the ACP sessions, and the permission requests. |
+
+The page sources are in `web/` (Vue and TypeScript). `make web` builds them into
+`internal/dashboard/dist/`, and the binary embeds that folder. Git keeps no built page, so a
+build from source needs Node.
 
 Other packages are smaller: `browser`, `mcp`, `media`, `sessions`, `pricing`, `obs` (logs and
 usage), `db`, `backup`, `setup`, `update`, `hostos`, and `gatewaylock`.
@@ -51,6 +58,8 @@ flowchart LR
     CRON[cron scheduler] --> AG
     GW -->|one turn per session key| AG[agent.RunTurn]
     CLI[tether chat] --> AG
+    DASH[dashboard page] -->|POST /api/messages, /api/command| GW
+    GW -->|SSE /api/events| DASH
     AG -->|stream| PR[provider.Chain]
     PR -->|entry fails before first byte| FB[next entry of the chain]
     AG -->|tool calls| TR[tools.Registry]
@@ -58,8 +67,9 @@ flowchart LR
     AG -->|save each message| DB[(state.db)]
 ```
 
-1. A channel receives a message. Telegram goes through `gateway.Gateway`. `tether chat` uses one
-   simple loop and reads input only between turns.
+1. A channel receives a message. Telegram and the dashboard go through `gateway.Gateway`. The
+   dashboard has one session key, `dashboard:owner`. `tether chat` uses one simple loop and reads
+   input only between turns.
 2. The gateway runs one turn at a time for each session key. When a turn runs for that key, a
    plain text goes into the running turn as a **steer**. Other messages, for example photos, wait
    in a queue. See [Commands](Commands#while-the-agent-is-busy).
@@ -71,6 +81,9 @@ flowchart LR
 5. The provider streams the answer back to the channel. The fallback chain goes to the next
    entry only when an entry fails before the first byte. See
    [The provider layer](#the-provider-layer).
+
+The dashboard gets the same turn as an event stream: text deltas, tool lines, cards, and the
+cost footer. A page that connects during a turn gets a snapshot first.
 
 `/now` or the **⚡ Do this now** button stops the running turn. The waiting steer then runs
 first, and then the queue. `/stop` drops the waiting steer and clears the queue. See
@@ -683,6 +696,9 @@ and it stops them when they are idle:
 | MCP server | At the first call to one of its tools. | After `idle_stop_minutes` (default 10). |
 | Media programs | At each call. | When the call ends. |
 | ACP adapter (`claude-agent-acp`, `codex-acp`) | At the first `acp_delegate` call. | After `acp.idle_timeout_s` (default 300 s). |
+
+The dashboard starts no process. With no open page, it costs one listening socket. With an open
+page and no turn, it sends a heartbeat every 15 s.
 
 At startup, the MCP tools come from a cache on disk, so most MCP servers do not start. Only a
 server with no cache file (once, to list its tools) and an `always_on` server start at

@@ -48,6 +48,9 @@ limits. Read the limits before you give the agent access to a machine that holds
   preset sets which actions it asks for. Tether Agent checks the paths and the commands of the
   requests that the coding agent sends. The permission preset decides which requests come.
   A hardline command of the coding agent is refused with no prompt.
+- The web dashboard is off by default. When it is on, each request needs a device session,
+  also on loopback. A human tap in Telegram or on a signed-in page approves each new device.
+  The operator limits who can reach the address. See [Dashboard](#dashboard).
 
 ## Approval gate for commands
 
@@ -74,6 +77,8 @@ model call. The gate is a port of the Hermes approval flow.
      or `systemctl`
    - `tether skills install`, `tether skills update`, and `tether skills uninstall`. Only the
      owner runs these commands, in a terminal.
+   - `tether … dashboard …`, for example `tether dashboard link`. Only the owner runs it, in a
+     terminal.
 
    The hardline rules read the raw text and the rule line of each simple command.
 4. **Sudo guard.** The gate blocks `sudo -S` when no sudo password is set, because the model
@@ -700,7 +705,7 @@ reads, stores, or sends a login token of the coding agent.
 ## Toolsets
 
 Each tool belongs to one named toolset, for example `terminal`, `file`, or `web`.
-`toolsets.<channel>` gives the toolsets of each channel: `cli`, `telegram`, and `cron`.
+`toolsets.<channel>` gives the toolsets of each channel: `cli`, `telegram`, `dashboard`, and `cron`.
 `toolsets.member` is not a channel. It limits the turns of a member.
 
 - The registry removes the hidden tools before it sends the request. The model never sees a
@@ -1555,6 +1560,8 @@ The default platform is `telegram`.
   or expired code), the platform is locked for 1 hour.
 - During the lockout, `pairing approve` refuses every code, also a correct code. The bot gives
   no new codes on that platform.
+- The Access page of the dashboard can also approve a code. It asks for a confirm, and the same
+  lockout applies.
 
 `tether pairing list [platform]` shows the pending requests and the approved users.
 `tether pairing revoke [platform] <user>` removes the access of a user.
@@ -1898,6 +1905,141 @@ a string or from decoded data. A Python file that `terminal` runs gets only the 
 So `write_file x.py` and then `python3 x.py` pass the gate. This is a known limit. The tool
 stubs send their calls through the approval gate and the protected path checks. Hide the
 `code_execution` toolset from a channel when you do not trust its users.
+
+## Dashboard
+
+The dashboard is an optional channel of the gateway. It has the chat, the cards, and the
+controls of Telegram and the CLI, in a web page. See the wiki page
+[Dashboard](https://github.com/dnwandana/tether-agent/wiki/Dashboard).
+
+- `dashboard.enabled` is `false` by default. The gateway then opens no port.
+- The dashboard has one user: the owner. A signed-in device can chat, answer approvals, and
+  change settings.
+- The dashboard is a private target, like the CLI. The outbound scan does not hold its replies.
+- Each turn is an owner turn with the tools of `toolsets.dashboard` (default `[all]`).
+- `/mode` on the dashboard sets the scope `dashboard`. The page cannot change another scope.
+- The operator limits who can reach the address: loopback, a VPN or Tailscale address, a
+  firewall, or a TLS proxy.
+
+### Sign-in
+
+Each request to `/api/` and `/auth/` needs a device session, also from `127.0.0.1`. Three
+requests need none: `POST /auth/request`, `GET /auth/request/{id}`, and `POST /auth/signin`. There is no
+master token and no secret in `.env`. A device gets a session in one of two ways.
+
+1. Request access. The page shows a device label and a 4-digit check code. The request expires
+   after 5 minutes. The gateway sends the human-only card `🔑 New dashboard sign-in` to the
+   private Telegram chat of each owner and to the tray of each signed-in page. The card has
+   `❌ Deny` alone on row 1 and `✅ Allow for 24 h` on row 2. The first answer wins. Compare
+   the check code with the code on the device in your hand. Deny a request from `127.0.0.1`
+   that you did not make.
+2. `tether dashboard link`. The command prints a one-time code of 40 bits, shown as
+   `XXXX-XXXX`. The code expires after 5 minutes. The database keeps the SHA-256 of the code.
+   The code goes in the URL fragment (`#code=`), so a proxy or an access log never sees it.
+
+The limits for sign-in:
+
+- A peer can make 1 request each minute and can have 3 pending requests.
+- The gateway holds at most 10 pending requests in total.
+- 5 wrong codes in 10 minutes lock that peer for 10 minutes.
+- A global limit of 30 wrong codes an hour also applies. It does not lock a peer on loopback, so
+  a remote peer cannot lock out a code from `tether dashboard link` on the host.
+
+`tether dashboard link` and `tether dashboard signout-all` need a real terminal. Without one,
+the command exits with `<command>: run this command in a terminal on the host.` `<command>` is
+`dashboard link` or `dashboard signout-all`. The
+`terminal` tool has no terminal.
+
+The hardline rule `tether_dashboard_hardline` blocks `tether … dashboard …`. It applies in
+`terminal`, in `execute_code` scripts, and behind `bash -c`, `sh -c`, and `script -c`. No mode
+and no Always answer allows it.
+
+### The session
+
+A session has two random values of 32 bytes each. Each request needs both, with one exception.
+
+- The cookie `tether_dash` has `HttpOnly`, `SameSite=Strict`, and `Path=/`. Its `Max-Age` comes
+  from `dashboard.session_hours`. It has `Secure` on HTTPS.
+- The header `X-Tether-Session` holds the second value. The page keeps it in `localStorage` of
+  the dashboard origin.
+- `GET /api/files/{id}` accepts the cookie alone. An `img`, `audio`, or `video` tag cannot send
+  a header. The ids of files are random values of 128 bits.
+- A cookie goes to each port of a host. A server on another port cannot read the header value.
+  A script of another origin cannot set the header.
+- `state.db` keeps the SHA-256 of each value in `dashboard_sessions`. The compare takes
+  constant time.
+- A restart keeps the sessions. A backup holds them.
+- Revoke on the Approvals and security page ends one session. `Sign out all other devices`
+  ends the others. A revoked session gets 401 at once.
+- `tether dashboard signout-all` ends every session when no device can sign in.
+
+### Request checks
+
+- The `Host` header must be allowed. The allowed values are the listen host (when it is not a
+  wildcard), the host of `dashboard.public_url`, the entries of `dashboard.allowed_hosts`, and
+  `localhost`, `127.0.0.1`, and `[::1]` on any port. This check blocks DNS rebinding.
+- `Origin` must be allowed on each request that is not GET.
+- `Sec-Fetch-Site` must be `same-origin` or missing. This check and the `Origin` check apply
+  only to methods that are not GET or HEAD.
+- `X-Forwarded-For` counts only from `dashboard.trusted_proxies`. The server does not read
+  `X-Forwarded-Proto`. Behind a TLS proxy, set `dashboard.public_url` to the `https://` origin,
+  so that the cookie gets `Secure`.
+- The values `*` and `0.0.0.0/0` in `dashboard.trusted_proxies` keep the dashboard off.
+- A wildcard listen address needs `dashboard.public_url` or `dashboard.allowed_hosts`.
+- The server sends no CORS headers. The API serves only the bundled page.
+- A bad dashboard value never stops the gateway. The log and `tether doctor` give the cause.
+
+### Response headers and files
+
+Each response has these headers:
+
+- `Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`
+- `X-Content-Type-Options: nosniff`
+- `Referrer-Policy: no-referrer`
+- `Strict-Transport-Security: max-age=31536000`, when the dashboard serves TLS itself
+
+The page renders Markdown with these rules:
+
+- Raw HTML shows as text.
+- A link can use only `http`, `https`, or `mailto`.
+- An image can come only from `/api/files/`.
+
+The rules for files:
+
+- The server checks the path at each request.
+- The server sends images, audio, and video with their type.
+- The server sends every other file as an attachment with `Content-Security-Policy: sandbox`.
+
+Other rules:
+
+- The value of a secret card goes only to `.env`.
+- The page stores only the session header value, the theme, the sound choice, and the last page.
+- Event text and message text pass through the redactor.
+
+### HTTPS
+
+- `dashboard.tls_cert` and `dashboard.tls_key` set the certificate. Set both or none.
+- The server loads the files again when they change.
+- `tether doctor` warns when the certificate expires in less than 14 days.
+- The gateway warns at start when the listen address is not loopback, the server uses plain
+  HTTP, and `dashboard.public_url` is empty.
+- Voice notes, Copy, and notifications need HTTPS or `localhost`.
+
+### What stops the agent
+
+- No secret in a file decides access. A session needs a tap in Telegram or on a signed-in page,
+  or a code from `tether dashboard link` in a real terminal.
+- The agent cannot tap a Telegram button. A dashboard card answer needs a session.
+- The hardline rule and the terminal check block `tether dashboard` for the agent.
+- The session hashes are in `state.db`, a protected path. The gate asks before a command uses it.
+
+### Known limits of the dashboard
+
+- In ⚡ Full mode, the agent can add a session row. A script that writes to `state.db` in a way
+  that the gate cannot see can do the same. Full mode already runs any command with no question.
+- Plain HTTP on a LAN or VPN address sends the cookie and the header as clear text.
+- A signed-in device is the owner. Revoke a lost device at once.
+- A dashboard page can approve a pairing code. That person becomes an owner.
 
 ## Self-update
 

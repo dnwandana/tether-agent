@@ -1,7 +1,7 @@
 # Tether Agent
 
 Tether Agent is a personal AI agent in one static Go binary. It works from the terminal, from
-Telegram, and from cron jobs. It runs shell commands, edits files, reads the web, drives a
+Telegram, from an optional web dashboard, and from cron jobs. It runs shell commands, edits files, reads the web, drives a
 browser, keeps a memory, learns skills, and delegates work to subagents.
 
 The agent costs almost nothing when it is idle. Heavy parts start on the first call and stop
@@ -23,7 +23,9 @@ adapters of the coding agents.
 
 ## What it can do
 
-- Chat with you in the terminal (`tether chat`) or in Telegram, with streamed answers and buttons.
+- Chat with you in the terminal (`tether chat`), in Telegram, or in the optional web dashboard,
+  with streamed answers and buttons. The gateway serves the dashboard when `dashboard.enabled`
+  is true. See [Dashboard](Dashboard).
 - Use a model from xAI, OpenAI, Anthropic, OpenRouter, Z.AI, DeepSeek, Moonshot, Alibaba,
   MiniMax, or Ollama Cloud through a preset. A custom entry connects to any compatible
   endpoint, for example a local model server.

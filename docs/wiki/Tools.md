@@ -54,8 +54,9 @@ See [Security](Security#bound-secrets).
 
 ## Turn toolsets on or off
 
-`toolsets.<channel>` sets the toolsets of each channel. The channels are `cli`, `telegram`, and
-`cron`. The default of each channel is `[all]`.
+`toolsets.<channel>` sets the toolsets of each channel. The channels are `cli`, `telegram`,
+`dashboard`, and `cron`. The default of each channel is `[all]`.
+`toolsets.dashboard` is for the web dashboard.
 
 ```yaml
 toolsets:

@@ -22,6 +22,7 @@ repository gives the full rule lists.
 | [Provider keys](#provider-keys) | Sends each API key only to its own host, and keeps it out of errors, exports, and backups. |
 | [Toolsets](Tools#turn-toolsets-on-or-off) | Hides tools from a channel. |
 | [Telegram access](#telegram-access) | Lets only approved users talk to the bot, and only owners answer approvals. |
+| [Dashboard](#dashboard) | Lets only a signed-in device use the web dashboard. A human tap approves each new device. |
 | [The skill guard](#the-skill-guard) | Scans skills for dangerous content. |
 
 ## The approval gate
@@ -698,6 +699,17 @@ covers the credential folders, for example `~/.aws/` and `~/.gnupg/`.
 In the gateway, Tether Agent deletes the files in `~/.tether/cache/media/` and
 `~/.tether/cache/screenshots/` after `media.cache_retention_days`. The default is 7 days.
 
+## Dashboard
+
+The web dashboard is off by default. When it is on, each request needs a session, also on
+loopback. A new device gets a session in one of two ways. You tap Allow in Telegram or on a
+signed-in page, or you run `tether dashboard link` in a terminal on the host.
+
+A session is a cookie plus a header. You can end it with Revoke on the Approvals and security
+page of the dashboard. You limit the network: use loopback or a VPN address. Set
+`dashboard.tls_cert` and `dashboard.tls_key` for HTTPS. See [Dashboard](Dashboard) and the full rules in
+[docs/SECURITY.md](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md).
+
 ## The skill guard
 
 The skill guard scans a skill before the agent uses it. It has 121 threat rules in 12 groups. A
@@ -744,6 +756,7 @@ itself. Refer to [Skills](Skills#the-skill-guard).
 - **A network program that is not on the list does not mark a run.** For example, `python
   fetch.py` does not mark the run as a run with outside content, so `model_guard` does not
   check the later send.
+- **A script can add a dashboard session in Full mode.** In ⚡ Full mode, the agent can write to state.db with no question. Keep the dashboard scope in Guarded mode.
 - **A coding agent can write outside its work folder.** Its permission preset sets which actions
   it asks for. See [Coding agents](#coding-agents).
 
@@ -764,6 +777,9 @@ itself. Refer to [Skills](Skills#the-skill-guard).
     `tools.exclude`.
 11. Send `/mode read-only` in a group topic that members use. The agent then only reads and
     answers there.
+12. Keep `dashboard.enabled: false` when you do not use the dashboard. When it is on, set
+    `dashboard.listen` to a loopback or VPN address, and set `dashboard.tls_cert` and
+    `dashboard.tls_key` for a VPN address.
 
 ```yaml
 approvals:

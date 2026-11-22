@@ -1,10 +1,10 @@
 # Tether Agent
 
 Tether Agent is a personal AI agent in one static Go binary. It works from the CLI, from
-Telegram, and from cron jobs. It has tools for the shell, files, the web, a browser, memory,
-skills, a task list, delegation, MCP servers, and media. It can give coding tasks to Claude
-Code and Codex over the Agent Client Protocol (ACP). With `/goal`, the agent keeps
-working over several turns until a judge model says that the goal is done.
+Telegram, from an optional web dashboard, and from cron jobs. It has tools for the shell, files,
+the web, a browser, memory, skills, a task list, delegation, MCP servers, and media. It can give
+coding tasks to Claude Code and Codex over the Agent Client Protocol (ACP). With `/goal`, the
+agent keeps working over several turns until a judge model says that the goal is done.
 
 The agent uses little CPU and RAM when it is idle. Heavy parts start on the first call and
 stop when they are idle. These parts are the browser, the MCP servers, the media programs, and
@@ -174,7 +174,8 @@ tether skills check
 
 ## Architecture
 
-- One binary has two roles: `gateway` runs Telegram and cron, and `chat` runs the CLI.
+- One binary has two roles: `gateway` runs Telegram, cron, and the optional web dashboard, and
+  `chat` runs the CLI.
 - Both roles share `state.db` (SQLite in WAL mode) in the data folder `~/.tether`.
 - Each agent run is a goroutine: a chat turn, a cron run, a child task, or a review.
 - A run calls a provider (OpenAI, Anthropic, or Responses wire format) with the tools of its
@@ -186,11 +187,17 @@ tether skills check
 
 ## Build from source
 
-You need Go 1.26 or later. The build does not use CGO.
+You need Go 1.26 or later, and Node with npm for the page of the web dashboard. The build does
+not use CGO.
+
+Git keeps no built page. Run `make web` before `make build`. It builds the page from `web/` into
+`internal/dashboard/dist/`, and the binary embeds it. A binary that you build before `make web`
+works, but its dashboard shows only a note.
 
 To install with Go, run `go install github.com/dnwandana/tether-agent/cmd/tether@latest`. That
 binary has the version `dev`. `tether update` then needs `--force`, and `tether doctor` does
-not check for a newer release. Use `make build VERSION=v1.2.3` to set a version.
+not check for a newer release. It also has no dashboard page, because `go install` cannot run
+`make web`. Use `make web` and then `make build VERSION=v1.2.3` to set a version.
 
 ```sh
 make build          # bin/tether
@@ -202,6 +209,10 @@ make test-release   # runs cross and the release checks
 make fuzz           # runs each fuzz target for FUZZTIME (default 30s)
 make startup-check  # checks that the startup takes less than 100 ms
 make soak           # runs the soak test for SOAK_MINUTES (default 5)
+make web            # rebuilds internal/dashboard/dist/ from web/ (needs Node)
+make web-test       # runs the frontend tests (needs Node)
+make web-lint       # runs oxlint and the Prettier check on web/ (needs Node)
+make web-format     # formats web/ with Prettier (needs Node)
 ```
 
 ## Documentation
@@ -209,6 +220,7 @@ make soak           # runs the soak test for SOAK_MINUTES (default 5)
 - [docs/CONFIG.md](docs/CONFIG.md): all configuration keys and their defaults.
 - [docs/TOOLS.md](docs/TOOLS.md): the tools and their toolsets.
 - [docs/SECURITY.md](docs/SECURITY.md): approvals, protected paths, secrets, and redaction.
+- [docs/wiki/Dashboard.md](docs/wiki/Dashboard.md): the web dashboard, its sign-in, and its pages.
 
 ## Credits
 

@@ -10,9 +10,9 @@ Tether Agent has two roles in one binary:
 | Role | Command | What it runs |
 |---|---|---|
 | Chat | `tether chat` | One chat in the terminal. It stops when you quit. |
-| Gateway | `tether gateway` | The Telegram channel and the cron scheduler. It runs until you stop it. |
+| Gateway | `tether gateway` | The Telegram channel, the cron scheduler, and the dashboard (when it is on). It runs until you stop it. |
 
-Only the gateway polls Telegram, runs cron jobs, and runs background `delegate_task` batches.
+Only the gateway polls Telegram, runs cron jobs, serves the dashboard, and runs background `delegate_task` batches.
 A `tether chat` can run next to the gateway. Both use the same `state.db`.
 
 Only one gateway can run for each data dir. The gateway holds a lock on `gateway.lock` and
@@ -146,6 +146,8 @@ When the gateway stops, it tries to finish the running replies first. It does th
    A message that it could not prepare in time, or that comes after the drain, gets this
    reply: `⚠️ Tether Agent stopped before it could read this message. Send it again.`
 
+An open dashboard page keeps its event stream until the drain ends, so it shows the end of the running turn. Then the stream closes. The page reconnects by itself: after 1 s, then with a back-off up to 10 s. It loads the saved messages again, so it shows each answer one time.
+
 On the next start, the gateway continues each reply that it cut, if the cut is recent
 (`agent.resume_freshness_s`, default 3600 seconds; `0` turns this off). It never runs an old
 tool call again. Photos and files in a waiting message are lost, and the agent gets a note
@@ -164,6 +166,7 @@ There are three ways to restart the gateway:
 | From a chat | Send `/restart`. The gateway restarts after the running turns end. |
 | With systemd | `systemctl --user reload tether` (sends `SIGUSR1`), or `systemctl --user restart tether`. |
 | With a signal | `kill -USR1 <pid>` |
+| From the dashboard | Restart the gateway on the System operations page, or send `/restart` in the chat. The page shows "Restarting…" until it reconnects. |
 
 Under systemd, a restart from `/restart` or `SIGUSR1` ends the process with exit code 75, and
 systemd starts it again. Without systemd, the process starts itself again in place.
@@ -299,3 +302,5 @@ log masks secrets. The file rotates at `log.max_size_mb` (default 10) and keeps
 `--log-stderr` sends the log to stderr instead of the file. The systemd unit uses this flag,
 so the log of the service is in the journal (`journalctl --user -u tether`), not in
 `logs/tether.log`. To see more detail for one run, add `--log-level debug`.
+
+The log viewer of the dashboard (System operations) keeps the last 2,000 lines in memory and shows the last 500, with the secrets masked. It works in both log modes, also when the service sends the log to journald. The start notice of the dashboard (`⚠ dashboard: on at …`) is in the same log, at the warn level.
