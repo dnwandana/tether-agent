@@ -109,8 +109,8 @@ func TestBuildLines(t *testing.T) {
 	longErr := strings.Repeat("e", 100)
 	rss := addJob(t, d, "rss", jobState{enabled: true, streak: 3, lastErr: "http 502 from the feed", lastRun: time.Hour})
 	news := addJob(t, d, "news", jobState{enabled: true, streak: 1, lastErr: longErr, lastRun: 10 * time.Minute})
-	addJob(t, d, "backup", jobState{streak: 10, reason: cron.PauseFailures, lastRun: 3 * time.Hour})
-	addJob(t, d, "old", jobState{reason: cron.PauseSchedule})
+	backup := addJob(t, d, "backup", jobState{streak: 10, reason: cron.PauseFailures, lastRun: 3 * time.Hour})
+	old := addJob(t, d, "old", jobState{reason: cron.PauseSchedule})
 	addJob(t, d, "owner-paused", jobState{streak: 2}) // an owner pause: no line
 	addJob(t, d, "ended", jobState{ended: true})      // ended: no line
 	addJob(t, d, "fine", jobState{enabled: true})     // no line
@@ -149,14 +149,14 @@ func TestBuildLines(t *testing.T) {
 	}
 	want := Status{
 		Lines: []Line{
-			{Kind: KindFailing, Name: "news", Count: 1, Detail: strings.Repeat("e", 80) + "…"},
-			{Kind: KindFailing, Name: "rss", Count: 3, Detail: "http 502 from the feed"},
-			{Kind: KindPausedJob, Name: "backup", Count: 10},
-			{Kind: KindBadSchedule, Name: "old"},
-			{Kind: KindHeld, Name: "rss", Age: 2 * time.Hour},
-			{Kind: KindGoal, Name: strings.Repeat("g", 60) + "…", Age: time.Hour},
-			{Kind: KindGoal, Name: "Ship the release", Age: 72 * time.Hour, Detail: "the judge failed 3 times"},
-			{Kind: KindCost, Name: "news", CostUSD: 1.5, Ratio: 3, Age: 30 * time.Minute},
+			{Kind: KindFailing, Name: "news", Count: 1, Detail: strings.Repeat("e", 80) + "…", JobID: news},
+			{Kind: KindFailing, Name: "rss", Count: 3, Detail: "http 502 from the feed", JobID: rss},
+			{Kind: KindPausedJob, Name: "backup", Count: 10, JobID: backup},
+			{Kind: KindBadSchedule, Name: "old", JobID: old},
+			{Kind: KindHeld, Name: "rss", Age: 2 * time.Hour, JobID: rss},
+			{Kind: KindGoal, Name: strings.Repeat("g", 60) + "…", Age: time.Hour, SessionID: "no-session"},
+			{Kind: KindGoal, Name: "Ship the release", Age: 72 * time.Hour, Detail: "the judge failed 3 times", SessionID: s.ID},
+			{Kind: KindCost, Name: "news", CostUSD: 1.5, Ratio: 3, Age: 30 * time.Minute, JobID: news},
 		},
 		RunsOK: 2, RunsTotal: 3, Spend: 0.4,
 	}

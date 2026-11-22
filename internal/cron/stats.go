@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/db"
 )
 
 // ErrJobPaused is the error of RunSoon for a disabled job.
@@ -136,4 +138,40 @@ func ErrorSummary(name, text string) string {
 		}
 	}
 	return rest
+}
+
+// RunsTotal counts the kept cron_runs rows of the job jobID. The Jobs page pages Runs with it.
+func (s *Store) RunsTotal(ctx context.Context, jobID string) (int, error) {
+	var n int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM cron_runs WHERE job_id=?`, jobID).Scan(&n); err != nil {
+		return 0, fmt.Errorf("cron: count runs of job %s: %w", jobID, err)
+	}
+	return n, nil
+}
+
+// CostByJob returns the cost of the cron sessions of each job since since, by job id. It sums
+// messages.cost_usd of the assistant rows of the "cron:<id>" sessions, because cron_runs keeps
+// only the last runs of a job. A job whose calls have no price gets 0.
+func CostByJob(ctx context.Context, d *db.DB, since time.Time) (map[string]float64, error) {
+	rows, err := d.QueryContext(ctx, `SELECT substr(s.session_key, 6), COALESCE(SUM(m.cost_usd), 0)
+		FROM messages m JOIN sessions s ON s.id = m.session_id
+		WHERE s.session_key LIKE 'cron:%' AND m.role = 'assistant' AND m.timestamp >= ?
+		GROUP BY s.session_key`, since.UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("cron: read the cost by job: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]float64{}
+	for rows.Next() {
+		var id string
+		var cost float64
+		if err := rows.Scan(&id, &cost); err != nil {
+			return nil, fmt.Errorf("cron: read the cost by job: %w", err)
+		}
+		out[id] += cost
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cron: read the cost by job: %w", err)
+	}
+	return out, nil
 }

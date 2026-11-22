@@ -156,3 +156,58 @@ func TestHeldStoreHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// HeldList lists both kinds of the last 24 h, newest first, also of a job that is gone.
+func TestHeldList(t *testing.T) {
+	c := fixedNow(2026, 11, 20, 12, 0)
+	s := store(t, c)
+	hs := &HeldStore{DB: s.DB}
+	id := mustCreate(t, s, Job{Name: "digest", Schedule: "30m", Prompt: "x", Enabled: true})
+	now := c.Now()
+	ms := func(d time.Duration) time.Time { return time.UnixMilli(now.Add(-d).UnixMilli()) }
+	orig := heldRow("a3", id, ms(10*time.Minute))
+	orig.Kind, orig.Text, orig.RunID = "original", "🛡️ the full note", 0
+	for _, h := range []HeldSend{
+		heldRow("a1", id, ms(2*time.Hour)),
+		heldRow("a2", id, ms(30*time.Minute)),
+		orig,
+		heldRow("a4", id, ms(25*time.Hour)),      // older than 24 h: not listed
+		heldRow("a5", "gone", ms(5*time.Minute)), // no job row: listed with no name
+	} {
+		if err := hs.Insert(ctx, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.HeldList(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range got {
+		ids = append(ids, r.ID)
+	}
+	if !reflect.DeepEqual(ids, []string{"a5", "a3", "a2", "a1"}) {
+		t.Fatalf("ids %v", ids)
+	}
+	r := got[2]
+	if !r.Created.Equal(ms(30 * time.Minute)) {
+		t.Fatalf("created %v", r.Created)
+	}
+	r.Created = time.Time{}
+	want := HeldRow{ID: "a2", Kind: "hold", JobID: id, JobName: "digest", Target: "telegram:-100:7",
+		TargetTitle: "Pricing team", Text: "the report", Reason: "the run read pastebin.com",
+		Sources: []string{"terminal:curl", "web_fetch"}}
+	if !reflect.DeepEqual(r, want) {
+		t.Fatalf("got  %+v\nwant %+v", r, want)
+	}
+	if got[0].JobName != "" || got[0].JobID != "gone" || got[1].Kind != "original" || got[1].Text != "🛡️ the full note" {
+		t.Fatalf("%+v %+v", got[0], got[1])
+	}
+	// The rows are closed: the next query does not wait for the one connection.
+	if _, err := s.List(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store(t, c).HeldList(ctx, now); err != nil || len(got) != 0 {
+		t.Fatalf("an empty table: %v %v", got, err)
+	}
+}

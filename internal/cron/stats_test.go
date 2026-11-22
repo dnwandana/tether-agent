@@ -165,3 +165,63 @@ func TestErrorSummary(t *testing.T) {
 		}
 	}
 }
+
+// RunsTotal counts the kept runs of one job, for the paging of Runs.
+func TestRunsTotal(t *testing.T) {
+	c := fixedNow(2026, 11, 20, 10, 0)
+	s := store(t, c)
+	for i := range 3 {
+		addRun(t, s, "a", "ok", DeliverySent, "x", c.t.Add(-time.Duration(i+1)*time.Hour), nil, nil, false)
+	}
+	addRun(t, s, "b", "error", DeliveryNone, "y", c.t.Add(-time.Hour), nil, nil, false)
+	for _, tc := range []struct {
+		job  string
+		want int
+	}{{"a", 3}, {"b", 1}, {"none", 0}} {
+		if n, err := s.RunsTotal(ctx, tc.job); err != nil || n != tc.want {
+			t.Errorf("%s: got %d %v, want %d", tc.job, n, err, tc.want)
+		}
+	}
+}
+
+// CostByJob sums the priced assistant rows of the cron sessions of each job since a time.
+func TestCostByJob(t *testing.T) {
+	c := fixedNow(2026, 11, 20, 10, 0)
+	s := store(t, c)
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := s.DB.ExecContext(ctx, q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO sessions (id, session_key, source) VALUES
+		('s1', 'cron:a', 'cron'), ('s2', 'cron:a', 'cron'), ('s3', 'cron:b', 'cron'),
+		('s4', 'telegram:dm:5', 'telegram'), ('s5', 'cron:c', 'cron')`)
+	at := func(d time.Duration) int64 { return c.t.Add(-d).UnixMilli() }
+	msg := func(sid, role string, cost any, ts int64) {
+		exec(`INSERT INTO messages (session_id, role, cost_usd, model, timestamp) VALUES (?, ?, ?, 'm', ?)`,
+			sid, role, cost, ts)
+	}
+	msg("s1", "assistant", 0.25, at(time.Hour))
+	msg("s2", "assistant", 0.5, at(2*time.Hour))
+	msg("s2", "assistant", nil, at(2*time.Hour))    // no price: adds 0
+	msg("s2", "user", 3.0, at(2*time.Hour))         // not an assistant row
+	msg("s1", "assistant", 4.0, at(8*24*time.Hour)) // before since
+	msg("s3", "assistant", 0.125, at(time.Hour))
+	msg("s4", "assistant", 9.0, at(time.Hour)) // not a cron session
+	msg("s5", "assistant", nil, at(time.Hour)) // only calls with no price
+	got, err := CostByJob(ctx, s.DB, c.t.Add(-7*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]float64{"a": 0.75, "b": 0.125, "c": 0}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got, err := CostByJob(ctx, s.DB, c.t); err != nil || len(got) != 0 {
+		t.Fatalf("no row since now: %v %v", got, err)
+	}
+	// The rows are closed: the next query does not wait for the one connection.
+	if _, err := s.List(ctx); err != nil {
+		t.Fatal(err)
+	}
+}

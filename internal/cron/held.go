@@ -75,6 +75,19 @@ func (s *HeldStore) Claim(ctx context.Context, id string) (HeldSend, bool, error
 	return rows[0], true, nil
 }
 
+// Get returns the row id with no change. ok is false when no row has the id.
+func (s *HeldStore) Get(ctx context.Context, id string) (HeldSend, bool, error) {
+	rows, err := s.claim(ctx, `SELECT id, kind, job_id, run_id, target, target_title, text, reason, sources,
+		card_chat, card_msg_id, created_at FROM held_sends WHERE id = ?`, id)
+	if err != nil {
+		return HeldSend{}, false, fmt.Errorf("cron: read held send %s: %w", id, err)
+	}
+	if len(rows) == 0 {
+		return HeldSend{}, false, nil
+	}
+	return rows[0], true, nil
+}
+
 // Restore puts a claimed row back with the same id.
 //
 // A tap can claim a hold row, and the run row can be written before the tap puts the row
@@ -163,6 +176,51 @@ func (s *HeldStore) Holds(ctx context.Context, since time.Time) ([]HeldLine, err
 	return out, nil
 }
 
+// heldLife is the age at which the sweep of the scheduler ends a held row. App.sweepHeld uses
+// the same value (heldExpiry in internal/app/cron_outbound.go).
+const heldLife = 24 * time.Hour
+
+// HeldRow is one held send for the Jobs page. JobName is "" when the job does not exist.
+type HeldRow struct {
+	ID                                                      string
+	Kind, JobID, JobName, Target, TargetTitle, Text, Reason string
+	Sources                                                 []string
+	Created                                                 time.Time
+}
+
+// HeldList returns the held sends of both kinds that were created in the 24 h before now,
+// newest first. It reads and closes all rows before it returns, because state.db has one
+// connection.
+func (s *Store) HeldList(ctx context.Context, now time.Time) ([]HeldRow, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT h.id, h.kind, h.job_id, COALESCE(j.name, ''), h.target,
+		h.target_title, h.text, h.reason, h.sources, h.created_at
+		FROM held_sends h LEFT JOIN cron_jobs j ON j.id = h.job_id
+		WHERE h.created_at >= ? ORDER BY h.created_at DESC, h.id`, now.Add(-heldLife).UnixMilli())
+	if err != nil {
+		return nil, fmt.Errorf("cron: read the held sends: %w", err)
+	}
+	defer rows.Close()
+	var out []HeldRow
+	for rows.Next() {
+		var r HeldRow
+		var src string
+		var ms int64
+		if err := rows.Scan(&r.ID, &r.Kind, &r.JobID, &r.JobName, &r.Target, &r.TargetTitle, &r.Text,
+			&r.Reason, &src, &ms); err != nil {
+			return nil, fmt.Errorf("cron: read the held sends: %w", err)
+		}
+		if err := json.Unmarshal([]byte(src), &r.Sources); err != nil {
+			return nil, fmt.Errorf("cron: read the held sends: sources of %s: %w", r.ID, err)
+		}
+		r.Created = time.UnixMilli(ms)
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("cron: read the held sends: %w", err)
+	}
+	return out, nil
+}
+
 // SetCard records the chat and the message of the owner card of the row id.
 func (s *HeldStore) SetCard(ctx context.Context, id, chat string, msgID int) error {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE held_sends SET card_chat = ?, card_msg_id = ? WHERE id = ?`,
@@ -172,7 +230,7 @@ func (s *HeldStore) SetCard(ctx context.Context, id, chat string, msgID int) err
 	return nil
 }
 
-// claim runs a DELETE RETURNING statement. It reads and closes all rows before it returns,
+// claim runs a DELETE RETURNING statement or a SELECT of the same columns. It reads and closes all rows before it returns,
 // because state.db has one connection.
 func (s *HeldStore) claim(ctx context.Context, query string, arg any) ([]HeldSend, error) {
 	rows, err := s.DB.QueryContext(ctx, query, arg)

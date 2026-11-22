@@ -59,6 +59,11 @@ type Line struct {
 	Age time.Duration
 	// CostUSD and Ratio are the cost of a flagged run and the cost divided by the stored median.
 	CostUSD, Ratio float64
+	// JobID is the id of the job of a job line, a held line, or a cost line. It is "" for a
+	// goal line.
+	JobID string
+	// SessionID is the id of the session of a goal line. It is "" for the other lines.
+	SessionID string
 }
 
 // Status is the status as data.
@@ -88,17 +93,17 @@ func Build(ctx context.Context, d Deps, historyOff bool, now time.Time) (Status,
 	for _, j := range sorted {
 		if j.Enabled && j.FailStreak > 0 {
 			st.Lines = append(st.Lines, Line{Kind: KindFailing, Name: j.Name, Count: j.FailStreak,
-				Detail: cron.TruncateRunes(cron.ErrorSummary(j.Name, j.LastError), detailMax)})
+				Detail: cron.TruncateRunes(cron.ErrorSummary(j.Name, j.LastError), detailMax), JobID: j.ID})
 		}
 	}
 	for _, j := range sorted {
 		if j.PauseReason == cron.PauseFailures {
-			st.Lines = append(st.Lines, Line{Kind: KindPausedJob, Name: j.Name, Count: j.FailStreak})
+			st.Lines = append(st.Lines, Line{Kind: KindPausedJob, Name: j.Name, Count: j.FailStreak, JobID: j.ID})
 		}
 	}
 	for _, j := range sorted {
 		if j.PauseReason == cron.PauseSchedule {
-			st.Lines = append(st.Lines, Line{Kind: KindBadSchedule, Name: j.Name})
+			st.Lines = append(st.Lines, Line{Kind: KindBadSchedule, Name: j.Name, JobID: j.ID})
 		}
 	}
 
@@ -108,7 +113,7 @@ func Build(ctx context.Context, d Deps, historyOff bool, now time.Time) (Status,
 			return Status{}, fmt.Errorf("brief: read the held sends: %w", err)
 		}
 		for _, h := range holds {
-			st.Lines = append(st.Lines, Line{Kind: KindHeld, Name: h.JobName, Age: now.Sub(h.CreatedAt)})
+			st.Lines = append(st.Lines, Line{Kind: KindHeld, Name: h.JobName, Age: now.Sub(h.CreatedAt), JobID: h.JobID})
 		}
 	}
 
@@ -148,7 +153,8 @@ func Build(ctx context.Context, d Deps, historyOff bool, now time.Time) (Status,
 					return Status{}, fmt.Errorf("brief: read the goal session: %w", err)
 				}
 			}
-			gl = append(gl, Line{Kind: KindGoal, Name: name, Age: age, Detail: cron.TruncateRunes(reason, detailMax)})
+			gl = append(gl, Line{Kind: KindGoal, Name: name, Age: age, Detail: cron.TruncateRunes(reason, detailMax),
+				SessionID: g.SessionID})
 		}
 		sort.SliceStable(gl, func(i, k int) bool { return gl[i].Age < gl[k].Age })
 		st.Lines = append(st.Lines, gl...)
@@ -163,7 +169,7 @@ func Build(ctx context.Context, d Deps, historyOff bool, now time.Time) (Status,
 			continue
 		}
 		st.Lines = append(st.Lines, Line{Kind: KindCost, Name: r.JobName, CostUSD: r.CostUSD,
-			Ratio: r.CostUSD / r.CostMedian, Age: now.Sub(r.At)})
+			Ratio: r.CostUSD / r.CostMedian, Age: now.Sub(r.At), JobID: r.JobID})
 	}
 
 	if historyOff {
