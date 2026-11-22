@@ -153,7 +153,10 @@ func TestSecurityDocCoversTopics(t *testing.T) {
 		"exec_secrets", "TMP_SECRET_", "«PYPI_TOKEN»", "request_secret", "/secrets set",
 		"human_only_stage_credential", "git ls-files", "outbound.private_chats", "Send redacted",
 		"model_guard", "outbound.guard_provider", "draft_only", "held_sends", "untrusted_tool_result",
-		"git commit -a"} {
+		"git commit -a",
+		"dashboard", "tether_dashboard_hardline", "tether dashboard link", "X-Tether-Session",
+		"tether_dash", "dashboard.trusted_proxies", "dashboard.allowed_hosts", "dashboard.tls_cert",
+		"Content-Security-Policy: sandbox"} {
 		if !strings.Contains(string(b), s) {
 			t.Fatal("SECURITY.md misses", s)
 		}

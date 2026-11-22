@@ -72,7 +72,8 @@ func TestDefaultsMatchSpec(t *testing.T) {
 
 func TestDefaultExtraKeys(t *testing.T) {
 	c := Default()
-	eq(t, len(c.Toolsets), 4)
+	eq(t, len(c.Toolsets), 5)
+	eq(t, c.Toolsets["dashboard"][0], "all")
 	eq(t, strings.Join(c.Toolsets["member"], ","), "web,ask,todo")
 	eq(t, c.Toolsets["cli"][0], "all")
 	eq(t, c.Toolsets["cron"][0], "all")
@@ -315,5 +316,111 @@ func TestValidateGoals(t *testing.T) {
 		if err := c.Validate(); err != nil {
 			t.Fatalf("judge_provider %q must be valid: %v", name, err)
 		}
+	}
+}
+
+func TestDashboardDefaults(t *testing.T) {
+	d := Default().Dashboard
+	eq(t, d.Enabled, false)
+	eq(t, d.Listen, "127.0.0.1:8787")
+	eq(t, d.PublicURL, "")
+	eq(t, d.SessionHours, 24)
+	eq(t, d.MaxUploadMB, 20)
+	eq(t, d.TLSCert, "")
+	eq(t, d.TLSKey, "")
+	eq(t, len(d.TrustedProxies), 0)
+	eq(t, len(d.AllowedHosts), 0)
+	if err := d.Check(); err != nil {
+		t.Fatal("the default must pass the check:", err)
+	}
+}
+
+func TestDashboardCheck(t *testing.T) {
+	const wild = "is a wildcard address. Set dashboard.public_url or dashboard.allowed_hosts, because no browser sends this host"
+	for _, c := range []struct {
+		name string
+		edit func(d *DashboardConfig)
+		want string
+	}{
+		{"no port", func(d *DashboardConfig) { d.Listen = "8787" }, `dashboard.listen "8787" is not a host:port address`},
+		{"bad port", func(d *DashboardConfig) { d.Listen = "127.0.0.1:http" },
+			`dashboard.listen "127.0.0.1:http" has no port number from 0 to 65535`},
+		{"big port", func(d *DashboardConfig) { d.Listen = "127.0.0.1:70000" },
+			`dashboard.listen "127.0.0.1:70000" has no port number from 0 to 65535`},
+		{"wildcard v4", func(d *DashboardConfig) { d.Listen = "0.0.0.0:8787" }, "dashboard.listen 0.0.0.0:8787 " + wild},
+		{"wildcard v6", func(d *DashboardConfig) { d.Listen = "[::]:8787" }, "dashboard.listen [::]:8787 " + wild},
+		{"wildcard empty", func(d *DashboardConfig) { d.Listen = ":8787" }, "dashboard.listen :8787 " + wild},
+		{"public url no scheme", func(d *DashboardConfig) { d.PublicURL = "agent.example.com" },
+			`dashboard.public_url "agent.example.com" must be an http or https URL with a host and no path`},
+		{"public url path", func(d *DashboardConfig) { d.PublicURL = "https://agent.example.com/tether" },
+			`dashboard.public_url "https://agent.example.com/tether" must be an http or https URL with a host and no path`},
+		{"hours 0", func(d *DashboardConfig) { d.SessionHours = 0 }, "dashboard.session_hours must be from 1 to 720, not 0"},
+		{"hours 721", func(d *DashboardConfig) { d.SessionHours = 721 }, "dashboard.session_hours must be from 1 to 720, not 721"},
+		{"upload 0", func(d *DashboardConfig) { d.MaxUploadMB = 0 }, "dashboard.max_upload_mb must be 1 or more, not 0"},
+		{"cert only", func(d *DashboardConfig) { d.TLSCert = "/c.pem" }, "dashboard.tls_cert and dashboard.tls_key must be set together"},
+		{"key only", func(d *DashboardConfig) { d.TLSKey = "/k.pem" }, "dashboard.tls_cert and dashboard.tls_key must be set together"},
+		{"proxy star", func(d *DashboardConfig) { d.TrustedProxies = []string{"*"} },
+			`dashboard.trusted_proxies: "*" is not permitted. Name each proxy address`},
+		{"proxy all v4", func(d *DashboardConfig) { d.TrustedProxies = []string{"10.0.0.1", "0.0.0.0/0"} },
+			`dashboard.trusted_proxies: "0.0.0.0/0" is not permitted. Name each proxy address`},
+		{"proxy all v6", func(d *DashboardConfig) { d.TrustedProxies = []string{"::/0"} },
+			`dashboard.trusted_proxies: "::/0" is not permitted. Name each proxy address`},
+		{"proxy name", func(d *DashboardConfig) { d.TrustedProxies = []string{"proxy.lan"} },
+			`dashboard.trusted_proxies: "proxy.lan" is not an IP address or a CIDR range`},
+	} {
+		d := Default().Dashboard
+		c.edit(&d)
+		if err := d.Check(); err == nil || err.Error() != c.want {
+			t.Errorf("%s: got %v, want %q", c.name, err, c.want)
+		}
+	}
+	for name, edit := range map[string]func(d *DashboardConfig){
+		"wildcard and public url": func(d *DashboardConfig) {
+			d.Listen, d.PublicURL = "0.0.0.0:8787", "https://agent.example.com/"
+		},
+		"wildcard and hosts": func(d *DashboardConfig) {
+			d.Listen, d.AllowedHosts = ":8787", []string{"agent.tail1234.ts.net"}
+		},
+		"vpn address":  func(d *DashboardConfig) { d.Listen = "10.8.0.1:8787" },
+		"random port":  func(d *DashboardConfig) { d.Listen = "127.0.0.1:0" },
+		"tls":          func(d *DashboardConfig) { d.TLSCert, d.TLSKey = "/c.pem", "/k.pem" },
+		"proxies":      func(d *DashboardConfig) { d.TrustedProxies = []string{"10.0.0.1", "192.168.0.0/16", "::1"} },
+		"hours limits": func(d *DashboardConfig) { d.SessionHours = 720 },
+		"hours one":    func(d *DashboardConfig) { d.SessionHours = 1 },
+	} {
+		d := Default().Dashboard
+		edit(&d)
+		if err := d.Check(); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestDashboardOriginAndTLS(t *testing.T) {
+	d := Default().Dashboard
+	eq(t, d.TLS(), false)
+	eq(t, d.Origin(), "http://127.0.0.1:8787")
+	d.TLSCert = "/c.pem"
+	eq(t, d.TLS(), false)
+	d.TLSKey = "/k.pem"
+	eq(t, d.TLS(), true)
+	eq(t, d.Origin(), "https://127.0.0.1:8787")
+	d.PublicURL = "https://agent.example.com/"
+	eq(t, d.Origin(), "https://agent.example.com")
+}
+
+// A bad dashboard value is never a load error. The gateway checks it and runs without the listener.
+func TestDashboardBadValueLoads(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal+"dashboard:\n  enabled: true\n  listen: nonsense\n  session_hours: 0\n"+
+		"  trusted_proxies: ['*']\n  allowed_hosts: [agent.lan]\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Dashboard.Enabled, true)
+	eq(t, c.Dashboard.Listen, "nonsense")
+	eq(t, c.Dashboard.AllowedHosts[0], "agent.lan")
+	eq(t, c.Dashboard.MaxUploadMB, 20) // default kept
+	if c.Dashboard.Check() == nil {
+		t.Fatal("the check must refuse the values")
 	}
 }

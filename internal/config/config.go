@@ -7,8 +7,12 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -39,6 +43,7 @@ type Config struct {
 	Cron          CronConfig            `yaml:"cron"`
 	Gateway       GatewayConfig         `yaml:"gateway"`
 	Telegram      TelegramConfig        `yaml:"telegram"`
+	Dashboard     DashboardConfig       `yaml:"dashboard"`
 	MCP           MCPConfig             `yaml:"mcp"`
 	ACP           ACPConfig             `yaml:"acp"`
 	Media         MediaConfig           `yaml:"media"`
@@ -427,6 +432,82 @@ type TelegramStreaming struct {
 	FreshFinalAfterS float64 `yaml:"fresh_final_after_s"`
 }
 
+// DashboardConfig sets the web dashboard of the gateway. The gateway checks the values
+// with Check when it starts. A bad value turns the dashboard off. It is not a load error.
+type DashboardConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Listen  string `yaml:"listen"`
+	// PublicURL is the external origin behind a TLS proxy, for example https://agent.example.com.
+	PublicURL string `yaml:"public_url"`
+	// TrustedProxies holds the peers whose X-Forwarded-* headers count: IP addresses or CIDR ranges.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	// AllowedHosts holds more host names that the Host and Origin checks accept.
+	AllowedHosts []string `yaml:"allowed_hosts"`
+	SessionHours int      `yaml:"session_hours"`
+	MaxUploadMB  int      `yaml:"max_upload_mb"`
+	TLSCert      string   `yaml:"tls_cert"`
+	TLSKey       string   `yaml:"tls_key"`
+}
+
+// Check returns the first value of the dashboard config that is not valid, or nil.
+func (c DashboardConfig) Check() error {
+	host, port, err := net.SplitHostPort(c.Listen)
+	if err != nil {
+		return fmt.Errorf("dashboard.listen %q is not a host:port address", c.Listen)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("dashboard.listen %q has no port number from 0 to 65535", c.Listen)
+	}
+	if ip, err := netip.ParseAddr(host); host == "" || (err == nil && ip.IsUnspecified()) {
+		if c.PublicURL == "" && len(c.AllowedHosts) == 0 {
+			return fmt.Errorf("dashboard.listen %s is a wildcard address. Set dashboard.public_url or dashboard.allowed_hosts, because no browser sends this host", c.Listen)
+		}
+	}
+	if c.PublicURL != "" {
+		u, err := url.Parse(c.PublicURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || (u.Path != "" && u.Path != "/") {
+			return fmt.Errorf("dashboard.public_url %q must be an http or https URL with a host and no path", c.PublicURL)
+		}
+	}
+	if c.SessionHours < 1 || c.SessionHours > 720 {
+		return fmt.Errorf("dashboard.session_hours must be from 1 to 720, not %d", c.SessionHours)
+	}
+	if c.MaxUploadMB < 1 {
+		return fmt.Errorf("dashboard.max_upload_mb must be 1 or more, not %d", c.MaxUploadMB)
+	}
+	if (c.TLSCert == "") != (c.TLSKey == "") {
+		return fmt.Errorf("dashboard.tls_cert and dashboard.tls_key must be set together")
+	}
+	for _, p := range c.TrustedProxies {
+		if p == "*" {
+			return fmt.Errorf("dashboard.trusted_proxies: %q is not permitted. Name each proxy address", p)
+		}
+		if pre, err := netip.ParsePrefix(p); err == nil {
+			if pre.Bits() == 0 {
+				return fmt.Errorf("dashboard.trusted_proxies: %q is not permitted. Name each proxy address", p)
+			}
+		} else if _, err := netip.ParseAddr(p); err != nil {
+			return fmt.Errorf("dashboard.trusted_proxies: %q is not an IP address or a CIDR range", p)
+		}
+	}
+	return nil
+}
+
+// TLS reports whether the dashboard serves HTTPS with its own certificate files.
+func (c DashboardConfig) TLS() bool { return c.TLSCert != "" && c.TLSKey != "" }
+
+// Origin returns the origin that a browser uses: PublicURL with no trailing "/" when it is
+// set, else "https://" or "http://" and Listen.
+func (c DashboardConfig) Origin() string {
+	if c.PublicURL != "" {
+		return strings.TrimRight(c.PublicURL, "/")
+	}
+	if c.TLS() {
+		return "https://" + c.Listen
+	}
+	return "http://" + c.Listen
+}
+
 // MCPConfig holds the MCP servers by name.
 type MCPConfig struct {
 	Servers map[string]MCPServer `yaml:"servers"`
@@ -702,10 +783,11 @@ func Default() Config {
 			JudgeChars:                GoalsJudgeChars{Goal: 2000, Response: 4000, Contract: 2500, Subgoal: 2000, Todo: 2000, Process: 120},
 		},
 		Toolsets: map[string][]string{
-			"cli":      {"all"},
-			"telegram": {"all"},
-			"cron":     {"all"},
-			"member":   {"web", "ask", "todo"},
+			"cli":       {"all"},
+			"telegram":  {"all"},
+			"dashboard": {"all"},
+			"cron":      {"all"},
+			"member":    {"web", "ask", "todo"},
 		},
 		Cron: CronConfig{
 			MaxParallelJobs:       2,
@@ -763,6 +845,7 @@ func Default() Config {
 			StatusIntervalS:         1.5,
 			PairingCodeTTLS:         3600,
 		},
+		Dashboard: DashboardConfig{Listen: "127.0.0.1:8787", SessionHours: 24, MaxUploadMB: 20},
 		MCP: MCPConfig{
 			Servers: map[string]MCPServer{},
 		},

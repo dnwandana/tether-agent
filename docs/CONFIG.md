@@ -332,9 +332,9 @@ See "The child environment" in [SECURITY.md](SECURITY.md).
 
 | Key | Default | Effect |
 |---|---|---|
-| `toolsets.<name>` | `[all]` | The toolsets that the channel `<name>` can use. The channels are `cli`, `telegram`, and `cron`. `member` is not a channel: it limits the turns of a member. The value `all` gives every toolset. |
+| `toolsets.<name>` | `[all]` | The toolsets that the channel `<name>` can use. The channels are `cli`, `telegram`, `dashboard`, and `cron`. `member` is not a channel: it limits the turns of a member. The value `all` gives every toolset. |
 
-The default is `cli: [all]`, `telegram: [all]`, `cron: [all]`, and `member: [web, ask, todo]`.
+The default is `cli: [all]`, `telegram: [all]`, `dashboard: [all]`, `cron: [all]`, and `member: [web, ask, todo]`.
 A cron job or a child run can only make its channel set smaller.
 
 A member is a sender that only `telegram.group_allowed_chats` admits. A member turn gets the
@@ -450,6 +450,23 @@ the variable and the key, and the key gives the value.
 | `telegram.menu_max_commands` | `60` | The maximum number of entries in the bot menu. The count includes the 27 built-in commands. The minimum is 22. A value below 27 shows all built-in commands and no skill commands. The maximum is 100. |
 | `telegram.status_interval_s` | `1.5` | The minimum time between two edits of the tool status message, in seconds. The value must be above 0. The maximum is 2592000. |
 | `telegram.pairing_code_ttl_s` | `3600` | The time until a pairing code of the bot expires, in seconds. `tether pairing` and `tether setup` always use 3600. The minimum is 1. The maximum is 2592000. |
+
+## dashboard
+
+| Key | Default | Effect |
+|---|---|---|
+| `dashboard.enabled` | `false` | When `true`, the gateway serves the web dashboard. `tether chat` never serves it. |
+| `dashboard.listen` | `127.0.0.1:8787` | The listen address. Any address works. Limit the access with the network: a VPN, a firewall, or a proxy. A wildcard address (`0.0.0.0`, `[::]`, or `:8787`) needs `dashboard.public_url` or `dashboard.allowed_hosts`. |
+| `dashboard.tls_cert` | `""` | A PEM certificate file. With `dashboard.tls_key`, the dashboard serves HTTPS. The gateway loads the file again when it changes. |
+| `dashboard.tls_key` | `""` | The PEM key file of `dashboard.tls_cert`. Set both keys or none. |
+| `dashboard.public_url` | `""` | The external origin behind a TLS proxy, for example `https://agent.example.com`. It sets the origin check, the `Secure` cookie, and the host of `tether dashboard link`. |
+| `dashboard.trusted_proxies` | `[]` | The IP addresses or CIDR ranges of the proxies whose `X-Forwarded-*` headers count. `*` and `0.0.0.0/0` are not permitted. |
+| `dashboard.allowed_hosts` | `[]` | More host names that the Host and Origin checks accept, for example a MagicDNS name. `localhost`, `127.0.0.1`, and `[::1]` on any port are always accepted. |
+| `dashboard.session_hours` | `24` | The life of a browser session, in hours. The value must be from 1 to 720. |
+| `dashboard.max_upload_mb` | `20` | The upload limit of one message, in MB. The minimum is 1. |
+
+A bad dashboard value does not stop the start. The gateway writes the cause to the log and
+to stderr, and runs with no dashboard. `tether doctor` shows the cause.
 
 ## mcp
 
