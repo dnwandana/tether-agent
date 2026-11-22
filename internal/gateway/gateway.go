@@ -174,6 +174,8 @@ type Gateway struct {
 	// waker wakes the parked goals. Use GoalWaker.
 	waker     *GoalWaker
 	wakerOnce sync.Once
+	// onQueue is the queue hook. Gateway.mu guards it.
+	onQueue func(key string)
 }
 
 // ackMark is the turn, the time, and the slot of the last busy ack of one kind in a session.
@@ -367,6 +369,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 	}
 	p := &pendingTurn{in: in, newRenderer: newRenderer, ready: make(chan struct{})}
 	ks.queue = append(ks.queue, p)
+	g.queueChangedLocked(in.Key)
 	// A built-in or reserved slash text is dropped when it leaves the queue, so it gets no ack.
 	var slot *ackSlot
 	send, turn := false, 0
@@ -389,6 +392,7 @@ func (g *Gateway) acceptMessage(ctx context.Context, in Inbound, newRenderer fun
 			for i, q := range ks.queue {
 				if q == p {
 					ks.queue = append(ks.queue[:i], ks.queue[i+1:]...)
+					g.queueChangedLocked(in.Key)
 					// While the gateway stops, BeginStopping owns the ack.
 					var left ackClose
 					if !g.stopping.Load() {
@@ -467,6 +471,9 @@ func (g *Gateway) dropGoalTurns(key string) int {
 	}
 	clear(ks.queue[len(kept):])
 	ks.queue = kept
+	if n > 0 {
+		g.queueChangedLocked(key)
+	}
 	return n
 }
 
@@ -546,6 +553,7 @@ func (g *Gateway) enqueueTurn(ctx context.Context, key string, p *pendingTurn) e
 		} else {
 			ks.queue = append(ks.queue, p)
 		}
+		g.queueChangedLocked(key)
 		op := g.markerUpsertOp(ks, key)
 		g.mu.Unlock()
 		g.sendMarker(op)
@@ -556,6 +564,79 @@ func (g *Gateway) enqueueTurn(ctx context.Context, key string, p *pendingTurn) e
 	g.start(ctx, p)
 	g.mu.Unlock()
 	return nil
+}
+
+// QueueItem is one message that waits for the key: its kind ("goal", "system", "media",
+// "skill", or "text") and a short preview of its text.
+type QueueItem struct{ Kind, Preview string }
+
+// Queue returns the messages that wait for key, in order. It is a copy, and it does
+// not show the running turn.
+func (g *Gateway) Queue(key string) []QueueItem {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	ks := g.keys[key]
+	if ks == nil {
+		return nil
+	}
+	var out []QueueItem
+	for _, p := range ks.queue {
+		if p.discard || isCommandText(p.in) {
+			continue
+		}
+		out = append(out, queueItem(p))
+	}
+	return out
+}
+
+// OnQueueChange sets the function that gets the key after a message joins or leaves
+// its queue. f runs in a new goroutine, never under the lock of the gateway, so it
+// can call Queue. Two calls can run in any order, so f must not send a queue that it read
+// before a newer call: for example, one worker can read the queue after the last call.
+func (g *Gateway) OnQueueChange(f func(key string)) {
+	g.mu.Lock()
+	g.onQueue = f
+	g.mu.Unlock()
+}
+
+// queueChangedLocked starts the queue hook for key. The caller holds g.mu.
+func (g *Gateway) queueChangedLocked(key string) {
+	if f := g.onQueue; f != nil {
+		go f(key)
+	}
+}
+
+// queueItem returns the kind and the preview of p.
+func queueItem(p *pendingTurn) QueueItem {
+	var it QueueItem
+	text := p.in.Text
+	switch {
+	case p.goalTurn:
+		it.Kind = "goal"
+		if p.goalLine != "" {
+			text = p.goalLine
+		}
+	case p.system:
+		it.Kind = "system"
+	case len(p.in.Images) > 0 || len(p.in.Files) > 0:
+		it.Kind = "media"
+	case p.in.Slash:
+		it.Kind = "skill"
+	default:
+		it.Kind = "text"
+	}
+	for line := range strings.SplitSeq(text, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			text = line
+			break
+		}
+	}
+	text = strings.TrimSpace(text)
+	if r := []rune(text); len(r) > 60 {
+		text = string(r[:60]) + "…"
+	}
+	it.Preview = text
+	return it
 }
 
 // Running returns the state of the running turn of key.
@@ -697,6 +778,7 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 		// p can be a skill command. A steer text is never one.
 		in.Slash = false
 		ks.queue = append([]*pendingTurn{{in: in, newRenderer: p.newRenderer}}, ks.queue...)
+		g.queueChangedLocked(p.in.Key)
 	}
 	// The continuation goes to the end of the queue, after the leftover steer and each
 	// queued sender message. It replaces a goal turn that a wake queued during the step.
@@ -704,6 +786,7 @@ func (g *Gateway) run(ctx context.Context, p *pendingTurn) {
 	// under g.mu. A goal turn has no marker text, so it needs no marker op.
 	if cont != nil && !p.discard && (rs == nil || !rs.stopped) && !g.stopping.Load() {
 		queueGoalTurnLocked(ks, g.goalTurnLocked(ks, p, *cont))
+		g.queueChangedLocked(p.in.Key)
 	}
 	g.next(ctx, p.in.Key, ks)
 	for _, c := range closes {
@@ -734,6 +817,7 @@ func (g *Gateway) next(ctx context.Context, key string, ks *keyState) {
 	for len(ks.queue) > 0 {
 		nx := ks.queue[0]
 		ks.queue = ks.queue[1:]
+		g.queueChangedLocked(key)
 		if isCommandText(nx.in) {
 			nx.discard = true
 			started = append(started, g.releaseAckLocked(nx, NotSentAck))
@@ -955,6 +1039,7 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 	c := &CommandCtx{
 		Deps:    g.Deps,
 		Key:     in.Key,
+		Source:  in.Source,
 		Owner:   in.Owner,
 		Shared:  in.Shared,
 		Session: sess,

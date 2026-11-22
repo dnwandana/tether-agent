@@ -27,6 +27,9 @@ type CommandCtx struct {
 	Deps *Deps
 	// Key is the session key of the caller.
 	Key string
+	// Source is the channel of the caller: "cli", "telegram", or "dashboard". An empty
+	// Source uses the old rule of channel.
+	Source string
 	// Owner is true when the caller is an owner. The CLI is always the owner.
 	Owner bool
 	// Shared is true when all users of the chat or the topic share the session of Key.
@@ -194,8 +197,12 @@ func (c *CommandCtx) reply(format string, args ...any) {
 // interactive reports whether the channel of the caller shows buttons.
 func (c *CommandCtx) interactive() bool { return c.Send != nil }
 
-// channel returns "telegram" for a channel with buttons, else "cli".
+// channel returns Source when it is not empty. Else it returns "telegram" for a channel with
+// buttons, and "cli" for a text-only channel.
 func (c *CommandCtx) channel() string {
+	if c.Source != "" {
+		return c.Source
+	}
 	if c.interactive() {
 		return "telegram"
 	}
@@ -257,6 +264,22 @@ func (c *CommandCtx) ownedOrReply(ctx context.Context, id string) (*sessions.Ses
 		return nil, nil
 	}
 	return s, err
+}
+
+// forkFromUsage is the reply to /fork from with no valid session id.
+const forkFromUsage = "🍴 **Fork from which session?**\nSend `/fork from <id> [title]`."
+
+// sessionArg reads a leading session id of args when c.Source is "dashboard". It
+// returns ok false and args unchanged on another source, or when the first word is not
+// a session id. For an id of another key, it sends the not-found reply and returns a
+// nil session with ok true.
+func (c *CommandCtx) sessionArg(ctx context.Context, args string) (s *sessions.Session, rest string, ok bool, err error) {
+	fields := strings.Fields(args)
+	if c.Source != "dashboard" || len(fields) == 0 || !isSessionID(fields[0]) {
+		return nil, args, false, nil
+	}
+	s, err = c.ownedOrReply(ctx, fields[0])
+	return s, strings.Join(fields[1:], " "), true, err
 }
 
 // messageCount returns the number of messages of the session with the id.
@@ -420,6 +443,27 @@ func fallbackWarning(st provider.FallbackStatus, now time.Time) string {
 }
 
 func cmdRename(ctx context.Context, c *CommandCtx, args string) error {
+	if target, rest, ok, err := c.sessionArg(ctx, args); ok {
+		if err != nil || target == nil {
+			return err
+		}
+		if rest == "" {
+			shown := "none"
+			if target.Title != "" {
+				shown = EscapeMarkdown(target.Title)
+			}
+			c.send(Reply{Text: "✏️ **Title: " + shown + "**\nTo change it, send `/rename <id> <new title>`."})
+			return nil
+		}
+		if err := c.store().Rename(ctx, target.ID, rest); err != nil {
+			return err
+		}
+		if c.Session != nil && c.Session.ID == target.ID {
+			c.Session.Title = rest
+		}
+		c.send(Reply{Text: fmt.Sprintf("✏️ **Renamed to \"%s\"**", sessionTitle(rest))})
+		return nil
+	}
 	title := strings.Join(strings.Fields(args), " ")
 	if title == "" {
 		// Only show the title. A command that shows help must not create a session.
@@ -442,10 +486,15 @@ func cmdRename(ctx context.Context, c *CommandCtx, args string) error {
 	return nil
 }
 
-func cmdArchive(ctx context.Context, c *CommandCtx, _ string) error {
-	s, err := c.current(ctx)
-	if err != nil {
+func cmdArchive(ctx context.Context, c *CommandCtx, args string) error {
+	s, _, ok, err := c.sessionArg(ctx, args)
+	if ok && (err != nil || s == nil) {
 		return err
+	}
+	if !ok {
+		if s, err = c.current(ctx); err != nil {
+			return err
+		}
 	}
 	if err := c.store().Archive(ctx, s.ID); err != nil {
 		return err
@@ -866,7 +915,43 @@ func quoteMarkdown(text string) string {
 	return strings.Join(lines, "\n")
 }
 
+// forkFrom copies the session with the id of args, of any key, into the key of c, and
+// makes the copy active. Only the dashboard calls it.
+func forkFrom(ctx context.Context, c *CommandCtx, args string) error {
+	fields := strings.Fields(args)
+	if len(fields) < 2 || !isSessionID(fields[1]) {
+		c.send(Reply{Text: forkFromUsage})
+		return nil
+	}
+	id := fields[1]
+	src, err := c.store().Get(ctx, id)
+	if errors.Is(err, sessions.ErrNotFound) {
+		c.send(Reply{Text: notFoundText(id)})
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	f, err := c.store().ForkInto(ctx, id, c.Key, "dashboard", "owner", strings.Join(fields[2:], " "))
+	if err != nil {
+		return err
+	}
+	// The copy gets no goal row.
+	pauseOldGoal(ctx, c, c.Session)
+	if err := c.store().SetActive(ctx, c.Key, f.ID); err != nil {
+		return err
+	}
+	c.Session = f
+	// The source session is of another key, so a /resume button cannot go back to it.
+	c.send(Reply{Text: fmt.Sprintf("🍴 **Copied to \"%s\"**\nYou are in the copy now. \"%s\" did not change.",
+		sessionTitle(f.Title), sessionTitle(src.Title))})
+	return nil
+}
+
 func cmdFork(ctx context.Context, c *CommandCtx, args string) error {
+	if f := strings.Fields(args); c.Source == "dashboard" && len(f) > 0 && f[0] == "from" {
+		return forkFrom(ctx, c, args)
+	}
 	s, err := c.current(ctx)
 	if err != nil {
 		return err
@@ -945,6 +1030,19 @@ const helpCLI = "📖 **Commands**\n\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
 	"**Setup**\n/jobs · see and control the cron jobs\n/brief · see what needs you\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat\n/secrets · see and save the bound secrets\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
 
+// helpDashboard is the reply to /help on the dashboard. It has /approve and /deny, and it
+// has no /sethome and no /exit.
+const helpDashboard = "📖 **Commands**\n\n" +
+	"**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
+	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n" +
+	"/delete · delete a session\n\n" +
+	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n" +
+	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
+	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
+	"/goal · keep working toward a goal\n/todo · see the task list\n" +
+	"/approve · /deny · answer an approval\n\n" +
+	"**Setup**\n/jobs · see and control the cron jobs\n/brief · see what needs you\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of the dashboard\n/secrets · see and save the bound secrets\n/reload-mcp · reload the MCP servers\n/restart · restart the gateway"
+
 // helpMember is the reply to /help for a member. It lists only the commands that a member
 // can run.
 const helpMember = "📖 **Commands**\n\n" +
@@ -973,7 +1071,10 @@ const helpDescMax = 60
 // skill commands. Another argument gives the normal reply.
 func cmdHelp(_ context.Context, c *CommandCtx, args string) error {
 	text, channel := helpCLI, c.channel()
-	if c.interactive() {
+	switch {
+	case channel == "dashboard":
+		text = helpDashboard
+	case c.interactive():
 		text = helpTelegram
 	}
 	if !c.Owner {

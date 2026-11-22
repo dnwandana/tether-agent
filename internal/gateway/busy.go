@@ -367,6 +367,7 @@ func (g *Gateway) flushBusyText(ctx context.Context, in Inbound, newRenderer fun
 	}
 	p := &pendingTurn{in: in, newRenderer: newRenderer}
 	ks.queue = append(ks.queue, p)
+	g.queueChangedLocked(in.Key)
 	slot, send := g.reserveAckLocked(ks.running, in.Key, ackQueue, 0)
 	p.ack = slot
 	turn := ks.currentTurn()
@@ -428,6 +429,7 @@ func (g *Gateway) steerCommand(ctx context.Context, in Inbound, newRenderer func
 		return func() error { return ErrStopping }
 	}
 	ks.queue = append(ks.queue, &pendingTurn{in: m, newRenderer: newRenderer})
+	g.queueChangedLocked(in.Key)
 	op := g.markerUpsertOp(ks, in.Key)
 	g.mu.Unlock()
 	g.sendMarker(op)
@@ -456,6 +458,9 @@ func (g *Gateway) stopKey(key string) bool {
 	}
 	dropped := ks.queue
 	ks.queue = nil
+	if len(dropped) > 0 {
+		g.queueChangedLocked(key)
+	}
 	var closes []ackClose
 	for _, p := range dropped {
 		p.discard = true
@@ -608,6 +613,7 @@ func (g *Gateway) takeOver(key string, turn, msgID int) (took bool, waiting int,
 		// the start, the drop, or a restart of the new message closes them.
 		moved := &pendingTurn{in: in, newRenderer: cur.newRenderer, steerAcks: takeSteerAcksLocked(rs, drained)}
 		ks.queue = append([]*pendingTurn{moved}, ks.queue...)
+		g.queueChangedLocked(in.Key)
 		waiting++
 	}
 	// A turn that starts now runs no agent. The steer that the stopped turn holds becomes

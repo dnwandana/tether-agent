@@ -16,14 +16,16 @@ func ScopeFor(source, chatID, threadID string) string {
 }
 
 // ModeScope returns the scope of the chat or the topic of s. It reads Source, ChatID, and
-// ThreadID, never the session key. A nil session, a session with no chat, and a cron run
-// give "".
+// ThreadID, never the session key. The dashboard gives "dashboard", because it has one key.
+// A nil session, a session with no chat, and a cron run give "".
 func ModeScope(s *sessions.Session) string {
 	switch {
 	case s == nil:
 		return ""
 	case s.Source == "cli":
 		return "cli"
+	case s.Source == "dashboard":
+		return "dashboard"
 	case s.Source == "telegram" && s.ChatID != "":
 		return ScopeFor(s.Source, s.ChatID, s.ThreadID)
 	}

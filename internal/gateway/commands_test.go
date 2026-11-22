@@ -1978,3 +1978,216 @@ func TestMemberNewSkipsTheReview(t *testing.T) {
 		}
 	}
 }
+
+// helpDashboardWant is the exact /help text of the dashboard.
+const helpDashboardWant = "📖 **Commands**\n\n**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
+	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/delete · delete a session\n\n" +
+	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
+	"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
+	"/goal · keep working toward a goal\n/todo · see the task list\n" +
+	"/approve · /deny · answer an approval\n\n**Setup**\n/jobs · see and control the cron jobs\n/brief · see what needs you\n" +
+	"/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n" +
+	"/mode · set the approval mode of the dashboard\n/secrets · see and save the bound secrets\n" +
+	"/reload-mcp · reload the MCP servers\n/restart · restart the gateway"
+
+func TestChannelFollowsSource(t *testing.T) {
+	for _, c := range []struct {
+		source string
+		send   bool
+		want   string
+	}{
+		{"", false, "cli"},
+		{"", true, "telegram"},
+		{"cli", false, "cli"},
+		{"telegram", true, "telegram"},
+		{"dashboard", true, "dashboard"},
+		{"dashboard", false, "dashboard"},
+	} {
+		cc := &CommandCtx{Source: c.source}
+		if c.send {
+			cc.Send = func(Reply) {}
+		}
+		if got := cc.channel(); got != c.want {
+			t.Errorf("source %q, send %v: got %q, want %q", c.source, c.send, got, c.want)
+		}
+	}
+}
+
+func TestHelpDashboard(t *testing.T) {
+	c, sent := interactiveCtx(t)
+	c.Key, c.Source = "dashboard:owner", "dashboard"
+	run(t, c, "/help")
+	r := lastSent(t, sent)
+	if r.Text != helpDashboardWant || r.Buttons != nil {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	for _, no := range []string{"/sethome", "/reload_mcp", "/exit"} {
+		if strings.Contains(r.Text, no) {
+			t.Errorf("the dashboard help must not show %s", no)
+		}
+	}
+}
+
+// runCommand copies Inbound.Source into the command context, so /help of a dashboard
+// message gets the dashboard text.
+func TestRunCommandFillsSource(t *testing.T) {
+	ctx := context.Background()
+	g, _ := gatewayWithSlowProvider(t, 0)
+	r := &recRenderer{}
+	in := Inbound{Key: "dashboard:owner", Source: "dashboard", ChatID: "owner", SenderID: "owner",
+		Text: "/help", IsText: true, Owner: true}
+	if err := g.Handle(ctx, in, func() Renderer { return r }); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.acks) != 1 || r.acks[0] != helpDashboardWant {
+		t.Fatalf("%q", r.acks)
+	}
+	sess, err := g.Deps.Store.Active(ctx, "dashboard:owner")
+	if err != nil || sess == nil || sess.Source != "dashboard" || sess.ChatID != "owner" {
+		t.Fatalf("%+v %v", sess, err)
+	}
+}
+
+// dashCtx returns a command context of the dashboard key, with buttons and a database.
+func dashCtx(t *testing.T) (*CommandCtx, *[]Reply) {
+	t.Helper()
+	c, _ := cmdCtxDB(t, "dashboard:owner")
+	c.Source = "dashboard"
+	var sent []Reply
+	c.Send = func(r Reply) { sent = append(sent, r) }
+	return c, &sent
+}
+
+func TestForkFromOtherKey(t *testing.T) {
+	ctx := context.Background()
+	c, sent := dashCtx(t)
+	old := titled(t, c, "Dashboard chat", 0)
+	if err := c.Deps.Store.SetActive(ctx, c.Key, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.Session = old
+	tg, _ := c.Deps.Store.Create(ctx, sessions.Session{Key: "telegram:dm:1", Source: "telegram", ChatID: "1",
+		UserID: "1", Title: "Plan the Bali trip"})
+	for range 2 {
+		if _, err := c.Deps.Store.Append(ctx, tg.ID, provider.Message{Role: provider.RoleUser, Content: "x"}, sessions.MessageMeta{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run(t, c, "/fork from "+tg.ID+" Bali on the web")
+	r := lastSent(t, sent)
+	if r.Text != "🍴 **Copied to \"Bali on the web\"**\nYou are in the copy now. \"Plan the Bali trip\" did not change." || r.Buttons != nil {
+		t.Fatalf("got:\n%s\n%+v", r.Text, r.Buttons)
+	}
+	id := active(t, c)
+	f, _ := c.Deps.Store.Get(ctx, id)
+	if id == old.ID || c.Session.ID != id || f.Key != "dashboard:owner" || f.Source != "dashboard" || f.ChatID != "owner" ||
+		f.UserID != "" || f.ParentID != tg.ID {
+		t.Fatalf("%+v", f)
+	}
+	if msgs, _ := c.Deps.Store.Messages(ctx, id); len(msgs) != 2 {
+		t.Fatal(len(msgs))
+	}
+	run(t, c, "/fork from "+tg.ID)
+	if r := lastSent(t, sent); !strings.HasPrefix(r.Text, "🍴 **Copied to \"Plan the Bali trip (fork)\"**\n") {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	for _, bad := range []string{"/fork from", "/fork from x"} {
+		run(t, c, bad)
+		if r := lastSent(t, sent); r.Text != "🍴 **Fork from which session?**\nSend `/fork from <id> [title]`." {
+			t.Fatalf("%s: got:\n%s", bad, r.Text)
+		}
+	}
+	run(t, c, "/fork from 0000000000000abcdef")
+	if r := lastSent(t, sent); r.Text != notFoundText("0000000000000abcdef") {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+// Outside the dashboard, "from <id>" is the title of a normal fork.
+func TestForkFromOnlyOnDashboard(t *testing.T) {
+	ctx := context.Background()
+	c, sent := interactiveCtx(t)
+	c.Source = "telegram"
+	mine := titled(t, c, "Mine", 1)
+	c.Session = mine
+	other, _ := c.Deps.Store.Create(ctx, sessions.Session{Key: "cli:t", Source: "cli", Title: "CLI chat"})
+	run(t, c, "/fork from "+other.ID)
+	if r := lastSent(t, sent); r.Text != "🍴 **Copied to \"from "+other.ID+"\"**\nYou are in the copy now. \"Mine\" did not change." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	f, _ := c.Deps.Store.Get(ctx, active(t, c))
+	if f.ParentID != mine.ID || f.Key != "telegram:dm:1" {
+		t.Fatalf("%+v", f)
+	}
+}
+
+func TestRenameArchiveDeleteByIDOnDashboard(t *testing.T) {
+	ctx := context.Background()
+	c, sent := dashCtx(t)
+	cur := titled(t, c, "Current", 0)
+	if err := c.Deps.Store.SetActive(ctx, c.Key, cur.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.Session = cur
+	other := titled(t, c, "Old notes", 2)
+	run(t, c, "/rename "+other.ID+" Trip   budget")
+	if r := lastSent(t, sent); r.Text != "✏️ **Renamed to \"Trip budget\"**" {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if o, _ := c.Deps.Store.Get(ctx, other.ID); o.Title != "Trip budget" {
+		t.Fatalf("%+v", o)
+	}
+	if s, _ := c.Deps.Store.Get(ctx, cur.ID); s.Title != "Current" || c.Session.ID != cur.ID {
+		t.Fatalf("the active session must not change: %+v", s)
+	}
+	run(t, c, "/rename "+other.ID)
+	if r := lastSent(t, sent); r.Text != "✏️ **Title: Trip budget**\nTo change it, send `/rename <id> <new title>`." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	run(t, c, "/archive "+other.ID)
+	if r := lastSent(t, sent); r.Text != "🗄 **Archived \"Trip budget\"**\nThe session list does not show it now." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if o, _ := c.Deps.Store.Get(ctx, other.ID); !o.Archived {
+		t.Fatal("the session of the id must be archived")
+	}
+	if s, _ := c.Deps.Store.Get(ctx, cur.ID); s.Archived || active(t, c) != cur.ID {
+		t.Fatalf("the active session must stay: %+v", s)
+	}
+	run(t, c, "/delete "+other.ID+" confirm")
+	if _, err := c.Deps.Store.Get(ctx, other.ID); !errors.Is(err, sessions.ErrNotFound) {
+		t.Fatal(err)
+	}
+	// A session of another key is refused.
+	tg, _ := c.Deps.Store.Create(ctx, sessions.Session{Key: "telegram:dm:1", Source: "telegram", Title: "Telegram chat"})
+	for _, cmd := range []string{"/rename " + tg.ID + " x", "/archive " + tg.ID, "/delete " + tg.ID + " confirm"} {
+		run(t, c, cmd)
+		if r := lastSent(t, sent); r.Text != notFoundText(tg.ID) {
+			t.Fatalf("%s: got:\n%s", cmd, r.Text)
+		}
+	}
+	if s, err := c.Deps.Store.Get(ctx, tg.ID); err != nil || s.Title != "Telegram chat" || s.Archived {
+		t.Fatalf("%+v %v", s, err)
+	}
+}
+
+// Outside the dashboard, the id is part of the title, and /archive ignores it.
+func TestRenameArchiveIDOnlyOnDashboard(t *testing.T) {
+	ctx := context.Background()
+	c, _ := interactiveCtx(t)
+	c.Source = "telegram"
+	cur := titled(t, c, "Current", 0)
+	c.Session = cur
+	other := titled(t, c, "Old notes", 0)
+	run(t, c, "/rename "+other.ID+" x")
+	if s, _ := c.Deps.Store.Get(ctx, cur.ID); s.Title != other.ID+" x" {
+		t.Fatalf("%+v", s)
+	}
+	run(t, c, "/archive "+other.ID)
+	if s, _ := c.Deps.Store.Get(ctx, cur.ID); !s.Archived {
+		t.Fatal("/archive acts on the active session")
+	}
+	if o, _ := c.Deps.Store.Get(ctx, other.ID); o.Archived || o.Title != "Old notes" {
+		t.Fatalf("%+v", o)
+	}
+}

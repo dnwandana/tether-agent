@@ -31,6 +31,9 @@ func TestModeScope(t *testing.T) {
 		// A per-user group session and a topic session of the same topic share one scope.
 		{&sessions.Session{Source: "telegram", ChatID: "-100", ThreadID: "7", UserID: "42"}, "telegram:-100:7"},
 		{&sessions.Session{Source: "telegram", ChatID: "-100", ThreadID: "7"}, "telegram:-100:7"},
+		// The dashboard has one key and one scope.
+		{&sessions.Session{Source: "dashboard", Key: "dashboard:owner", ChatID: "owner"}, "dashboard"},
+		{&sessions.Session{Source: "dashboard", Key: "dashboard:owner"}, "dashboard"},
 		// A cron run has no scope.
 		{&sessions.Session{Source: "cron", Kind: "cron", Key: "cron:j1"}, ""},
 		{&sessions.Session{Source: "telegram"}, ""},

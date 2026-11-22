@@ -110,6 +110,7 @@ func (g *Gateway) applyGoalDecision(key, sessionID string, epoch int64, p *pendi
 		return
 	}
 	removeGoalTurnsLocked(g.key(key), sessionID, epoch)
+	g.queueChangedLocked(key)
 	g.mu.Unlock()
 	if res.RetryAfter <= 0 {
 		g.GoalWaker().StopRetry(sessionID)
