@@ -11,6 +11,8 @@ func TestIsPrivateTarget(t *testing.T) {
 	}{
 		{"cli", "cli", "", true},
 		{"local", "local", "", true},
+		{"dashboard", "dashboard", "owner", true},
+		{"dashboard with no chat", "dashboard", "", true},
 		{"owner private chat", "telegram", "42", true},
 		{"member private chat", "telegram", "77", false},
 		{"group", "telegram", "-1009999", false},

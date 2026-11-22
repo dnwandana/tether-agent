@@ -6,11 +6,11 @@ import (
 )
 
 // IsPrivateTarget reports whether a send to chatID of source stays with the owner: the CLI,
-// a local save, a chat id of privateChats, or a private chat for which ownerChat is true.
+// the dashboard, a local save, a chat id of privateChats, or a private chat for which ownerChat is true.
 // A nil ownerChat counts as false.
 func IsPrivateTarget(source, chatID string, ownerChat func(int64) bool, privateChats []string) bool {
 	switch source {
-	case "cli", "local":
+	case "cli", "local", "dashboard":
 		return true
 	case "telegram":
 	default:

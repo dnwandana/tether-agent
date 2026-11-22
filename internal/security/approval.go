@@ -1044,7 +1044,11 @@ func (g *Gate) ClearRemovedAlways(ctx context.Context) error {
 // and Workdir is the folder of the command. Server and ToolName are set for an MCP row.
 type AlwaysRow struct {
 	ID, PatternID, Preview, Workdir, Server, ToolName string
-	CreatedAt                                         time.Time
+	// Via is the wrapper text of the command, for example `bash -c`. Programs are the real
+	// paths of the programs, in command order.
+	Via       string
+	Programs  []string
+	CreatedAt time.Time
 }
 
 // ListAlways returns the stored "Always" answers, newest first. It leaves out
@@ -1053,7 +1057,7 @@ func (g *Gate) ListAlways(ctx context.Context) ([]AlwaysRow, error) {
 	if g.DB == nil {
 		return nil, nil
 	}
-	rows, err := g.DB.QueryContext(ctx, `SELECT id, pattern_id, preview, workdir, server, tool_name, programs, created_at
+	rows, err := g.DB.QueryContext(ctx, `SELECT id, pattern_id, preview, workdir, server, tool_name, via, programs, created_at
 		FROM approval_grants ORDER BY created_at DESC, pattern_id, id`)
 	if err != nil {
 		g.noteDamage(err)
@@ -1065,7 +1069,7 @@ func (g *Gate) ListAlways(ctx context.Context) ([]AlwaysRow, error) {
 		var r AlwaysRow
 		var ms int64
 		var programs string
-		if err := rows.Scan(&r.ID, &r.PatternID, &r.Preview, &r.Workdir, &r.Server, &r.ToolName, &programs, &ms); err != nil {
+		if err := rows.Scan(&r.ID, &r.PatternID, &r.Preview, &r.Workdir, &r.Server, &r.ToolName, &r.Via, &programs, &ms); err != nil {
 			g.noteDamage(err)
 			return nil, fmt.Errorf("approval: read an Always answer: %w", err)
 		}
@@ -1077,6 +1081,7 @@ func (g *Gate) ListAlways(ctx context.Context) ([]AlwaysRow, error) {
 		if IsProtectedPatternID(r.PatternID) {
 			continue
 		}
+		r.Programs = list
 		r.CreatedAt = time.UnixMilli(ms)
 		out = append(out, r)
 	}

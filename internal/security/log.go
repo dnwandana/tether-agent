@@ -3,7 +3,9 @@ package security
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -185,6 +187,11 @@ func (g *Gate) ListLog(ctx context.Context, scope string, all bool, limit int) (
 	if err != nil {
 		return nil, err
 	}
+	return scanLogRows(rows)
+}
+
+// scanLogRows reads all rows into a slice and closes rows.
+func scanLogRows(rows *sql.Rows) ([]LogRow, error) {
 	defer rows.Close()
 	var out []LogRow
 	for rows.Next() {
@@ -198,6 +205,29 @@ func (g *Gate) ListLog(ctx context.Context, scope string, all bool, limit int) (
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ListLogPage returns the rows of scope from offset, newest first, at most limit rows, and
+// the count of all rows of scope. An empty scope means every scope. A nil DB gives nil and 0.
+func (g *Gate) ListLogPage(ctx context.Context, scope string, offset, limit int) ([]LogRow, int, error) {
+	if g.DB == nil {
+		return nil, 0, nil
+	}
+	var total int
+	if err := g.DB.QueryRowContext(ctx, "SELECT count(*) FROM approval_log WHERE (?='' OR scope=?)", scope, scope).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("approval log: count the rows: %w", err)
+	}
+	rows, err := g.DB.QueryContext(ctx, `SELECT at, session_id, scope, kind, tool, server, tool_name, rule, class, decision, source,
+		answer, content_sha256, preview FROM approval_log WHERE (?='' OR scope=?)
+		ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`, scope, scope, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("approval log: read a page: %w", err)
+	}
+	out, err := scanLogRows(rows)
+	if err != nil {
+		return nil, 0, fmt.Errorf("approval log: read a page: %w", err)
+	}
+	return out, total, nil
 }
 
 // PruneLog deletes the rows that are older than before. It returns the number of rows.

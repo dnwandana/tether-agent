@@ -74,3 +74,40 @@ func (g *Gate) SetMode(ctx context.Context, scope, mode string) error {
 	}
 	return nil
 }
+
+// ScopeMode is one row of chat_modes: a scope that is not guarded, its mode, and the time of
+// the last /mode change.
+type ScopeMode struct {
+	Scope, Mode string
+	SetAt       time.Time
+}
+
+// ScopeModes returns the scopes with a read-only or full row, ordered by scope. A nil DB gives
+// nil. It closes the rows before it returns.
+func (g *Gate) ScopeModes(ctx context.Context) ([]ScopeMode, error) {
+	if g == nil || g.DB == nil {
+		return nil, nil
+	}
+	rows, err := g.DB.QueryContext(ctx, "SELECT scope, mode, set_at FROM chat_modes ORDER BY scope")
+	if err != nil {
+		return nil, fmt.Errorf("mode: list the scopes: %w", err)
+	}
+	defer rows.Close()
+	var out []ScopeMode
+	for rows.Next() {
+		var r ScopeMode
+		var at int64
+		if err := rows.Scan(&r.Scope, &r.Mode, &at); err != nil {
+			return nil, fmt.Errorf("mode: list the scopes: %w", err)
+		}
+		if r.Mode != ModeReadOnly && r.Mode != ModeFull {
+			continue
+		}
+		r.SetAt = time.UnixMilli(at)
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("mode: list the scopes: %w", err)
+	}
+	return out, nil
+}

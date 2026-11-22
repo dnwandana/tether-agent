@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -291,5 +293,47 @@ func TestMaskCutDigits(t *testing.T) {
 		if got := maskCutDigits(tc.in); got != tc.want {
 			t.Errorf("%q: got %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// ListLogPage gives one page, newest first, with the total of the filter. "" is every scope.
+func TestListLogPage(t *testing.T) {
+	g := &Gate{DB: openGateDB(t)}
+	for i, scope := range []string{"a", "a", "b", "a", "b"} {
+		if _, err := g.DB.ExecContext(ctx, `INSERT INTO approval_log(at, scope, decision, source, preview)
+			VALUES (?, ?, 'allowed', 'owner', ?)`, int64(i+1), scope, fmt.Sprintf("cmd %d", i+1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		scope         string
+		offset, limit int
+		want          []string
+		total         int
+	}{
+		{"a", 0, 2, []string{"cmd 4", "cmd 2"}, 3},
+		{"a", 2, 2, []string{"cmd 1"}, 3},
+		{"a", 3, 2, nil, 3},
+		{"", 0, 10, []string{"cmd 5", "cmd 4", "cmd 3", "cmd 2", "cmd 1"}, 5},
+		{"c", 0, 10, nil, 0},
+	} {
+		rows, total, err := g.ListLogPage(ctx, c.scope, c.offset, c.limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, r := range rows {
+			got = append(got, r.Preview)
+		}
+		if total != c.total || !slices.Equal(got, c.want) {
+			t.Errorf("%q %d %d: %v %d, want %v %d", c.scope, c.offset, c.limit, got, total, c.want, c.total)
+		}
+	}
+	if rows, total, err := (&Gate{}).ListLogPage(ctx, "", 0, 10); err != nil || rows != nil || total != 0 {
+		t.Fatal(rows, total, err)
+	}
+	// ListLog does not change.
+	if rows, err := g.ListLog(ctx, "b", false, 15); err != nil || len(rows) != 2 || rows[0].Preview != "cmd 5" {
+		t.Fatal(rows, err)
 	}
 }

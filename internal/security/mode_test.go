@@ -1,6 +1,7 @@
 package security
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -109,5 +110,41 @@ func TestModeSeenByOtherGate(t *testing.T) {
 	}
 	if m := chat.ModeOf(ctx, "cli"); m != "" {
 		t.Fatalf("the other gate read %q", m)
+	}
+}
+
+// ScopeModes lists only the scopes with a read-only or full row, by scope, and closes its rows.
+func TestScopeModes(t *testing.T) {
+	g := &Gate{DB: openGateDB(t)}
+	before := time.Now().Add(-time.Second)
+	for scope, mode := range map[string]string{"telegram:5:0": ModeReadOnly, "dashboard": ModeFull, "cli": ModeGuarded} {
+		if err := g.SetMode(ctx, scope, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := g.DB.ExecContext(ctx, "INSERT INTO chat_modes(scope, mode, set_at) VALUES ('telegram:9:0', 'weird', 5)"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := g.ScopeModes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Scope != "dashboard" || got[0].Mode != ModeFull ||
+		got[1].Scope != "telegram:5:0" || got[1].Mode != ModeReadOnly {
+		t.Fatalf("%+v", got)
+	}
+	for _, r := range got {
+		if r.SetAt.Before(before) || r.SetAt.After(time.Now().Add(time.Second)) {
+			t.Fatalf("set_at of %s: %v", r.Scope, r.SetAt)
+		}
+	}
+	// The rows are closed: a second query on the one connection does not wait.
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if m, err := g.ModeCheck(qctx, "dashboard"); err != nil || m != ModeFull {
+		t.Fatal(m, err)
+	}
+	if rows, err := (&Gate{}).ScopeModes(ctx); err != nil || rows != nil {
+		t.Fatal(rows, err)
 	}
 }

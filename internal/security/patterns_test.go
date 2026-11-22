@@ -45,6 +45,39 @@ func TestHardline(t *testing.T) {
 			t.Fatalf("%s: matched %q", c, p.ID)
 		}
 	}
+	for _, c := range []string{
+		"tether dashboard link",
+		"tether dashboard devices",
+		"tether dashboard signout-all",
+		"tether dashboard",
+		"TETHER Dashboard link",
+		"/usr/local/bin/tether dashboard link",
+		"tether --data-dir ~/.tether dashboard link",
+		"tether --data-dir=/srv/t dashboard signout-all",
+		"tether dashboard --data-dir /srv/t link",
+		"cd /tmp && tether dashboard link",
+		"bash -c 'tether dashboard link'",
+		"sh -c \"tether --data-dir /x dashboard signout-all\"",
+		"script -q -c 'tether dashboard link' /dev/null",
+		"echo y | tether dashboard signout-all",
+	} {
+		p, ok := MatchHardline(c)
+		if !ok || p.ID != "tether_dashboard_hardline" {
+			t.Fatalf("%s: got %q, %v", c, p.ID, ok)
+		}
+	}
+	for _, c := range []string{
+		"echo tether dashboards",
+		"cat ~/.tether/dashboard.md",
+		"tether chat",
+		"tether-dashboard link",
+		"grep dashboard ~/.tether/logs/tether.log",
+		"curl http://127.0.0.1:8787/api/sessions",
+	} {
+		if p, ok := MatchHardline(c); ok {
+			t.Fatalf("%s: matched %q", c, p.ID)
+		}
+	}
 }
 
 func TestDangerous(t *testing.T) {
@@ -100,9 +133,9 @@ func TestPatternIDsUnique(t *testing.T) {
 
 // TestPatternCountsMatchHermes guards the port. Hermes tools/approval.py has
 // 12 HARDLINE_PATTERNS and 56 DANGEROUS_PATTERNS. Tether Agent adds one
-// hardline rule for the skill install commands.
+// hardline rule for the skill install commands and one for the dashboard command.
 func TestPatternCountsMatchHermes(t *testing.T) {
-	if len(HardlinePatterns) != 12+1 || len(DangerousPatterns) != 56 {
+	if len(HardlinePatterns) != 12+2 || len(DangerousPatterns) != 56 {
 		t.Fatalf("hardline %d, dangerous %d", len(HardlinePatterns), len(DangerousPatterns))
 	}
 }

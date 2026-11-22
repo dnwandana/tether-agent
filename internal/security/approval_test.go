@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -172,6 +173,32 @@ func TestSkillsChangeBlockedInEveryMode(t *testing.T) {
 	check("always", g, ApprovalRequest{SessionID: "s", Command: cmd}, p)
 	if p.n != 0 {
 		t.Fatal("the gate asked about a hardline command")
+	}
+}
+
+func TestDashboardCommandBlockedInEveryMode(t *testing.T) {
+	const want = "BLOCKED (hardline): tether dashboard (only the owner runs it, in a terminal)"
+	for _, mode := range []string{"manual", "smart", "off"} {
+		g := newGate(t, mode, "approve")
+		if mode == "smart" {
+			g.Judge = fixedJudge{risky: false}
+		}
+		p := &countingPrompter{answer: ScopeAlways}
+		for _, cmd := range []string{"tether dashboard link", "tether --data-dir /x dashboard signout-all",
+			"bash -c 'tether dashboard link'"} {
+			reason := blockedReason(t, g.Check(ctx, ApprovalRequest{SessionID: "s", Command: cmd}, p))
+			if !strings.HasPrefix(reason, want) {
+				t.Fatalf("%s %s: %q", mode, cmd, reason)
+			}
+		}
+		script := "import os\nos.system('tether dashboard link')"
+		g.approveSession("s", ScriptPatternID)
+		if reason := blockedReason(t, g.CheckScript(ctx, scriptReq("s", script), p)); !strings.Contains(reason, "hardline") {
+			t.Fatalf("%s script: %q", mode, reason)
+		}
+		if p.n != 0 {
+			t.Fatalf("%s: the gate asked about a hardline command", mode)
+		}
 	}
 }
 
@@ -1106,5 +1133,20 @@ func TestRemoveAlwaysClearsRowAndSessionGrants(t *testing.T) {
 	// A gate with no state.db has nothing to remove.
 	if err := (&Gate{}).RemoveAlways(ctx, id); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ListAlways reads the via text and the programs of each row.
+func TestListAlwaysViaPrograms(t *testing.T) {
+	g := &Gate{DB: openGateDB(t)}
+	insertGrant(t, g, "recursive_delete", "x", "/w", "bash -c", `["/usr/bin/rm","/usr/bin/bash"]`, 2000)
+	insertGrant(t, g, "git_force_push", "y", "", "", "[]", 1000)
+	rows, err := g.ListAlways(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Via != "bash -c" || !slices.Equal(rows[0].Programs, []string{"/usr/bin/rm", "/usr/bin/bash"}) ||
+		rows[1].Via != "" || len(rows[1].Programs) != 0 {
+		t.Fatalf("%+v", rows)
 	}
 }

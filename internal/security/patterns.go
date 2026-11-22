@@ -53,8 +53,8 @@ func newPattern(id, desc, src string) Pattern {
 }
 
 // HardlinePatterns are always blocked. No mode, cron setting, or "Always"
-// answer allows them. This is Hermes HARDLINE_PATTERNS, plus the last rule,
-// which is only in Tether Agent.
+// answer allows them. This is Hermes HARDLINE_PATTERNS, plus the last two rules,
+// which are only in Tether Agent.
 var HardlinePatterns = []Pattern{
 	newPattern("recursive_delete_root_filesystem", "recursive delete of root filesystem", `\brm\s+(-[^\s]*\s+)*(/|/\*|/ \*)(\s|$)`),
 	newPattern("recursive_delete_system_directory", "recursive delete of system directory", `\brm\s+(-[^\s]*\s+)*(/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*)(\s|$)`),
@@ -72,6 +72,9 @@ var HardlinePatterns = []Pattern{
 	// The CLI accepts flags before the command word, so flag tokens and their
 	// values can come between "tether", "skills", and the command.
 	newPattern("tether_skills_change_hardline", "tether skills install/update/uninstall (only the owner runs these, in a terminal)", `\btether(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+skills(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+(install|update|uninstall)\b`),
+	// The agent must never sign in a device or end the device sessions of the dashboard. The
+	// CLI accepts flags before and after the command word, as for the skills rule.
+	newPattern("tether_dashboard_hardline", "tether dashboard (only the owner runs it, in a terminal)", `\btether(?:\s+-\S+(?:\s+[^\s-]\S*)?)*\s+dashboard\b`),
 }
 
 // TetherDangerousPatterns are dangerous rules that only Tether Agent has. They
