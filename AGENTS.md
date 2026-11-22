@@ -146,6 +146,35 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
 - `internal/skills/testdata/guard_golden.json` is the output of the Hermes threat patterns.
   No tool regenerates it.
 
+## Docs to sync
+
+A change updates its docs in the same change. A spec has a "Docs" section with one row for each
+place that changes: the file, the `path:line` or the heading, the text today, and the change. Write
+"no change" for each doc family with no hit. Find the places with a search, not from memory:
+
+1. List the terms that the change adds, renames, or removes: commands, flags, config keys, tool
+   names, user-facing texts, file names, and behaviors.
+2. Search each term and the old text of each changed behavior in each doc family below.
+3. Search all tracked files last: `git ls-files | xargs grep -nE '<pattern>'`. For a short term
+   such as `now`, use a pattern with boundaries, for example `(^|[^a-z-])/now\b`.
+4. If the change renames a heading in `docs/wiki/`, search the wiki for links to its anchor
+   (`#<heading-slug>`).
+
+| Doc family | Files | Update it when |
+| --- | --- | --- |
+| README | `README.md` | The feature list, the install, the quick start, or a command example changes. |
+| Agent rules | `AGENTS.md` | The architecture, the message flow, a command, a package rule, or a rule that spans files changes. |
+| Config | `docs/CONFIG.md` | A config key, its default, or a preset changes. |
+| Tools | `docs/TOOLS.md` | A tool changes. Generate it with `go run ./cmd/tether gen-tools-doc`. |
+| Security | `docs/SECURITY.md` | The approval gate, a protected path, a secret, or a sandbox rule changes. |
+| Wiki | `docs/wiki/*.md` | The behavior that a page describes changes. A new page also goes into `_Sidebar.md`. |
+| Help text | `cmd/tether/help.go`, the command table of `gateway.Register`, `helpTelegram` and `helpCLI` in `internal/gateway/commands.go`, the Telegram `BotCommands` | A command, a flag, or its description changes. |
+| Web dashboard | `web/src/` | A command, a setting, or a behavior that the page shows changes. |
+| Text that the agent reads | `internal/agent/base_prompt.md`, `internal/skills/bootstrap/*/SKILL.md` | A tool, a command, or a behavior that the agent tells the user about changes. |
+| Credits | `NOTICE` | The change ports code from Hermes or from another project. |
+
+Code comments change with their code.
+
 ## Writing style
 
 - Write comments, docs, and user-facing strings in ASD-STE100 Simplified Technical English,
