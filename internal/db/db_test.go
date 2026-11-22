@@ -59,7 +59,8 @@ func TestOpenCreatesSchemaAndWAL(t *testing.T) {
 	}
 	for _, tbl := range []string{"sessions", "messages", "messages_fts", "compactions", "cron_jobs",
 		"approval_grants", "pairing", "active_session", "delegation_batches", "kv", "schema_version", "goals",
-		"acp_sessions", "chat_modes", "approval_log", "secret_pins", "held_sends"} {
+		"acp_sessions", "chat_modes", "approval_log", "secret_pins", "held_sends",
+		"dashboard_sessions", "dashboard_codes"} {
 		var n int
 		if err := d.QueryRow("SELECT count(*) FROM sqlite_master WHERE name=?", tbl).Scan(&n); err != nil {
 			t.Fatal(err)
@@ -771,7 +772,7 @@ func TestMigrationCronAttentionFrom012(t *testing.T) {
 		Scan(&cost, &median, &flag); err != nil || cost.Valid || median.Valid || flag != 0 {
 		t.Fatal("an old run has no cost:", cost, median, flag, err)
 	}
-	if v, err := d.SchemaVersion(ctx); err != nil || v != 13 || v != LatestVersion() {
+	if v, err := d.SchemaVersion(ctx); err != nil || v < 13 || v != LatestVersion() {
 		t.Fatal(v, LatestVersion(), err)
 	}
 }
