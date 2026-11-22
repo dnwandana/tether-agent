@@ -2,6 +2,8 @@ module github.com/dnwandana/tether-agent
 
 go 1.26.0
 
+ignore ./web/node_modules
+
 require (
 	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.2
 	github.com/chromedp/cdproto v0.157.8

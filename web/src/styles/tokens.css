@@ -1,0 +1,146 @@
+/* Design tokens of Tether Agent. They come from the mockup. The fonts are system fonts only.
+   No color is set outside this file. */
+
+/* ---------- 1. Tokens ---------- */
+.tt {
+  /* type */
+  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --fs-11: 11px;
+  --lh-11: 16px; /* caption, meta, table header */
+  --fs-12: 12px;
+  --lh-12: 16px; /* status bar, chips, mono code */
+  --fs-13: 13px;
+  --lh-13: 20px; /* dense body, tables */
+  --fs-14: 14px;
+  --lh-14: 20px; /* body, chat text */
+  --fs-16: 16px;
+  --lh-16: 24px; /* card titles, phone body */
+  --fs-20: 20px;
+  --lh-20: 28px; /* page titles */
+  --fs-24: 24px;
+  --lh-24: 32px; /* section display */
+  --fs-32: 32px;
+  --lh-32: 40px; /* hero numbers */
+  /* spacing (4 px base) */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  /* radius */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-pill: 999px;
+  /* control heights */
+  --h-sm: 28px;
+  --h-md: 32px;
+  --h-lg: 36px;
+  --h-touch: 44px;
+}
+
+.theme-dark {
+  --nav-on: #332e28;
+  /* Stone dark: warm stone neutrals, petrol-teal accent */
+  --bg: #151311;
+  --surface-1: #1b1916;
+  --surface-2: #211e1a;
+  --surface-3: #2b2722;
+  --surface-inset: #100e0c;
+  --border: #332e28;
+  --border-strong: #473f36;
+  --text: #ece6dd;
+  --text-2: #bdb4a7;
+  --text-3: #988f82;
+  --text-inv: #151311;
+  --accent: #6cc7be; /* accent text / icons */
+  --accent-strong: #55b8ae; /* accent fills (dark text on it) */
+  --accent-hover: #47a69c;
+  --accent-tint: #173330;
+  --on-accent: #0b1716;
+  --success: #8bcb7e;
+  --success-tint: #1b2a17;
+  --success-line: #3a5a33;
+  --warning: #e3c35a;
+  --warning-tint: #2c2512;
+  --warning-line: #5e4e1e;
+  --danger: #f28e82;
+  --danger-tint: #331a16;
+  --danger-line: #6a3129;
+  --danger-strong: #b83e33;
+  --on-danger: #ffffff;
+  --info: #8cb4e8;
+  --info-tint: #182433;
+  --info-line: #33496a;
+  --new: #6cc7be;
+  --focus: #6cc7be;
+  --seg-on: #473f36;
+  --toast-ok: #2f6b2a;
+  --diff-add: #1b2a17;
+  --diff-add-text: #a9db9e;
+  --diff-del: #3a1d19;
+  --diff-del-text: #f7b3aa;
+  --mark: #4a3d16;
+  --scrim: rgba(8, 7, 6, 0.68);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.theme-light {
+  --on-accent: #ffffff;
+  --seg-on: #ffffff;
+  --toast-ok: #7be0a5;
+  --nav-on: #e3e6eb;
+  --bg: #f3f4f6;
+  --surface-1: #ffffff;
+  --surface-2: #ffffff;
+  --surface-3: #eceef2;
+  --surface-inset: #f7f8fa;
+  --border: #dce0e6;
+  --border-strong: #c3cad4;
+  --text: #12151a;
+  --text-2: #444d5a;
+  --text-3: #5d6674;
+  --text-inv: #ffffff;
+  --accent: #4344c9;
+  --accent-strong: #4344c9;
+  --accent-hover: #3536b0;
+  --accent-tint: #ececfd;
+  --success: #17754b;
+  --success-tint: #e5f4ec;
+  --success-line: #a9d9bf;
+  --warning: #8f5300;
+  --warning-tint: #fcf0db;
+  --warning-line: #ebc888;
+  --danger: #be2626;
+  --danger-tint: #fce8e8;
+  --danger-line: #f0b4b4;
+  --danger-strong: #be2626;
+  --info: #0a5faf;
+  --info-tint: #e4effa;
+  --info-line: #a9cbec;
+  --new: #4344c9;
+  --focus: #4344c9;
+  --diff-add: #e3f5ea;
+  --diff-add-text: #135e3c;
+  --diff-del: #fbe6e6;
+  --diff-del-text: #9e1f1f;
+  --mark: #fbe7a8;
+  --scrim: rgba(18, 21, 26, 0.45);
+  --shadow-sm: 0 1px 2px rgba(18, 21, 26, 0.08);
+  --shadow-md: 0 4px 12px rgba(18, 21, 26, 0.1), 0 1px 2px rgba(18, 21, 26, 0.06);
+  --shadow-lg: 0 16px 40px rgba(18, 21, 26, 0.16), 0 2px 6px rgba(18, 21, 26, 0.08);
+  color-scheme: light;
+  background: var(--bg);
+  color: var(--text);
+}

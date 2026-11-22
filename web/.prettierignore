@@ -1,0 +1,7 @@
+# Prettier ignores node_modules by itself.
+
+package-lock.json
+
+# go run ./cmd/tether gen-dashboard-types writes this file, and a Go test compares it byte for
+# byte with the generator output. Do not format it.
+src/api/types.gen.ts
