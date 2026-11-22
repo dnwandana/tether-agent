@@ -96,6 +96,13 @@ func (in *Installer) Uninstall(ctx context.Context, req UninstallRequest) error 
 		for _, line := range req.CronUsers(name) {
 			in.printf("Cron job %s uses this skill. Its runs will skip it.\n", Sanitize(line))
 		}
+	} else if in.CronUsers != nil {
+		// The line is only a warning, so an error gives no line.
+		if users, err := in.CronUsers(ctx); err == nil {
+			for _, line := range users[name] {
+				in.printf("Cron job %s uses this skill. Its runs will skip it.\n", Sanitize(line))
+			}
+		}
 	}
 
 	if !req.Yes {

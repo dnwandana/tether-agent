@@ -142,6 +142,15 @@ func NewLogger(w io.Writer, level string, r *security.Redactor) *slog.Logger {
 	return slog.New(&redactHandler{inner: inner, r: r})
 }
 
+// NewLoggerRing returns a logger like NewLogger that also keeps each record in ring. The
+// ring gets the redacted record, at the same level as w.
+func NewLoggerRing(w io.Writer, level string, red *security.Redactor, ring *Ring) *slog.Logger {
+	lvl := ParseLevel(level)
+	j := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: lvl})
+	rh := &ringHandler{ring: ring, level: lvl}
+	return slog.New(&redactHandler{inner: fanout{a: j, b: rh}, r: red})
+}
+
 // redactHandler redacts each record before the inner handler writes it.
 type redactHandler struct {
 	inner slog.Handler

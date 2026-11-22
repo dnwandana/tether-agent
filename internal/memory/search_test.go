@@ -322,3 +322,33 @@ func TestSearchMaxHitsFromField(t *testing.T) {
 		t.Fatal(out)
 	}
 }
+
+func TestSearchHits(t *testing.T) {
+	s := open(t)
+	if err := os.WriteFile(filepath.Join(s.dir, "memory.md"), []byte("QuickNode key is in .env"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeSearchFile(t, s, "rpc.md", "---\ntype: memory\nmodified: 2026-11-04T09:12:44Z\n---\n"+
+		"Helius RPC: 1M credits/day\n§\nQuickNode free plan: 10M credits/month")
+	got, err := s.SearchHits("quicknode plan", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []SearchHit{
+		{File: "rpc", Entry: "QuickNode free plan: 10M credits/month", Match: "[QuickNode] free [plan]: 10M credits/month"},
+		{File: "memory.md", Entry: "QuickNode key is in .env", Match: "[QuickNode] key is in .env"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%+v", got)
+	}
+	if got, err := s.SearchHits("quicknode", 1); err != nil || len(got) != 1 {
+		t.Fatalf("the limit: %+v %v", got, err)
+	}
+	if _, err := s.SearchHits(" ,, ", 5); err == nil || err.Error() != "query is required for search; give one or more words" {
+		t.Fatalf("%v", err)
+	}
+	// The text result of the tool does not change.
+	if out := mustSearch(t, s, "quicknode plan"); !strings.HasPrefix(out, "2 matches for \"quicknode plan\":\n1. note rpc (type memory, ") {
+		t.Fatalf("%q", out)
+	}
+}

@@ -33,14 +33,14 @@ func TestSessionInfoFromResponse(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		s    fakeScript
-		want SessionInfo
+		want SessionSetup
 	}{
 		{"modes only", fakeScript{},
-			SessionInfo{ID: "fake-session-1", Modes: claudeModes, CurrentMode: "default"}},
+			SessionSetup{ID: "fake-session-1", Modes: claudeModes, CurrentMode: "default"}},
 		{"mode config", fakeScript{ModeConfig: true, Models: []string{"opus", "sonnet"}},
-			SessionInfo{ID: "fake-session-1", Modes: claudeModes, ModeConfig: true, CurrentMode: "default", Models: []string{"opus", "sonnet"}}},
+			SessionSetup{ID: "fake-session-1", Modes: claudeModes, ModeConfig: true, CurrentMode: "default", Models: []string{"opus", "sonnet"}}},
 		{"grouped modes", fakeScript{ModeConfig: true, ModeGroups: true},
-			SessionInfo{ID: "fake-session-1", Modes: claudeModes, ModeConfig: true, CurrentMode: "default"}},
+			SessionSetup{ID: "fake-session-1", Modes: claudeModes, ModeConfig: true, CurrentMode: "default"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := startFake(t, tc.s)
@@ -56,7 +56,7 @@ func TestSessionInfoFromResponse(t *testing.T) {
 }
 
 // configured starts a session and runs Configure with model and the mode of preset.
-func configured(t *testing.T, s fakeScript, model, preset string) (*Client, SessionInfo, string, string, error) {
+func configured(t *testing.T, s fakeScript, model, preset string) (*Client, SessionSetup, string, string, error) {
 	t.Helper()
 	c, logPath := startFake(t, s)
 	info, err := c.NewSession(context.Background(), t.TempDir())

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -124,6 +125,35 @@ func (h *Health) clear(name, model string) {
 	h.mu.Lock()
 	delete(h.fails, healthKey{name, model})
 	h.mu.Unlock()
+}
+
+// HealthRow is the last failure of one entry and model. SkipUntil is the end of the skip, or
+// the zero time when the skip ended.
+type HealthRow struct {
+	Entry, Model, Cause string
+	FailedAt, SkipUntil time.Time
+}
+
+// Snapshot returns the last failure of each entry and model, sorted by entry, then by model.
+// The dashboard Models page reads it.
+func (h *Health) Snapshot(now time.Time) []HealthRow {
+	h.mu.Lock()
+	out := make([]HealthRow, 0, len(h.fails))
+	for k, f := range h.fails {
+		r := HealthRow{Entry: k.name, Model: k.model, Cause: f.cause, FailedAt: f.at}
+		if until := f.at.Add(h.skip()); until.After(now) {
+			r.SkipUntil = until
+		}
+		out = append(out, r)
+	}
+	h.mu.Unlock()
+	slices.SortFunc(out, func(a, b HealthRow) int {
+		if c := strings.Compare(a.Entry, b.Entry); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Model, b.Model)
+	})
+	return out
 }
 
 // ChainEntry is one entry of a chain. Model is a ":model" pin; "" uses the

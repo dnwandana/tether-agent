@@ -58,7 +58,7 @@ type sessionKey struct{ SessionID, Agent string }
 type entry struct {
 	key     sessionKey
 	client  *Client
-	info    SessionInfo
+	info    SessionSetup
 	cwd     string
 	release func() error // frees the lock file; a second call does nothing
 	broken  bool         // the setup of the ACP session failed; the next call needs a new session
@@ -517,7 +517,7 @@ func (m *Manager) session(ctx context.Context, key sessionKey, a config.ACPAgent
 	if found && rec.CWD == cwd {
 		caps := c.Capabilities()
 		var (
-			info     SessionInfo
+			info     SessionSetup
 			restored string
 			rerr     error
 		)
@@ -676,6 +676,29 @@ func (m *Manager) Busy() []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// SessionInfo is one live coding agent process, for the System page of the dashboard.
+type SessionInfo struct {
+	SessionID, Agent, Cwd string
+	Busy                  bool
+}
+
+// Sessions returns the live processes, sorted by session id and then by agent id.
+func (m *Manager) Sessions() []SessionInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []SessionInfo
+	for _, e := range m.entries {
+		out = append(out, SessionInfo{SessionID: e.key.SessionID, Agent: e.key.Agent, Cwd: e.cwd, Busy: e.client.Busy()})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].SessionID != out[j].SessionID {
+			return out[i].SessionID < out[j].SessionID
+		}
+		return out[i].Agent < out[j].Agent
+	})
+	return out
 }
 
 // dotEnv returns the .env values for a start: the store after a refresh, else DotEnv.

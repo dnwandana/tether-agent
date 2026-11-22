@@ -59,6 +59,23 @@ func (s *Store) Get(ctx context.Context, sessionID string) (State, int64, error)
 	return st, rev, nil
 }
 
+// UpdatedAt returns the time of the last write of the goal row (updated_at, Unix
+// milliseconds). No row gives the zero time.
+func (s *Store) UpdatedAt(ctx context.Context, sessionID string) (time.Time, error) {
+	var ms int64
+	err := s.DB.QueryRowContext(ctx, `SELECT updated_at FROM goals WHERE session_id = ?`, sessionID).Scan(&ms)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("goals: read the update time of session %s: %w", sessionID, err)
+	}
+	if ms == 0 {
+		return time.Time{}, nil
+	}
+	return time.UnixMilli(ms), nil
+}
+
 // Put writes the goal and returns the new revision. An expectedRev of 0 inserts a new row.
 // Another value updates the row only when its revision is still expectedRev. A row that
 // exists on an insert, or a changed or missing row on an update, gives ErrConflict.
@@ -177,6 +194,58 @@ func (s *Store) Paused(ctx context.Context) ([]PausedGoal, error) {
 		if st.Status == StatusPaused {
 			out = append(out, PausedGoal{SessionID: r.id, State: st, UpdatedAt: time.UnixMilli(r.upd)})
 		}
+	}
+	return out, nil
+}
+
+// GoalRow is one goal with the title and the source of its session, for the dashboard list.
+type GoalRow struct {
+	SessionID, Title, Source string
+	State                    State
+	UpdatedAt                time.Time
+}
+
+// ListAll returns the active and paused goals, and the done and cleared goals with an
+// updated_at at or after finishedSince, newest first. It reads and closes all rows before it
+// decodes, because state.db has one connection.
+func (s *Store) ListAll(ctx context.Context, finishedSince time.Time) ([]GoalRow, error) {
+	type row struct {
+		id, raw, title, source string
+		upd                    int64
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT g.session_id, g.state, g.updated_at,
+		COALESCE(s.title, ''), COALESCE(s.source, '')
+		FROM goals g LEFT JOIN sessions s ON s.id = g.session_id
+		ORDER BY g.updated_at DESC, g.session_id`)
+	if err != nil {
+		return nil, fmt.Errorf("goals: list all goals: %w", err)
+	}
+	var all []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.raw, &r.upd, &r.title, &r.source); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("goals: list all goals: %w", err)
+		}
+		all = append(all, r)
+	}
+	err = rows.Err()
+	// state.db has one connection. Close the rows before the next query can need it.
+	rows.Close()
+	if err != nil {
+		return nil, fmt.Errorf("goals: list all goals: %w", err)
+	}
+	var out []GoalRow
+	for _, r := range all {
+		st, err := decodeState(r.raw, s.GateTimeoutS, s.GateMaxRetries)
+		if err != nil {
+			return nil, fmt.Errorf("goals: decode the goal of session %s: %w", r.id, err)
+		}
+		upd := time.UnixMilli(r.upd)
+		if (st.Status == StatusDone || st.Status == StatusCleared) && upd.Before(finishedSince) {
+			continue
+		}
+		out = append(out, GoalRow{SessionID: r.id, Title: r.title, Source: r.source, State: st, UpdatedAt: upd})
 	}
 	return out, nil
 }

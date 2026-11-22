@@ -44,18 +44,17 @@ func (s *Store) Search(query string) (string, error) {
 	return s.SearchMasked(query, nil)
 }
 
-// SearchMasked is Search with mask applied to the entries of memory.md and
-// user_profile.md. A nil mask shows each entry as it is.
-func (s *Store) SearchMasked(query string, mask func(entry string) (string, bool)) (string, error) {
-	words := queryWords(query)
+// rank reads the sources and returns the hits of the query words, best first, with no cap.
+// names, skipped, stop, and unread are the values that the text result of SearchMasked needs.
+func (s *Store) rank(query string) (hits []searchSource, words, names []string, skipped int, stop string, unread []string, err error) {
+	words = queryWords(query)
 	if len(words) == 0 {
-		return "", errors.New("query is required for search; give one or more words")
+		return nil, nil, nil, 0, "", nil, errors.New("query is required for search; give one or more words")
 	}
 
 	// The search takes no lock: writeAtomic renames a file, so the search
 	// reads the old file or the new file.
 	var srcs []searchSource
-	var unread []string
 	for _, t := range []struct{ target, file string }{
 		{TargetMemory, memoryFile},
 		{TargetUser, profileFile},
@@ -77,19 +76,18 @@ func (s *Store) SearchMasked(query string, mask func(entry string) (string, bool
 		srcs = append(srcs, src)
 	}
 
-	names, skipped, err := s.listNotes()
+	names, skipped, err = s.listNotes()
 	if errors.Is(err, errNotesNotFolder) {
 		// A search acts as if no notes exist when notes is not a folder.
 		names, skipped, err = nil, 0, nil
 	}
 	if err != nil {
-		return "", err
+		return nil, nil, nil, 0, "", nil, err
 	}
 	notes, noteSkipped, stop := s.scanNotes(names)
 	srcs = append(srcs, notes...)
 	skipped += noteSkipped
 
-	var hits []searchSource
 	for i := range srcs {
 		score(&srcs[i], words)
 		if srcs[i].matched > 0 && len(srcs[i].entries) > 0 {
@@ -108,6 +106,16 @@ func (s *Store) SearchMasked(query string, mask func(entry string) (string, bool
 		}
 		return strings.Compare(a.name, b.name)
 	})
+	return hits, words, names, skipped, stop, unread, nil
+}
+
+// SearchMasked is Search with mask applied to the entries of memory.md and
+// user_profile.md. A nil mask shows each entry as it is.
+func (s *Store) SearchMasked(query string, mask func(entry string) (string, bool)) (string, error) {
+	hits, words, names, skipped, stop, unread, err := s.rank(query)
+	if err != nil {
+		return "", err
+	}
 	maxHits := s.SearchMaxHits
 	if maxHits <= 0 {
 		maxHits = maxSearchHits
@@ -348,4 +356,31 @@ func snippet(entry string, words []string) string {
 		b.WriteString("…")
 	}
 	return b.String()
+}
+
+// SearchHit is one hit of SearchHits. File is "memory.md", "user_profile.md", or the topic of a
+// note. Entry is the best entry in full. Match is the snippet of Entry with each match in "["
+// and "]".
+type SearchHit struct {
+	File, Entry, Match string
+}
+
+// SearchHits returns the hits of query, best first, at most limit. A limit of 0 or less uses
+// Store.SearchMaxHits. It applies no mask. It takes no lock.
+func (s *Store) SearchHits(query string, limit int) ([]SearchHit, error) {
+	hits, words, _, _, _, _, err := s.rank(query)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = s.SearchMaxHits
+	}
+	if limit <= 0 {
+		limit = maxSearchHits
+	}
+	var out []SearchHit
+	for _, h := range hits[:min(len(hits), limit)] {
+		out = append(out, SearchHit{File: h.name, Entry: h.best, Match: snippet(h.best, words)})
+	}
+	return out, nil
 }

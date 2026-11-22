@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/tools"
@@ -28,7 +29,15 @@ const cancelledText = "tool call cancelled: the turn was stopped"
 // Otherwise they run in order. The results are in call order. When deny is not empty, a
 // call to a tool that is not in visible gets the error text deny. A review run uses it.
 func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *tools.Env, visible map[string]bool, sink Sink, deny string) []tools.Result {
+	results, _ := a.runRoundTimed(ctx, calls, env, visible, sink, deny)
+	return results
+}
+
+// runRoundTimed is runRound that also returns the run time of each call, in call order. A
+// call that did not start has 0.
+func (a *Agent) runRoundTimed(ctx context.Context, calls []provider.ToolCall, env *tools.Env, visible map[string]bool, sink Sink, deny string) ([]tools.Result, []time.Duration) {
 	results := make([]tools.Result, len(calls))
+	durs := make([]time.Duration, len(calls))
 	// The sinks are not safe for concurrent use, so the parallel calls share one lock.
 	ls := &lockedSink{s: sink}
 	run := func(i int) {
@@ -37,7 +46,7 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 			results[i] = tools.Result{Text: cancelledText, IsError: true}
 			return
 		}
-		ls.ToolStart(c.Name, tools.ArgPreview(c.Name, c.Args, a.config().Agent.ToolPreviewChars))
+		ls.begin(c.ID, c.Name, json.RawMessage(c.Args), tools.ArgPreview(c.Name, c.Args, a.config().Agent.ToolPreviewChars))
 		// todo_list is not parallel-safe, so no other call of the round writes the list
 		// between the two reads.
 		todo := c.Name == "todo_list" && env != nil && env.Kind != KindSubagent
@@ -45,11 +54,13 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 		if todo {
 			_, _, w0 = tools.TodoStoreFor(env.Values).Change()
 		}
+		t0 := time.Now()
 		if deny != "" && !visible[c.Name] {
 			results[i] = tools.Result{Text: deny, IsError: true}
 		} else {
 			results[i] = a.dispatch(ctx, c, env, visible)
 		}
+		durs[i] = time.Since(t0)
 		ls.ToolEnd(c.Name, results[i].IsError)
 		if todo && !results[i].IsError {
 			before, items, w1 := tools.TodoStoreFor(env.Values).Change()
@@ -65,7 +76,7 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 		for i := range calls {
 			run(i)
 		}
-		return results
+		return results, durs
 	}
 	n := max(a.config().Agent.ToolConcurrency, 1)
 	sem := make(chan struct{}, n)
@@ -80,7 +91,7 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 		}()
 	}
 	wg.Wait()
-	return results
+	return results, durs
 }
 
 // allParallelSafe reports whether every call names a visible tool that is parallel-safe.
@@ -157,10 +168,21 @@ func (f *failureTracker) Err() error {
 	return fmt.Errorf("stopped: the model %s %d times in a row", what, f.count)
 }
 
-// lockedSink serializes the ToolStart and ToolEnd calls of a parallel round.
+// lockedSink serializes the sink calls of a parallel round.
 type lockedSink struct {
 	mu sync.Mutex
 	s  Sink
+}
+
+// begin sends ToolCall, when the inner sink is a ToolDetailSink, and then ToolStart, in one
+// hold of the lock. So the calls of two parallel tool calls never mix.
+func (l *lockedSink) begin(callID, name string, args json.RawMessage, preview string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if d, ok := l.s.(ToolDetailSink); ok {
+		d.ToolCall(callID, name, args)
+	}
+	l.s.ToolStart(name, preview)
 }
 
 func (l *lockedSink) ToolStart(name, preview string) {

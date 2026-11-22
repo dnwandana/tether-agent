@@ -204,7 +204,7 @@ func TestCloseDuringSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := &entry{key: key, client: c, cwd: t.TempDir(), release: release, info: SessionInfo{ID: "x"}}
+	e := &entry{key: key, client: c, cwd: t.TempDir(), release: release, info: SessionSetup{ID: "x"}}
 	m.putRow(ctx, e, time.Time{})
 	m.Close("s1")
 	if m.settle(key, e) {
@@ -225,5 +225,38 @@ func TestCloseDuringSetup(t *testing.T) {
 	m.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("starting = %d after settle, want 0", n)
+	}
+}
+
+// Sessions lists the live entries with the workdir and the busy flag.
+func TestSessionsIdle(t *testing.T) {
+	ctx := context.Background()
+	agents, _ := fakeAgents(t, twoTurns(`,"resume":true`))
+	m, _, _ := newTestManager(t, 2, agents, nil)
+	if got := m.Sessions(); len(got) != 0 {
+		t.Fatalf("Sessions() = %+v before a turn", got)
+	}
+	cwd := t.TempDir()
+	if _, err := m.Delegate(ctx, del("s1", cwd)); err != nil {
+		t.Fatal(err)
+	}
+	want := []SessionInfo{{SessionID: "s1", Agent: "claude-code", Cwd: cwd, Busy: false}}
+	if got := m.Sessions(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Sessions() = %+v", got)
+	}
+}
+
+func TestSessionsBusySorted(t *testing.T) {
+	a1, _ := fakeAgentConfig(t, scriptFromJSON(t, longTurn))
+	a2, _ := fakeAgentConfig(t, scriptFromJSON(t, longTurn))
+	a1.Enabled, a1.PermissionPreset = true, "auto"
+	a2.Enabled, a2.PermissionPreset = true, "auto"
+	m, _, _ := newTestManager(t, 2, map[string]config.ACPAgent{"codex": a2, "claude-code": a1}, nil)
+	_ = startBusy(t, m, "codex", "s2")
+	_ = startBusy(t, m, "claude-code", "s1")
+	got := m.Sessions()
+	if len(got) != 2 || got[0].SessionID != "s1" || got[0].Agent != "claude-code" || !got[0].Busy ||
+		got[1].SessionID != "s2" || got[1].Agent != "codex" || !got[1].Busy || got[0].Cwd == "" {
+		t.Fatalf("Sessions() = %+v", got)
 	}
 }

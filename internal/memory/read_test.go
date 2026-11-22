@@ -335,3 +335,41 @@ func TestReadMaxCharsFromField(t *testing.T) {
 		t.Fatal("a smaller maxChars still wins")
 	}
 }
+
+func TestTopicInfos(t *testing.T) {
+	s := open(t)
+	if got, err := s.TopicInfos(); err != nil || len(got) != 0 {
+		t.Fatalf("no notes folder: %+v %v", got, err)
+	}
+	writeReadFile(t, s, "rpc.md", readFront+"QuickNode free plan\n§\nHelius RPC: 1M credits/day")
+	writeReadFile(t, s, "plain.md", "a\n§\nb\n§\nc")
+	writeReadFile(t, s, "notes.txt", "not a note")
+	old := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(s.notesPath(), "plain.md"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.TopicInfos()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []TopicInfo{
+		{Name: "rpc", Type: "memory", Modified: time.Date(2026, 11, 4, 9, 12, 44, 0, time.UTC), Entries: 2},
+		{Name: "plain", Type: "", Modified: old, Entries: 3},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%+v", got)
+	}
+	for i := range want {
+		if got[i].Name != want[i].Name || got[i].Type != want[i].Type || !got[i].Modified.Equal(want[i].Modified) ||
+			got[i].Entries != want[i].Entries {
+			t.Fatalf("%d: %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestLimit(t *testing.T) {
+	s := open(t)
+	if s.Limit(TargetMemory) != 2200 || s.Limit(TargetUser) != 1375 || s.Limit("other") != 0 {
+		t.Fatal(s.Limit(TargetMemory), s.Limit(TargetUser), s.Limit("other"))
+	}
+}

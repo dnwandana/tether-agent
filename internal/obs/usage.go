@@ -2,7 +2,9 @@ package obs
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -117,6 +119,75 @@ func SpendSince(ctx context.Context, d *db.DB, since time.Time) (usd float64, un
 		return 0, false, fmt.Errorf("spend since: %w", err)
 	}
 	return usd, missing > 0, nil
+}
+
+// DayCost is the cost and the tokens of one model on one local day. Unpriced is true when one
+// or more calls of the day have no stored cost. In counts the input and the cache read tokens.
+type DayCost struct {
+	Day      string
+	Model    string
+	USD      float64
+	Unpriced bool
+	In, Out  int64
+}
+
+// DailyCost returns the cost and the tokens of each model for each local day since the time,
+// sorted by day, then by model. It uses the scope of UsageReport with no session. Go finds the
+// local day of each row, so a day before a daylight saving change uses its own offset.
+func DailyCost(ctx context.Context, d *db.DB, since time.Time) ([]DayCost, error) {
+	var sinceMS int64
+	if !since.IsZero() {
+		sinceMS = since.UnixMilli()
+	}
+	q := `SELECT m.timestamp, m.model, m.cost_usd,
+		COALESCE(m.input_tokens, 0) + COALESCE(m.cache_read_tokens, 0), COALESCE(m.output_tokens, 0)
+		FROM messages m
+		WHERE m.role = 'assistant' AND m.model != '' AND m.timestamp >= ?`
+	filter, fargs := usageScope("m.session_id", "m.timestamp", "")
+	args := append([]any{sinceMS}, fargs...)
+	rows, err := d.QueryContext(ctx, q+filter, args...)
+	if err != nil {
+		return nil, fmt.Errorf("daily cost: %w", err)
+	}
+	// The rows close before the function returns.
+	defer rows.Close()
+	type dayModel struct{ day, model string }
+	sums := map[dayModel]*DayCost{}
+	for rows.Next() {
+		var ts, in, out int64
+		var model string
+		var cost sql.NullFloat64
+		if err := rows.Scan(&ts, &model, &cost, &in, &out); err != nil {
+			return nil, fmt.Errorf("daily cost: %w", err)
+		}
+		k := dayModel{time.UnixMilli(ts).In(time.Local).Format("2006-01-02"), model}
+		r := sums[k]
+		if r == nil {
+			r = &DayCost{Day: k.day, Model: model}
+			sums[k] = r
+		}
+		if cost.Valid {
+			r.USD += cost.Float64
+		} else {
+			r.Unpriced = true
+		}
+		r.In += in
+		r.Out += out
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("daily cost: %w", err)
+	}
+	out := make([]DayCost, 0, len(sums))
+	for _, r := range sums {
+		out = append(out, *r)
+	}
+	slices.SortFunc(out, func(a, b DayCost) int {
+		if c := strings.Compare(a.Day, b.Day); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Model, b.Model)
+	})
+	return out, nil
 }
 
 // usageScope returns the WHERE conditions that the two report queries share, and their args

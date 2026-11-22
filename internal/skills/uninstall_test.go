@@ -270,3 +270,31 @@ func TestChangedFiles(t *testing.T) {
 		t.Fatal("ChangedFiles returned no error for a missing folder")
 	}
 }
+
+func TestUninstallCronUsersOfInstaller(t *testing.T) {
+	in, out := installPDF(t, &fakePrompt{})
+	calls := 0
+	in.CronUsers = func(context.Context) (map[string][]string, error) {
+		calls++
+		return map[string][]string{"pdf": {`"morning-brief" (a1b2)`}, "other": {`"x" (c3)`}}, nil
+	}
+	if err := in.Uninstall(context.Background(), UninstallRequest{Name: "pdf", Yes: true}); err != nil {
+		t.Fatalf("Uninstall: %v\n%s", err, out)
+	}
+	want := `Cron job "morning-brief" (a1b2) uses this skill. Its runs will skip it.` + "\n"
+	if calls != 1 || !strings.Contains(out.String(), want) || strings.Contains(out.String(), `"x"`) {
+		t.Fatalf("calls %d, output:\n%s", calls, out)
+	}
+}
+
+// The cron line is only a warning, so a failed read of the jobs does not stop the uninstall.
+func TestUninstallCronUsersError(t *testing.T) {
+	in, out := installPDF(t, &fakePrompt{})
+	in.CronUsers = func(context.Context) (map[string][]string, error) { return nil, errors.New("db is closed") }
+	if err := in.Uninstall(context.Background(), UninstallRequest{Name: "pdf", Yes: true}); err != nil {
+		t.Fatalf("Uninstall: %v\n%s", err, out)
+	}
+	if strings.Contains(out.String(), "Cron job") || !strings.Contains(out.String(), "Removed pdf.") {
+		t.Fatalf("output:\n%s", out)
+	}
+}

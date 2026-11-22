@@ -19,6 +19,23 @@ var forkBeforeTx func()
 // The copies keep their old timestamps and their token counts. The compactor reads the
 // counts. The usage report does not count a copy, because the copy is older than the fork.
 func (s *Store) Fork(ctx context.Context, id, title string) (*Session, error) {
+	return s.fork(ctx, id, title, nil)
+}
+
+// ForkInto is Fork into another key. The copy gets the key, the source, and the chat
+// id, an empty thread and user, and the kind "chat", so the rules of the new key apply
+// to it.
+func (s *Store) ForkInto(ctx context.Context, id, key, source, chatID, title string) (*Session, error) {
+	return s.fork(ctx, id, title, func(f *Session) {
+		f.Key, f.Source, f.ChatID = key, source, chatID
+		f.ThreadID, f.UserID = "", ""
+		f.Kind = "chat"
+	})
+}
+
+// fork copies the session with the id. set, when not nil, changes the fields of the
+// copy before the insert.
+func (s *Store) fork(ctx context.Context, id, title string, set func(f *Session)) (*Session, error) {
 	orig, err := s.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -58,6 +75,9 @@ func (s *Store) Fork(ctx context.Context, id, title string) (*Session, error) {
 	f.Title = title
 	f.StartedAt, f.LastActive = now, now
 	f.Archived = false
+	if set != nil {
+		set(&f)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (`+sessionCols+`)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
 		f.ID, f.Key, f.Source, f.ChatID, f.ThreadID, f.UserID, f.Title, f.ModelOverride,

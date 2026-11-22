@@ -44,6 +44,10 @@ type Installer struct {
 	Now     func() time.Time
 	FindGit func() (Git, error)
 	Index   func(name string) (IndexEntry, bool, error)
+	// CronUsers returns, for each skill name, one line for each cron job that uses the
+	// skill, for example `"morning-brief" (a1b2)`. Uninstall calls it when
+	// UninstallRequest.CronUsers is nil. Nil means no cron check.
+	CronUsers func(ctx context.Context) (map[string][]string, error)
 }
 
 // InstallRequest holds the arguments and flags of one install.

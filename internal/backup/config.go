@@ -74,6 +74,17 @@ func redactConfig(data []byte, dotenv map[string]string, lookupEnv func(string) 
 	return res, nil
 }
 
+// MaskConfig returns config.yaml for a read-only view. Each literal value in a secret key path
+// becomes a ${NAME} reference, as in the archive copy. The caller passes the result through
+// the redactor too, because MaskConfig knows no .env value.
+func MaskConfig(raw []byte) ([]byte, error) {
+	res, err := redactConfig(raw, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return res.Data, nil
+}
+
 // configError keeps the yaml error text and drops a typed error value, which
 // can quote the content of the file.
 func configError(err error) error {

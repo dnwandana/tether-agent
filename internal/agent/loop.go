@@ -87,6 +87,13 @@ type PlanSink interface {
 	Plan(before, after []tools.TodoItem)
 }
 
+// ToolDetailSink gets the full call and the result of each tool call. A sink that does not
+// implement it gets only ToolStart and ToolEnd. text is the stored text of the result.
+type ToolDetailSink interface {
+	ToolCall(callID, name string, args json.RawMessage)
+	ToolResult(callID, text string, isError bool, d time.Duration)
+}
+
 // Agent runs the turns of all sessions. One Agent is shared by all channels.
 type Agent struct {
 	// Prov is the default provider.
@@ -518,7 +525,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		}
 
 		sink.Boundary()
-		results := a.runRound(ctx, out.ToolCalls, env, turnVisible, sink, deny)
+		results, durs := a.runRoundTimed(ctx, out.ToolCalls, env, turnVisible, sink, deny)
 		if t.review != nil && t.review.onResult != nil {
 			for i, c := range out.ToolCalls {
 				t.review.onResult(c, results[i])
@@ -560,6 +567,10 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			m := provider.Message{Role: provider.RoleTool, Content: contents[i], ToolCallID: c.ID, ToolName: c.Name}
 			if _, err := a.save(dbCtx, ts, m, sessions.MessageMeta{}); err != nil {
 				return res, err
+			}
+			// The page shows the same text as the saved row.
+			if d, ok := sink.(ToolDetailSink); ok {
+				d.ToolResult(c.ID, contents[i], results[i].IsError, durs[i])
 			}
 		}
 		if ctx.Err() != nil {

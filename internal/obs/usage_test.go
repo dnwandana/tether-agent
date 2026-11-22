@@ -616,3 +616,66 @@ func TestSpendSinceSkipsForkCopies(t *testing.T) {
 		t.Fatal(usd, unpriced, err)
 	}
 }
+
+func TestDailyCost(t *testing.T) {
+	ctx := context.Background()
+	d := openUsageDB(t)
+	day := func(back int) time.Time {
+		y, m, dd := time.Now().AddDate(0, 0, -back).Date()
+		return time.Date(y, m, dd, 12, 0, 0, 0, time.Local)
+	}
+	insertUsage(t, d, usageRow{model: "glm-4.7", prov: "primary", in: 1000, cache: 200, out: 100, cost: 0.5, at: day(2)})
+	insertUsage(t, d, usageRow{model: "glm-4.7", prov: "primary", in: 500, out: 50, cost: 0.25, at: day(2).Add(time.Hour)})
+	insertUsage(t, d, usageRow{model: "mystery", prov: "local", in: 10, out: 10, at: day(2)})
+	insertUsage(t, d, usageRow{model: "glm-4.7", prov: "openrouter", in: 300, out: 30, cost: 0.1, at: day(1)})
+	insertUsage(t, d, usageRow{model: "glm-4.7", prov: "primary", in: 9, out: 9, cost: 9.0, at: day(10)})
+	if _, err := d.Exec(`INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'user', 'hi', ?)`, day(1).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DailyCost(ctx, d, day(3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []DayCost{
+		{Day: day(2).Format("2006-01-02"), Model: "glm-4.7", USD: 0.75, In: 1700, Out: 150},
+		{Day: day(2).Format("2006-01-02"), Model: "mystery", USD: 0, Unpriced: true, In: 10, Out: 10},
+		{Day: day(1).Format("2006-01-02"), Model: "glm-4.7", USD: 0.1, In: 300, Out: 30},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%+v", got)
+	}
+	if got, err := DailyCost(ctx, d, time.Now().Add(time.Hour)); err != nil || len(got) != 0 {
+		t.Fatalf("no rows: %+v %v", got, err)
+	}
+}
+
+// DailyCost puts each row into the local day of its own time. A day before a daylight saving
+// change uses the offset of that day, not the offset of today.
+func TestDailyCostUsesTheOffsetOfEachDay(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skip("no time zone data:", err)
+	}
+	old := time.Local
+	time.Local = berlin
+	t.Cleanup(func() { time.Local = old })
+	ctx := context.Background()
+	d := openUsageDB(t)
+	// 00:30 on 2 July in Berlin (summer time, UTC+2) is 22:30 on 1 July in UTC.
+	summer := time.Date(2026, 7, 2, 0, 30, 0, 0, berlin)
+	// 00:30 on 2 December in Berlin (winter time, UTC+1).
+	winter := time.Date(2026, 12, 2, 0, 30, 0, 0, berlin)
+	insertUsage(t, d, usageRow{model: "m", prov: "p", in: 1, out: 1, cost: 0.5, at: summer})
+	insertUsage(t, d, usageRow{model: "m", prov: "p", in: 1, out: 1, cost: 0.25, at: winter})
+	got, err := DailyCost(ctx, d, summer.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []DayCost{
+		{Day: "2026-07-02", Model: "m", USD: 0.5, In: 1, Out: 1},
+		{Day: "2026-12-02", Model: "m", USD: 0.25, In: 1, Out: 1},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%+v", got)
+	}
+}

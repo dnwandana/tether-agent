@@ -103,6 +103,20 @@ type serverState struct {
 	registered map[string]bool
 	// filtered holds the raw names of the tools that the filter hides.
 	filtered map[string]bool
+	// lastErr and lastErrAt are the text and the time of the last error. A success does
+	// not clear them.
+	lastErr   string
+	lastErrAt time.Time
+}
+
+// noteErr records err as the last error of st at the time at. A nil err does nothing.
+func (st *serverState) noteErr(err error, at time.Time) {
+	if err == nil {
+		return
+	}
+	st.mu.Lock()
+	st.lastErr, st.lastErrAt = err.Error(), at
+	st.mu.Unlock()
 }
 
 // Init loads the tool list of each enabled server and registers one tool per entry in
@@ -155,6 +169,7 @@ func (m *Manager) initServer(ctx context.Context, st *serverState) error {
 	c, err := m.dialer()(ctx, st.name, st.config())
 	if err != nil {
 		m.logger().Warn("mcp: cannot start the server", "server", st.name, "err", err.Error())
+		st.noteErr(err, m.now())
 		return err
 	}
 	m.refreshList(ctx, st, c)
@@ -284,17 +299,22 @@ func mayHaveRunText(server, tool string) string {
 // call runs one tool call. A cold server starts first. A call that did not run because the
 // connection is dead dials again and tries one more time. A call that is not read never
 // goes again when it may have run.
-func (m *Manager) call(ctx context.Context, server, tool string, class Class, args json.RawMessage) (string, error) {
+func (m *Manager) call(ctx context.Context, server, tool string, class Class, args json.RawMessage) (out string, err error) {
 	st := m.state(server)
 	if st == nil {
 		return "", fmt.Errorf("MCP server %s is not configured", server)
 	}
+	defer func() {
+		if err != nil && ctx.Err() == nil {
+			st.noteErr(err, m.now())
+		}
+	}()
 	for attempt := 0; ; attempt++ {
 		c, err := m.acquire(ctx, st)
 		if err != nil {
 			return "", err
 		}
-		out, err := c.Call(ctx, tool, args)
+		out, err = c.Call(ctx, tool, args)
 		f := faultNone
 		if err != nil && ctx.Err() == nil {
 			f = callFault(server, tool, class, err)
@@ -349,7 +369,9 @@ func (m *Manager) acquire(ctx context.Context, st *serverState) (conn, error) {
 		}
 		m.logger().Warn("mcp: cannot start the server", "server", st.name, "try", try, "err", err.Error())
 	}
-	return nil, fmt.Errorf("%w: MCP server %s is not reachable after %d tries: %v", tools.ErrToolError, st.name, tries, last)
+	err := fmt.Errorf("%w: MCP server %s is not reachable after %d tries: %v", tools.ErrToolError, st.name, tries, last)
+	st.noteErr(err, m.now())
+	return nil, err
 }
 
 // take returns the live connection of st and counts one call in flight, or nil.
@@ -580,10 +602,12 @@ func (m *Manager) relist(ctx context.Context, st *serverState) error {
 	c, err := m.dialer()(ctx, st.name, st.config())
 	if err != nil {
 		m.logger().Warn("mcp: reload: cannot start the server", "server", st.name, "err", err.Error())
+		st.noteErr(err, m.now())
 		return err
 	}
 	defs, err := c.ListTools(ctx)
 	if err != nil {
+		st.noteErr(err, m.now())
 		m.closeLater(c)
 		return err
 	}
@@ -989,4 +1013,49 @@ func (m *Manager) dotEnv() map[string]string {
 		return m.EnvStore.Snapshot()
 	}
 	return m.DotEnv
+}
+
+// ServerStatus is the state of one enabled MCP server, for the System page of the dashboard.
+type ServerStatus struct {
+	Name, Transport string
+	Connected       bool
+	// Tools is the count of the tools of the server that are in the registry. Classes counts
+	// them by class.
+	Tools       int
+	Classes     map[string]int
+	LastError   string
+	LastErrorAt time.Time
+}
+
+// ServerStatus returns the state of each enabled server, in name order.
+func (m *Manager) ServerStatus() []ServerStatus {
+	var out []ServerStatus
+	for _, st := range m.states() {
+		st.mu.Lock()
+		if st.disabled {
+			st.mu.Unlock()
+			continue
+		}
+		s := ServerStatus{Name: st.name, Connected: st.conn != nil, Classes: map[string]int{},
+			LastError: st.lastErr, LastErrorAt: st.lastErrAt}
+		switch {
+		case len(st.cfg.Command) > 0:
+			s.Transport = "stdio"
+		case strings.ToLower(st.cfg.Transport) == "sse":
+			s.Transport = "sse"
+		default:
+			s.Transport = "http"
+		}
+		for _, d := range st.defs {
+			if !st.registered[ToolName(st.name, d.Name)] {
+				continue
+			}
+			c, _ := finalClass(st.name, d, st.cfg.Tools.Class)
+			s.Tools++
+			s.Classes[string(c)]++
+		}
+		st.mu.Unlock()
+		out = append(out, s)
+	}
+	return out
 }

@@ -257,3 +257,31 @@ func TestRedactConfigErrorHasNoValue(t *testing.T) {
 		t.Errorf("error text holds the secret: %v", err)
 	}
 }
+
+// MaskConfig gives the config view the same masks as the archive copy, with no .env values.
+func TestMaskConfig(t *testing.T) {
+	in := "providers:\n  openai:\n    api_key: sk-proj-literal-0123456789\n" +
+		"telegram:\n  bot_token: 123456:literal-token-abcdef\nlog:\n  level: info\n"
+	got, err := MaskConfig([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"api_key: ${OPENAI_API_KEY}", "bot_token: ${TELEGRAM_BOT_TOKEN}", "level: info"} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("no %q in:\n%s", want, got)
+		}
+	}
+	for _, secret := range []string{"sk-proj-literal-0123456789", "123456:literal-token-abcdef"} {
+		if strings.Contains(string(got), secret) {
+			t.Errorf("the masked config holds %q", secret)
+		}
+	}
+	plain := "log:\n  level: info\n"
+	if got, err := MaskConfig([]byte(plain)); err != nil || string(got) != plain {
+		t.Fatalf("a config with no secret must not change: %q %v", got, err)
+	}
+	bad := "providers:\n  openai:\n    api_key: sk-secret-0123456789abc\n  x: [\n"
+	if _, err := MaskConfig([]byte(bad)); err == nil || strings.Contains(err.Error(), "sk-secret-0123456789abc") {
+		t.Fatalf("want an error with no value, got %v", err)
+	}
+}

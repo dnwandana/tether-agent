@@ -370,3 +370,35 @@ func TestHealthSkipFromField(t *testing.T) {
 		t.Fatal("a zero Skip must keep 60 s")
 	}
 }
+
+func TestHealthSnapshot(t *testing.T) {
+	clk := &clock{t: time.Unix(1000, 0)}
+	h := NewHealth(clk.now)
+	if got := h.Snapshot(clk.now()); len(got) != 0 {
+		t.Fatalf("%+v", got)
+	}
+	h.fail("primary", "glm-5", fmt.Errorf("provider primary: %w: %w", ErrBeforeFirstByte, &HTTPStatusError{Code: 503}))
+	clk.mu.Lock()
+	clk.t = time.Unix(1010, 0)
+	clk.mu.Unlock()
+	h.fail("openrouter", "z-ai/glm-4.7", fmt.Errorf("dial: %w", ErrBeforeFirstByte))
+	got := h.Snapshot(time.Unix(1065, 0))
+	want := []HealthRow{
+		{Entry: "openrouter", Model: "z-ai/glm-4.7", Cause: "no connection", FailedAt: time.Unix(1010, 0), SkipUntil: time.Unix(1070, 0)},
+		// The skip of primary ended at 1060.
+		{Entry: "primary", Model: "glm-5", Cause: "HTTP 503", FailedAt: time.Unix(1000, 0)},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%+v", got)
+	}
+	for i := range want {
+		if got[i].Entry != want[i].Entry || got[i].Model != want[i].Model || got[i].Cause != want[i].Cause ||
+			!got[i].FailedAt.Equal(want[i].FailedAt) || !got[i].SkipUntil.Equal(want[i].SkipUntil) {
+			t.Fatalf("%d: %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	h.clear("openrouter", "z-ai/glm-4.7")
+	if got := h.Snapshot(time.Unix(1065, 0)); len(got) != 1 || got[0].Entry != "primary" {
+		t.Fatalf("a success clears the row: %+v", got)
+	}
+}

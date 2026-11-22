@@ -10,9 +10,9 @@ import (
 	acpsdk "github.com/coder/acp-go-sdk"
 )
 
-// SessionInfo is the state of one ACP session: its id, the offered modes, the current mode,
+// SessionSetup is the state of one ACP session: its id, the offered modes, the current mode,
 // and the offered models.
-type SessionInfo struct {
+type SessionSetup struct {
 	ID          string
 	Modes       []string
 	ModeConfig  bool // the session has a "mode" config option
@@ -44,22 +44,22 @@ func (e *modeNotStricterError) Error() string {
 }
 
 // NewSession starts a new ACP session in cwd.
-func (c *Client) NewSession(ctx context.Context, cwd string) (SessionInfo, error) {
+func (c *Client) NewSession(ctx context.Context, cwd string) (SessionSetup, error) {
 	resp, err := c.conn.NewSession(ctx, acpsdk.NewSessionRequest{Cwd: cwd, McpServers: []acpsdk.McpServer{}})
 	if err != nil {
-		return SessionInfo{}, c.callErr(err)
+		return SessionSetup{}, c.callErr(err)
 	}
 	return sessionInfo(string(resp.SessionId), resp.ConfigOptions, resp.Modes), nil
 }
 
 // ResumeSession opens the ACP session id again with no replay of its history.
-func (c *Client) ResumeSession(ctx context.Context, id, cwd string) (SessionInfo, error) {
+func (c *Client) ResumeSession(ctx context.Context, id, cwd string) (SessionSetup, error) {
 	// The SDK drops an empty McpServers list from session/resume (omitempty). Send it anyway.
 	resp, err := c.conn.ResumeSession(ctx, acpsdk.ResumeSessionRequest{
 		SessionId: acpsdk.SessionId(id), Cwd: cwd, McpServers: []acpsdk.McpServer{},
 	})
 	if err != nil {
-		return SessionInfo{}, c.callErr(err)
+		return SessionSetup{}, c.callErr(err)
 	}
 	return sessionInfo(id, resp.ConfigOptions, resp.Modes), nil
 }
@@ -68,12 +68,12 @@ func (c *Client) ResumeSession(ctx context.Context, id, cwd string) (SessionInfo
 // updates before its response. Call it with no attached turn handler, so that the client
 // drops the replay. The SDK handles each update that comes before the response before the
 // call returns, so a handler that is attached after the call sees no replayed update.
-func (c *Client) LoadSession(ctx context.Context, id, cwd string) (SessionInfo, error) {
+func (c *Client) LoadSession(ctx context.Context, id, cwd string) (SessionSetup, error) {
 	resp, err := c.conn.LoadSession(ctx, acpsdk.LoadSessionRequest{
 		SessionId: acpsdk.SessionId(id), Cwd: cwd, McpServers: []acpsdk.McpServer{},
 	})
 	if err != nil {
-		return SessionInfo{}, c.callErr(err)
+		return SessionSetup{}, c.callErr(err)
 	}
 	return sessionInfo(id, resp.ConfigOptions, resp.Modes), nil
 }
@@ -90,7 +90,7 @@ func (c *Client) CloseSession(ctx context.Context, id string) error {
 
 // Configure sets the model and then the mode of session s. It runs before each prompt. The
 // note is not empty when the agent uses a stricter mode than mode.
-func (c *Client) Configure(ctx context.Context, s *SessionInfo, model, mode string) (note string, err error) {
+func (c *Client) Configure(ctx context.Context, s *SessionSetup, model, mode string) (note string, err error) {
 	if model != "" {
 		resp, err := c.conn.SetSessionConfigOption(ctx, setValue(s.ID, "model", model))
 		if err != nil {
@@ -163,10 +163,10 @@ func setValue(sessionID, configID, value string) acpsdk.SetSessionConfigOptionRe
 	}}
 }
 
-// sessionInfo builds the SessionInfo of a session/new, session/load, or
+// sessionInfo builds the SessionSetup of a session/new, session/load, or
 // session/resume response.
-func sessionInfo(id string, opts []acpsdk.SessionConfigOption, modes *acpsdk.SessionModeState) SessionInfo {
-	s := SessionInfo{ID: id}
+func sessionInfo(id string, opts []acpsdk.SessionConfigOption, modes *acpsdk.SessionModeState) SessionSetup {
+	s := SessionSetup{ID: id}
 	if modes != nil {
 		for _, m := range modes.AvailableModes {
 			s.Modes = append(s.Modes, string(m.Id))
@@ -178,7 +178,7 @@ func sessionInfo(id string, opts []acpsdk.SessionConfigOption, modes *acpsdk.Ses
 }
 
 // applyOptions reads the mode and model entries of opts into s.
-func (s *SessionInfo) applyOptions(opts []acpsdk.SessionConfigOption) {
+func (s *SessionSetup) applyOptions(opts []acpsdk.SessionConfigOption) {
 	for _, o := range opts {
 		sel := o.Select
 		if sel == nil {

@@ -150,3 +150,29 @@ func TestProcRegistryKeepField(t *testing.T) {
 		}
 	}
 }
+
+// All gives each kept process, also an exited one, by start time and then pid.
+func TestProcRegistryAll(t *testing.T) {
+	r := NewProcRegistry()
+	t0 := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	r.Add("s2", 300, "sleep 60", "", t0.Add(time.Second))
+	r.Add("s1", 200, "make test", "/tmp/make.log", t0)
+	r.Add("s1", 100, "npm run dev", "", t0.Add(time.Second))
+	r.Exit(200, 2, t0.Add(2*time.Second))
+	got := r.All()
+	if len(got) != 3 || got[0].PID != 200 || got[1].PID != 100 || got[2].PID != 300 {
+		t.Fatalf("%+v", got)
+	}
+	if !got[0].Exited || got[0].ExitCode != 2 || got[0].Command != "make test" || got[0].SessionID != "s1" ||
+		got[1].Exited || got[2].Exited {
+		t.Fatalf("%+v", got)
+	}
+	got[0].Command = "changed"
+	if p, _ := r.Get(200); p.Command != "make test" {
+		t.Fatal("All must return copies")
+	}
+	var none *ProcRegistry
+	if none.All() != nil {
+		t.Fatal("a nil registry has no processes")
+	}
+}

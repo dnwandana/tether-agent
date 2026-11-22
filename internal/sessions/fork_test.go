@@ -192,3 +192,54 @@ func TestForkTakesStartTimeAfterBeginTx(t *testing.T) {
 		}
 	}
 }
+
+func TestForkIntoResetsSourceFields(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	orig, err := s.Create(ctx, Session{Key: "telegram:-100:7", Source: "telegram", ChatID: "-100", ThreadID: "7",
+		UserID: "42", Title: "infra talk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, text := range []string{"one", "two", "three"} {
+		if _, err := s.Append(ctx, orig.ID, provider.Message{Role: provider.RoleUser, Content: text}, MessageMeta{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetModel(ctx, orig.ID, "cheap"); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.ForkInto(ctx, orig.ID, "dashboard:owner", "dashboard", "owner", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(got *Session) {
+		t.Helper()
+		if got.Key != "dashboard:owner" || got.Source != "dashboard" || got.ChatID != "owner" || got.ThreadID != "" ||
+			got.UserID != "" || got.Kind != "chat" || got.ParentID != orig.ID || got.Title != "infra talk (fork)" ||
+			got.ModelOverride != "cheap" || got.ID == orig.ID {
+			t.Fatalf("%+v", got)
+		}
+	}
+	check(f)
+	stored, err := s.Get(ctx, f.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(stored)
+	if msgs, _ := s.Messages(ctx, f.ID); len(msgs) != 3 || msgs[2].Msg.Content != "three" {
+		t.Fatalf("%+v", msgs)
+	}
+	if o, _ := s.Get(ctx, orig.ID); o.Key != "telegram:-100:7" || o.Source != "telegram" || o.UserID != "42" {
+		t.Fatalf("the original must not change: %+v", o)
+	}
+	// A cron run becomes a chat session of the new key.
+	run, _ := s.Create(ctx, Session{Key: "cron:j1", Source: "cron", Kind: "cron", Title: "nightly"})
+	c, err := s.ForkInto(ctx, run.ID, "dashboard:owner", "dashboard", "owner", "nightly copy")
+	if err != nil || c.Kind != "chat" || c.Title != "nightly copy" || c.Source != "dashboard" {
+		t.Fatalf("%+v %v", c, err)
+	}
+	if _, err := s.ForkInto(ctx, "nope", "dashboard:owner", "dashboard", "owner", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatal(err)
+	}
+}

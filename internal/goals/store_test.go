@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/sessions"
 )
 
 // openGoalsDB opens a new state.db in a temporary folder. The test closes it at the end.
@@ -217,5 +218,80 @@ func TestStorePaused(t *testing.T) {
 	if got[1].SessionID != "s4" || got[1].State.PausedAt != 0 || !got[1].UpdatedAt.Equal(time.UnixMilli(1794988800000)) ||
 		got[1].State.PausedReason == nil || *got[1].State.PausedReason != ReasonChatEnded {
 		t.Fatalf("%+v", got[1])
+	}
+}
+
+func TestStoreListAll(t *testing.T) {
+	ctx := context.Background()
+	d := openGoalsDB(t)
+	s := &Store{DB: d}
+	ss := sessions.New(d)
+	mk := func(src, title string) string {
+		t.Helper()
+		sess, err := ss.Create(ctx, sessions.Session{Key: src + ":x", Source: src, Title: title})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sess.ID
+	}
+	dash, tg, done, cleared := mk("dashboard", "Ship the docs"), mk("telegram", "Phone chat"), mk("cli", "Old work"), mk("cli", "Older work")
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	put := func(id, raw string, upd time.Time) {
+		t.Helper()
+		if _, err := d.Exec(`INSERT INTO goals (session_id, state, revision, updated_at) VALUES (?, ?, 1, ?)`,
+			id, raw, upd.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(dash, `{"goal":"Fix the flaky test","status":"active"}`, now.Add(-time.Hour))
+	put(tg, `{"goal":"Plan the trip","status":"paused","paused_reason":"budget"}`, now.Add(-2*time.Hour))
+	put("no-session", `{"goal":"Orphan","status":"active"}`, now.Add(-3*time.Hour))
+	put(done, `{"goal":"Write the guide","status":"done"}`, now.Add(-10*24*time.Hour))
+	put(cleared, `{"goal":"Old idea","status":"cleared"}`, now.Add(-40*24*time.Hour))
+
+	got, err := s.ListAll(ctx, now.Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type want struct{ id, title, source, status string }
+	exp := []want{
+		{dash, "Ship the docs", "dashboard", StatusActive},
+		{tg, "Phone chat", "telegram", StatusPaused},
+		{"no-session", "", "", StatusActive},
+		{done, "Old work", "cli", StatusDone},
+	}
+	if len(got) != len(exp) {
+		t.Fatalf("%+v", got)
+	}
+	for i, w := range exp {
+		g := got[i]
+		if g.SessionID != w.id || g.Title != w.title || g.Source != w.source || g.State.Status != w.status {
+			t.Errorf("row %d: %+v, want %+v", i, g, w)
+		}
+	}
+	if !got[0].UpdatedAt.Equal(now.Add(-time.Hour)) || got[1].State.PausedReason == nil || *got[1].State.PausedReason != "budget" {
+		t.Fatalf("%+v", got[:2])
+	}
+	// The rows are closed, so the next query gets the one connection at once.
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, _, err := s.Get(qctx, dash); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreUpdatedAt(t *testing.T) {
+	ctx := context.Background()
+	s := &Store{DB: openGoalsDB(t)}
+	if got, err := s.UpdatedAt(ctx, "none"); err != nil || !got.IsZero() {
+		t.Fatalf("%v %v", got, err)
+	}
+	before := time.Now().Add(-time.Second)
+	if _, err := s.Put(ctx, "s1", State{Goal: "g", Status: StatusActive, MaxTurns: 20}, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.UpdatedAt(ctx, "s1")
+	if err != nil || got.Before(before) || got.After(time.Now().Add(time.Second)) {
+		t.Fatalf("%v %v", got, err)
 	}
 }

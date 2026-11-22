@@ -1211,3 +1211,93 @@ func TestWriteCallSendsGateArgs(t *testing.T) {
 		t.Fatal(res)
 	}
 }
+
+// ServerStatus gives the transport, the state, the tool count, and the class counts.
+func TestServerStatusCountsAndTransport(t *testing.T) {
+	servers := ghServer(false)
+	sse := config.DefaultMCPServer()
+	sse.URL, sse.Transport = "https://mcp.example.com/sse", "SSE"
+	servers["notes"] = sse
+	web := config.DefaultMCPServer()
+	web.URL = "https://mcp.example.com/mcp"
+	servers["web"] = web
+	off := config.DefaultMCPServer()
+	off.Command, off.Enabled = []string{"off-mcp"}, false
+	servers["zoff"] = off
+	f := &fakeServer{tools: []ToolDef{{Name: "search"}, {Name: "create_issue"}}}
+	m, _, _ := testManager(t, servers, map[string]*fakeServer{"gh": f})
+	writeCache(t, m, "gh", f.tools)
+	writeCache(t, m, "notes", []ToolDef{{Name: "search_notes"}})
+	writeCache(t, m, "web", nil)
+	reg := tools.NewRegistry()
+	if err := m.Init(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	got := m.ServerStatus()
+	want := []ServerStatus{
+		{Name: "gh", Transport: "stdio", Tools: 2, Classes: map[string]int{"read": 1, "write": 1}},
+		{Name: "notes", Transport: "sse", Tools: 1, Classes: map[string]int{"read": 1}},
+		{Name: "web", Transport: "http", Tools: 0, Classes: map[string]int{}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+	callTool(t, reg, "mcp_gh_search", `{}`)
+	if s := m.ServerStatus()[0]; !s.Connected || s.LastError != "" {
+		t.Fatalf("a call connects the server: %+v", s)
+	}
+}
+
+// A dial failure in a call sets the last error. A later success keeps it.
+func TestServerStatusLastErrorFromCall(t *testing.T) {
+	m, f, _ := managerWithCache(t, []ToolDef{{Name: "search"}})
+	reg := tools.NewRegistry()
+	if err := m.Init(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.failDials = 5
+	f.mu.Unlock()
+	if res := callTool(t, reg, "mcp_gh_search", `{}`); !res.IsError {
+		t.Fatal(res)
+	}
+	s := m.ServerStatus()[0]
+	if !strings.Contains(s.LastError, "MCP server gh is not reachable after 5 tries: mcp gh: connection refused") ||
+		!s.LastErrorAt.Equal(time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)) || s.Connected {
+		t.Fatalf("%+v", s)
+	}
+	if res := callTool(t, reg, "mcp_gh_search", `{}`); res.IsError {
+		t.Fatal(res)
+	}
+	if s2 := m.ServerStatus()[0]; !s2.Connected || s2.LastError != s.LastError {
+		t.Fatalf("a success keeps the last error: %+v", s2)
+	}
+}
+
+// A server that does not start at Init has the dial error.
+func TestServerStatusLastErrorFromInit(t *testing.T) {
+	f := &fakeServer{tools: []ToolDef{{Name: "search"}}, failDials: 1}
+	m, _, _ := testManager(t, ghServer(false), map[string]*fakeServer{"gh": f})
+	if err := m.Init(ctx, tools.NewRegistry()); err == nil {
+		t.Fatal("Init must return the dial error")
+	}
+	if s := m.ServerStatus()[0]; s.LastError != "mcp gh: connection refused" || s.Tools != 0 {
+		t.Fatalf("%+v", s)
+	}
+}
+
+// A failed reload sets the last error.
+func TestServerStatusLastErrorFromReload(t *testing.T) {
+	m, f, _ := managerWithCache(t, []ToolDef{{Name: "search"}})
+	reg := tools.NewRegistry()
+	if err := m.Init(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.failDials = 1
+	f.mu.Unlock()
+	_ = m.Reload(ctx, reg)
+	if s := m.ServerStatus()[0]; s.LastError != "mcp gh: connection refused" {
+		t.Fatalf("%+v", s)
+	}
+}

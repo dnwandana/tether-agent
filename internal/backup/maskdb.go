@@ -28,6 +28,7 @@ var freeTextColumns = map[string][]string{
 	"approval_log":       {"preview"},
 	"approval_grants":    {"preview"},
 	"held_sends":         {"text", "reason", "target_title"},
+	"dashboard_sessions": {"label", "user_agent"},
 }
 
 // stateColumns lists every other TEXT column of the schema. maskDB never masks these columns.
@@ -55,9 +56,11 @@ var stateColumns = map[string][]string{
 	"acp_sessions":       {"session_id", "agent", "acp_session_id", "cwd"},
 	"approval_log": {"session_id", "scope", "kind", "tool", "server", "tool_name", "rule", "class",
 		"decision", "source", "answer", "content_sha256"},
-	"chat_modes":  {"scope", "mode"},
-	"secret_pins": {"name", "path", "sha256"},
-	"held_sends":  {"id", "kind", "job_id", "target", "sources", "card_chat"},
+	"chat_modes":         {"scope", "mode"},
+	"secret_pins":        {"name", "path", "sha256"},
+	"held_sends":         {"id", "kind", "job_id", "target", "sources", "card_chat"},
+	"dashboard_sessions": {"id", "cookie_hash", "header_hash", "ip"},
+	"dashboard_codes":    {"code_hash"},
 }
 
 // maskCell is one cell that maskDB changes.

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -231,6 +232,48 @@ func (b *Batches) Running(key string) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.running[key])
+}
+
+// BatchInfo is one background batch row, for the System page of the dashboard.
+type BatchInfo struct {
+	ID, Key, Status string
+	// Tasks and Results are the JSON columns as stored. A NULL column is nil.
+	Tasks, Results json.RawMessage
+	Created        time.Time
+}
+
+// List returns at most limit background batches, newest first. A nil b has none.
+func (b *Batches) List(ctx context.Context, limit int) ([]BatchInfo, error) {
+	if b == nil || b.DB == nil {
+		return nil, nil
+	}
+	rows, err := b.DB.QueryContext(ctx, `SELECT id, parent_session_key, status, tasks, results, created_at
+		FROM delegation_batches WHERE background = 1 ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("agent: read the batches: %w", err)
+	}
+	defer rows.Close()
+	var out []BatchInfo
+	for rows.Next() {
+		var bi BatchInfo
+		var tasks, results sql.NullString
+		var created int64
+		if err := rows.Scan(&bi.ID, &bi.Key, &bi.Status, &tasks, &results, &created); err != nil {
+			return nil, fmt.Errorf("agent: read the batches: %w", err)
+		}
+		if tasks.Valid {
+			bi.Tasks = json.RawMessage(tasks.String)
+		}
+		if results.Valid {
+			bi.Results = json.RawMessage(results.String)
+		}
+		bi.Created = time.UnixMilli(created)
+		out = append(out, bi)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("agent: read the batches: %w", err)
+	}
+	return out, nil
 }
 
 // RecoverLost runs at startup. A restart loses the running background children, so for each

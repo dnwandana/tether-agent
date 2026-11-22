@@ -88,6 +88,27 @@ func (r *ProcRegistry) Running(sessionID string) []ProcInfo {
 	return out
 }
 
+// All returns a copy of each process that the registry keeps, also the exited ones,
+// sorted by the start time and then by the pid. A nil r has none.
+func (r *ProcRegistry) All() []ProcInfo {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []ProcInfo
+	for _, p := range r.procs {
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].StartedAt.Equal(out[j].StartedAt) {
+			return out[i].StartedAt.Before(out[j].StartedAt)
+		}
+		return out[i].PID < out[j].PID
+	})
+	return out
+}
+
 // Get returns a copy of the entry of pid.
 func (r *ProcRegistry) Get(pid int) (ProcInfo, bool) {
 	r.mu.Lock()

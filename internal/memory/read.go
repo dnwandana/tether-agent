@@ -179,3 +179,44 @@ func (s *Store) Topics() ([]string, error) {
 	}
 	return out, nil
 }
+
+// TopicInfo is one note in the topic list of the dashboard.
+type TopicInfo struct {
+	Name, Type string
+	Modified   time.Time
+	Entries    int
+}
+
+// TopicInfos returns the notes with type, modified time, and entry count, new first by
+// Modified, then by name. It reads the notes like a search, so the 2000-note and 16 MiB limits
+// apply, and a note that is too large or binary is not in the list.
+func (s *Store) TopicInfos() ([]TopicInfo, error) {
+	names, _, err := s.listNotes()
+	if errors.Is(err, errNotesNotFolder) || errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []TopicInfo
+	s.eachNote(names, maxNoteBytes, func(n note) {
+		out = append(out, TopicInfo{Name: n.Topic, Type: n.Type, Modified: n.Modified, Entries: len(n.Entries)})
+	})
+	slices.SortStableFunc(out, func(a, b TopicInfo) int {
+		if c := b.Modified.Compare(a.Modified); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Name, b.Name)
+	})
+	return out, nil
+}
+
+// Limit returns the limit in runes of the target file, separators included. An unknown target
+// gives 0.
+func (s *Store) Limit(target string) int {
+	_, limit, err := s.file(target)
+	if err != nil {
+		return 0
+	}
+	return limit
+}

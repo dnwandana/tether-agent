@@ -466,3 +466,40 @@ func TestRecoverLostKeepsTheOwnerFlag(t *testing.T) {
 		t.Fatal("the lost note keeps the owner flag of the batch:", got)
 	}
 }
+
+// List gives the background batches, newest first, with the raw JSON columns.
+func TestBatchesList(t *testing.T) {
+	d := openTestDB(t)
+	insertRunningBatch(t, d, "b1", "dashboard:owner")
+	if _, err := d.ExecContext(ctx, `INSERT INTO delegation_batches
+		(id, parent_session_key, parent_session_id, background, status, tasks, results, created_at) VALUES
+		('b2', 'telegram:dm:1', 's1', 1, 'done', '[{"name":"1/1","goal":"g1"}]', '[{"Status":"ok","Summary":"did g1"}]', 1763629200000),
+		('f1', 'cli:local', 's2', 0, 'done', '[]', NULL, 5)`); err != nil {
+		t.Fatal(err)
+	}
+	b := &Batches{DB: d}
+	got, err := b.List(ctx, 10)
+	if err != nil || len(got) != 2 {
+		t.Fatal(got, err)
+	}
+	if got[0].ID != "b2" || got[0].Key != "telegram:dm:1" || got[0].Status != BatchDone ||
+		string(got[0].Tasks) != `[{"name":"1/1","goal":"g1"}]` ||
+		string(got[0].Results) != `[{"Status":"ok","Summary":"did g1"}]` ||
+		!got[0].Created.Equal(time.UnixMilli(1763629200000)) {
+		t.Fatalf("%+v", got[0])
+	}
+	if got[1].ID != "b1" || got[1].Status != BatchRunning || string(got[1].Tasks) != `[]` || got[1].Results != nil {
+		t.Fatalf("%+v", got[1])
+	}
+	// The rows are closed: a second read and a write do not wait for the connection.
+	if one, err := b.List(ctx, 1); err != nil || len(one) != 1 || one[0].ID != "b2" {
+		t.Fatal(one, err)
+	}
+	if _, err := d.ExecContext(ctx, `DELETE FROM delegation_batches WHERE id = 'f1'`); err != nil {
+		t.Fatal(err)
+	}
+	var none *Batches
+	if l, err := none.List(ctx, 10); l != nil || err != nil {
+		t.Fatal(l, err)
+	}
+}

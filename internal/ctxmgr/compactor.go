@@ -492,6 +492,15 @@ func loadCompactions(ctx context.Context, d *db.DB, sessionID, query string) ([]
 	return out, nil
 }
 
+// StoredSize returns the size in tokens of the model view of stored with the compaction
+// comps. It is the size that MaybeStoredView compares with the threshold. fixed is the
+// estimate of the system prompt and the tool schemas (EstimateFixed), or 0.
+func StoredSize(stored []sessions.StoredMessage, comps []Compaction, fixed int) int {
+	view := BuildStoredView(stored, comps)
+	last, at := lastPrompt(stored, comps)
+	return ViewSize(last, at, fixed, view)
+}
+
 // lastPrompt returns the prompt tokens of the last response, and the id before that
 // response, so ViewSize also counts the response text. A response from before the latest
 // compaction does not count, because its prompt held the messages that the summary

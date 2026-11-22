@@ -24,7 +24,7 @@ func scriptFromJSON(t *testing.T, js string) fakeScript {
 }
 
 // startFakeSession starts the fake agent with the script js and opens one session.
-func startFakeSession(t *testing.T, js string) (*Client, SessionInfo, string) {
+func startFakeSession(t *testing.T, js string) (*Client, SessionSetup, string) {
 	t.Helper()
 	a, logPath := fakeAgentConfig(t, scriptFromJSON(t, js))
 	dir := t.TempDir()
