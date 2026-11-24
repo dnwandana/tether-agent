@@ -163,11 +163,11 @@ func (it *Interactions) promptApproval(ctx context.Context, chatID int64, thread
 			it.editResult(ectx, p, resultHeader(p.pin, r.scope, it.ApprovalTimeout), req)
 			return r.scope, nil
 		}
-		scope := security.ScopeDeny
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			scope = security.ScopeTimeout
+			it.editResult(ectx, p, resultHeader(p.pin, security.ScopeTimeout, it.ApprovalTimeout), req)
+		} else {
+			it.editResult(ectx, p, stoppedHeader(), req)
 		}
-		it.editResult(ectx, p, resultHeader(p.pin, scope, it.ApprovalTimeout), req)
 		return security.ScopeTimeout, ctx.Err()
 	}
 }

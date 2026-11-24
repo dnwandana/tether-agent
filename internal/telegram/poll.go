@@ -312,7 +312,7 @@ func menuDescription(c gateway.SkillCommand) string {
 
 // builtinCommands returns the bot command menu. The most-used commands come first. Telegram does
 // not allow "-" in a command name, so "/reload-mcp" is "reload_mcp" here. "/start",
-// "/reset", "/resume", and "/subgoal" still work, but they are not in the menu.
+// "/reset", "/resume", "/subgoal", and "/unarchive" still work, but they are not in the menu.
 func builtinCommands() []BotCommand {
 	return []BotCommand{
 		{Command: "new", Description: "Start a new session"},

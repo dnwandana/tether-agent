@@ -75,6 +75,14 @@ func TestHeaderFor(t *testing.T) {
 	}
 }
 
+func TestStoppedHeader(t *testing.T) {
+	h := stoppedHeader()
+	if h.mdv2() != "⏹ *No answer* · the turn stopped" || h.plain() != "⏹ No answer · the turn stopped" ||
+		h.markdown() != "⏹ **No answer** · the turn stopped" {
+		t.Fatalf("%q %q %q", h.mdv2(), h.plain(), h.markdown())
+	}
+}
+
 func TestBuildApprovalPrompt(t *testing.T) {
 	const timeoutLine = "\n_No answer in 10 min \\= deny\\._"
 	for _, c := range []struct {

@@ -342,6 +342,24 @@ func (p *Pairing) TriesLeft(ctx context.Context, platform string) (int, error) {
 	return max(PairMaxFailures-fails, 0), nil
 }
 
+// LockedUntil returns the end of the lockout of the platform, or the zero time when the
+// platform is not locked. It makes no network call.
+func (p *Pairing) LockedUntil(ctx context.Context, platform string) (time.Time, error) {
+	tx, err := p.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("pairing: locked until: %w", err)
+	}
+	defer tx.Rollback()
+	until, err := kvTime(ctx, tx, pairLockoutKey(platform))
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !until.After(p.now()) {
+		return time.Time{}, nil
+	}
+	return until, nil
+}
+
 // IsApproved reports whether pairing approved the user on the platform. It
 // reads the table on each call. A database error gives false.
 func (p *Pairing) IsApproved(ctx context.Context, platform, userID string) bool {
@@ -362,13 +380,33 @@ ORDER BY platform, status, created_at, user_id`,
 		return nil, fmt.Errorf("pairing: list: %w", err)
 	}
 	defer rows.Close()
+	return scanPairRows(rows, "list")
+}
+
+// ListRevoked returns the revoked users, newest request first. An empty platform lists all
+// platforms. A revoked user can send /start again, and that request takes the user out of
+// this list.
+func (p *Pairing) ListRevoked(ctx context.Context, platform string) ([]PairRow, error) {
+	rows, err := p.DB.QueryContext(ctx, `SELECT platform, user_id, user_name, status, created_at, expires_at, approved_at
+FROM pairing WHERE (?='' OR platform=?) AND status=?
+ORDER BY created_at DESC, user_id`,
+		platform, platform, PairRevoked)
+	if err != nil {
+		return nil, fmt.Errorf("pairing: list revoked: %w", err)
+	}
+	defer rows.Close()
+	return scanPairRows(rows, "list revoked")
+}
+
+// scanPairRows reads all rows of a pairing query. The caller closes the rows.
+func scanPairRows(rows *sql.Rows, op string) ([]PairRow, error) {
 	var out []PairRow
 	for rows.Next() {
 		var r PairRow
 		var created, expires int64
 		var approved sql.NullInt64
 		if err := rows.Scan(&r.Platform, &r.UserID, &r.UserName, &r.Status, &created, &expires, &approved); err != nil {
-			return nil, fmt.Errorf("pairing: list: %w", err)
+			return nil, fmt.Errorf("pairing: %s: %w", op, err)
 		}
 		r.CreatedAt, r.ExpiresAt = time.UnixMilli(created), time.UnixMilli(expires)
 		if approved.Valid {
@@ -377,7 +415,7 @@ ORDER BY platform, status, created_at, user_id`,
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("pairing: list: %w", err)
+		return nil, fmt.Errorf("pairing: %s: %w", op, err)
 	}
 	return out, nil
 }

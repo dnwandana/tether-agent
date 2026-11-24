@@ -14,41 +14,34 @@ import (
 // bold. Detail follows a middle dot, and an empty Detail has no dot.
 type approvalHeader struct{ Emoji, Title, Detail string }
 
-// headerFor returns the header for the answer s. A timeout names the wait when timeout
-// is above zero.
+// splitHeader cuts a result text into the emoji, the bold title, and the detail after the
+// first " · ". A text with no " · " has no detail.
+func splitHeader(s string) approvalHeader {
+	emoji, rest, _ := strings.Cut(s, " ")
+	title, detail, _ := strings.Cut(rest, " · ")
+	return approvalHeader{emoji, title, detail}
+}
+
+// headerFor returns the header for the answer s. A timeout names the wait in whole
+// minutes when timeout is above zero.
 func headerFor(s security.Scope, timeout time.Duration) approvalHeader {
-	const allowed, denied = "Approval allowed", "Approval denied"
-	switch s {
-	case security.ScopeOnce:
-		return approvalHeader{"✅", allowed, "once"}
-	case security.ScopeSession:
-		return approvalHeader{"✅", allowed, "this session"}
-	case security.ScopeAlways:
-		return approvalHeader{"✅", allowed, "always"}
-	case security.ScopeRedacted:
-		return approvalHeader{"✅", "Sent redacted", ""}
-	case security.ScopeTimeout:
-		if timeout > 0 {
-			return approvalHeader{"⌛", denied, "no answer in " + formatWait(timeout)}
-		}
-		return approvalHeader{"⌛", denied, "no answer"}
-	}
-	// A stopped turn and an unknown scope deny the command.
-	return approvalHeader{"❌", denied, ""}
+	return splitHeader(gateway.CardResultHeader(gateway.CardResult{Kind: "approval", Scope: string(s), Wait: timeout}))
 }
 
 // resultHeader returns the header after the answer s. With pin true, the titles are for a
-// pin request and the header has no "once" detail. Otherwise it is headerFor(s, timeout).
+// pin request. Otherwise it is headerFor(s, timeout).
 func resultHeader(pin bool, s security.Scope, timeout time.Duration) approvalHeader {
-	h := headerFor(s, timeout)
-	if !pin {
-		return h
+	kind := "approval"
+	if pin {
+		kind = "pin"
 	}
-	if h.Emoji == "✅" {
-		return approvalHeader{h.Emoji, "Program allowed", ""}
-	}
-	h.Title = "Program denied"
-	return h
+	return splitHeader(gateway.CardResultHeader(gateway.CardResult{Kind: kind, Scope: string(s), Wait: timeout}))
+}
+
+// stoppedHeader returns the header of a prompt that the stop of the turn ended. It has its
+// own text and is not a deny.
+func stoppedHeader() approvalHeader {
+	return splitHeader(gateway.CardResultHeader(gateway.CardResult{Stopped: true}))
 }
 
 // approvalKeyboard returns the buttons of the approval prompt id: "❌ Deny" alone on the

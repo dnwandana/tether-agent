@@ -171,3 +171,19 @@ func TestHeldCardDropAndChecks(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+// A tap that resolves a held send calls OnResolved once with the id. A nil OnResolved is safe.
+func TestHeldCardOnResolved(t *testing.T) {
+	ch, hc, _, _ := heldCards(t)
+	hc.Send = func(context.Context, cron.HeldSend) error { return nil }
+	var ids []string
+	hc.OnResolved = func(id string) { ids = append(ids, id) }
+	tap(ch, 5, "hs:h1:s")
+	tap(ch, 5, "hs:h1:s")
+	if !reflect.DeepEqual(ids, []string{"h1"}) {
+		t.Fatal(ids)
+	}
+	ch2, hc2, _, _ := heldCards(t)
+	hc2.Send = func(context.Context, cron.HeldSend) error { return nil }
+	tap(ch2, 5, "hs:h1:d")
+}

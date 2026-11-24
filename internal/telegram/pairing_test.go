@@ -357,3 +357,66 @@ func TestTriesLeft(t *testing.T) {
 		t.Fatalf("after the lockout: %d %v", n, err)
 	}
 }
+
+// ListRevoked lists the revoked users of one platform, newest request first. A new request
+// takes the user out of the list.
+func TestListRevoked(t *testing.T) {
+	p, clk := pairStore(t)
+	code := mustRequest(t, p, "6")
+	if _, err := p.Approve(ctx, "telegram", code); err != nil {
+		t.Fatal(err)
+	}
+	clk.advance(time.Minute)
+	mustRequest(t, p, "7")
+	mustRequestOn(t, p, "other", "8")
+	for _, u := range []string{"6", "7"} {
+		if err := p.Revoke(ctx, "telegram", u); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.Revoke(ctx, "other", "8"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := p.ListRevoked(ctx, "telegram")
+	if err != nil || len(rows) != 2 || rows[0].UserID != "7" || rows[1].UserID != "6" ||
+		rows[0].Status != PairRevoked || rows[0].UserName != "user7" || rows[0].Platform != "telegram" {
+		t.Fatalf("%+v %v", rows, err)
+	}
+	if rows, err := p.ListRevoked(ctx, ""); err != nil || len(rows) != 3 {
+		t.Fatalf("an empty platform lists all platforms: %+v %v", rows, err)
+	}
+	// A revoked user can send /start again. The new request is pending, not revoked.
+	clk.advance(11 * time.Minute)
+	mustRequest(t, p, "6")
+	if rows, err := p.ListRevoked(ctx, "telegram"); err != nil || len(rows) != 1 || rows[0].UserID != "7" {
+		t.Fatalf("%+v %v", rows, err)
+	}
+	if rows, err := (&Pairing{DB: openTestDB(t)}).ListRevoked(ctx, "telegram"); err != nil || len(rows) != 0 {
+		t.Fatalf("%+v %v", rows, err)
+	}
+}
+
+// LockedUntil gives the end of the lockout, and the zero time when the platform is not locked.
+func TestLockedUntil(t *testing.T) {
+	p, clk := pairStore(t)
+	start := clk.now()
+	mustRequest(t, p, "6")
+	if until, err := p.LockedUntil(ctx, "telegram"); err != nil || !until.IsZero() {
+		t.Fatal(until, err)
+	}
+	for range PairMaxFailures {
+		if _, err := p.Approve(ctx, "telegram", "AAAAAAAA"); !errors.Is(err, ErrPairCodeNotFound) {
+			t.Fatal(err)
+		}
+	}
+	if until, err := p.LockedUntil(ctx, "telegram"); err != nil || !until.Equal(start.Add(PairLockout)) {
+		t.Fatalf("got %v %v, want %v", until, err, start.Add(PairLockout))
+	}
+	if until, err := p.LockedUntil(ctx, "other"); err != nil || !until.IsZero() {
+		t.Fatal("the lockout is for one platform only:", until, err)
+	}
+	clk.advance(PairLockout + time.Minute)
+	if until, err := p.LockedUntil(ctx, "telegram"); err != nil || !until.IsZero() {
+		t.Fatal("an old lockout gives the zero time:", until, err)
+	}
+}

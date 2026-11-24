@@ -42,6 +42,8 @@ type HeldCards struct {
 	// Jobs is the store of the held rows and the run rows. Nil answers each tap as resolved.
 	Jobs *cron.Store
 	Send func(ctx context.Context, h cron.HeldSend) error
+	// OnResolved runs after a tap resolves a held send. Nil does nothing.
+	OnResolved func(id string)
 }
 
 func (hc *HeldCards) logger() *slog.Logger {
@@ -158,6 +160,9 @@ func (hc *HeldCards) tap(ctx context.Context, cq CallbackQuery, id, arg string) 
 	})
 	switch {
 	case err == nil:
+		if hc.OnResolved != nil {
+			hc.OnResolved(id)
+		}
 	case errors.Is(err, cron.ErrHeldNotSent):
 		hc.edit(ctx, cq, result+" Tap Send to try again.", heldKeyboard(h.ID, h.Kind, h.TargetTitle))
 	case errors.Is(err, cron.ErrHeldGone):

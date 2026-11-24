@@ -217,7 +217,7 @@ func TestApprovalEditKeepsCommand(t *testing.T) {
 	if got := api.lastCall("editMessageText").Body["text"]; got != "⌛ *Approval denied* · no answer in 10 min"+body {
 		t.Fatal(got)
 	}
-	// A turn that stops while the prompt waits gets the deny header.
+	// A turn that stops while the prompt waits gets the stopped header, not the deny header.
 	it, api = interactions(t)
 	sctx, stop := context.WithCancel(ctx)
 	go func() {
@@ -225,7 +225,7 @@ func TestApprovalEditKeepsCommand(t *testing.T) {
 		stop()
 	}()
 	_, _ = it.For(5, "", "").PromptApproval(sctx, req)
-	if got := api.lastCall("editMessageText").Body["text"]; got != "❌ *Approval denied*"+body {
+	if got := api.lastCall("editMessageText").Body["text"]; got != "⏹ *No answer* · the turn stopped"+body {
 		t.Fatal(got)
 	}
 }
