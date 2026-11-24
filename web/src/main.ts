@@ -20,6 +20,8 @@ import { applyNoticeEvents } from "./stores/notices"
 import { applyStatusEvents, status } from "./stores/status"
 import { applyTheme, toast } from "./stores/ui"
 import { anyDirty } from "./lib/dirty"
+import { setHost } from "./stores/host"
+import type { BootstrapView } from "./api/types.gen"
 
 applyTheme()
 
@@ -33,8 +35,9 @@ let version = ""
 // Reads the version of the gateway. After a reload for a new build it says "Updated to vX.Y.Z.".
 async function loadVersion(): Promise<void> {
   try {
-    const b = await api<{ version: string }>("GET", "/api/bootstrap")
+    const b = await api<BootstrapView>("GET", "/api/bootstrap")
     version = b.version
+    setHost(b.host_zone, b.host_offset_min)
     let from: string | null = null
     try {
       from = sessionStorage.getItem(KEY_FROM)
