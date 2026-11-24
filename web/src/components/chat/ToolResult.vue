@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import type { ToolView } from "../../api/types.gen"
+import { Button } from "@/components/ui/button"
+import {
+  CodeBlock,
+  CodeBlockContent,
+  CodeBlockFooter,
+  CodeBlockHeader,
+  CodeBlockTitle,
+} from "@/components/ui/code-block"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { renderMarkdown } from "../../lib/markdown"
 import DiffView from "./DiffView.vue"
 import CodeView from "./CodeView.vue"
@@ -75,54 +84,68 @@ const known = computed(
 </script>
 
 <template>
-  <div v-if="name !== 'todo_list'" class="tool-result">
+  <div v-if="name !== 'todo_list'" class="flex min-w-0 flex-col gap-2">
     <TerminalView v-if="name === 'terminal'" :command="str(a.command)" :text="text" />
     <template v-else-if="name === 'execute_code'">
-      <pre class="code-block">{{ str(a.code) }}</pre>
+      <CodeBlock size="sm">
+        <CodeBlockContent wrap>{{ str(a.code) }}</CodeBlockContent>
+      </CodeBlock>
       <TerminalView command="python" :text="text" />
     </template>
     <DiffView v-else-if="name === 'patch'" :text="text" />
-    <div v-else-if="oneLine.includes(name)" class="result">
-      <div class="result-h">
-        <span class="path">{{ firstLine }}</span>
-      </div>
+    <CodeBlock v-else-if="oneLine.includes(name)" size="sm">
+      <CodeBlockContent wrap>{{ firstLine }}</CodeBlockContent>
+    </CodeBlock>
+    <div
+      v-else-if="untrustedTools.includes(name)"
+      data-untrusted
+      class="rounded-md border border-dashed border-warning"
+    >
+      <Collapsible>
+        <CollapsibleTrigger as-child>
+          <Button variant="ghost" size="sm" class="w-full min-w-0 justify-start">
+            <span>⚠ Untrusted content</span>
+            <span v-if="str(a.url)" class="truncate font-mono text-xs">{{ str(a.url) }}</span>
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown escapes raw HTML -->
+          <div class="typeset typeset-chat p-3" v-html="html"></div>
+        </CollapsibleContent>
+      </Collapsible>
     </div>
-    <details v-else-if="untrustedTools.includes(name)" class="result untrusted">
-      <summary class="result-h">
-        <span>⚠ Untrusted content</span>
-        <span v-if="str(a.url)" class="path">{{ str(a.url) }}</span>
-      </summary>
-      <div class="result-b md" v-html="html"></div>
-    </details>
-    <div v-else-if="name === 'browser_navigate'" class="result">
-      <div class="result-h">
-        <span class="path">{{ nav.title }}</span>
-        <span class="grow"></span>
-        <span v-if="nav.status" class="c-3">{{ nav.status }}</span>
-      </div>
-      <div class="result-b">
-        <p class="t-12 c-3">{{ nav.url }}</p>
-        <pre class="code-block">{{ nav.excerpt }}</pre>
-      </div>
-    </div>
+    <CodeBlock v-else-if="name === 'browser_navigate'" size="sm">
+      <CodeBlockHeader>
+        <CodeBlockTitle>{{ nav.title }}</CodeBlockTitle>
+        <span v-if="nav.status" class="ms-auto text-xs">{{ nav.status }}</span>
+      </CodeBlockHeader>
+      <CodeBlockContent wrap>{{ nav.excerpt }}</CodeBlockContent>
+      <CodeBlockFooter>{{ nav.url }}</CodeBlockFooter>
+    </CodeBlock>
     <CodeView v-else-if="readOk" :path="str(a.path)" :text="text" />
     <SearchList v-else-if="webOk" kind="web" :text="text" :query="str(a.query)" />
     <SearchList v-else-if="sessionOk" kind="session" :text="text" :query="str(a.query)" />
     <DelegateCards v-else-if="delegateOk" :text="text" :args="props.tool.args" />
     <template v-else-if="imageTools.includes(name)">
-      <img v-if="link" class="shot" :src="link" alt="" />
-      <pre v-else class="code-block">{{ firstLine }}</pre>
+      <img v-if="link" class="w-full rounded-md border" :src="link" alt="" />
+      <CodeBlock v-else size="sm">
+        <CodeBlockContent wrap>{{ firstLine }}</CodeBlockContent>
+      </CodeBlock>
     </template>
     <template v-else-if="name === 'text_to_speech'">
-      <audio v-if="link" class="audio" controls :src="link"></audio>
-      <pre v-else class="code-block">{{ firstLine }}</pre>
+      <audio v-if="link" controls :src="link"></audio>
+      <CodeBlock v-else size="sm">
+        <CodeBlockContent wrap>{{ firstLine }}</CodeBlockContent>
+      </CodeBlock>
     </template>
-    <pre v-if="!known" class="code-block">{{ text }}</pre>
-    <p v-if="props.tool.cut" class="t-12 c-3">
+    <CodeBlock v-if="!known" size="sm">
+      <CodeBlockContent wrap>{{ text }}</CodeBlockContent>
+    </CodeBlock>
+    <p v-if="props.tool.cut" class="text-xs text-muted-foreground">
       The text is cut at 16 KB.
-      <button type="button" class="link" data-act="show-all" @click="emit('show-all', props.tool)">
+      <Button type="button" variant="link" size="xs" @click="emit('show-all', props.tool)">
         Show all
-      </button>
+      </Button>
     </p>
   </div>
 </template>

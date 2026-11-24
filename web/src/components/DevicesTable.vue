@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { MonitorIcon } from "@lucide/vue"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { deviceLabel } from "../lib/browser"
 import { computed, onMounted, ref } from "vue"
 import { useRouter } from "vue-router"
@@ -110,57 +113,40 @@ onMounted(load)
 </script>
 
 <template>
-  <div class="devices">
-    <div class="page-h">
-      <span
-        >A new device signs in when you tap ✅ Allow in Telegram or on a signed-in device. A sign-in
-        lasts dashboard.session_hours.</span
-      >
-      <button
-        class="btn btn-danger-soft"
-        type="button"
-        :disabled="others === 0"
-        @click="revokeOthers"
-      >
+  <div class="flex flex-col gap-4">
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <p class="text-sm text-muted-foreground">
+        A new device signs in when you tap ✅ Allow in Telegram or on a signed-in device. A sign-in
+        lasts dashboard.session_hours.
+      </p>
+      <Button variant="outline" type="button" :disabled="others === 0" @click="revokeOthers">
         Sign out all other devices…
-      </button>
+      </Button>
     </div>
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @action="load" />
     <DataTable v-else :columns="columns" :rows="rows" row-key="id" :cards-below="1024">
       <template #cell-label="{ row }">
-        <svg
-          viewBox="0 0 24 24"
-          width="16"
-          height="16"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.75"
-          stroke-linecap="round"
-          aria-hidden="true"
-        >
-          <rect x="3" y="5" width="18" height="12" rx="2" />
-          <path d="M8 21h8M12 17v4" />
-        </svg>
-        <b>{{ (row as unknown as DeviceRow).label }}</b
+        <MonitorIcon aria-hidden="true" />
+        <b class="font-medium">{{ (row as unknown as DeviceRow).label }}</b
         >{{ " "
-        }}<span v-if="(row as unknown as DeviceRow).this_device" class="chip chip-acc"
-          >This device</span
+        }}<Badge v-if="(row as unknown as DeviceRow).this_device" variant="secondary"
+          >This device</Badge
         >
         <details>
           <summary>{{ deviceLabel((row as unknown as DeviceRow).browser) }}</summary>
-          <span class="mono t-12">{{ (row as unknown as DeviceRow).browser }}</span>
+          <span class="font-mono text-xs break-all">{{
+            (row as unknown as DeviceRow).browser
+          }}</span>
         </details>
       </template>
       <template #cell-ip="{ row }"
-        ><span class="mono">{{ (row as unknown as DeviceRow).ip }}</span></template
+        ><span class="font-mono">{{ (row as unknown as DeviceRow).ip }}</span></template
       >
       <template #cell-created="{ row }"
-        ><span
-          style="white-space: nowrap"
-          :title="fullTime((row as unknown as DeviceRow).created)"
-          >{{ shortTime((row as unknown as DeviceRow).created) || "—" }}</span
-        ></template
+        ><span class="whitespace-nowrap" :title="fullTime((row as unknown as DeviceRow).created)">{{
+          shortTime((row as unknown as DeviceRow).created) || "—"
+        }}</span></template
       >
       <template #cell-last_seen="{ row }">{{
         ago((row as unknown as DeviceRow).last_seen, now)
@@ -169,13 +155,15 @@ onMounted(load)
         until((row as unknown as DeviceRow).expires, now)
       }}</template>
       <template #cell-actions="{ row }">
-        <button
-          class="btn btn-danger-soft btn-sm"
+        <Button
+          variant="outline"
+          size="sm"
           type="button"
+          class="max-tab:h-11"
           @click="revoke(row as unknown as DeviceRow)"
         >
           Sign out
-        </button>
+        </Button>
       </template>
     </DataTable>
   </div>

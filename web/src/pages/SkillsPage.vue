@@ -8,6 +8,10 @@ import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api } from "../api/client"
 import type { CatalogRow, SkillRow, TaskView } from "../api/types.gen"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
 import ResultNote from "../components/ResultNote.vue"
@@ -109,11 +113,22 @@ watch([search, trust, inst], () => {
   page.value = 0
 })
 
-function trustClass(t: string): string {
-  if (t === "trusted") return "chip-ok"
-  if (t === "community") return "chip-warn"
-  if (t === "agent-created") return "chip-info"
-  return "chip-plain"
+type Tone = "ok" | "warn" | "bad" | "info" | "plain"
+// The status token of each tone. "plain" keeps the outline badge as it comes.
+const TONE: Record<Tone, string> = {
+  ok: "border-success/40 text-success",
+  warn: "border-warning/40 text-warning",
+  bad: "border-destructive/40 text-destructive",
+  info: "border-info/40 text-info",
+  plain: "",
+}
+
+// Returns the tone of a trust label.
+function trustTone(t: string): Tone {
+  if (t === "trusted") return "ok"
+  if (t === "community") return "warn"
+  if (t === "agent-created") return "info"
+  return "plain"
 }
 
 // Returns the trust label that the page shows. The loader cannot tell an agent write from a
@@ -122,15 +137,15 @@ function trustLabel(t: string): string {
   return t === "agent-created" ? "local" : t
 }
 
-// Returns the status chips of one skill as { text, cls } pairs.
-function chips(r: SkillRow): { text: string; cls: string }[] {
-  const out: { text: string; cls: string }[] = []
+// Returns the status chips of one skill as { text, tone } pairs.
+function chips(r: SkillRow): { text: string; tone: Tone }[] {
+  const out: { text: string; tone: Tone }[] = []
   if (r.update || r.check.includes("update available"))
-    out.push({ text: "update available", cls: "chip-info" })
-  if (r.pinned || r.check.includes("pinned")) out.push({ text: "pinned", cls: "chip-plain" })
-  if (r.check.includes("modified locally")) out.push({ text: "modified locally", cls: "chip-warn" })
-  if (r.check.includes("cannot check")) out.push({ text: "cannot check", cls: "chip-plain" })
-  if (r.check.includes("source changed")) out.push({ text: "source changed", cls: "chip-warn" })
+    out.push({ text: "update available", tone: "info" })
+  if (r.pinned || r.check.includes("pinned")) out.push({ text: "pinned", tone: "plain" })
+  if (r.check.includes("modified locally")) out.push({ text: "modified locally", tone: "warn" })
+  if (r.check.includes("cannot check")) out.push({ text: "cannot check", tone: "plain" })
+  if (r.check.includes("source changed")) out.push({ text: "source changed", tone: "warn" })
   return out
 }
 
@@ -189,11 +204,11 @@ function isEnd(_name: string, data: unknown): boolean {
   return !!t && t.kind === "skills" && (t.state === "done" || t.state === "error")
 }
 
-// Returns the chip class of a guard verdict.
-function verdictClass(v: string): string {
-  if (v === "safe") return "chip-ok"
-  if (v === "dangerous") return "chip-bad"
-  return "chip-warn"
+// Returns the tone of a guard verdict.
+function verdictTone(v: string): Tone {
+  if (v === "safe") return "ok"
+  if (v === "dangerous") return "bad"
+  return "warn"
 }
 
 const verbs: Record<Action, [string, string]> = {
@@ -378,25 +393,21 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Skills</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight">Skills</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-      <button class="btn btn-secondary" type="button" :disabled="busy" @click="check">
-        Check for updates
-      </button>
+      <Button variant="outline" :disabled="busy" @click="check">Check for updates</Button>
     </div>
     <ResultNote :note="note" @close="closeNote" />
-    <div v-if="forceOffer" class="li">
-      <button class="btn btn-secondary" type="button" :disabled="busy" @click="installAnyway">
+    <div v-if="forceOffer" class="flex items-center gap-2">
+      <Button variant="outline" :disabled="busy" @click="installAnyway">
         {{ forceOffer.action === "install" ? "Install anyway…" : "Update anyway…" }}
-      </button>
+      </Button>
     </div>
-    <div v-if="running?.waiting" class="li">
-      <span class="grow">Answer the card in ⏳ Waiting.</span>
-      <button class="btn btn-secondary btn-sm" type="button" @click="ui.trayOpen = true">
-        Open Waiting
-      </button>
+    <div v-if="running?.waiting" class="flex items-center gap-2">
+      <span class="flex-1">Answer the card in ⏳ Waiting.</span>
+      <Button variant="outline" size="sm" @click="ui.trayOpen = true">Open Waiting</Button>
     </div>
     <Tabs :tabs="tabList" v-model="tabModel" />
 
@@ -417,15 +428,12 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
         @action="setTab('catalog')"
       />
       <template v-else>
-        <div class="search">
-          <input
-            v-model="installedQuery"
-            class="input"
-            type="search"
-            placeholder="Search the installed skills"
-            aria-label="Search the installed skills"
-          />
-        </div>
+        <Input
+          v-model="installedQuery"
+          type="search"
+          placeholder="Search the installed skills"
+          aria-label="Search the installed skills"
+        />
         <StateBlock v-if="shownRows.length === 0" state="empty" text="No skill matches" />
         <DataTable
           v-else
@@ -434,61 +442,81 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
           row-key="name"
         >
           <template #cell-name="{ row }">
-            <router-link :to="{ name: 'skill', params: { name: s(row).name } }"
+            <router-link
+              class="font-medium underline-offset-4 hover:underline"
+              :to="{ name: 'skill', params: { name: s(row).name } }"
               >/{{ s(row).name }}</router-link
             >
-            <div class="c-2 t-12 clamp-3" :title="s(row).description">{{ s(row).description }}</div>
+            <div class="line-clamp-3 text-xs text-muted-foreground" :title="s(row).description">
+              {{ s(row).description }}
+            </div>
           </template>
-          <template #cell-trust="{ row }"
-            ><span class="chip" :class="trustClass(s(row).trust)">{{
-              trustLabel(s(row).trust)
-            }}</span></template
-          >
+          <template #cell-trust="{ row }">
+            <Badge
+              variant="outline"
+              :class="TONE[trustTone(s(row).trust)]"
+              :data-tone="trustTone(s(row).trust)"
+              >{{ trustLabel(s(row).trust) }}</Badge
+            >
+          </template>
           <template #cell-source="{ row }"
-            ><span class="mono">{{ s(row).source || "—" }}</span></template
+            ><span class="font-mono text-xs">{{ s(row).source || "—" }}</span></template
           >
           <template #cell-env="{ row }">{{
             s(row).required_env.length ? s(row).required_env.join(", ") : "—"
           }}</template>
           <template #cell-status="{ row }">
-            <span v-if="running && running.name === s(row).name" class="chip chip-info"
-              >Running…</span
+            <Badge
+              v-if="running && running.name === s(row).name"
+              variant="outline"
+              :class="TONE.info"
+              data-tone="info"
+              >Running…</Badge
             >
             <template v-if="chips(s(row)).length">
-              <span v-for="ch in chips(s(row))" :key="ch.text" class="chip" :class="ch.cls">{{
-                ch.text
-              }}</span>
+              <Badge
+                v-for="ch in chips(s(row))"
+                :key="ch.text"
+                variant="outline"
+                :class="TONE[ch.tone]"
+                :data-tone="ch.tone"
+                >{{ ch.text }}</Badge
+              >
             </template>
-            <span v-else-if="!(running && running.name === s(row).name)" class="c-3">—</span>
+            <span
+              v-else-if="!(running && running.name === s(row).name)"
+              class="text-muted-foreground"
+              >—</span
+            >
           </template>
           <template #cell-actions="{ row }">
-            <button
+            <Button
               v-if="canUpdate(s(row))"
-              class="btn btn-secondary btn-sm"
-              type="button"
+              variant="outline"
+              size="sm"
               :disabled="busy"
               @click.stop="skillAction(s(row).name, 'update')"
             >
               Update
-            </button>
-            <button
+            </Button>
+            <Button
               v-if="s(row).actions.includes('reset')"
-              class="btn btn-secondary btn-sm"
-              type="button"
+              variant="outline"
+              size="sm"
               :disabled="busy"
               @click.stop="skillAction(s(row).name, 'reset')"
             >
               Reset
-            </button>
-            <button
+            </Button>
+            <Button
               v-if="s(row).actions.includes('uninstall')"
-              class="btn btn-danger-soft btn-sm"
-              type="button"
+              variant="destructive"
+              size="sm"
               :disabled="busy"
               @click.stop="skillAction(s(row).name, 'uninstall')"
             >
               Uninstall
-            </button>
+            </Button>
           </template>
         </DataTable>
       </template>
@@ -504,27 +532,24 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
         @action="loadCatalog"
       />
       <template v-else>
-        <div class="search">
-          <input
-            v-model="search"
-            class="input"
-            type="search"
-            :placeholder="`Search ${catalog.length} skills`"
-            :aria-label="`Search ${catalog.length} skills`"
-          />
-        </div>
-        <div class="li">
-          <select v-model="trust" class="input" aria-label="Trust">
-            <option value="all">All</option>
-            <option value="trusted">Trusted</option>
-            <option value="community">Community</option>
-            <option value="local">Local</option>
-          </select>
-          <select v-model="inst" class="input" aria-label="Installed">
-            <option value="all">All</option>
-            <option value="yes">Installed</option>
-            <option value="no">Not installed</option>
-          </select>
+        <Input
+          v-model="search"
+          type="search"
+          :placeholder="`Search ${catalog.length} skills`"
+          :aria-label="`Search ${catalog.length} skills`"
+        />
+        <div class="flex flex-wrap gap-2">
+          <NativeSelect v-model="trust" aria-label="Trust">
+            <NativeSelectOption value="all">All</NativeSelectOption>
+            <NativeSelectOption value="trusted">Trusted</NativeSelectOption>
+            <NativeSelectOption value="community">Community</NativeSelectOption>
+            <NativeSelectOption value="local">Local</NativeSelectOption>
+          </NativeSelect>
+          <NativeSelect v-model="inst" aria-label="Installed">
+            <NativeSelectOption value="all">All</NativeSelectOption>
+            <NativeSelectOption value="yes">Installed</NativeSelectOption>
+            <NativeSelectOption value="no">Not installed</NativeSelectOption>
+          </NativeSelect>
         </div>
         <StateBlock v-if="filtered.length === 0" state="empty" text="No skill matches" />
         <DataTable
@@ -535,49 +560,45 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
         >
           <template #cell-name="{ row }">
             <b>/{{ c(row).name }}</b>
-            <div class="c-2 t-12 clamp-3" :title="c(row).description">{{ c(row).description }}</div>
+            <div class="line-clamp-3 text-xs text-muted-foreground" :title="c(row).description">
+              {{ c(row).description }}
+            </div>
           </template>
           <template #cell-url="{ row }"
-            ><span class="mono">{{ c(row).url }}</span></template
+            ><span class="font-mono text-xs">{{ c(row).url }}</span></template
           >
           <template #cell-checks="{ row }">
-            <span v-if="c(row).verdict" class="chip" :class="verdictClass(c(row).verdict)">{{
-              c(row).verdict
-            }}</span>
-            <span
-              v-if="c(row).source_trust"
-              class="chip"
-              :class="trustClass(c(row).source_trust)"
-              >{{ trustLabel(c(row).source_trust) }}</span
+            <Badge
+              v-if="c(row).verdict"
+              variant="outline"
+              :class="TONE[verdictTone(c(row).verdict)]"
+              :data-tone="verdictTone(c(row).verdict)"
+              >{{ c(row).verdict }}</Badge
             >
-            <span v-if="!c(row).verdict && !c(row).source_trust" class="c-3">—</span>
+            <Badge
+              v-if="c(row).source_trust"
+              variant="outline"
+              :class="TONE[trustTone(c(row).source_trust)]"
+              :data-tone="trustTone(c(row).source_trust)"
+              >{{ trustLabel(c(row).source_trust) }}</Badge
+            >
+            <span v-if="!c(row).verdict && !c(row).source_trust" class="text-muted-foreground"
+              >—</span
+            >
           </template>
           <template #cell-actions="{ row }">
-            <span v-if="c(row).installed" class="chip chip-plain">installed</span>
-            <button
-              v-else
-              class="btn btn-primary btn-sm"
-              type="button"
-              :disabled="busy"
-              @click.stop="install(c(row))"
-            >
+            <Badge v-if="c(row).installed" variant="secondary">installed</Badge>
+            <Button v-else size="sm" :disabled="busy" @click.stop="install(c(row))">
               Install
-            </button>
+            </Button>
           </template>
         </DataTable>
-        <div v-if="filtered.length > PAGE_SIZE" class="pager">
-          <span class="grow">Page {{ page + 1 }} of {{ pageCount }}</span>
-          <button class="btn btn-ghost" type="button" :disabled="page === 0" @click="page--">
-            ◀ Prev
-          </button>
-          <button
-            class="btn btn-ghost"
-            type="button"
-            :disabled="page >= pageCount - 1"
-            @click="page++"
+        <div v-if="filtered.length > PAGE_SIZE" class="flex items-center gap-2">
+          <span class="flex-1 text-sm text-muted-foreground"
+            >Page {{ page + 1 }} of {{ pageCount }}</span
           >
-            Next ▶
-          </button>
+          <Button variant="ghost" :disabled="page === 0" @click="page--">◀ Prev</Button>
+          <Button variant="ghost" :disabled="page >= pageCount - 1" @click="page++">Next ▶</Button>
         </div>
       </template>
     </template>
@@ -588,22 +609,22 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
           The skill guard marked /{{ manual.name }} as dangerous. The dashboard does not
           {{ manual.action }} it.
         </p>
-        <div class="code-block">{{ terminalCommand(manual) }}</div>
+        <pre
+          class="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
+          >{{ terminalCommand(manual) }}</pre>
         <p>The terminal asks you to type the name of the skill.</p>
-        <button
-          v-if="isSecure()"
-          class="btn btn-secondary"
-          type="button"
-          @click="copy(terminalCommand(manual))"
-        >
+        <Button v-if="isSecure()" variant="outline" @click="copy(terminalCommand(manual))">
           Copy command
-        </button>
-        <p v-else class="c-3">Needs HTTPS or localhost</p>
-        <div v-if="manual.findings" class="code-block">{{ manual.findings }}</div>
+        </Button>
+        <p v-else class="text-sm text-muted-foreground">Needs HTTPS or localhost</p>
+        <pre
+          v-if="manual.findings"
+          class="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
+          >{{ manual.findings }}</pre>
       </template>
     </SidePanel>
 
-    <p class="pill-note">
+    <p class="text-sm text-muted-foreground">
       Each skill is a /command in Chat. A new skill loads in new sessions. The agent itself can
       never install a skill.
     </p>

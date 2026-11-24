@@ -2,6 +2,10 @@
 import { ref, onMounted, onUnmounted, type Ref } from "vue"
 import type { Card } from "../../api/types.gen"
 import { answerCard } from "../../stores/cards"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Item, ItemContent, ItemHeader } from "@/components/ui/item"
+import { Progress } from "@/components/ui/progress"
 
 const props = defineProps<{ card: Card }>()
 
@@ -91,48 +95,61 @@ async function deny(): Promise<void> {
 </script>
 
 <template>
-  <div :id="'card-' + card.id" class="icard" role="group" :aria-label="card.header">
-    <div class="icard-h">
+  <Item
+    :id="'card-' + card.id"
+    variant="outline"
+    role="group"
+    :aria-label="card.header"
+    class="min-w-0 bg-card"
+  >
+    <ItemHeader>
       <span>{{ card.header }}</span>
-      <span v-if="card.child" class="t-12 c-3">· {{ card.child }}</span>
-      <span v-if="cd.text.value" class="cd" role="timer" :aria-label="cd.aria.value">{{
-        cd.text.value
-      }}</span>
-    </div>
-    <div v-if="cd.text.value" class="countdown">
-      <span :style="{ width: cd.pct.value + '%' }"></span>
-    </div>
-    <div class="icard-b">
-      <dl class="ikv">
-        <dt>For</dt>
-        <dd style="white-space: pre-wrap">{{ card.command }}</dd>
-        <dt>Reason</dt>
-        <dd>{{ card.reason }}</dd>
+      <span v-if="card.child" class="text-xs text-muted-foreground">· {{ card.child }}</span>
+      <span
+        v-if="cd.text.value"
+        class="ml-auto text-xs text-muted-foreground tabular-nums"
+        role="timer"
+        :aria-label="cd.aria.value"
+        >{{ cd.text.value }}</span
+      >
+    </ItemHeader>
+    <Progress v-if="cd.text.value" :model-value="cd.pct.value" class="h-1 basis-full" />
+    <ItemContent class="min-w-0 basis-full gap-2">
+      <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+        <dt class="text-muted-foreground">For</dt>
+        <dd class="min-w-0 break-all whitespace-pre-wrap">{{ card.command }}</dd>
+        <dt class="text-muted-foreground">Reason</dt>
+        <dd class="min-w-0">{{ card.reason }}</dd>
       </dl>
-      <input
+      <Input
         v-model="value"
-        class="input masked"
         type="password"
         autocomplete="off"
         spellcheck="false"
         placeholder="Paste the value"
         @keydown.enter="save"
       />
-      <div v-if="card.answers.includes('deny')" class="icard-row">
-        <button class="btn btn-danger-soft" type="button" :disabled="busy" @click="deny">
+      <div v-if="card.answers.includes('deny')" data-row class="flex flex-wrap gap-2">
+        <Button type="button" variant="outline" class="max-tab:h-11" :disabled="busy" @click="deny">
           ❌ Deny
-        </button>
+        </Button>
       </div>
-      <div class="icard-row">
-        <button class="btn btn-primary" type="button" :disabled="busy || !value" @click="save">
+      <div data-row class="flex flex-wrap gap-2">
+        <Button
+          type="button"
+          variant="default"
+          class="max-tab:h-11"
+          :disabled="busy || !value"
+          @click="save"
+        >
           Save
-        </button>
+        </Button>
       </div>
-      <p class="t-12 c-3">
+      <p class="text-xs text-muted-foreground">
         The value goes into .env on the host. It is never shown again, and the model sees only
         “Saved”.
       </p>
-      <div v-if="error" class="t-12 c-bad">{{ error }}</div>
-    </div>
-  </div>
+      <div v-if="error" role="alert" class="text-xs text-destructive">{{ error }}</div>
+    </ItemContent>
+  </Item>
 </template>

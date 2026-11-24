@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 import type { SetupStep } from "../api/types.gen"
 
@@ -75,13 +77,16 @@ async function mk() {
     ],
   })
   await router.push("/start")
-  const w = mount(GettingStartedPage, {
+  render(GettingStartedPage, {
     global: { plugins: [router], stubs: { SidePanel: true, LiveHeader: true } },
   })
   await flushPromises()
-  return Object.assign(w, { router })
+  return { router, user: userEvent.setup() }
 }
-const btns = (w: any, t: string) => w.findAll("button").filter((b: any) => b.text() === t)
+const rows = () =>
+  within(screen.getByRole("list", { name: "Setup steps" })).getAllByRole("listitem")
+const markOf = (li: HTMLElement) => li.querySelector("[data-tone]")!
+const buttons = (name: string) => screen.queryAllByRole("button", { name })
 
 beforeEach(() => {
   vi.mocked(api)
@@ -93,33 +98,34 @@ beforeEach(() => {
 
 describe("GettingStartedPage", () => {
   it("shows a done step with ✓, an open step with its command, and an unknown step with ?", async () => {
-    const w = await mk()
+    await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/setup")
-    const rows = w.findAll(".li")
-    expect(rows[0].find(".lead").classes()).toContain("is-done")
-    expect(rows[0].find(".lead").text()).toBe("✓")
-    expect(rows[0].find("code").exists()).toBe(false)
-    expect(rows[1].find(".lead").text()).toBe("2")
-    expect(rows[1].find("code").text()).toBe("tether setup")
-    expect(rows[3].find(".lead").classes()).toContain("is-unknown")
-    expect(rows[3].find(".lead").text()).toBe("?")
-    expect(rows[3].text()).toContain("Run the doctor on the System page.")
-    expect(rows[3].find("code").exists()).toBe(false)
-    expect(btns(w, "Run doctor")).toHaveLength(1)
-    expect(rows[3].find("button").exists()).toBe(false)
-    expect(rows[4].find("button").exists()).toBe(false)
-    const html = w.html()
-    expect(html.indexOf("Run doctor")).toBeLessThan(html.indexOf("Primary provider"))
-    expect(rows[6].text()).toContain("How to turn on HTTPS")
-    expect(btns(w, "Copy")).toHaveLength(3)
+    expect(markOf(rows()[0]).getAttribute("data-tone")).toBe("done")
+    expect(markOf(rows()[0]).textContent?.trim()).toBe("✓")
+    expect(rows()[0].querySelector("code")).toBeNull()
+    expect(markOf(rows()[1]).textContent?.trim()).toBe("2")
+    expect(rows()[1].querySelector("code")?.textContent).toBe("tether setup")
+    expect(markOf(rows()[3]).getAttribute("data-tone")).toBe("unknown")
+    expect(markOf(rows()[3]).textContent?.trim()).toBe("?")
+    expect(rows()[3].textContent).toContain("Run the doctor on the System page.")
+    expect(rows()[3].querySelector("code")).toBeNull()
+    expect(within(rows()[3]).queryAllByRole("button")).toHaveLength(0)
+    expect(within(rows()[4]).queryAllByRole("button")).toHaveLength(0)
+    expect(buttons("Run doctor")).toHaveLength(1)
+    expect(
+      buttons("Run doctor")[0].compareDocumentPosition(rows()[0]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0)
+    expect(rows()[6].textContent).toContain("How to turn on HTTPS")
+    expect(buttons("Copy")).toHaveLength(3)
   })
 
   it("starts the doctor and opens System", async () => {
-    const w = await mk()
-    await btns(w, "Run doctor")[0].trigger("click")
+    const { router, user } = await mk()
+    await user.click(buttons("Run doctor")[0])
     await flushPromises()
     expect(api).toHaveBeenCalledWith("POST", "/api/doctor")
-    expect(w.router.currentRoute.value.name).toBe("system")
+    expect(router.currentRoute.value.name).toBe("system")
   })
 
   it("posts the doctor once on a double tap and disables the buttons", async () => {
@@ -127,11 +133,11 @@ describe("GettingStartedPage", () => {
     vi.mocked(api).mockImplementation(async (m: string) =>
       m === "POST" ? new Promise((r) => (hold.done = r)) : (steps as any),
     )
-    const w = await mk()
-    await btns(w, "Run doctor")[0].trigger("click")
-    await btns(w, "Run doctor")[0].trigger("click")
+    const { user } = await mk()
+    await user.click(buttons("Run doctor")[0])
+    await user.click(buttons("Run doctor")[0])
     expect(posts()).toHaveLength(1)
-    expect(btns(w, "Run doctor")[0].attributes("disabled")).toBeDefined()
+    expect(buttons("Run doctor")[0].hasAttribute("disabled")).toBe(true)
     hold.done({})
     await flushPromises()
     expect(posts()).toHaveLength(1)
@@ -142,33 +148,32 @@ describe("GettingStartedPage", () => {
       if (m === "POST") throw new Error("The doctor ran 12 s ago. Try again in 48 s.")
       return steps as any
     })
-    const w = await mk()
-    await btns(w, "Run doctor")[0].trigger("click")
+    const { router, user } = await mk()
+    await user.click(buttons("Run doctor")[0])
     await flushPromises()
     expect(toast).toHaveBeenCalledWith("The doctor ran 12 s ago. Try again in 48 s.", "error")
-    expect(w.router.currentRoute.value.name).toBe("system")
+    expect(router.currentRoute.value.name).toBe("system")
   })
 
   it("checks the steps again", async () => {
-    const w = await mk()
+    const { user } = await mk()
     vi.mocked(api).mockClear()
-    await btns(w, "Check again")[0].trigger("click")
+    await user.click(buttons("Check again")[0])
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/setup")
   })
 
   it("shows the HTTPS note in place of Copy on plain HTTP, but not in the HTTPS row", async () => {
     vi.mocked(isSecure).mockReturnValue(false)
-    const w = await mk()
-    expect(btns(w, "Copy")).toHaveLength(0)
-    const rows = w.findAll(".li")
+    await mk()
+    expect(buttons("Copy")).toHaveLength(0)
     expect(
-      rows.filter((r: any) => r.text().includes("Copy needs HTTPS or localhost.")),
+      rows().filter((r) => r.textContent?.includes("Copy needs HTTPS or localhost.")),
     ).toHaveLength(2)
-    expect(rows[6].text()).not.toContain("Copy needs HTTPS or localhost.")
-    expect(
-      rows[6].findAll("button").filter((b: any) => b.text() === "How to turn on HTTPS"),
-    ).toHaveLength(1)
+    expect(rows()[6].textContent).not.toContain("Copy needs HTTPS or localhost.")
+    expect(within(rows()[6]).getAllByRole("button", { name: "How to turn on HTTPS" })).toHaveLength(
+      1,
+    )
   })
 
   it("shows no Run doctor button when no step is unknown", async () => {
@@ -177,8 +182,8 @@ describe("GettingStartedPage", () => {
         ? ({ task_id: "t1" } as any)
         : (steps.filter((s) => s.state !== "unknown") as any),
     )
-    const w = await mk()
-    expect(btns(w, "Run doctor")).toHaveLength(0)
+    await mk()
+    expect(buttons("Run doctor")).toHaveLength(0)
   })
 
   it("reloads only on a focus and a reconnect", async () => {

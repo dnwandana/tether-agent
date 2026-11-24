@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../api/client", () => ({
@@ -48,11 +50,12 @@ async function mk() {
     ],
   })
   await router.push("/security")
-  const w = mount(DevicesTable, { global: { plugins: [router] } })
+  const r = render(DevicesTable, { global: { plugins: [router] } })
   await flushPromises()
-  return { w, router }
+  return { r, router, q: within(r.container), user: userEvent.setup() }
 }
-const btns = (w: any, t: string) => w.findAll("button").filter((b: any) => b.text() === t)
+// Returns the body rows. Row 0 of the table is the header row.
+const bodyRows = (q: ReturnType<typeof within>) => q.getAllByRole("row").slice(1)
 
 beforeEach(() => {
   window.matchMedia = ((q: string) => ({
@@ -71,19 +74,19 @@ beforeEach(() => {
 
 describe("DevicesTable", () => {
   it("lists the devices and marks this device", async () => {
-    const { w } = await mk()
+    const { r, q } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/devices")
-    expect(w.text()).toContain("Chrome on Android")
-    expect(w.findAll("details")[1].text()).toContain("Chrome/131.0.0.0")
-    expect(w.text()).toContain("10.8.0.5")
-    expect(w.findAll(".chip").filter((c) => c.text() === "This device")).toHaveLength(1)
+    expect(r.container.textContent).toContain("Chrome on Android")
+    expect(r.container.querySelectorAll("details")[1].textContent).toContain("Chrome/131.0.0.0")
+    expect(r.container.textContent).toContain("10.8.0.5")
+    const marks = q.getAllByText("This device")
+    expect(marks).toHaveLength(1)
+    expect(marks[0].getAttribute("data-slot")).toBe("badge")
   })
 
   it("revokes another device after a confirm", async () => {
-    const { w } = await mk()
-    await btns(w, "Sign out")[1].trigger("click")
-    // The revoke waits for the confirm and then for the API call. Wait for the last step, so
-    // the test does not depend on the number of microtask turns.
+    const { q, user } = await mk()
+    await user.click(q.getAllByRole("button", { name: "Sign out" })[1])
     await vi.waitFor(() => expect(toast).toHaveBeenCalledWith("Signed out Pixel 8."))
     expect(confirm).toHaveBeenCalledWith({
       title: "Sign out Pixel 8?",
@@ -95,8 +98,8 @@ describe("DevicesTable", () => {
   })
 
   it("signs this device out and goes to the sign-in page", async () => {
-    const { w, router } = await mk()
-    await btns(w, "Sign out")[0].trigger("click")
+    const { q, user, router } = await mk()
+    await user.click(q.getAllByRole("button", { name: "Sign out" })[0])
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Sign out Laptop?",
@@ -110,8 +113,10 @@ describe("DevicesTable", () => {
   })
 
   it("signs out all other devices", async () => {
-    const { w } = await mk()
-    await btns(w, "Sign out all other devices…")[0].trigger("click")
+    const { q, user } = await mk()
+    const all = q.getByRole("button", { name: "Sign out all other devices…" })
+    expect(all.getAttribute("data-slot")).toBe("button")
+    await user.click(all)
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Sign out 1 other device?",
@@ -126,28 +131,31 @@ describe("DevicesTable", () => {
     vi.mocked(api).mockImplementation(
       async (m: string) => (m === "GET" ? [...devices, { ...devices[1], id: "d3" }] : {}) as any,
     )
-    const { w } = await mk()
-    await btns(w, "Sign out all other devices…")[0].trigger("click")
+    const a = await mk()
+    await a.user.click(a.q.getByRole("button", { name: "Sign out all other devices…" }))
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith(
       expect.objectContaining({ title: "Sign out 2 other devices?" }),
     )
+    a.r.unmount()
     vi.mocked(api).mockReset()
     vi.mocked(api).mockRejectedValueOnce(new Error("HTTP 500"))
     const e = await mk()
     vi.mocked(api).mockImplementation(async () => devices as any)
-    e.w.findComponent({ name: "StateBlock" }).vm.$emit("action")
+    await e.user.click(e.q.getByRole("button", { name: "Retry" }))
     await flushPromises()
-    expect(e.w.text()).toContain("10.8.0.5")
+    expect(e.r.container.textContent).toContain("10.8.0.5")
   })
 
   it("shows the user agent in the Device cell, a spaced chip, and no Browser column", async () => {
-    const { w } = await mk()
-    expect(w.findAll("th").map((t) => t.text())).not.toContain("Browser")
-    const first = w.findAll("tbody tr")[0].findAll("td")
-    expect(first[0].text()).toContain("Laptop This device")
-    expect(first[0].find("details summary").text()).toBe("Firefox on Linux")
-    expect(first[0].find("details").text()).toContain("Firefox/133.0")
+    const { q } = await mk()
+    expect(q.getAllByRole("columnheader").map((t) => t.textContent!.trim())).not.toContain(
+      "Browser",
+    )
+    const first = within(bodyRows(q)[0]).getAllByRole("cell")
+    expect(first[0].textContent!.replace(/\s+/g, " ")).toContain("Laptop This device")
+    expect(first[0].querySelector("details summary")!.textContent!.trim()).toBe("Firefox on Linux")
+    expect(first[0].querySelector("details")!.textContent).toContain("Firefox/133.0")
   })
 
   it("shows a dash for a sign-in time that is not known", async () => {
@@ -155,14 +163,15 @@ describe("DevicesTable", () => {
       async (m: string) =>
         (m === "GET" ? [{ ...devices[0], created: "0001-01-01T00:00:00Z" }] : {}) as any,
     )
-    const { w } = await mk()
-    expect(w.findAll("tbody tr")[0].findAll("td")[2].find("span").text()).toBe("—")
+    const { q } = await mk()
+    expect(within(bodyRows(q)[0]).getAllByRole("cell")[2].textContent!.trim()).toBe("—")
   })
 
   it("shows the sign-in time in the short form with the full time in the tooltip", async () => {
-    const { w } = await mk()
-    const cell = w.findAll("tbody tr")[0].findAll("td")[2].find("span")
-    expect(cell.text()).toBe(shortTime("2026-11-20T09:12:00Z"))
-    expect(cell.attributes("title")).toBe(fullTime("2026-11-20T09:12:00Z"))
+    const { q } = await mk()
+    const cell = within(bodyRows(q)[0]).getAllByRole("cell")[2]
+    const span = within(cell).getByText(shortTime("2026-11-20T09:12:00Z"))
+    expect(span.getAttribute("title")).toBe(fullTime("2026-11-20T09:12:00Z"))
+    expect(span.classList.contains("whitespace-nowrap")).toBe(true)
   })
 })

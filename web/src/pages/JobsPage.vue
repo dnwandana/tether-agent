@@ -3,6 +3,17 @@ import { ref } from "vue"
 import { useRouter } from "vue-router"
 import { api } from "../api/client"
 import type { BriefView, HeldView, JobRow, ReplyView, RunRow } from "../api/types.gen"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import { cn } from "@/lib/utils"
 import DataTable from "../components/DataTable.vue"
 import JobForm from "../components/JobForm.vue"
 import LiveHeader from "../components/LiveHeader.vue"
@@ -75,6 +86,14 @@ function barsOf(j: JobRow): Bar[] {
   return lastSeven([...(j.last7 ?? [])].reverse().map((status) => ({ status }) as RunRow))
 }
 
+// Returns the status token class of one run bar.
+function barClass(b: Bar): string {
+  if (b === "ok") return "bg-success"
+  if (b === "bad") return "bg-destructive"
+  if (b === "stop") return "bg-warning"
+  return "bg-muted"
+}
+
 // Returns the count of runs with the status "ok" in the newest 7 runs.
 function okOf(j: JobRow): number {
   return (j.last7 ?? []).slice(-7).filter((st) => st === "ok").length
@@ -139,14 +158,14 @@ async function saved(): Promise<void> {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Jobs</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-2">
+      <h1 class="text-xl font-semibold tracking-tight">Jobs</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-      <button class="btn btn-secondary" type="button" @click="router.push({ name: 'chat' })">
+      <Button variant="secondary" type="button" @click="router.push({ name: 'chat' })">
         Ask in chat
-      </button>
-      <button class="btn btn-primary" type="button" @click="formOpen = true">+ New job</button>
+      </Button>
+      <Button type="button" @click="formOpen = true">+ New job</Button>
     </div>
 
     <StateBlock v-if="state === 'loading'" state="loading" />
@@ -157,38 +176,44 @@ async function saved(): Promise<void> {
       action="Retry"
       @action="refresh"
     />
-    <div v-else class="page-stack" :aria-busy="stale || undefined">
-      <div v-if="brief" class="card">
-        <div class="card-h">
-          <h3>Brief</h3>
-          <span class="c-3 t-12">what needs attention · no model call</span>
-        </div>
-        <p v-if="brief.lines.length === 0" class="c-3 card-b">Nothing needs your attention.</p>
-        <component
-          :is="l.job_id || l.session_id ? 'router-link' : 'div'"
-          v-for="(l, i) in brief.lines"
-          :key="i"
-          class="li"
-          v-bind="briefTarget(l)"
-        >
-          <span aria-hidden="true">{{ kindIcon[l.kind] ?? "•" }}</span>
-          <span class="grow"
-            ><b>{{ l.name }}</b> <span class="c-2">{{ l.detail }}</span></span
+    <div v-else class="flex flex-col gap-6" :aria-busy="stale || undefined">
+      <Card v-if="brief">
+        <CardHeader>
+          <CardTitle>Brief</CardTitle>
+          <CardDescription>what needs attention · no model call</CardDescription>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-1">
+          <p v-if="brief.lines.length === 0" class="text-sm text-muted-foreground">
+            Nothing needs your attention.
+          </p>
+          <component
+            :is="l.job_id || l.session_id ? 'router-link' : 'div'"
+            v-for="(l, i) in brief.lines"
+            :key="i"
+            class="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"
+            v-bind="briefTarget(l)"
           >
-          <span v-if="l.count > 1" class="chip chip-plain">×{{ l.count }}</span>
-          <span v-if="l.cost_usd > 0" class="c-2 t-12">{{ usd(l.cost_usd) }}</span>
-          <span class="c-3 t-12">{{ age(l.age_seconds) }}</span>
-        </component>
-        <div class="card-f">
+            <span aria-hidden="true">{{ kindIcon[l.kind] ?? "•" }}</span>
+            <span class="flex-1"
+              ><b>{{ l.name }}</b> <span class="text-muted-foreground">{{ l.detail }}</span></span
+            >
+            <Badge v-if="l.count > 1" variant="outline">×{{ l.count }}</Badge>
+            <span v-if="l.cost_usd > 0" class="text-xs text-muted-foreground">{{
+              usd(l.cost_usd)
+            }}</span>
+            <span class="text-xs text-muted-foreground">{{ age(l.age_seconds) }}</span>
+          </component>
+        </CardContent>
+        <CardFooter class="flex flex-wrap gap-2 text-sm text-muted-foreground">
           <span v-if="brief.history_off">Run history is off.</span>
           <span v-else>Jobs: {{ brief.runs_ok }} of {{ brief.runs_total }} runs OK in 24 h</span
-          ><span class="grow" />
+          ><span class="flex-1" />
           <span
             >Spend in 24 h: ${{ brief.spend_usd.toFixed(4)
             }}{{ brief.spend_unpriced ? " · unpriced" : "" }}</span
           >
-        </div>
-      </div>
+        </CardFooter>
+      </Card>
 
       <StateBlock
         v-if="jobs.length === 0"
@@ -207,10 +232,15 @@ async function saved(): Promise<void> {
         <template #cell-name="{ row }">
           <span aria-hidden="true">{{ stateGlyph[(row as unknown as JobRow).state] }}</span>
           {{ " "
-          }}<router-link :to="{ name: 'job', params: { id: (row as unknown as JobRow).id } }">{{
-            (row as unknown as JobRow).name
-          }}</router-link>
-          {{ " " }}<span v-if="(row as unknown as JobRow).watch" class="chip chip-info">watch</span>
+          }}<router-link
+            class="font-medium"
+            :to="{ name: 'job', params: { id: (row as unknown as JobRow).id } }"
+            >{{ (row as unknown as JobRow).name }}</router-link
+          >
+          {{ " "
+          }}<Badge v-if="(row as unknown as JobRow).watch" variant="outline" class="text-info"
+            >watch</Badge
+          >
         </template>
         <template #cell-schedule="{ row }"
           ><span :title="sched((row as unknown as JobRow).schedule).title">{{
@@ -218,26 +248,27 @@ async function saved(): Promise<void> {
           }}</span></template
         >
         <template #cell-next_run="{ row }"
-          ><span
-            style="white-space: nowrap"
-            :title="fullTime((row as unknown as JobRow).next_run)"
-            >{{ when((row as unknown as JobRow).next_run) }}</span
-          ></template
+          ><span class="whitespace-nowrap" :title="fullTime((row as unknown as JobRow).next_run)">{{
+            when((row as unknown as JobRow).next_run)
+          }}</span></template
         >
         <template #cell-runs7="{ row }">
-          <span v-if="(row as unknown as JobRow).history_off" class="c-3">—</span>
-          <span v-else-if="((row as unknown as JobRow).last7 ?? []).length === 0" class="c-3 t-12"
+          <span v-if="(row as unknown as JobRow).history_off" class="text-muted-foreground">—</span>
+          <span
+            v-else-if="((row as unknown as JobRow).last7 ?? []).length === 0"
+            class="text-xs text-muted-foreground"
             >No runs</span
           >
           <template v-else>
-            <span class="runs7"
+            <span data-runs7 class="inline-flex gap-0.5"
               ><i
                 v-for="(b, n) in barsOf(row as unknown as JobRow)"
                 :key="n"
-                :class="b === 'ok' ? '' : b"
+                :data-bar="b"
+                :class="cn('h-3 w-1.5 rounded-sm', barClass(b))"
             /></span>
             {{ " "
-            }}<span class="c-2 t-12"
+            }}<span class="text-xs text-muted-foreground"
               >{{ okOf(row as unknown as JobRow) }}/{{
                 ((row as unknown as JobRow).last7 ?? []).length
               }}
@@ -249,40 +280,50 @@ async function saved(): Promise<void> {
           {{ costText(row as unknown as JobRow) }}
         </template>
         <template #cell-actions="{ row }">
-          <span v-if="(row as unknown as JobRow).state === 'done'" class="c-3">done</span>
+          <span v-if="(row as unknown as JobRow).state === 'done'" class="text-muted-foreground"
+            >done</span
+          >
           <template v-else>
-            <button
+            <Button
               v-if="(row as unknown as JobRow).enabled"
-              class="btn btn-secondary btn-sm"
+              variant="secondary"
+              size="sm"
+              class="max-tab:min-h-11"
               type="button"
               @click.stop="command(`/jobs pause ${(row as unknown as JobRow).id}`)"
             >
               ⏸ Pause
-            </button>
-            <button
+            </Button>
+            <Button
               v-else
-              class="btn btn-secondary btn-sm"
+              variant="secondary"
+              size="sm"
+              class="max-tab:min-h-11"
               type="button"
               @click.stop="command(`/jobs resume ${(row as unknown as JobRow).id}`)"
             >
               ▶ Resume
-            </button>
-            <button
-              class="btn btn-secondary btn-sm"
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              class="max-tab:min-h-11"
               type="button"
               :disabled="!(row as unknown as JobRow).enabled"
               :title="(row as unknown as JobRow).enabled ? undefined : 'Resume the job first'"
               @click.stop="command(`/jobs run ${(row as unknown as JobRow).id}`)"
             >
               ⚡ Run now
-            </button>
+            </Button>
           </template>
         </template>
       </DataTable>
 
-      <div class="section-h">
-        <h2>Held sends</h2>
-        <span class="c-3 t-12">The guard held these deliveries. Each lives 24 h.</span>
+      <div class="flex flex-wrap items-baseline gap-2">
+        <h2 class="text-lg font-semibold">Held sends</h2>
+        <span class="text-sm text-muted-foreground"
+          >The guard held these deliveries. Each lives 24 h.</span
+        >
       </div>
       <StateBlock
         v-if="held.length === 0"
@@ -290,37 +331,40 @@ async function saved(): Promise<void> {
         text="No held sends."
         hint="A delivery that the outbound guard holds shows here."
       />
-      <div v-for="h in held" :key="h.id" class="card">
-        <div class="card-h">
-          <h3>🛡 {{ h.job_name }} → {{ h.target_title }}</h3>
-          <span class="c-3 t-12">{{ heldAge(h.created) }}</span>
-        </div>
-        <div class="card-b">
+      <Card v-for="h in held" :key="h.id">
+        <CardHeader>
+          <CardTitle>🛡 {{ h.job_name }} → {{ h.target_title }}</CardTitle>
+          <CardDescription>{{ heldAge(h.created) }}</CardDescription>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-2">
           <p>
-            <span class="chip chip-plain">{{ h.kind }}</span>
-            <span v-if="h.sources.length > 0" class="t-12 c-3">
+            <Badge variant="outline">{{ h.kind }}</Badge>
+            <span v-if="h.sources.length > 0" class="text-xs text-muted-foreground">
               Sources: {{ h.sources.join(", ") }}</span
             >
           </p>
-          <p class="c-2 t-12">{{ h.reason }}</p>
-          <div class="cmd">{{ h.text }}</div>
-        </div>
-        <div class="card-f">
-          <span v-if="!h.can_post" class="t-12 c-3">Telegram is off.</span>
-          <span class="grow" />
-          <button
+          <p class="text-sm text-muted-foreground">{{ h.reason }}</p>
+          <pre class="whitespace-pre-wrap rounded-md bg-muted p-3 font-mono text-sm">{{
+            h.text
+          }}</pre>
+        </CardContent>
+        <CardFooter class="flex flex-wrap gap-2">
+          <span v-if="!h.can_post" class="text-xs text-muted-foreground">Telegram is off.</span>
+          <span class="flex-1" />
+          <Button
             v-for="a in h.actions"
             :key="a.data"
-            class="btn btn-sm"
-            :class="a.data === 'post' ? 'btn-primary' : 'btn-secondary'"
+            size="sm"
+            :variant="a.data === 'post' ? 'default' : 'secondary'"
+            class="max-tab:min-h-11"
             type="button"
             :disabled="a.data === 'post' && !h.can_post"
             @click="resolveHeld(h, a.data === 'drop' ? 'drop' : 'post')"
           >
             {{ a.text }}
-          </button>
-        </div>
-      </div>
+          </Button>
+        </CardFooter>
+      </Card>
     </div>
 
     <SidePanel

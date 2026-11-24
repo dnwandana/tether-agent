@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen } from "@testing-library/vue"
+import { flushPromises } from "@vue/test-utils"
 
 vi.mock("../api/client", () => ({
   api: vi.fn(),
@@ -18,59 +19,57 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = scroll
   vi.mocked(api).mockReset().mockResolvedValue({ text: "a\nb\nc", cut: false })
 })
+const lines = () => screen.getAllByRole("listitem")
 
 describe("FileViewer", () => {
   it("reads the file through the skill file route and numbers each line", async () => {
-    const w = mount(FileViewer, {
-      props: { skill: "release-notes", path: "scripts/notes.sh", line: null },
-    })
+    render(FileViewer, { props: { skill: "release-notes", path: "scripts/notes.sh", line: null } })
     await flushPromises()
     expect(api).toHaveBeenCalledWith(
       "GET",
       "/api/skills/release-notes/file?path=scripts%2Fnotes.sh",
     )
-    expect(w.findAll(".file-view li").map((l) => l.text())).toEqual(["a", "b", "c"])
-    expect(w.find(".file-view li").attributes("data-n")).toBe("1")
-    expect(w.text()).not.toContain("The file is cut at 256 KiB.")
+    expect(lines().map((l) => l.textContent)).toEqual(["a", "b", "c"])
+    expect(lines()[0].getAttribute("data-n")).toBe("1")
+    expect(screen.getByRole("list").classList.contains("font-mono")).toBe(true)
+    expect(screen.queryByText("The file is cut at 256 KiB.")).toBeNull()
   })
 
   it("puts each line in its li with no leading or trailing white space", async () => {
     vi.mocked(api).mockResolvedValue({ text: "  indented\nb", cut: false })
-    const w = mount(FileViewer, { props: { skill: "s", path: "a.sh", line: null } })
+    render(FileViewer, { props: { skill: "s", path: "a.sh", line: null } })
     await flushPromises()
-    expect(w.findAll(".file-view li").map((l) => l.element.textContent)).toEqual([
-      "  indented",
-      "b",
-    ])
+    expect(lines().map((l) => l.textContent)).toEqual(["  indented", "b"])
   })
 
   it("marks the line of a finding and scrolls it into view", async () => {
-    const w = mount(FileViewer, { props: { skill: "s", path: "SKILL.md", line: 2 } })
+    render(FileViewer, { props: { skill: "s", path: "SKILL.md", line: 2 } })
     await flushPromises()
-    const hit = w.findAll(".file-view li")[1]
-    expect(hit.classes()).toContain("is-hit")
+    expect(lines()[1].getAttribute("data-hit")).toBe("true")
+    expect(lines()[1].getAttribute("aria-current")).toBe("true")
+    expect(lines()[0].getAttribute("data-hit")).toBeNull()
     expect(scroll).toHaveBeenCalledTimes(1)
   })
 
   it("says when the server cut the file", async () => {
     vi.mocked(api).mockResolvedValue({ text: "x", cut: true })
-    const w = mount(FileViewer, { props: { skill: "s", path: "big.txt", line: null } })
+    render(FileViewer, { props: { skill: "s", path: "big.txt", line: null } })
     await flushPromises()
-    expect(w.text()).toContain("The file is cut at 256 KiB.")
+    expect(screen.getByText("The file is cut at 256 KiB.")).toBeTruthy()
   })
 
   it("shows the server text of a refused file", async () => {
     vi.mocked(api).mockRejectedValue(new Error("The file is not a text file."))
-    const w = mount(FileViewer, { props: { skill: "s", path: "logo.png", line: null } })
+    const r = render(FileViewer, { props: { skill: "s", path: "logo.png", line: null } })
     await flushPromises()
-    expect(w.text()).toContain("Could not open the file")
-    expect(w.text()).toContain("The file is not a text file.")
+    expect(r.container.textContent).toContain("Could not open the file")
+    expect(r.container.textContent).toContain("The file is not a text file.")
   })
 
   it("loads again when the path changes", async () => {
-    const w = mount(FileViewer, { props: { skill: "s", path: "a.sh", line: null } })
+    const r = render(FileViewer, { props: { skill: "s", path: "a.sh", line: null } })
     await flushPromises()
-    await w.setProps({ path: "b.sh" })
+    await r.rerender({ skill: "s", path: "b.sh", line: null })
     await flushPromises()
     expect(api).toHaveBeenLastCalledWith("GET", "/api/skills/s/file?path=b.sh")
   })

@@ -1,30 +1,50 @@
 <script setup lang="ts">
 import { computed } from "vue"
+import {
+  CodeBlock,
+  CodeBlockActions,
+  CodeBlockContent,
+  CodeBlockCopyButton,
+  CodeBlockHeader,
+  CodeBlockLine,
+  CodeBlockTitle,
+} from "@/components/ui/code-block"
+import { isSecure } from "../../stores/ui"
 import { parseDiff } from "./parse"
 
 const props = defineProps<{ text: string }>()
+
+// The copy button needs a secure context (HTTPS) to be reliable.
+const secure = isSecure()
 const res = computed(() => parseDiff(props.text))
+const col = "inline-block w-8 select-none text-right text-muted-foreground"
 </script>
 
 <template>
-  <div class="result">
-    <div class="result-h">
+  <CodeBlock>
+    <CodeBlockHeader>
       <span aria-hidden="true">🔧</span>
-      <span class="path">{{ res.summary || res.path }}</span>
-      <span class="grow"></span>
-      <span class="c-ok">+{{ res.added }}</span>
-      <span class="c-bad">−{{ res.removed }}</span>
-    </div>
-    <div class="diff">
+      <CodeBlockTitle>{{ res.summary || res.path }}</CodeBlockTitle>
+      <span class="ms-auto text-success">+{{ res.added }}</span>
+      <span class="text-destructive">−{{ res.removed }}</span>
+      <CodeBlockActions v-if="secure">
+        <CodeBlockCopyButton :value="props.text" />
+      </CodeBlockActions>
+    </CodeBlockHeader>
+    <CodeBlockContent class="max-h-96">
       <template v-for="(l, i) in res.lines" :key="i">
-        <div v-if="l.kind === 'hunk'" class="hunk">{{ l.text }}</div>
-        <div v-else class="dl" :class="{ add: l.kind === 'add', del: l.kind === 'del' }">
-          <span>{{ l.a ?? "" }}</span>
-          <span>{{ l.b ?? "" }}</span>
-          <span>{{ l.kind === "add" ? "+" : l.kind === "del" ? "−" : " " }}</span>
-          <span>{{ l.text }}</span>
-        </div>
+        <CodeBlockLine v-if="l.kind === 'hunk'" variant="highlighted" data-hunk>{{
+          l.text
+        }}</CodeBlockLine>
+        <CodeBlockLine
+          v-else
+          :variant="l.kind === 'add' ? 'added' : l.kind === 'del' ? 'removed' : 'default'"
+        >
+          <span data-col="old" :class="col">{{ l.a ?? "" }}</span>
+          <span data-col="new" :class="col">{{ l.b ?? "" }}</span>
+          {{ l.text }}
+        </CodeBlockLine>
       </template>
-    </div>
-  </div>
+    </CodeBlockContent>
+  </CodeBlock>
 </template>

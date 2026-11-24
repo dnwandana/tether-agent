@@ -1,9 +1,15 @@
 <template>
   <StatusBar v-if="shell" />
   <RestartBanner v-if="shell" />
-  <div class="shell">
-    <div v-if="shell" class="rail-slot"><NavRail /></div>
-    <main class="view">
+  <UpdateBanner />
+  <div class="flex min-h-0 flex-1">
+    <div
+      v-if="shell"
+      class="flex w-56 shrink-0 overflow-x-hidden overflow-y-auto border-r max-lg:w-16 max-tab:hidden"
+    >
+      <NavRail />
+    </div>
+    <main class="flex min-h-0 min-w-0 flex-1">
       <RouterView v-if="ownScroll" />
       <div v-else class="scroll"><RouterView /></div>
     </main>
@@ -13,13 +19,14 @@
   <WaitingTray v-if="shell" />
   <CommandPalette :open="paletteOpen" @close="paletteOpen = false" />
   <ConfirmDialog />
-  <ToastHost />
-  <div class="announce sr" aria-live="polite" role="status"></div>
+  <AppToaster />
+  <div class="announce sr-only" aria-live="polite" role="status"></div>
 </template>
 
 <script setup lang="ts">
 import { computed, getCurrentInstance, onBeforeUnmount, onMounted, provide, ref, watch } from "vue"
 import RestartBanner from "./components/RestartBanner.vue"
+import UpdateBanner from "./components/UpdateBanner.vue"
 import WaitingTray from "./components/WaitingTray.vue"
 import { cards } from "./stores/cards"
 import { announce } from "./lib/announce"

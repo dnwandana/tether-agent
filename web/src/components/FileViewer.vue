@@ -52,13 +52,15 @@ watch(() => [props.skill, props.path, props.line], load, { immediate: true })
     :text="errorText"
   />
   <template v-else>
-    <p v-if="cut" class="t-12 c-3">The file is cut at 256 KiB.</p>
-    <ol ref="box" class="file-view mono">
+    <p v-if="cut" class="text-xs text-muted-foreground">The file is cut at 256 KiB.</p>
+    <ol ref="box" class="overflow-auto rounded-md border bg-muted/30 py-2 font-mono text-xs">
       <li
         v-for="(l, i) in lines"
         :key="i"
         :data-n="i + 1"
-        :class="{ 'is-hit': i + 1 === line }"
+        :data-hit="i + 1 === line || undefined"
+        :aria-current="i + 1 === line || undefined"
+        class="whitespace-pre pl-12 pr-3 before:-ml-10 before:inline-block before:w-8 before:pr-2 before:text-right before:text-muted-foreground before:content-[attr(data-n)] data-[hit=true]:bg-warning/15"
         v-text="l"
       ></li>
     </ol>

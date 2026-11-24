@@ -2,6 +2,9 @@
 import { ref, computed, onMounted, onUnmounted, type Ref } from "vue"
 import type { Card } from "../../api/types.gen"
 import { answerCard } from "../../stores/cards"
+import { Button } from "@/components/ui/button"
+import { Item, ItemContent, ItemFooter, ItemHeader } from "@/components/ui/item"
+import { Progress } from "@/components/ui/progress"
 
 const props = defineProps<{ card: Card }>()
 
@@ -82,91 +85,111 @@ async function send(answer: string): Promise<void> {
 </script>
 
 <template>
-  <div
+  <Item
+    variant="outline"
     :id="'card-' + card.id"
-    class="icard icard-approval"
     role="group"
     :aria-label="card.header"
-    :class="{ 'icard-human': card.human_only }"
+    :data-human-only="card.human_only || undefined"
+    class="min-w-0 bg-card data-[human-only=true]:border-warning"
   >
-    <div class="icard-h">
-      <span>{{ card.header }}</span>
-      <span v-if="card.child" class="t-12 c-3">· {{ card.child }}</span>
-      <span v-if="cd.text.value" class="cd" role="timer" :aria-label="cd.aria.value">{{
-        cd.text.value
-      }}</span>
-    </div>
-    <div v-if="cd.text.value" class="countdown">
-      <span :style="{ width: cd.pct.value + '%' }"></span>
-    </div>
-    <div class="icard-b">
-      <div v-if="card.kind === 'pin'">
-        <dl class="ikv">
-          <dt>Program</dt>
-          <dd>{{ card.description }}</dd>
-          <dt>SHA-256</dt>
-          <dd>{{ card.rule }}</dd>
-          <dt>Command</dt>
-          <dd>{{ card.command }}</dd>
+    <ItemHeader>
+      <span class="font-medium">{{ card.header }}</span>
+      <span v-if="card.child" class="text-xs text-muted-foreground">· {{ card.child }}</span>
+      <span
+        v-if="cd.text.value"
+        role="timer"
+        :aria-label="cd.aria.value"
+        class="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground"
+        >{{ cd.text.value }}</span
+      >
+    </ItemHeader>
+    <Progress v-if="cd.text.value" :model-value="cd.pct.value" class="h-1 basis-full" />
+    <ItemContent class="min-w-0 basis-full gap-2">
+      <template v-if="card.kind === 'pin'">
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+          <dt class="text-muted-foreground">Program</dt>
+          <dd class="min-w-0 break-all">{{ card.description }}</dd>
+          <dt class="text-muted-foreground">SHA-256</dt>
+          <dd class="min-w-0 break-all">{{ card.rule }}</dd>
+          <dt class="text-muted-foreground">Command</dt>
+          <dd class="min-w-0 break-all">{{ card.command }}</dd>
         </dl>
-        <p class="t-12 c-3">
+        <p class="text-xs text-muted-foreground">
           The program gets the value in its environment. The model never sees the value.
         </p>
-      </div>
+      </template>
       <template v-else>
-        <div v-if="card.summary" class="t-13">{{ card.summary }}</div>
-        <div v-if="card.command" class="cmd">{{ card.command }}</div>
-        <pre v-if="card.diff" class="code-block">{{ card.diff }}</pre>
-        <div v-if="card.rule || card.description" class="rule">
+        <div v-if="card.summary" class="text-sm">{{ card.summary }}</div>
+        <code
+          v-if="card.command"
+          class="block whitespace-pre-wrap break-all rounded-md bg-muted px-2 py-1 font-mono text-xs"
+          >{{ card.command }}</code
+        >
+        <pre
+          v-if="card.diff"
+          class="max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-2 font-mono text-xs"
+          >{{ card.diff }}</pre>
+        <div v-if="card.rule || card.description" class="text-xs text-muted-foreground">
           <span v-if="card.rule">{{ card.rule }}</span>
           <span v-if="card.description"> {{ card.description }}</span>
         </div>
-        <div v-for="(f, i) in card.findings" :key="i" class="finding">⚠ {{ f }}</div>
-        <dl v-if="card.workdir || card.via || card.secrets.length" class="ikv">
+        <div v-for="(f, i) in card.findings" :key="i" class="text-xs text-warning">⚠ {{ f }}</div>
+        <dl
+          v-if="card.workdir || card.via || card.secrets.length"
+          class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"
+        >
           <template v-if="card.workdir">
-            <dt>Workdir</dt>
-            <dd>{{ card.workdir }}</dd>
+            <dt class="text-muted-foreground">Workdir</dt>
+            <dd class="min-w-0 break-all">{{ card.workdir }}</dd>
           </template>
           <template v-if="card.via">
-            <dt>Via</dt>
-            <dd>{{ card.via }}</dd>
+            <dt class="text-muted-foreground">Via</dt>
+            <dd class="min-w-0 break-all">{{ card.via }}</dd>
           </template>
           <template v-if="card.secrets.length">
-            <dt>Secrets</dt>
-            <dd>{{ card.secrets.join(", ") }}</dd>
+            <dt class="text-muted-foreground">Secrets</dt>
+            <dd class="min-w-0 break-all">{{ card.secrets.join(", ") }}</dd>
           </template>
         </dl>
       </template>
-      <p v-if="card.human_only" class="t-12 c-3">
+      <p v-if="card.human_only" class="text-xs text-muted-foreground">
         A human-only action needs your answer each time. “Approve all” never answers it.
       </p>
-    </div>
-    <div class="icard-f">
-      <div v-if="hasDeny" class="icard-row">
-        <button class="btn btn-danger-soft" type="button" :disabled="busy" @click="send('deny')">
-          ❌ Deny
-        </button>
-      </div>
-      <div v-if="row2.length" class="icard-row">
-        <button
-          v-for="a in row2"
-          :key="a"
-          :class="['btn', a === 'always' ? 'btn-quiet' : 'btn-secondary']"
+    </ItemContent>
+    <ItemFooter class="flex-col items-stretch gap-2">
+      <div v-if="hasDeny" data-row class="flex">
+        <Button
+          variant="outline"
           type="button"
           :disabled="busy"
+          class="max-tab:h-11"
+          @click="send('deny')"
+        >
+          ❌ Deny
+        </Button>
+      </div>
+      <div v-if="row2.length" data-row class="flex flex-wrap gap-2">
+        <Button
+          v-for="a in row2"
+          :key="a"
+          :variant="a === 'always' ? 'ghost' : 'secondary'"
+          type="button"
+          :disabled="busy"
+          class="max-tab:h-11"
           @click="send(a)"
         >
           {{ LABELS[a] }}
-        </button>
+        </Button>
       </div>
-      <p v-if="hasAlways" class="always-hint t-12 c-3">
+      <p v-if="hasAlways" data-always-hint class="text-xs text-muted-foreground">
         <template v-if="card.workdir">
-          ✅ Always: this exact command in <code>{{ card.workdir }}</code
+          ✅ Always: this exact command in <code class="font-mono">{{ card.workdir }}</code
           >, from now on.
         </template>
         <template v-else>✅ Always: this tool, with any arguments, from now on.</template>
       </p>
-      <div v-if="error" class="t-12 c-bad">{{ error }}</div>
-    </div>
-  </div>
+      <div v-if="error" role="alert" class="text-xs text-destructive">{{ error }}</div>
+    </ItemFooter>
+  </Item>
 </template>

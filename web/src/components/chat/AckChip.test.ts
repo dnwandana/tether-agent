@@ -1,47 +1,41 @@
-import { mount } from "@vue/test-utils"
 import { describe, expect, it } from "vitest"
+import { render, screen } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
 import AckChip from "./AckChip.vue"
 
+const ack = (kind: string, text: string, buttons: { text: string; data: string }[][] = []) => ({
+  id: "a-" + kind,
+  kind,
+  text,
+  request_id: "",
+  buttons,
+})
+const root = (c: Element) => c.querySelector('[data-slot="marker"]')!
+
 describe("AckChip", () => {
-  it("shows the text with the class of its kind", () => {
-    const w = mount(AckChip, {
-      props: {
-        ack: {
-          id: "a1",
-          kind: "steer",
-          text: "↪️ Got it. I’ll do this after the current step.",
-          request_id: "",
-          buttons: [],
-        },
-      },
+  it("shows the text with the tone of its kind", () => {
+    const r = render(AckChip, {
+      props: { ack: ack("steer", "↪️ Got it. I’ll do this after the current step.") },
     })
-    expect(w.find(".ack").classes()).toContain("ack-run")
-    expect(w.text()).toContain("↪️ Got it.")
-    expect(
-      mount(AckChip, {
-        props: {
-          ack: { id: "a2", kind: "queue", text: "⏳ Queued.", request_id: "", buttons: [] },
-        },
-      })
-        .find(".ack")
-        .classes(),
-    ).toContain("ack-pending")
+    expect(root(r.container).getAttribute("data-tone")).toBe("run")
+    expect(root(r.container).classList.contains("text-info")).toBe(true)
+    expect(r.container.textContent).toContain("↪️ Got it.")
+    r.unmount()
+    const q = render(AckChip, { props: { ack: ack("queue", "⏳ Queued.") } })
+    expect(root(q.container).getAttribute("data-tone")).toBe("pending")
+    q.unmount()
+    const other = render(AckChip, { props: { ack: ack("odd", "?") } })
+    expect(root(other.container).getAttribute("data-tone")).toBeNull()
   })
 
   it("emits the data of a button", async () => {
-    const w = mount(AckChip, {
-      props: {
-        ack: {
-          id: "a3",
-          kind: "busy",
-          text: "⏳ Busy",
-          request_id: "",
-          buttons: [[{ text: "⏹ Stop the task", data: "/stop" }]],
-        },
-      },
+    const r = render(AckChip, {
+      props: { ack: ack("busy", "⏳ Busy", [[{ text: "⏹ Stop the task", data: "/stop" }]]) },
     })
-    expect(w.find(".ack").classes()).toContain("ack-warn")
-    await w.find("button").trigger("click")
-    expect(w.emitted("action")).toEqual([["/stop"]])
+    expect(root(r.container).getAttribute("data-tone")).toBe("warn")
+    const stop = screen.getByRole("button", { name: "⏹ Stop the task" })
+    expect(stop.getAttribute("data-variant")).toBe("ghost")
+    await userEvent.setup().click(stop)
+    expect(r.emitted().action).toEqual([["/stop"]])
   })
 })

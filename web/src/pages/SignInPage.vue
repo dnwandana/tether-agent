@@ -5,6 +5,11 @@ import { api, setSessionHeader } from "../api/client"
 import type { SignInPoll, SignInStart } from "../api/types.gen"
 import BrandMark from "../components/BrandMark.vue"
 import SidePanel from "../components/SidePanel.vue"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Spinner } from "@/components/ui/spinner"
 import { deviceLabel } from "../lib/browser"
 import { friendlyError } from "../lib/errors"
 import { isSecure, prefs } from "../stores/ui"
@@ -142,108 +147,106 @@ onBeforeUnmount(stopPoll)
 </script>
 
 <template>
-  <div class="signin">
-    <div class="card">
-      <div class="card-b">
-        <div class="row" style="margin-bottom: 12px"><BrandMark /><b class="t-16">Tether</b></div>
-
+  <div class="flex min-h-dvh items-center justify-center p-4">
+    <Card class="w-full max-w-sm">
+      <CardHeader>
+        <div class="flex items-center gap-2"><BrandMark /><b class="font-semibold">Tether</b></div>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-4">
         <template v-if="view === 'start'">
-          <h1 class="t-20">Sign in to the dashboard</h1>
-          <div v-if="route.query.reason === 'ended'" class="warn-banner">
-            Your session ended. Request access again.
-          </div>
-          <p class="c-2">
+          <h1 class="text-xl font-semibold tracking-tight">Sign in to the dashboard</h1>
+          <Alert v-if="route.query.reason === 'ended'">
+            <AlertDescription>Your session ended. Request access again.</AlertDescription>
+          </Alert>
+          <p class="text-muted-foreground">
             Ask for access. An owner approves the request with one tap in Telegram, or on a device
             that is already signed in.
           </p>
-          <button
-            class="btn btn-primary btn-touch btn-block"
-            type="button"
-            :disabled="busy"
-            @click="requestAccess"
-          >
+          <Button class="h-11 w-full" type="button" :disabled="busy" @click="requestAccess">
             Request access
-          </button>
-          <p v-if="errorText" class="t-12 c-bad">{{ errorText }}</p>
+          </Button>
+          <p v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</p>
           <p>
-            <button class="link" type="button" @click="show('code')">
+            <Button variant="link" type="button" @click="show('code')">
               Use a code from tether dashboard link
-            </button>
-            <span class="c-3 t-12"> Needs a terminal on the host.</span>
+            </Button>
+            <span class="text-sm text-muted-foreground"> Needs a terminal on the host.</span>
           </p>
-          <p class="c-3 t-12">
+          <p class="text-sm text-muted-foreground">
             No user names and no passwords. Limit who can reach this address with your VPN or
             firewall.
           </p>
         </template>
 
         <template v-else-if="view === 'waiting'">
-          <span class="spin" />
-          <h1 class="t-20">Sign-in request sent</h1>
-          <p class="c-2">Check code</p>
-          <p class="check-code mono" aria-live="polite">{{ requestCode }}</p>
-          <p class="c-2">Approve it in Telegram, or on a device that is already signed in.</p>
-          <p class="c-3 t-12">Expires in {{ left }}. This page continues by itself.</p>
-          <p v-if="pollError" class="t-12 c-warn" role="status">{{ pollError }}</p>
-          <button class="btn btn-secondary" type="button" @click="cancel">Cancel</button>
+          <Spinner />
+          <h1 class="text-xl font-semibold tracking-tight">Sign-in request sent</h1>
+          <p class="text-muted-foreground">Check code</p>
+          <p class="font-mono text-3xl tracking-widest" aria-live="polite">{{ requestCode }}</p>
+          <p class="text-muted-foreground">
+            Approve it in Telegram, or on a device that is already signed in.
+          </p>
+          <p class="text-sm text-muted-foreground">
+            Expires in {{ left }}. This page continues by itself.
+          </p>
+          <p v-if="pollError" role="status" class="text-sm text-warning">{{ pollError }}</p>
+          <Button variant="outline" type="button" @click="cancel">Cancel</Button>
         </template>
 
         <template v-else-if="view === 'denied'">
-          <h1 class="t-20">Request denied</h1>
-          <p class="c-2">An owner tapped ❌ Deny. Ask them, then try again.</p>
-          <button class="btn btn-primary" type="button" :disabled="busy" @click="requestAccess">
+          <h1 class="text-xl font-semibold tracking-tight">Request denied</h1>
+          <p class="text-muted-foreground">An owner tapped ❌ Deny. Ask them, then try again.</p>
+          <Button type="button" :disabled="busy" @click="requestAccess">
             Request access again
-          </button>
-          <p v-if="errorText" class="t-12 c-bad">{{ errorText }}</p>
+          </Button>
+          <p v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</p>
         </template>
 
         <template v-else-if="view === 'expired'">
-          <h1 class="t-20">Request expired</h1>
-          <p class="c-2">Nobody answered in 5 minutes.</p>
-          <button class="btn btn-primary" type="button" :disabled="busy" @click="requestAccess">
+          <h1 class="text-xl font-semibold tracking-tight">Request expired</h1>
+          <p class="text-muted-foreground">Nobody answered in 5 minutes.</p>
+          <Button type="button" :disabled="busy" @click="requestAccess">
             Request access again
-          </button>
-          <p v-if="errorText" class="t-12 c-bad">{{ errorText }}</p>
+          </Button>
+          <p v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</p>
         </template>
 
         <template v-else>
-          <h1 class="t-20">Sign in with a code</h1>
-          <p class="c-2">
+          <h1 class="text-xl font-semibold tracking-tight">Sign in with a code</h1>
+          <p class="text-muted-foreground">
             On the host, run tether dashboard link. Open the link it prints, or paste its one-time
             code here. The code works once and expires after 5 minutes.
           </p>
-          <input
+          <Input
             v-model="code"
-            class="input input-touch mono"
+            class="h-11 font-mono"
             aria-label="One-time code"
             autocomplete="one-time-code"
             spellcheck="false"
             @keydown.enter.prevent="!busy && signInWithCode()"
           />
-          <p v-if="errorText" class="t-12 c-bad">{{ errorText }}</p>
-          <p>
-            <button class="btn btn-primary" type="button" :disabled="busy" @click="signInWithCode">
-              Sign in
-            </button>
-          </p>
-          <button class="link" type="button" @click="show('start')">
+          <p v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</p>
+          <Button type="button" :disabled="busy" @click="signInWithCode">Sign in</Button>
+          <Button variant="link" type="button" @click="show('start')">
             ← Request access instead
-          </button>
+          </Button>
         </template>
 
-        <p v-if="!secure" class="c-3 t-12">
+        <p v-if="!secure" class="text-sm text-muted-foreground">
           Voice notes, Copy, and notifications need HTTPS or localhost
-          <button class="link" type="button" @click="helpOpen = true">How to turn on HTTPS</button>
+          <Button variant="link" type="button" @click="helpOpen = true">
+            How to turn on HTTPS
+          </Button>
         </p>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
 
     <SidePanel :open="helpOpen" title="Turn on HTTPS" @close="helpOpen = false">
       <p>
         Voice notes, Copy, and browser notifications need HTTPS, or a page on localhost. Pick one
         way:
       </p>
-      <ol class="steps">
+      <ol class="flex list-decimal flex-col gap-1 pl-5">
         <li>Cert files. Get a certificate, for example tailscale cert {{ host }}.</li>
         <li>Set dashboard.tls_cert and dashboard.tls_key in config.yaml to the two files.</li>
         <li>Restart the gateway. The dashboard then serves HTTPS on the same address.</li>
@@ -255,12 +258,3 @@ onBeforeUnmount(stopPoll)
     </SidePanel>
   </div>
 </template>
-
-<style scoped>
-.check-code {
-  font-size: 32px;
-  line-height: 40px;
-  letter-spacing: 0.08em;
-  margin: 4px 0 8px;
-}
-</style>

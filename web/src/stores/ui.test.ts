@@ -1,4 +1,4 @@
-import { nextTick } from "vue"
+import { computed, nextTick } from "vue"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 type Mod = typeof import("./ui")
@@ -13,10 +13,29 @@ function stubMedia(light: boolean) {
   }))
 }
 
+// Gives a matchMedia with an OS value that can change. A change calls each listener, as a
+// browser does.
+function liveMedia(dark: boolean): (next: boolean) => void {
+  const state = { dark }
+  const fns = new Set<(e: { matches: boolean }) => void>()
+  vi.stubGlobal("matchMedia", (q: string) => ({
+    get matches() {
+      return q.includes("dark") ? state.dark : !state.dark
+    },
+    media: q,
+    addEventListener: (_t: string, f: (e: { matches: boolean }) => void) => fns.add(f),
+    removeEventListener: (_t: string, f: (e: { matches: boolean }) => void) => fns.delete(f),
+  }))
+  return (next) => {
+    state.dark = next
+    for (const f of fns) f({ matches: next })
+  }
+}
+
 beforeEach(async () => {
   vi.useFakeTimers()
   localStorage.clear()
-  document.documentElement.className = "tt theme-dark"
+  document.documentElement.className = ""
   vi.resetModules()
   ui = await import("./ui")
 })
@@ -26,6 +45,21 @@ afterEach(() => {
 })
 
 describe("toast", () => {
+  it("holds and releases all toasts at once", () => {
+    ui.toast("One.")
+    ui.toast("Two.", "ok")
+    ui.toast("⏳ Busy", "warn")
+    vi.advanceTimersByTime(4000)
+    ui.holdAllToasts()
+    vi.advanceTimersByTime(10_000)
+    expect(ui.toasts).toHaveLength(3)
+    ui.releaseAllToasts()
+    vi.advanceTimersByTime(1999)
+    expect(ui.toasts).toHaveLength(3)
+    vi.advanceTimersByTime(1)
+    expect(ui.toasts.map((t) => t.text)).toEqual(["⏳ Busy"])
+  })
+
   it("keeps up to 3 toasts and drops the oldest toast that is not sticky", () => {
     ui.toast("One.")
     ui.toast("Failed.", "error")
@@ -100,11 +134,14 @@ describe("prefs", () => {
   })
 
   it("sets and stores the theme", () => {
+    const cls = document.documentElement.classList
     ui.setTheme("light")
-    expect(document.documentElement.classList.contains("tt")).toBe(true)
-    expect(document.documentElement.classList.contains("theme-light")).toBe(true)
-    expect(document.documentElement.classList.contains("theme-dark")).toBe(false)
+    expect(cls.contains("light")).toBe(true)
+    expect(cls.contains("dark")).toBe(false)
     expect(localStorage.getItem("tether.theme")).toBe("light")
+    ui.setTheme("dark")
+    expect(cls.contains("dark")).toBe(true)
+    expect(cls.contains("light")).toBe(false)
   })
 
   it("writes the theme key once on setTheme", async () => {
@@ -128,21 +165,32 @@ describe("prefs", () => {
   })
 
   it("applies the theme with no write", () => {
-    stubMedia(true)
+    stubMedia(false)
     const set = vi.spyOn(localStorage, "setItem")
     ui.applyTheme()
-    expect(document.documentElement.classList.contains("theme-light")).toBe(true)
+    expect(document.documentElement.className).toBe("")
     expect(set).not.toHaveBeenCalled()
     set.mockRestore()
   })
 
-  it("follows the system theme", () => {
+  it("sets no class for System and keeps the other classes", () => {
+    document.documentElement.classList.add("keep")
+    ui.setTheme("dark")
+    ui.setTheme("system")
+    expect([...document.documentElement.classList]).toEqual(["keep"])
+  })
+
+  it("resolves the theme from the choice and the OS", () => {
     stubMedia(true)
     ui.setTheme("system")
-    expect(document.documentElement.classList.contains("theme-light")).toBe(true)
+    expect(ui.resolvedTheme()).toBe("light")
     stubMedia(false)
+    expect(ui.resolvedTheme()).toBe("dark")
+    ui.setTheme("light")
+    expect(ui.resolvedTheme()).toBe("light")
+    vi.stubGlobal("matchMedia", undefined)
     ui.setTheme("system")
-    expect(document.documentElement.classList.contains("theme-dark")).toBe(true)
+    expect(ui.resolvedTheme()).toBe("light")
   })
 })
 
@@ -192,26 +240,51 @@ describe("theme-color", () => {
     for (const m of document.head.querySelectorAll('meta[name="theme-color"]')) m.remove()
   })
 
-  it("sets the theme-color meta to the --bg value of the theme", () => {
-    const meta = addMeta()
-    vi.stubGlobal("getComputedStyle", (el: Element) => ({
-      getPropertyValue: (p: string) =>
-        p === "--bg" ? (el.classList.contains("theme-light") ? " #f4f1ec" : " #151311") : "",
-    }))
-    ui.setTheme("light")
-    expect(meta.getAttribute("content")).toBe("#f4f1ec")
-    ui.setTheme("dark")
-    expect(meta.getAttribute("content")).toBe("#151311")
-    stubMedia(true)
-    ui.setTheme("system")
-    expect(meta.getAttribute("content")).toBe("#f4f1ec")
+  it("has a hex value for each theme", () => {
+    expect(ui.THEME_COLOR).toEqual({ light: "#ffffff", dark: "#030712" })
+    expect(Object.isFrozen(ui.THEME_COLOR)).toBe(true)
   })
 
-  it("keeps the content when --bg is empty, and runs with no meta", () => {
-    vi.stubGlobal("getComputedStyle", () => ({ getPropertyValue: () => "" }))
+  it("sets the theme-color meta to the hex value of the theme", () => {
+    const meta = addMeta()
+    ui.setTheme("light")
+    expect(meta.getAttribute("content")).toBe("#ffffff")
+    ui.setTheme("dark")
+    expect(meta.getAttribute("content")).toBe("#030712")
+    stubMedia(true)
+    ui.setTheme("system")
+    expect(meta.getAttribute("content")).toBe("#ffffff")
+    stubMedia(false)
+    ui.setTheme("system")
+    expect(meta.getAttribute("content")).toBe("#030712")
+  })
+
+  it("runs with no meta", () => {
     expect(() => ui.applyTheme()).not.toThrow()
-    const meta = addMeta("#151311")
-    ui.applyTheme()
-    expect(meta.getAttribute("content")).toBe("#151311")
+  })
+
+  it("follows an OS change while System is set", () => {
+    const meta = addMeta()
+    const osChange = liveMedia(false)
+    ui.setTheme("system")
+    const theme = computed(() => ui.resolvedTheme())
+    expect(theme.value).toBe("light")
+    expect(meta.getAttribute("content")).toBe("#ffffff")
+    osChange(true)
+    expect(theme.value).toBe("dark")
+    expect(meta.getAttribute("content")).toBe("#030712")
+    // The CSS media block gives the dark tokens. System sets no class.
+    expect(document.documentElement.classList.contains("dark")).toBe(false)
+    expect(document.documentElement.classList.contains("light")).toBe(false)
+  })
+
+  it("ignores an OS change while Light is set", () => {
+    const meta = addMeta()
+    const osChange = liveMedia(false)
+    ui.setTheme("light")
+    osChange(true)
+    expect(ui.resolvedTheme()).toBe("light")
+    expect(document.documentElement.classList.contains("light")).toBe(true)
+    expect(meta.getAttribute("content")).toBe("#ffffff")
   })
 })

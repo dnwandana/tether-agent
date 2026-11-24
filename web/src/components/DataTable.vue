@@ -1,5 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { cn } from "@/lib/utils"
 
 interface Column {
   key: string
@@ -51,11 +60,9 @@ onBeforeUnmount(() => {
 const cols = computed(() =>
   props.columns.map((c, i) => ({
     ...c,
-    cls: {
-      first: i === 0,
-      num: c.align === "right",
-      act: c.key === "actions",
-    },
+    first: i === 0,
+    num: c.align === "right",
+    act: c.key === "actions",
     label2: i === 0 || c.key === "actions" ? "" : c.label,
   })),
 )
@@ -67,36 +74,56 @@ function plain(v: unknown): string {
 </script>
 
 <template>
-  <div class="table-wrap">
-    <table class="table" :class="{ 'rt-cards': cards }">
-      <thead>
-        <tr>
-          <th
-            v-for="c in cols"
-            :key="c.key"
-            :class="{ num: c.align === 'right' }"
-            :style="c.width ? { width: c.width } : undefined"
-          >
-            {{ c.label }}
-          </th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-if="rows.length === 0">
-          <td :colspan="columns.length" class="c-3">Nothing to show.</td>
-        </tr>
-        <tr v-for="row in rows" :key="String(row[rowKey])" @click="emit('row-click', row)">
-          <td v-for="c in cols" :key="c.key" :class="c.cls" :data-l="c.label2">
-            <slot
-              v-if="$slots['cell-' + c.key]"
-              :name="`cell-${c.key}`"
-              :row="row"
-              :value="row[c.key]"
-            />
-            <template v-else>{{ plain(row[c.key]) }}</template>
-          </td>
-        </tr>
-      </tbody>
-    </table>
-  </div>
+  <Table :data-layout="cards ? 'cards' : 'table'" :class="cn(cards && 'block')">
+    <TableHeader :class="cn(cards && 'sr-only')">
+      <TableRow>
+        <TableHead
+          v-for="c in cols"
+          :key="c.key"
+          :class="cn(c.num && 'text-right tabular-nums')"
+          :style="c.width ? { width: c.width } : undefined"
+        >
+          {{ c.label }}
+        </TableHead>
+      </TableRow>
+    </TableHeader>
+    <TableBody :class="cn(cards && 'flex flex-col gap-2')">
+      <TableRow v-if="rows.length === 0">
+        <TableCell :colspan="columns.length" class="text-muted-foreground">
+          Nothing to show.
+        </TableCell>
+      </TableRow>
+      <TableRow
+        v-for="row in rows"
+        :key="String(row[rowKey])"
+        :class="cn(cards && 'flex flex-col gap-1 rounded-lg border! p-3')"
+        @click="emit('row-click', row)"
+      >
+        <TableCell
+          v-for="c in cols"
+          :key="c.key"
+          :data-l="c.label2"
+          :data-first="c.first ? '' : undefined"
+          :data-act-col="c.act ? '' : undefined"
+          :class="
+            cn(
+              c.num && 'text-right tabular-nums',
+              cards &&
+                'flex min-w-0 items-baseline gap-2 border-0 p-0 whitespace-normal wrap-anywhere before:shrink-0 before:text-muted-foreground before:content-[attr(data-l)]',
+              cards && c.first && 'font-medium',
+              cards && c.act && 'justify-end',
+            )
+          "
+        >
+          <slot
+            v-if="$slots['cell-' + c.key]"
+            :name="`cell-${c.key}`"
+            :row="row"
+            :value="row[c.key]"
+          />
+          <template v-else>{{ plain(row[c.key]) }}</template>
+        </TableCell>
+      </TableRow>
+    </TableBody>
+  </Table>
 </template>

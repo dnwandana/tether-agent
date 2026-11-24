@@ -1,6 +1,18 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import type { PlanItem } from "../../api/types.gen"
+import { Badge } from "@/components/ui/badge"
+import { Progress } from "@/components/ui/progress"
+import {
+  Trace,
+  TraceCollapsible,
+  TraceCollapsibleContent,
+  TraceCollapsibleTrigger,
+  TraceDescription,
+  TraceLine,
+  TraceTitle,
+} from "@/components/ui/trace"
+import { cn } from "@/lib/utils"
 
 const props = defineProps<{ items: PlanItem[]; before?: PlanItem[] }>()
 
@@ -20,9 +32,9 @@ const allClosed = computed(
 const pct = computed(() =>
   total.value === 0 ? 0 : Math.round((doneCount.value / total.value) * 100),
 )
-const header = computed(() =>
-  allClosed.value ? "📋 Plan done" : `📋 Plan ${doneCount.value}/${total.value}`,
-)
+const header = computed(() => (allClosed.value ? "📋 Plan done" : "📋 Plan"))
+const progress = computed(() => `${doneCount.value} of ${total.value} done`)
+const running = computed(() => props.items.some((i) => i.state === "in_progress"))
 
 // Returns true when the item at the index has a state that differs from the same item before.
 function changed(i: number): boolean {
@@ -32,22 +44,47 @@ function changed(i: number): boolean {
 </script>
 
 <template>
-  <div class="plan">
-    <div class="plan-h">
-      <span>{{ header }}</span>
-      <div class="meter meter-ok"><span :style="{ width: pct + '%' }" /></div>
-    </div>
-    <div class="plan-list">
-      <div
-        v-for="(item, i) in items"
-        :key="i"
-        class="pi"
-        :class="{ child: item.parent >= 0, changed: changed(i), done: item.state === 'completed' }"
-      >
-        <span class="mk">{{ MARK[item.state] ?? "[ ]" }}</span>
-        <span class="tx">{{ item.text }}</span>
-        <span v-if="changed(i)" class="chg">changed</span>
-      </div>
-    </div>
-  </div>
+  <Trace>
+    <TraceCollapsible default-open>
+      <TraceCollapsibleTrigger>
+        <TraceLine :status="running ? 'running' : undefined">
+          <TraceTitle>{{ header }}</TraceTitle>
+          <TraceDescription v-if="!allClosed">{{ progress }}</TraceDescription>
+        </TraceLine>
+      </TraceCollapsibleTrigger>
+      <TraceCollapsibleContent>
+        <div class="flex flex-col gap-2">
+          <Progress :model-value="pct" />
+          <Trace role="list">
+            <TraceLine
+              v-for="(item, i) in items"
+              :key="i"
+              role="listitem"
+              :data-state="item.state"
+              :data-child="item.parent >= 0 ? '' : undefined"
+              :data-changed="changed(i) ? '' : undefined"
+              :status="
+                item.state === 'in_progress'
+                  ? 'running'
+                  : item.state === 'pending'
+                    ? 'pending'
+                    : undefined
+              "
+              :class="
+                cn(
+                  item.parent >= 0 && 'ml-4',
+                  item.state === 'cancelled' && 'line-through',
+                  item.state === 'completed' && 'text-foreground',
+                )
+              "
+            >
+              <span class="font-mono">{{ MARK[item.state] ?? "[ ]" }}</span>
+              <TraceTitle>{{ item.text }}</TraceTitle>
+              <Badge v-if="changed(i)" variant="outline">changed</Badge>
+            </TraceLine>
+          </Trace>
+        </div>
+      </TraceCollapsibleContent>
+    </TraceCollapsible>
+  </Trace>
 </template>

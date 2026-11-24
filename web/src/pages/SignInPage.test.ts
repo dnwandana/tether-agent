@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../api/client", () => ({
@@ -40,11 +42,13 @@ async function mk(path = "/signin") {
     ],
   })
   await router.push(path)
-  const w = mount(SignInPage, { global: { plugins: [router], stubs: { SidePanel: true } } })
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+  render(SignInPage, { global: { plugins: [router], stubs: { SidePanel: true } } })
   await flushPromises()
-  return { w, router }
+  return { router, user }
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
+const btn = (name: string) => screen.getByRole("button", { name })
+const h1 = () => screen.getByRole("heading", { level: 1 }).textContent?.trim()
 
 beforeEach(() => {
   vi.useFakeTimers({
@@ -60,18 +64,20 @@ afterEach(() => vi.useRealTimers())
 
 describe("SignInPage", () => {
   it("shows the brand mark before the name on the card", async () => {
-    const { w } = await mk()
-    const brand = w.find(".card-b .row")
-    expect(brand.element.firstElementChild?.classList.contains("rail-mark")).toBe(true)
-    expect(brand.find(".rail-mark").attributes("aria-hidden")).toBe("true")
-    expect(brand.find(".rail-mark svg path").attributes("d")).toBe(
+    await mk()
+    const name = screen.getByText("Tether")
+    const mark = name.previousElementSibling!
+    expect(
+      mark.matches('[aria-hidden="true"]') || mark.querySelector('[aria-hidden="true"]') !== null,
+    ).toBe(true)
+    expect(mark.querySelector("svg path")?.getAttribute("d")).toBe(
       "M6.24 7.2H17.76M12 7.2v6.72c0 3.84 3.84 4.56 5.28 1.92",
     )
-    const dot = brand.find(".rail-mark svg circle")
-    expect(dot.attributes("cx")).toBe("17.28")
-    expect(dot.attributes("cy")).toBe("15.84")
-    expect(dot.attributes("r")).toBe("1.56")
-    expect(brand.text()).toBe("Tether")
+    const dot = mark.querySelector("svg circle")
+    expect(dot?.getAttribute("cx")).toBe("17.28")
+    expect(dot?.getAttribute("cy")).toBe("15.84")
+    expect(dot?.getAttribute("r")).toBe("1.56")
+    expect(name.parentElement?.textContent?.trim()).toBe("Tether")
   })
 
   it("requests access with the device label and signs in after Allow", async () => {
@@ -79,12 +85,14 @@ describe("SignInPage", () => {
       .mockResolvedValueOnce({ id: "r1", code: "4821", expires: "2026-11-20T10:05:00Z" })
       .mockResolvedValueOnce({ state: "pending", header: "" })
       .mockResolvedValueOnce({ state: "allowed", header: "hdr-value" })
-    const { w, router } = await mk()
-    await btn(w, "Request access").trigger("click")
+    const { router, user } = await mk()
+    await user.click(btn("Request access"))
     await flushPromises()
     expect(api).toHaveBeenCalledWith("POST", "/auth/request", { label: "Chrome on Android" })
-    expect(w.find(".check-code").text()).toBe("4821")
-    expect(w.text()).toContain("Approve it in Telegram, or on a device that is already signed in.")
+    expect(screen.getByText("4821")).toBeTruthy()
+    expect(
+      screen.getByText("Approve it in Telegram, or on a device that is already signed in."),
+    ).toBeTruthy()
     vi.advanceTimersByTime(2000)
     await flushPromises()
     expect(api).toHaveBeenLastCalledWith("GET", "/auth/request/r1")
@@ -98,47 +106,47 @@ describe("SignInPage", () => {
     vi.mocked(api)
       .mockResolvedValueOnce({ id: "r1", code: "4821", expires: "" })
       .mockResolvedValueOnce({ state: "denied", header: "" })
-    const { w } = await mk()
-    await btn(w, "Request access").trigger("click")
+    const { user } = await mk()
+    await user.click(btn("Request access"))
     await flushPromises()
     vi.advanceTimersByTime(2000)
     await flushPromises()
-    expect(w.find("h1").text()).toBe("Request denied")
+    expect(h1()).toBe("Request denied")
     vi.mocked(api)
       .mockResolvedValueOnce({ id: "r2", code: "1234", expires: "" })
       .mockResolvedValueOnce({ state: "expired", header: "" })
-    await btn(w, "Request access again").trigger("click")
+    await user.click(btn("Request access again"))
     await flushPromises()
     vi.advanceTimersByTime(2000)
     await flushPromises()
-    expect(w.find("h1").text()).toBe("Request expired")
+    expect(h1()).toBe("Request expired")
   })
 
   it("disables Request access again while a request runs", async () => {
     vi.mocked(api)
       .mockResolvedValueOnce({ id: "r1", code: "4821", expires: "" })
       .mockResolvedValueOnce({ state: "denied", header: "" })
-    const { w } = await mk()
-    await btn(w, "Request access").trigger("click")
+    const { user } = await mk()
+    await user.click(btn("Request access"))
     await flushPromises()
     vi.advanceTimersByTime(2000)
     await flushPromises()
     vi.mocked(api)
       .mockClear()
       .mockReturnValue(new Promise(() => {}) as any)
-    const again = btn(w, "Request access again")
-    await again.trigger("click")
-    expect(again.attributes("disabled")).toBeDefined()
-    await again.trigger("click")
+    const again = btn("Request access again")
+    await user.click(again)
+    expect(again.hasAttribute("disabled")).toBe(true)
+    await user.click(again)
     expect(api).toHaveBeenCalledTimes(1)
   })
 
   it("stops asking after Cancel", async () => {
     vi.mocked(api).mockResolvedValueOnce({ id: "r1", code: "4821", expires: "" })
-    const { w } = await mk()
-    await btn(w, "Request access").trigger("click")
+    const { user } = await mk()
+    await user.click(btn("Request access"))
     await flushPromises()
-    await btn(w, "Cancel").trigger("click")
+    await user.click(btn("Cancel"))
     vi.advanceTimersByTime(10000)
     await flushPromises()
     expect(api).toHaveBeenCalledTimes(1)
@@ -156,27 +164,35 @@ describe("SignInPage", () => {
   it("shows the code error, the ended session, and the HTTPS line", async () => {
     vi.mocked(isSecure).mockReturnValue(false)
     vi.mocked(api).mockRejectedValueOnce(new (ApiError as any)(401, "bad code"))
-    const { w } = await mk("/signin?reason=ended")
-    expect(w.find(".warn-banner").text()).toBe("Your session ended. Request access again.")
-    expect(w.text()).toContain("Voice notes, Copy, and notifications need HTTPS or localhost")
-    await btn(w, "Use a code from tether dashboard link").trigger("click")
-    await w.find("input").setValue(" AAAA-BBBB ")
-    await btn(w, "Sign in").trigger("click")
+    const { user } = await mk("/signin?reason=ended")
+    expect(screen.getByRole("alert").textContent?.trim()).toBe(
+      "Your session ended. Request access again.",
+    )
+    expect(document.body.textContent).toContain(
+      "Voice notes, Copy, and notifications need HTTPS or localhost",
+    )
+    await user.click(btn("Use a code from tether dashboard link"))
+    await user.type(screen.getByRole("textbox", { name: "One-time code" }), " AAAA-BBBB ")
+    await user.click(btn("Sign in"))
     await flushPromises()
     expect(api).toHaveBeenCalledWith("POST", "/auth/signin", { code: "AAAA-BBBB" })
-    expect(w.find(".c-bad").text()).toBe("The code is not valid, or it expired.")
+    expect(screen.getByRole("alert").textContent?.trim()).toBe(
+      "The code is not valid, or it expired.",
+    )
   })
 
   it("shows the server sentence of a code error", async () => {
     vi.mocked(api).mockRejectedValueOnce(
       new (ApiError as any)(401, "x", "The code is not valid or has expired."),
     )
-    const { w } = await mk()
-    await btn(w, "Use a code from tether dashboard link").trigger("click")
-    await w.find("input").setValue("AAAA-BBBB")
-    await btn(w, "Sign in").trigger("click")
+    const { user } = await mk()
+    await user.click(btn("Use a code from tether dashboard link"))
+    await user.type(screen.getByRole("textbox", { name: "One-time code" }), "AAAA-BBBB")
+    await user.click(btn("Sign in"))
     await flushPromises()
-    expect(w.find(".c-bad").text()).toBe("The code is not valid or has expired.")
+    expect(screen.getByRole("alert").textContent?.trim()).toBe(
+      "The code is not valid or has expired.",
+    )
   })
 
   it("says that it tries again when the poll cannot reach the gateway", async () => {
@@ -184,15 +200,17 @@ describe("SignInPage", () => {
       .mockResolvedValueOnce({ id: "r1", code: "4821", expires: "" })
       .mockRejectedValueOnce(new TypeError("Failed to fetch"))
       .mockResolvedValueOnce({ state: "pending", header: "" })
-    const { w } = await mk()
-    await btn(w, "Request access").trigger("click")
+    const { user } = await mk()
+    await user.click(btn("Request access"))
     await flushPromises()
     vi.advanceTimersByTime(2000)
     await flushPromises()
-    expect(w.text()).toContain("Cannot reach the gateway. The page tries again.")
+    expect(
+      screen.getByText("Cannot reach the gateway. The page tries again.").getAttribute("role"),
+    ).toBe("status")
     vi.advanceTimersByTime(2000)
     await flushPromises()
-    expect(w.text()).not.toContain("Cannot reach the gateway.")
+    expect(document.body.textContent).not.toContain("Cannot reach the gateway.")
   })
 
   it("counts down the 5 minutes of the request", async () => {
@@ -202,24 +220,24 @@ describe("SignInPage", () => {
       code: "4821",
       expires: "2026-11-20T10:05:00Z",
     })
-    const { w } = await mk()
-    await btn(w, "Request access").trigger("click")
+    const { user } = await mk()
+    await user.click(btn("Request access"))
     await flushPromises()
-    expect(w.text()).toContain("Expires in 5:00")
+    expect(document.body.textContent).toContain("Expires in 5:00")
     vi.advanceTimersByTime(1000)
     await flushPromises()
-    expect(w.text()).toContain("Expires in 4:59")
+    expect(document.body.textContent).toContain("Expires in 4:59")
   })
 
   it("labels the code input and ignores Enter while busy", async () => {
     let release!: (v: unknown) => void
     vi.mocked(api).mockImplementationOnce(() => new Promise((r) => (release = r)) as any)
-    const { w } = await mk()
-    await btn(w, "Use a code from tether dashboard link").trigger("click")
-    const input = w.find("input[aria-label='One-time code']")
-    await input.setValue("AAAA-BBBB")
-    await input.trigger("keydown", { key: "Enter" })
-    await input.trigger("keydown", { key: "Enter" })
+    const { user } = await mk()
+    await user.click(btn("Use a code from tether dashboard link"))
+    const input = screen.getByRole("textbox", { name: "One-time code" })
+    expect(input).toBeTruthy()
+    await user.type(input, "AAAA-BBBB")
+    await user.keyboard("{Enter}{Enter}")
     expect(api).toHaveBeenCalledTimes(1)
     release({ header: "h" })
     await flushPromises()

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import type { Card } from "../../api/types.gen"
 
 vi.mock("../../stores/cards", () => ({
@@ -17,8 +19,6 @@ vi.mock("../../api/client", () => ({
 }))
 
 import { answerCard } from "../../stores/cards"
-import { ApiError } from "../../api/client"
-import ApprovalCard from "./ApprovalCard.vue"
 import ClarifyCard from "./ClarifyCard.vue"
 import SecretCard from "./SecretCard.vue"
 
@@ -50,8 +50,6 @@ function card(over: Partial<Card>): Card {
     ...over,
   } as Card
 }
-const rows = (w: ReturnType<typeof mount>) =>
-  w.findAll(".icard-row").map((r) => r.findAll("button").map((b) => b.text()))
 const none = { answer: "", choices: [], text: "", value: "" }
 
 beforeEach(() => {
@@ -59,273 +57,76 @@ beforeEach(() => {
 })
 afterEach(() => vi.useRealTimers())
 
-const cls = (w: ReturnType<typeof mount>, label: string) =>
-  w
-    .findAll("button")
-    .find((b) => b.text() === label)!
-    .classes()
-
-describe("ApprovalCard", () => {
-  it("shows Deny alone on row 1 and the allowed answers on row 2", () => {
-    const w = mount(ApprovalCard, {
-      props: {
-        card: card({
-          command: "rm -rf build/",
-          answers: ["deny", "once", "session", "always"],
-        }),
-      },
-    })
-    expect(w.find(".icard-h").text()).toContain("🛡 Approval needed")
-    expect(w.find(".cmd").text()).toBe("rm -rf build/")
-    expect(rows(w)).toEqual([["❌ Deny"], ["✅ Once", "✅ Session", "✅ Always"]])
-  })
-
-  it("follows the answer list: no session, no always, and Send redacted with findings", () => {
-    const noSession = mount(ApprovalCard, {
-      props: { card: card({ answers: ["deny", "once"] }) },
-    })
-    expect(rows(noSession)).toEqual([["❌ Deny"], ["✅ Once"]])
-    const send = mount(ApprovalCard, {
-      props: {
-        card: card({
-          header: "📤 Send on your behalf?",
-          findings: ["an API key (sk-…)"],
-          answers: ["deny", "redacted", "once"],
-        }),
-      },
-    })
-    expect(rows(send)).toEqual([["❌ Deny"], ["✅ Send redacted", "✅ Once"]])
-    expect(send.find(".finding").text()).toContain("an API key (sk-…)")
-  })
-
-  it("marks a human-only card", () => {
-    const w = mount(ApprovalCard, {
-      props: {
-        card: card({
-          header: "🔒 Human-only action",
-          human_only: true,
-          answers: ["deny", "once"],
-        }),
-      },
-    })
-    expect(w.find(".icard").classes()).toContain("icard-human")
-    expect(w.text()).toContain(
-      "A human-only action needs your answer each time. “Approve all” never answers it.",
-    )
-  })
-
-  it("shows the pin card with Allow this program", () => {
-    const w = mount(ApprovalCard, {
-      props: {
-        card: card({
-          kind: "pin",
-          header: "🔑 Give GITHUB_TOKEN to this program?",
-          description: "/usr/bin/gh",
-          rule: "sha256 3f1a9c",
-          command: "gh pr list",
-          answers: ["deny", "allow"],
-        }),
-      },
-    })
-    expect(rows(w)).toEqual([["❌ Deny"], ["✅ Allow this program"]])
-    expect(w.find("dl.ikv").text()).toContain("/usr/bin/gh")
-    expect(w.find("dl.ikv").text()).toContain("sha256 3f1a9c")
-  })
-
-  it("posts the answer", async () => {
-    const w = mount(ApprovalCard, {
-      props: { card: card({ answers: ["deny", "once"] }) },
-    })
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "✅ Once")!
-      .trigger("click")
-    expect(answerCard).toHaveBeenCalledWith("c1", { ...none, answer: "once" })
-  })
-
-  it("shows the 409 text of a closed card", async () => {
-    vi.mocked(answerCard).mockRejectedValue(
-      new (ApiError as any)(409, "This card is already answered."),
-    )
-    const w = mount(ApprovalCard, {
-      props: { card: card({ answers: ["deny", "once"] }) },
-    })
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "❌ Deny")!
-      .trigger("click")
-    await flushPromises()
-    expect(w.find(".c-bad").text()).toBe("This card is already answered.")
-  })
-
-  it("counts down to the deadline", async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date("2026-11-20T10:00:00Z"))
-    const w = mount(ApprovalCard, {
-      props: {
-        card: card({
-          answers: ["deny", "once"],
-          deadline: "2026-11-20T10:01:30Z",
-        }),
-      },
-    })
-    expect(w.find(".cd").text()).toBe("⌛ 1:30")
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(w.find(".cd").text()).toBe("⌛ 1:29")
-    w.unmount()
-  })
-
-  it("gives Deny the soft danger weight, the allow answers secondary, and Always the quiet weight", () => {
-    const w = mount(ApprovalCard, {
-      props: {
-        card: card({ command: "rm -rf build/", answers: ["deny", "once", "session", "always"] }),
-      },
-    })
-    expect(cls(w, "❌ Deny")).toContain("btn-danger-soft")
-    expect(cls(w, "✅ Once")).toContain("btn-secondary")
-    expect(cls(w, "✅ Session")).toContain("btn-secondary")
-    expect(cls(w, "✅ Always")).toContain("btn-quiet")
-    expect(w.html()).not.toContain("btn-primary")
-    const send = mount(ApprovalCard, {
-      props: {
-        card: card({ header: "📤 Send on your behalf?", answers: ["deny", "redacted", "once"] }),
-      },
-    })
-    expect(cls(send, "✅ Send redacted")).toContain("btn-secondary")
-    const pin = mount(ApprovalCard, {
-      props: { card: card({ kind: "pin", answers: ["deny", "allow"] }) },
-    })
-    expect(cls(pin, "✅ Allow this program")).toContain("btn-secondary")
-  })
-
-  it("shows the scope of Always for a shell card and for an MCP card", () => {
-    const shell = mount(ApprovalCard, {
-      props: {
-        card: card({
-          command: "make test",
-          workdir: "/home/me/app",
-          answers: ["deny", "once", "always"],
-        }),
-      },
-    })
-    expect(shell.find(".always-hint").text()).toBe(
-      "✅ Always: this exact command in /home/me/app, from now on.",
-    )
-    expect(shell.find(".always-hint code").text()).toBe("/home/me/app")
-    const mcp = mount(ApprovalCard, {
-      props: {
-        card: card({ command: "github.create_issue", answers: ["deny", "once", "always"] }),
-      },
-    })
-    expect(mcp.find(".always-hint").text()).toBe(
-      "✅ Always: this tool, with any arguments, from now on.",
-    )
-    const noAlways = mount(ApprovalCard, { props: { card: card({ answers: ["deny", "once"] }) } })
-    expect(noAlways.find(".always-hint").exists()).toBe(false)
-  })
-
-  it("names the card root as a group with its header", () => {
-    const w = mount(ApprovalCard, { props: { card: card({ answers: ["deny"] }) } })
-    expect(w.find(".icard").attributes("role")).toBe("group")
-    expect(w.find(".icard").attributes("aria-label")).toBe("🛡 Approval needed")
-  })
-
-  it("gives the countdown a timer label that changes every 15 s", async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date("2026-11-20T10:00:00Z"))
-    const w = mount(ApprovalCard, {
-      props: { card: card({ answers: ["deny", "once"], deadline: "2026-11-20T10:01:30Z" }) },
-    })
-    const timer = () => w.find('[role="timer"]')
-    expect(timer().attributes("aria-label")).toBe("Time left: 1:30")
-    await vi.advanceTimersByTimeAsync(1000)
-    expect(w.find(".cd").text()).toBe("⌛ 1:29")
-    expect(timer().attributes("aria-label")).toBe("Time left: 1:30")
-    await vi.advanceTimersByTimeAsync(14_000)
-    expect(timer().attributes("aria-label")).toBe("Time left: 1:15")
-    w.unmount()
-  })
-})
+const done = () => screen.getByRole("button", { name: "Done" })
+const timer = () => screen.getByRole("timer")
 
 describe("ClarifyCard", () => {
-  const q = { kind: "clarify", header: "❓ Question", summary: "Which branch?" } as const
+  const q = { kind: "clarify", header: "❓ Question", summary: "Which folder?" } as const
 
   it("sends one choice", async () => {
-    const w = mount(ClarifyCard, {
-      props: { card: card({ ...q, choices: ["main", "dev"] }) },
-    })
-    await w.findAll(".choice")[0].trigger("click")
-    expect(answerCard).toHaveBeenCalledWith("c1", {
-      ...none,
-      choices: ["main"],
-    })
+    render(ClarifyCard, { props: { card: card({ ...q, choices: ["main", "dev"] }) } })
+    await userEvent.setup().click(screen.getByRole("button", { name: "main" }))
+    expect(answerCard).toHaveBeenCalledWith("c1", { ...none, choices: ["main"] })
   })
 
   it("sends the selection of a multi card with Done", async () => {
-    const w = mount(ClarifyCard, {
-      props: { card: card({ ...q, choices: ["a", "b", "c"], multi: true }) },
-    })
-    const done = () => w.findAll("button").find((b) => b.text() === "Done")!
-    expect(done().attributes("disabled")).toBeDefined()
-    await w.findAll(".choice")[0].trigger("click")
-    await w.findAll(".choice")[1].trigger("click")
-    expect(w.findAll(".choice")[0].text()).toBe("✓ a")
-    expect(w.findAll(".choice")[2].text()).toBe("☐ c")
-    await done().trigger("click")
-    expect(answerCard).toHaveBeenCalledWith("c1", {
-      ...none,
-      choices: ["a", "b"],
-    })
+    render(ClarifyCard, { props: { card: card({ ...q, choices: ["a", "b", "c"], multi: true }) } })
+    const user = userEvent.setup()
+    expect(done().hasAttribute("disabled")).toBe(true)
+    await user.click(screen.getByRole("button", { name: "☐ a" }))
+    await user.click(screen.getByRole("button", { name: "☐ b" }))
+    expect(screen.getByRole("button", { name: "✓ a" }).getAttribute("aria-pressed")).toBe("true")
+    expect(screen.getByRole("button", { name: "☐ c" }).getAttribute("aria-pressed")).toBe("false")
+    await user.click(done())
+    expect(answerCard).toHaveBeenCalledWith("c1", { ...none, choices: ["a", "b"] })
   })
 
   it("sends free text when the card has no choices", async () => {
-    const w = mount(ClarifyCard, { props: { card: card({ ...q }) } })
-    await w.find("input").setValue("  feature/x  ")
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "Send")!
-      .trigger("click")
-    expect(answerCard).toHaveBeenCalledWith("c1", {
-      ...none,
-      text: "feature/x",
-    })
+    render(ClarifyCard, { props: { card: card({ ...q }) } })
+    const user = userEvent.setup()
+    await user.type(screen.getByRole("textbox", { name: "Your answer" }), "  feature/x  ")
+    await user.click(screen.getByRole("button", { name: "Send" }))
+    expect(answerCard).toHaveBeenCalledWith("c1", { ...none, text: "feature/x" })
   })
 
   it("shows the question as the body text under the header", () => {
-    const w = mount(ClarifyCard, { props: { card: card({ ...q, choices: ["main", "dev"] }) } })
-    expect(w.find(".icard-h").text()).toContain("❓ Question")
-    expect(w.find(".clarify-q").text()).toBe("Which branch?")
-    expect(w.find(".icard").attributes("role")).toBe("group")
-    expect(w.find(".icard").attributes("aria-label")).toBe("❓ Question")
+    const r = render(ClarifyCard, { props: { card: card({ ...q, choices: ["main", "dev"] }) } })
+    expect(r.container.querySelector('[data-slot="item-header"]')!.textContent).toContain(
+      "❓ Question",
+    )
+    const question = screen.getByText("Which folder?")
+    expect(question.closest('[data-slot="item-content"]')).not.toBeNull()
+    expect(question.classList.contains("whitespace-pre-wrap")).toBe(true)
+    const root = screen.getByRole("group", { name: "❓ Question" })
+    expect(root.getAttribute("data-slot")).toBe("item")
   })
 
   it("labels the free-text input Your answer", () => {
-    const w = mount(ClarifyCard, { props: { card: card({ ...q }) } })
-    expect(w.text()).not.toContain("(Reply with a message.)")
-    const input = w.find("input")
-    const label = w.find(`label[for="${input.attributes("id")}"]`)
-    expect(label.text()).toBe("Your answer")
+    const r = render(ClarifyCard, { props: { card: card({ ...q }) } })
+    expect(r.container.textContent).not.toContain("(Reply with a message.)")
+    const input = screen.getByRole("textbox", { name: "Your answer" })
+    expect(input.getAttribute("data-slot")).toBe("input")
   })
 
   it("gives the countdown a timer label that changes every 15 s", async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date("2026-11-20T10:00:00Z"))
-    const w = mount(ClarifyCard, {
+    const r = render(ClarifyCard, {
       props: { card: card({ ...q, deadline: "2026-11-20T10:01:30Z" }) },
     })
-    const timer = () => w.find('[role="timer"]')
-    expect(timer().attributes("aria-label")).toBe("Time left: 1:30")
+    expect(timer().getAttribute("aria-label")).toBe("Time left: 1:30")
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100")
     await vi.advanceTimersByTimeAsync(1000)
-    expect(timer().attributes("aria-label")).toBe("Time left: 1:30")
+    expect(timer().getAttribute("aria-label")).toBe("Time left: 1:30")
     await vi.advanceTimersByTimeAsync(14_000)
-    expect(timer().attributes("aria-label")).toBe("Time left: 1:15")
-    w.unmount()
+    expect(timer().getAttribute("aria-label")).toBe("Time left: 1:15")
+    r.unmount()
   })
 })
 
 describe("SecretCard", () => {
   it("posts the value and keeps no copy", async () => {
-    const w = mount(SecretCard, {
+    render(SecretCard, {
       props: {
         card: card({
           kind: "secret",
@@ -336,57 +137,50 @@ describe("SecretCard", () => {
         }),
       },
     })
-    const input = w.find("input")
-    expect(input.attributes("type")).toBe("password")
-    expect(input.attributes("autocomplete")).toBe("off")
-    expect(w.find("dl.ikv").text()).toContain("publish the package")
-    await input.setValue("s3cr3t-value")
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "Save")!
-      .trigger("click")
+    const user = userEvent.setup()
+    const input = screen.getByPlaceholderText("Paste the value") as HTMLInputElement
+    expect(input.getAttribute("type")).toBe("password")
+    expect(input.getAttribute("autocomplete")).toBe("off")
+    expect(input.getAttribute("data-slot")).toBe("input")
+    expect(screen.getAllByRole("definition").map((d) => d.textContent)).toContain(
+      "publish the package",
+    )
+    await user.type(input, "s3cr3t-value")
+    await user.click(screen.getByRole("button", { name: "Save" }))
     await flushPromises()
-    expect(answerCard).toHaveBeenCalledWith("c1", {
-      ...none,
-      value: "s3cr3t-value",
-    })
-    expect((w.find("input").element as HTMLInputElement).value).toBe("")
+    expect(answerCard).toHaveBeenCalledWith("c1", { ...none, value: "s3cr3t-value" })
+    expect(input.value).toBe("")
     expect(JSON.stringify({ ...localStorage })).not.toContain("s3cr3t-value")
   })
 
-  it("gives Deny the soft danger weight and keeps Save primary", () => {
-    const w = mount(SecretCard, {
+  it("gives Deny the outline weight and keeps Save primary", () => {
+    render(SecretCard, {
       props: {
         card: card({ kind: "secret", header: "🔑 Secret needed: PYPI_TOKEN", answers: ["deny"] }),
       },
     })
-    expect(cls(w, "❌ Deny")).toContain("btn-danger-soft")
-    expect(cls(w, "Save")).toContain("btn-primary")
-    expect(w.find(".icard").attributes("role")).toBe("group")
-    expect(w.find(".icard").attributes("aria-label")).toBe("🔑 Secret needed: PYPI_TOKEN")
+    expect(screen.getByRole("button", { name: "❌ Deny" }).getAttribute("data-variant")).toBe(
+      "outline",
+    )
+    expect(screen.getByRole("button", { name: "Save" }).getAttribute("data-variant")).toBe(
+      "default",
+    )
+    const root = screen.getByRole("group", { name: "🔑 Secret needed: PYPI_TOKEN" })
+    expect(root.getAttribute("data-slot")).toBe("item")
+    const rows = Array.from(root.querySelectorAll("[data-row]")).map((row) =>
+      within(row as HTMLElement)
+        .getAllByRole("button")
+        .map((b) => b.textContent!.trim()),
+    )
+    expect(rows).toEqual([["❌ Deny"], ["Save"]])
+    for (const b of within(root).getAllByRole("button"))
+      expect(b.classList.contains("max-tab:h-11")).toBe(true)
   })
 })
 
 describe("card fields and deadline", () => {
-  it("shows the pin card fields from description, rule, and command", () => {
-    const w = mount(ApprovalCard, {
-      props: {
-        card: card({
-          kind: "pin",
-          summary: "wrong",
-          description: "/usr/bin/gh",
-          rule: "sha256 3f1a9c",
-          command: "gh pr list",
-          answers: ["deny", "allow"],
-        }),
-      },
-    })
-    const dd = w.findAll("dl.ikv dd").map((d) => d.text())
-    expect(dd).toEqual(["/usr/bin/gh", "sha256 3f1a9c", "gh pr list"])
-  })
-
   it("shows the commands of a secret card in For", () => {
-    const w = mount(SecretCard, {
+    render(SecretCard, {
       props: {
         card: card({
           kind: "secret",
@@ -396,44 +190,44 @@ describe("card fields and deadline", () => {
         }),
       },
     })
-    expect(w.find("dl.ikv dd").text()).toContain("twine upload")
-    expect(w.find("dl.ikv dd").text()).toContain("twine check")
-    expect(w.find("dl.ikv dd").text()).not.toBe("x")
+    const forValue = screen.getAllByRole("definition")[0]
+    expect(forValue.textContent).toContain("twine upload")
+    expect(forValue.textContent).toContain("twine check")
+    expect(forValue.textContent).not.toBe("x")
+    expect(forValue.classList.contains("whitespace-pre-wrap")).toBe(true)
   })
 
   it("treats the zero time as no deadline", () => {
     const zero = "0001-01-01T00:00:00Z"
     for (const [C, k] of [
-      [ApprovalCard, "approval"],
       [ClarifyCard, "clarify"],
       [SecretCard, "secret"],
     ] as const) {
-      const w = mount(C, { props: { card: card({ kind: k, deadline: zero, answers: ["deny"] }) } })
-      expect(w.find(".cd").exists()).toBe(false)
-      expect(w.find(".countdown").exists()).toBe(false)
+      const r = render(C, { props: { card: card({ kind: k, deadline: zero, answers: ["deny"] }) } })
+      expect(within(r.container).queryByRole("timer")).toBeNull()
+      expect(within(r.container).queryByRole("progressbar")).toBeNull()
+      r.unmount()
     }
   })
 
   it("sets the id card-<id> and uses no c-faint", () => {
     for (const [C, k] of [
-      [ApprovalCard, "approval"],
       [ClarifyCard, "clarify"],
       [SecretCard, "secret"],
     ] as const) {
-      const w = mount(C, {
+      const r = render(C, {
         props: { card: card({ id: "x9", kind: k, child: "sub", human_only: true }) },
       })
-      expect(w.find(".icard").attributes("id")).toBe("card-x9")
-      expect(w.html()).not.toContain("c-faint")
+      expect(within(r.container).getByRole("group").getAttribute("id")).toBe("card-x9")
+      expect(r.container.innerHTML).not.toContain("c-faint")
+      expect(r.container.innerHTML).not.toContain("icard")
+      r.unmount()
     }
   })
 
   it("denies a secret card", async () => {
-    const w = mount(SecretCard, { props: { card: card({ kind: "secret", answers: ["deny"] }) } })
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "❌ Deny")!
-      .trigger("click")
+    render(SecretCard, { props: { card: card({ kind: "secret", answers: ["deny"] }) } })
+    await userEvent.setup().click(screen.getByRole("button", { name: "❌ Deny" }))
     await flushPromises()
     expect(answerCard).toHaveBeenCalledWith("c1", { ...none, answer: "deny" })
   })

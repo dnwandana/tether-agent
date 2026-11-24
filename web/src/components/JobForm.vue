@@ -1,3 +1,8 @@
+<script lang="ts">
+// Counts the forms of the page, so each form gets its own element ids.
+let formCount = 0
+</script>
+
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue"
 import { api, runCommand } from "../api/client"
@@ -7,6 +12,25 @@ import { friendlyError } from "../lib/errors"
 import { useDirty } from "../lib/dirty"
 import { shortTime } from "../lib/time"
 import { toast } from "../stores/ui"
+import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+  FieldLegend,
+  FieldSet,
+} from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
+import { NativeSelect } from "@/components/ui/native-select"
+import { Spinner } from "@/components/ui/spinner"
+import { Textarea } from "@/components/ui/textarea"
+
+// Each form instance has its own ids, so two forms on one page do not share a label target.
+const uid = ++formCount
+const elId = (k: string): string => `jf-${uid}-${k}`
 
 const props = defineProps<{ job: JobDetail | null }>()
 const emit = defineEmits<{ saved: []; cancel: []; dirty: [on: boolean] }>()
@@ -38,7 +62,8 @@ function formOf(j: JobDetail | null): Form {
     prompt: j?.prompt ?? "",
     script: j?.script ?? "",
     noAgent: j?.no_agent ?? false,
-    repeat: j?.repeat_left ?? 0,
+    // The server keeps -1 for a job with no end. The form shows 0, which means the same.
+    repeat: Math.max(0, j?.repeat_left ?? 0),
     deliver: j?.deliver ?? "",
     model: j?.model ?? "",
     effort: j?.effort ?? "",
@@ -76,6 +101,12 @@ const shownSkills = computed(() => {
 // Removes one skill from the selected skills.
 function removeSkill(s: string): void {
   f.skills = f.skills.filter((x) => x !== s)
+}
+
+// Returns a new list with the item added at the end (on) or removed (off).
+function toggleIn(list: string[], item: string, on: boolean | "indeterminate"): string[] {
+  if (on === true) return list.includes(item) ? [...list] : [...list, item]
+  return list.filter((x) => x !== item)
 }
 
 const efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
@@ -221,173 +252,175 @@ onMounted(async () => {
 </script>
 
 <template>
-  <form
-    class="job-form"
-    style="display: flex; flex-direction: column; gap: 14px"
-    @submit.prevent="save"
-  >
-    <div class="field">
-      <label for="jf-name">Name</label>
-      <input
-        id="jf-name"
-        v-model="f.name"
-        class="input"
-        data-field="name"
-        placeholder="e.g. morning-digest"
-      />
-      <span v-if="errors.name" class="t-12 c-bad">{{ errors.name }}</span>
-    </div>
-    <div class="field">
-      <label for="jf-schedule">Schedule</label>
-      <input id="jf-schedule" v-model="f.schedule" class="input mono" data-field="schedule" />
-      <span v-if="errors.schedule" class="t-12 c-bad">{{ errors.schedule }}</span>
-      <span class="t-12 c-3"
-        >A 5-field cron expression, an interval from 1 minute to 366 days, or one ISO time.</span
-      >
-      <span v-if="props.job && f.schedule.trim() === base.schedule" class="t-12 c-3"
-        >Next run: {{ when(props.job.job.next_run) }}</span
-      >
-    </div>
-    <div class="field">
-      <label for="jf-prompt">Prompt</label>
-      <textarea
-        id="jf-prompt"
-        v-model="f.prompt"
-        class="input"
-        data-field="prompt"
-        rows="5"
-        style="height: auto; padding: 8px 10px"
-      />
-      <span v-if="errors.prompt" class="t-12 c-bad">{{ errors.prompt }}</span>
-      <span
-        v-if="props.job?.prompt_masked && f.prompt !== base.prompt"
-        class="t-12 c-warn"
-        role="status"
-        >The prompt holds a masked secret. Type the full prompt again, or the secret is lost.</span
-      >
-    </div>
-    <div class="field">
-      <label for="jf-script">Script</label>
-      <input id="jf-script" v-model="f.script" class="input mono" data-field="script" />
-    </div>
-    <label class="check"
-      ><input v-model="f.noAgent" type="checkbox" data-field="no_agent" />No agent: run only the
-      script</label
-    >
-    <div class="field">
-      <label for="jf-repeat">Repeat</label>
-      <input
-        id="jf-repeat"
-        v-model.number="f.repeat"
-        class="input"
-        type="number"
-        min="0"
-        data-field="repeat"
-      />
-      <span class="t-12 c-3">0 runs the job with no end.</span>
-    </div>
-    <div class="field">
-      <label for="jf-deliver">Deliver to</label>
-      <input id="jf-deliver" v-model="f.deliver" class="input" data-field="deliver" />
-      <span v-if="defaultDeliver" class="t-12 c-3">Empty sends to {{ defaultDeliver }}.</span>
-    </div>
-    <div class="field">
-      <label for="jf-model">Model</label>
-      <input
-        id="jf-model"
-        v-model="f.model"
-        class="input"
-        data-field="model"
-        list="jf-models"
-        placeholder="e.g. default"
-      />
-      <datalist id="jf-models">
-        <option v-for="m in models" :key="m" :value="m" />
-      </datalist>
-      <span class="t-12 c-3"
-        >Leave it empty, or write default, or write &lt;entry&gt;:&lt;model&gt;.</span
-      >
-    </div>
-    <div class="field">
-      <label for="jf-effort">Effort</label>
-      <select id="jf-effort" v-model="f.effort" class="input" data-field="effort">
-        <option value="">default</option>
-        <option v-for="e in efforts" :key="e" :value="e">{{ e }}</option>
-      </select>
-    </div>
-    <label class="check"
-      ><input v-model="f.watch" type="checkbox" data-field="watch" />Watch: report only
-      changes</label
-    >
-    <label class="check"
-      ><input v-model="f.draftOnly" type="checkbox" data-field="draft_only" />Draft only</label
-    >
-    <label class="check"
-      ><input v-model="f.continuity" type="checkbox" data-field="continuity" />Continuity</label
-    >
-    <label class="check"
-      ><input v-model="f.enabled" type="checkbox" data-field="enabled" />Enabled</label
-    >
-    <fieldset class="field" style="border: 0; padding: 0; margin: 0">
-      <legend>Skills</legend>
-      <div
-        v-if="f.skills.length"
-        class="skill-chips"
-        style="display: flex; flex-wrap: wrap; gap: 6px"
-      >
-        <button
-          v-for="s in f.skills"
-          :key="s"
-          type="button"
-          class="chip chip-plain"
-          :aria-label="`Remove ${s}`"
-          @click="removeSkill(s)"
+  <form class="flex flex-col gap-4" @submit.prevent="save">
+    <FieldGroup>
+      <Field :data-invalid="!!errors.name || undefined">
+        <FieldLabel :for="elId('name')">Name</FieldLabel>
+        <Input
+          :id="elId('name')"
+          v-model="f.name"
+          :aria-invalid="!!errors.name || undefined"
+          placeholder="e.g. morning-digest"
+        />
+        <FieldError v-if="errors.name">{{ errors.name }}</FieldError>
+      </Field>
+      <Field :data-invalid="!!errors.schedule || undefined">
+        <FieldLabel :for="elId('schedule')">Schedule</FieldLabel>
+        <Input
+          :id="elId('schedule')"
+          v-model="f.schedule"
+          class="font-mono"
+          :aria-invalid="!!errors.schedule || undefined"
+        />
+        <FieldError v-if="errors.schedule">{{ errors.schedule }}</FieldError>
+        <FieldDescription
+          >A 5-field cron expression, an interval from 1 minute to 366 days, or one ISO
+          time.</FieldDescription
         >
-          {{ s }} ✕
-        </button>
-      </div>
-      <input
-        v-if="skillNames.length > 0"
-        v-model="skillQuery"
-        class="input"
-        type="search"
-        data-field="skill-search"
-        placeholder="Search skills"
-        aria-label="Search skills"
-        @keydown.enter.prevent
-      />
-      <label v-for="s in shownSkills" :key="s" class="check"
-        ><input v-model="f.skills" type="checkbox" :value="s" :data-field="'skill-' + s" />{{
-          s
-        }}</label
-      >
-      <span v-if="skillNames.length > 0 && shownSkills.length === 0" class="t-12 c-3"
-        >No skill matches.</span
-      >
-      <span v-if="skillNames.length === 0" class="t-12 c-3">No skills installed.</span>
-    </fieldset>
-    <fieldset class="field" style="border: 0; padding: 0; margin: 0">
-      <legend>Toolsets</legend>
-      <label v-for="t in toolsetNames" :key="t" class="check"
-        ><input v-model="f.toolsets" type="checkbox" :value="t" :data-field="'toolset-' + t" />{{
-          t
-        }}</label
-      >
-    </fieldset>
-    <div class="field">
-      <label for="jf-workdir">Workdir</label>
-      <input id="jf-workdir" v-model="f.workdir" class="input mono" data-field="workdir" />
+        <FieldDescription v-if="props.job && f.schedule.trim() === base.schedule"
+          >Next run: {{ when(props.job.job.next_run) }}</FieldDescription
+        >
+      </Field>
+      <Field :data-invalid="!!errors.prompt || undefined">
+        <FieldLabel :for="elId('prompt')">Prompt</FieldLabel>
+        <Textarea
+          :id="elId('prompt')"
+          v-model="f.prompt"
+          rows="5"
+          :aria-invalid="!!errors.prompt || undefined"
+        />
+        <FieldError v-if="errors.prompt">{{ errors.prompt }}</FieldError>
+        <span
+          v-if="props.job?.prompt_masked && f.prompt !== base.prompt"
+          class="text-xs text-warning"
+          role="status"
+          >The prompt holds a masked secret. Type the full prompt again, or the secret is
+          lost.</span
+        >
+      </Field>
+      <Field>
+        <FieldLabel :for="elId('script')">Script</FieldLabel>
+        <Input :id="elId('script')" v-model="f.script" class="font-mono" />
+      </Field>
+      <Field orientation="horizontal">
+        <Checkbox :id="elId('no-agent')" v-model="f.noAgent" />
+        <FieldLabel :for="elId('no-agent')" class="font-normal"
+          >No agent: run only the script</FieldLabel
+        >
+      </Field>
+      <Field>
+        <FieldLabel :for="elId('repeat')">Repeat</FieldLabel>
+        <Input :id="elId('repeat')" v-model.number="f.repeat" type="number" min="0" />
+        <FieldDescription>0 runs the job with no end.</FieldDescription>
+      </Field>
+      <Field>
+        <FieldLabel :for="elId('deliver')">Deliver to</FieldLabel>
+        <Input :id="elId('deliver')" v-model="f.deliver" />
+        <FieldDescription v-if="defaultDeliver"
+          >Empty sends to {{ defaultDeliver }}.</FieldDescription
+        >
+      </Field>
+      <Field>
+        <FieldLabel :for="elId('model')">Model</FieldLabel>
+        <Input
+          :id="elId('model')"
+          v-model="f.model"
+          :list="elId('models')"
+          placeholder="e.g. default"
+        />
+        <datalist :id="elId('models')">
+          <option v-for="m in models" :key="m" :value="m" />
+        </datalist>
+        <FieldDescription
+          >Leave it empty, or write default, or write &lt;entry&gt;:&lt;model&gt;.</FieldDescription
+        >
+      </Field>
+      <Field>
+        <FieldLabel :for="elId('effort')">Effort</FieldLabel>
+        <NativeSelect :id="elId('effort')" v-model="f.effort">
+          <option value="">default</option>
+          <option v-for="e in efforts" :key="e" :value="e">{{ e }}</option>
+        </NativeSelect>
+      </Field>
+      <Field orientation="horizontal">
+        <Checkbox :id="elId('watch')" v-model="f.watch" />
+        <FieldLabel :for="elId('watch')" class="font-normal">Watch: report only changes</FieldLabel>
+      </Field>
+      <Field orientation="horizontal">
+        <Checkbox :id="elId('draft-only')" v-model="f.draftOnly" />
+        <FieldLabel :for="elId('draft-only')" class="font-normal">Draft only</FieldLabel>
+      </Field>
+      <Field orientation="horizontal">
+        <Checkbox :id="elId('continuity')" v-model="f.continuity" />
+        <FieldLabel :for="elId('continuity')" class="font-normal">Continuity</FieldLabel>
+      </Field>
+      <Field orientation="horizontal">
+        <Checkbox :id="elId('enabled')" v-model="f.enabled" />
+        <FieldLabel :for="elId('enabled')" class="font-normal">Enabled</FieldLabel>
+      </Field>
+      <FieldSet>
+        <FieldLegend variant="label">Skills</FieldLegend>
+        <div v-if="f.skills.length" class="flex flex-wrap gap-2">
+          <Button
+            v-for="s in f.skills"
+            :key="s"
+            type="button"
+            variant="secondary"
+            size="xs"
+            :aria-label="`Remove ${s}`"
+            @click="removeSkill(s)"
+          >
+            {{ s }} ✕
+          </Button>
+        </div>
+        <Input
+          v-if="skillNames.length > 0"
+          v-model="skillQuery"
+          type="search"
+          placeholder="Search skills"
+          aria-label="Search skills"
+          @keydown.enter.prevent
+        />
+        <Field v-for="s in shownSkills" :key="s" orientation="horizontal">
+          <Checkbox
+            :id="elId('skill-' + s)"
+            :model-value="f.skills.includes(s)"
+            @update:model-value="(on) => (f.skills = toggleIn(f.skills, s, on))"
+          />
+          <FieldLabel :for="elId('skill-' + s)" class="font-normal">{{ s }}</FieldLabel>
+        </Field>
+        <FieldDescription v-if="skillNames.length > 0 && shownSkills.length === 0"
+          >No skill matches.</FieldDescription
+        >
+        <FieldDescription v-if="skillNames.length === 0">No skills installed.</FieldDescription>
+      </FieldSet>
+      <FieldSet>
+        <FieldLegend variant="label">Toolsets</FieldLegend>
+        <Field v-for="t in toolsetNames" :key="t" orientation="horizontal">
+          <Checkbox
+            :id="elId('toolset-' + t)"
+            :model-value="f.toolsets.includes(t)"
+            @update:model-value="(on) => (f.toolsets = toggleIn(f.toolsets, t, on))"
+          />
+          <FieldLabel :for="elId('toolset-' + t)" class="font-normal">{{ t }}</FieldLabel>
+        </Field>
+      </FieldSet>
+      <Field>
+        <FieldLabel :for="elId('workdir')">Workdir</FieldLabel>
+        <Input :id="elId('workdir')" v-model="f.workdir" class="font-mono" />
+      </Field>
+    </FieldGroup>
+    <div v-if="note" class="text-xs text-muted-foreground" role="status">{{ note }}</div>
+    <div v-if="error" class="text-sm text-destructive" role="alert">{{ error }}</div>
+    <div class="flex justify-end gap-2">
+      <Button type="button" variant="outline" @click="emit('cancel')">Cancel</Button>
+      <Button type="submit" :disabled="busy">
+        <template v-if="busy"><Spinner aria-hidden="true" />Saving…</template>
+        <template v-else>Save</template>
+      </Button>
     </div>
-    <div v-if="note" class="t-12 c-3" role="status">{{ note }}</div>
-    <div v-if="error" class="t-12 c-bad" role="alert">{{ error }}</div>
-    <div style="display: flex; gap: 8px; justify-content: flex-end">
-      <button class="btn btn-secondary" type="button" @click="emit('cancel')">Cancel</button>
-      <button class="btn btn-primary" type="submit" :disabled="busy">
-        {{ busy ? "Saving…" : "Save" }}
-      </button>
-    </div>
-    <span class="t-12 c-3"
-      >The server runs the same cronjob tool as the agent, so the same checks apply.</span
-    >
+    <p class="text-xs text-muted-foreground">
+      The server runs the same cronjob tool as the agent, so the same checks apply.
+    </p>
   </form>
 </template>

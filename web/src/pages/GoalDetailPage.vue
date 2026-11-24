@@ -12,6 +12,14 @@ import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
 import DataTable from "../components/DataTable.vue"
 import SidePanel from "../components/SidePanel.vue"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
+import { Progress } from "@/components/ui/progress"
+import { cn } from "@/lib/utils"
 
 const route = useRoute()
 const router = useRouter()
@@ -231,8 +239,10 @@ watch(
 </script>
 
 <template>
-  <div class="page">
-    <router-link class="back" :to="{ name: 'goals' }">‹ Goals</router-link>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <RouterLink class="text-sm text-muted-foreground hover:text-foreground" :to="{ name: 'goals' }"
+      >‹ Goals</RouterLink
+    >
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
       v-else-if="missing"
@@ -247,220 +257,215 @@ watch(
       :text="errText"
       @action="refresh"
     />
-    <div v-else class="page-stack" :aria-busy="stale || undefined">
-      <div class="page-h">
-        <h1 class="t-20">{{ d.row.goal }}</h1>
+    <div v-else class="flex flex-col gap-6" :aria-busy="stale || undefined">
+      <div class="flex flex-wrap items-center gap-2">
+        <h1 class="text-xl font-semibold tracking-tight">{{ d.row.goal }}</h1>
         <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
         <template v-if="own">
-          <button
-            v-if="d.row.status === 'paused'"
-            class="btn btn-secondary"
-            type="button"
-            @click="resume"
-          >
+          <Button v-if="d.row.status === 'paused'" variant="secondary" @click="resume">
             ▶ Resume (new budget)
-          </button>
-          <button
-            v-else-if="d.row.status === 'active'"
-            class="btn btn-secondary"
-            type="button"
-            @click="pause"
-          >
+          </Button>
+          <Button v-else-if="d.row.status === 'active'" variant="secondary" @click="pause">
             ⏸ Pause
-          </button>
-          <button v-if="parked" class="btn btn-secondary" type="button" @click="unwait">
-            Unwait
-          </button>
-          <button class="btn btn-secondary" type="button" @click="waitOpen = true">Wait…</button>
-          <button class="btn btn-secondary" type="button" @click="draft">
+          </Button>
+          <Button v-if="parked" variant="secondary" @click="unwait">Unwait</Button>
+          <Button variant="secondary" @click="waitOpen = true">Wait…</Button>
+          <Button variant="secondary" @click="draft">
             {{ hasContract ? "Draft again" : "Draft" }}
-          </button>
-          <button class="btn btn-danger-soft" type="button" @click="clearGoal">Clear</button>
+          </Button>
+          <Button variant="destructive" @click="clearGoal">Clear</Button>
         </template>
         <template v-else-if="remote">
-          <button
-            v-if="d.row.status === 'active'"
-            class="btn btn-secondary"
-            type="button"
-            @click="pause"
-          >
+          <Button v-if="d.row.status === 'active'" variant="secondary" @click="pause">
             ⏸ Pause
-          </button>
-          <button class="btn btn-danger-soft" type="button" @click="clearGoal">Clear</button>
+          </Button>
+          <Button variant="destructive" @click="clearGoal">Clear</Button>
         </template>
-        <span v-else class="chip chip-plain">read-only</span>
+        <Badge v-else variant="outline">read-only</Badge>
       </div>
-      <div v-if="own" class="li">
-        <input
+      <div v-if="own" class="flex gap-2">
+        <Input
           v-model="setText"
-          class="input grow"
           aria-label="New goal"
           placeholder="A new goal text"
           @keydown.enter="setGoal"
         />
-        <button class="btn btn-secondary btn-sm" type="button" @click="setGoal">Set</button>
+        <Button variant="secondary" size="sm" @click="setGoal">Set</Button>
       </div>
-      <div v-if="remote" class="ro-banner">To resume, set, or wait, send /goal in that chat.</div>
-      <div v-else-if="cli" class="ro-banner">This goal runs in tether chat. Change it there.</div>
-      <div class="grid-3">
-        <div class="tile">
-          <span class="t-12 c-3">Turns</span>
-          <span class="v">{{ d.row.turns_used }} / {{ d.row.max_turns }}</span>
-          <div class="meter"><span :style="{ width: pct + '%' }" /></div>
-        </div>
-        <div class="tile">
-          <span class="t-12 c-3">Last verdict</span>
-          <span class="v">{{ d.last_verdict || "—" }}</span>
-          <span class="t-12 c-3">{{ d.last_reason }}</span>
-        </div>
-        <div class="tile">
-          <span class="t-12 c-3">Session</span>
-          <span class="v">{{ d.row.title }}</span>
-          <span class="t-12 c-3">{{ label }}</span>
-        </div>
+      <Alert v-if="remote">
+        <AlertDescription>To resume, set, or wait, send /goal in that chat.</AlertDescription>
+      </Alert>
+      <Alert v-else-if="cli">
+        <AlertDescription>This goal runs in tether chat. Change it there.</AlertDescription>
+      </Alert>
+      <div class="grid gap-4 tab:grid-cols-3">
+        <Card>
+          <CardContent class="flex flex-col gap-1">
+            <span class="text-xs text-muted-foreground">Turns</span>
+            <span class="text-lg font-semibold"
+              >{{ d.row.turns_used }} / {{ d.row.max_turns }}</span
+            >
+            <Progress :model-value="pct" />
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent class="flex flex-col gap-1">
+            <span class="text-xs text-muted-foreground">Last verdict</span>
+            <span class="text-lg font-semibold">{{ d.last_verdict || "—" }}</span>
+            <span class="text-xs text-muted-foreground">{{ d.last_reason }}</span>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent class="flex flex-col gap-1">
+            <span class="text-xs text-muted-foreground">Session</span>
+            <span class="text-lg font-semibold">{{ d.row.title }}</span>
+            <span class="text-xs text-muted-foreground">{{ label }}</span>
+          </CardContent>
+        </Card>
       </div>
-      <div v-if="parked" class="warn-banner">⏸ Parked: waits on {{ d.row.wait_target }}.</div>
-      <div class="grid-2">
-        <div class="card card-pad">
-          <div class="card-h"><h3>Contract</h3></div>
-          <dl v-if="hasContract" class="kv">
-            <template v-for="[k, v] in contract" :key="k">
-              <dt>{{ k }}</dt>
-              <dd>{{ v }}</dd>
-            </template>
-          </dl>
-          <p v-else class="c-3">No contract.</p>
-        </div>
-        <div class="card card-pad">
-          <div class="card-h"><h3>Times</h3></div>
-          <dl class="kv">
-            <dt>Last turn</dt>
-            <dd>
-              <span style="white-space: nowrap" :title="fullTime(d.row.last_turn_at)">{{
-                when(d.row.last_turn_at)
-              }}</span>
-            </dd>
-            <dt>Changed</dt>
-            <dd>
-              <span style="white-space: nowrap" :title="fullTime(d.row.updated_at)">{{
-                when(d.row.updated_at)
-              }}</span>
-            </dd>
-            <template v-if="parked">
-              <dt>Waits on</dt>
-              <dd>{{ d.row.wait_target }}</dd>
-              <dt>Reason</dt>
-              <dd>{{ d.waiting_reason || "—" }}</dd>
-              <dt>Since</dt>
+      <Alert v-if="parked" class="text-warning">
+        <AlertDescription>⏸ Parked: waits on {{ d.row.wait_target }}.</AlertDescription>
+      </Alert>
+      <div class="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Contract</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <dl v-if="hasContract" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+              <template v-for="[k, v] in contract" :key="k">
+                <dt class="text-muted-foreground">{{ k }}</dt>
+                <dd>{{ v }}</dd>
+              </template>
+            </dl>
+            <p v-else class="text-sm text-muted-foreground">No contract.</p>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Times</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+              <dt class="text-muted-foreground">Last turn</dt>
               <dd>
-                <span style="white-space: nowrap" :title="fullTime(d.waiting_since)">{{
-                  when(d.waiting_since)
+                <span class="whitespace-nowrap" :title="fullTime(d.row.last_turn_at)">{{
+                  when(d.row.last_turn_at)
                 }}</span>
               </dd>
-              <dt>Ends at the latest</dt>
+              <dt class="text-muted-foreground">Changed</dt>
               <dd>
-                <span style="white-space: nowrap" :title="fullTime(d.waiting_until)">{{
-                  when(d.waiting_until)
+                <span class="whitespace-nowrap" :title="fullTime(d.row.updated_at)">{{
+                  when(d.row.updated_at)
                 }}</span>
               </dd>
-            </template>
-          </dl>
-        </div>
+              <template v-if="parked">
+                <dt class="text-muted-foreground">Waits on</dt>
+                <dd>{{ d.row.wait_target }}</dd>
+                <dt class="text-muted-foreground">Reason</dt>
+                <dd>{{ d.waiting_reason || "—" }}</dd>
+                <dt class="text-muted-foreground">Since</dt>
+                <dd>
+                  <span class="whitespace-nowrap" :title="fullTime(d.waiting_since)">{{
+                    when(d.waiting_since)
+                  }}</span>
+                </dd>
+                <dt class="text-muted-foreground">Ends at the latest</dt>
+                <dd>
+                  <span class="whitespace-nowrap" :title="fullTime(d.waiting_until)">{{
+                    when(d.waiting_until)
+                  }}</span>
+                </dd>
+              </template>
+            </dl>
+          </CardContent>
+        </Card>
       </div>
-      <div class="card card-pad">
-        <div class="card-h">
-          <h3>Subgoals</h3>
-          <button
-            v-if="(own || remote) && d.subgoals.length > 0"
-            class="btn btn-ghost btn-sm"
-            type="button"
-            @click="clearSubgoals"
-          >
-            Clear all
-          </button>
-        </div>
-        <div v-for="(s, i) in d.subgoals" :key="i" class="li">
-          <span class="c-3">{{ i + 1 }}</span>
-          <span class="grow">{{ s }}</span>
-          <button
-            v-if="own || remote"
-            class="btn btn-ghost btn-sm"
-            type="button"
-            @click="removeSubgoal(i)"
-          >
-            Remove
-          </button>
-        </div>
-        <div v-if="own" class="li">
-          <input
-            v-model="subText"
-            class="input grow"
-            placeholder="Add a subgoal"
-            @keydown.enter="addSubgoal"
-          />
-          <button class="btn btn-secondary btn-sm" type="button" @click="addSubgoal">Add</button>
-        </div>
-      </div>
-      <div class="section-h">
-        <h2>Gates</h2>
-        <span class="pill-note">Commands that must pass before the judge can say “done”.</span>
-        <button
+      <Card>
+        <CardHeader>
+          <CardTitle>Subgoals</CardTitle>
+          <CardAction v-if="(own || remote) && d.subgoals.length > 0">
+            <Button variant="ghost" size="sm" @click="clearSubgoals">Clear all</Button>
+          </CardAction>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-2">
+          <div v-for="(s, i) in d.subgoals" :key="i" class="flex items-center gap-2">
+            <span class="text-muted-foreground">{{ i + 1 }}</span>
+            <span class="flex-1">{{ s }}</span>
+            <Button v-if="own || remote" variant="ghost" size="sm" @click="removeSubgoal(i)">
+              Remove
+            </Button>
+          </div>
+          <div v-if="own" class="flex gap-2">
+            <Input v-model="subText" placeholder="Add a subgoal" @keydown.enter="addSubgoal" />
+            <Button variant="secondary" size="sm" @click="addSubgoal">Add</Button>
+          </div>
+        </CardContent>
+      </Card>
+      <div class="flex flex-wrap items-baseline gap-2">
+        <h2 class="text-lg font-semibold">Gates</h2>
+        <span class="text-sm text-muted-foreground"
+          >Commands that must pass before the judge can say “done”.</span
+        >
+        <Button
           v-if="(own || remote) && d.gates.length > 0"
-          class="btn btn-ghost btn-sm"
-          type="button"
+          variant="ghost"
+          size="sm"
           @click="clearGates"
         >
           Clear all
-        </button>
+        </Button>
       </div>
       <DataTable :columns="gateCols" :rows="gateRows" row-key="n">
         <template #cell-command="{ row }"
-          ><code>{{ row.command }}</code></template
+          ><code class="font-mono text-sm">{{ row.command }}</code></template
         >
         <template #cell-exit="{ row }">
-          <span :class="{ 'c-bad': row.exit !== null && row.exit !== 0 }">{{
+          <span :class="cn(row.exit !== null && row.exit !== 0 && 'text-destructive')">{{
             row.exit === null ? "—" : row.exit
           }}</span>
         </template>
         <template #cell-tail="{ row }">
-          <span class="mono" style="white-space: pre-wrap">{{
+          <span class="font-mono whitespace-pre-wrap">{{
             tailOf(row).split("\n").slice(-2).join("\n")
           }}</span>
-          <button
+          <Button
             v-if="tailOf(row).split('\n').length > 2"
-            class="btn btn-ghost btn-sm"
-            type="button"
+            variant="ghost"
+            size="sm"
             @click="gateFull = tailOf(row)"
           >
             Show all
-          </button>
+          </Button>
         </template>
         <template #cell-actions="{ row }">
-          <button
+          <Button
             v-if="own || remote"
-            class="btn btn-ghost btn-sm"
-            type="button"
+            variant="ghost"
+            size="sm"
             @click="removeGate(Number(row.n) - 1)"
           >
             Remove
-          </button>
+          </Button>
         </template>
       </DataTable>
-      <div v-if="own" class="li">
-        <input
+      <div v-if="own" class="flex gap-2">
+        <Input
           v-model="gateText"
-          class="input mono grow"
+          class="font-mono"
           placeholder="Add a gate, for example: go vet ./..."
           @keydown.enter="addGate"
         />
-        <button class="btn btn-secondary btn-sm" type="button" @click="addGate">Add gate</button>
+        <Button variant="secondary" size="sm" @click="addGate">Add gate</Button>
       </div>
-      <p class="t-12 c-3">
+      <p class="text-xs text-muted-foreground">
         Parse failures {{ d.parse_failures }} · transport failures {{ d.transport_failures }} · turn
         failures {{ d.turn_failures }}
       </p>
       <SidePanel :open="gateFull !== ''" title="Gate output" @close="gateFull = ''">
-        <pre class="code-block gate-full">{{ gateFull }}</pre>
+        <pre class="overflow-auto whitespace-pre-wrap rounded-md bg-muted p-3 font-mono text-sm">{{
+          gateFull
+        }}</pre>
       </SidePanel>
       <SidePanel
         :open="waitOpen"
@@ -468,23 +473,26 @@ watch(
         :dirty="pid !== '' || reason !== ''"
         @close="closeWait"
       >
-        <p class="c-3">The goal parks until the process ends, at most 30 minutes.</p>
-        <div class="field">
-          <label for="goal-wait-pid">PID</label>
-          <input
-            id="goal-wait-pid"
-            v-model="pid"
-            class="input"
-            data-field="pid"
-            inputmode="numeric"
-            @input="pid = pid.replace(/\D/g, '')"
-          />
-        </div>
-        <div class="field">
-          <label for="goal-wait-reason">Reason</label>
-          <input id="goal-wait-reason" v-model="reason" class="input" data-field="reason" />
-        </div>
-        <button class="btn btn-primary" type="button" @click="wait">Wait</button>
+        <p class="text-sm text-muted-foreground">
+          The goal parks until the process ends, at most 30 minutes.
+        </p>
+        <FieldGroup>
+          <Field>
+            <FieldLabel for="goal-wait-pid">PID</FieldLabel>
+            <Input
+              id="goal-wait-pid"
+              v-model="pid"
+              data-field="pid"
+              inputmode="numeric"
+              @input="pid = pid.replace(/\D/g, '')"
+            />
+          </Field>
+          <Field>
+            <FieldLabel for="goal-wait-reason">Reason</FieldLabel>
+            <Input id="goal-wait-reason" v-model="reason" data-field="reason" />
+          </Field>
+        </FieldGroup>
+        <Button @click="wait">Wait</Button>
       </SidePanel>
     </div>
   </div>

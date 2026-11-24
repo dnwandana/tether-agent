@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref } from "vue"
 import type { PinView, SecretView } from "../../api/types.gen"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import DataTable from "../DataTable.vue"
 import ResultNote from "../ResultNote.vue"
 import StateBlock from "../StateBlock.vue"
@@ -46,7 +49,9 @@ async function setValue(s: SecretView): Promise<void> {
 
 <template>
   <div>
-    <p>Bound exec_secrets names. Values are never shown here, in a log, or to the model.</p>
+    <p class="text-sm text-muted-foreground">
+      Bound exec_secrets names. Values are never shown here, in a log, or to the model.
+    </p>
     <ResultNote :note="note" @close="note = null" />
     <StateBlock
       v-if="secrets.length === 0"
@@ -61,51 +66,59 @@ async function setValue(s: SecretView): Promise<void> {
       row-key="name"
     >
       <template #cell-state="{ row }">
-        <span v-if="row.state === 'set'" class="chip chip-ok">✓ set</span>
-        <span
+        <Badge v-if="row.state === 'set'" variant="secondary">✓ set</Badge>
+        <Badge
           v-else-if="row.state === 'check'"
-          class="chip chip-warn"
+          variant="outline"
+          class="text-warning"
           :title="fullTime(row.failed_at as string)"
-          >✓ set · auth failed {{ shortTime(row.failed_at as string) }}</span
+          >✓ set · auth failed {{ shortTime(row.failed_at as string) }}</Badge
         >
-        <span v-else class="chip chip-warn">not set</span>
+        <Badge v-else variant="outline" class="text-warning">not set</Badge>
       </template>
       <template #cell-commands="{ row }">{{ (row.commands as string[]).join(", ") }}</template>
       <template #cell-pins="{ row }">
-        <div v-for="p in row.pins as PinView[]" :key="p.path" class="pin">
-          <code>{{ p.path }}</code>
-          <details class="pin-sha">
-            <summary class="mono t-12">{{ p.sha256.slice(0, 12) }}</summary>
-            <span class="mono t-12">{{ p.sha256 }}</span>
-          </details>
-          <button
-            class="btn btn-danger-soft btn-sm"
+        <div
+          v-for="p in row.pins as PinView[]"
+          :key="p.path"
+          class="flex flex-wrap items-center gap-2"
+        >
+          <code class="font-mono break-all">{{ p.path }}</code>
+          <Collapsible>
+            <CollapsibleTrigger as-child>
+              <Button variant="ghost" size="xs" class="font-mono">{{
+                p.sha256.slice(0, 12)
+              }}</Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <span class="font-mono text-xs break-all">{{ p.sha256 }}</span>
+            </CollapsibleContent>
+          </Collapsible>
+          <Button
+            variant="outline"
+            size="sm"
+            class="max-tab:h-11"
             type="button"
             @click="unpin(row as unknown as SecretView, p)"
           >
             Unpin
-          </button>
+          </Button>
         </div>
-        <span v-if="(row.pins as PinView[]).length === 0" class="c-3">No allowed programs.</span>
+        <span v-if="(row.pins as PinView[]).length === 0" class="text-muted-foreground"
+          >No allowed programs.</span
+        >
       </template>
       <template #cell-actions="{ row }">
-        <button
-          class="btn btn-secondary btn-sm"
+        <Button
+          variant="secondary"
+          size="sm"
+          class="max-tab:h-11"
           type="button"
           @click="setValue(row as unknown as SecretView)"
         >
           Set value…
-        </button>
+        </Button>
       </template>
     </DataTable>
   </div>
 </template>
-
-<style scoped>
-.pin-sha summary {
-  cursor: pointer;
-}
-code {
-  overflow-wrap: anywhere;
-}
-</style>

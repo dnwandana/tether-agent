@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { defineComponent, h as vh, type PropType } from "vue"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
+import type { ResultNoteData } from "../lib/command"
 
 const h = vi.hoisted(() => ({
   follow: new Map<string, (t: unknown) => void>(),
@@ -56,7 +60,6 @@ vi.mock("../lib/live", async () => {
 })
 import { api, ApiError } from "../api/client"
 import { confirm, toast } from "../stores/ui"
-import ResultNote from "../components/ResultNote.vue"
 import SystemPage from "./SystemPage.vue"
 import { shortTime } from "../lib/time"
 
@@ -145,6 +148,21 @@ const reset = () => {
   }
 }
 
+// A stub that shows the note data in an output element, so that tests read the exact data.
+const NoteStub = defineComponent({
+  props: { note: { type: Object as PropType<ResultNoteData | null>, default: null } },
+  setup: (p) => () =>
+    p.note
+      ? vh("output", { "data-title": p.note.title, "data-kind": p.note.kind }, p.note.text)
+      : null,
+})
+const notes = () =>
+  [...document.querySelectorAll("output")].map((o) => ({
+    title: (o as HTMLElement).dataset.title,
+    kind: (o as HTMLElement).dataset.kind,
+    text: o.textContent,
+  }))
+
 async function mk() {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -155,11 +173,15 @@ async function mk() {
     ],
   })
   await router.push("/system")
-  const w = mount(SystemPage, { global: { plugins: [router], stubs: { LiveHeader: true } } })
+  const r = render(SystemPage, {
+    global: { plugins: [router], stubs: { LiveHeader: true, ResultNote: NoteStub } },
+  })
   await flushPromises()
-  return Object.assign(w, { router })
+  return Object.assign(r, { router, user: userEvent.setup() })
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
+const mcp = () => screen.getByRole("region", { name: "MCP servers" })
+const button = (name: string | RegExp) => screen.getByRole("button", { name })
+const bodyRows = () => [...mcp().querySelectorAll("tbody tr")] as HTMLElement[]
 const task = (o: object) => ({
   id: "t1",
   kind: "doctor",
@@ -191,15 +213,24 @@ beforeEach(() => {
   vi.mocked(toast).mockReset()
 })
 
+// Returns the fourth cell of the MCP row that names the server.
+const cell3 = (name: string) =>
+  bodyRows()
+    .find((r) => r.textContent?.includes(name))!
+    .querySelectorAll("td")[3] as HTMLElement
+const summary = () => screen.getByText(/^one/).closest(".typeset")!
+const items = () =>
+  within(screen.getByRole("list", { name: "Background processes" })).getAllByRole("listitem")
+
 describe("SystemPage", () => {
   it("shows the doctor, the MCP servers, and the running work", async () => {
-    const w = await mk()
+    await mk()
     for (const p of ["/api/doctor", "/api/mcp", "/api/runtime"])
       expect(api).toHaveBeenCalledWith("GET", p)
-    expect(w.text()).toContain("1 read · 1 write")
-    expect(w.text()).toContain("npx: not found")
-    expect(w.text()).toContain("job-48211")
-    expect(w.text()).toContain("claude-code")
+    expect(screen.getByText("1 read · 1 write")).toBeTruthy()
+    expect(screen.getByText("job-48211")).toBeTruthy()
+    expect(screen.getByText("claude-code")).toBeTruthy()
+    expect(document.body.textContent).toContain("npx: not found")
   })
 
   it("loads each section alone, with its own Retry", async () => {
@@ -207,23 +238,23 @@ describe("SystemPage", () => {
       if (p === "/api/mcp") throw new Error("mcp read failed")
       return data[p] as any
     })
-    const w = await mk()
-    expect(w.text()).toContain("mcp read failed")
-    expect(w.text()).toContain("config")
-    expect(w.text()).toContain("claude-code")
+    const { user } = await mk()
+    const text = document.body.textContent
+    expect(text).toContain("mcp read failed")
+    expect(text).toContain("config")
+    expect(text).toContain("claude-code")
     vi.mocked(api).mockImplementation(async (m: string, p: string) => data[p] as any)
-    await w.find(".mcp-section .state-error button").trigger("click")
+    await user.click(within(mcp()).getByRole("button", { name: "Retry" }))
     await flushPromises()
-    expect(w.text()).toContain("github")
+    const name = (data["/api/mcp"] as any[])[0].name
+    expect(within(mcp()).getByText(name)).toBeTruthy()
   })
 
   it("gives each MCP dot the class of its state and shows the settings", async () => {
-    const w = await mk()
-    const dots = w.findAll(".mcp-section .dot").map((d: any) => d.classes())
-    expect(dots[0]).toContain("dot-ok")
-    expect(dots[1]).toContain("dot-bad")
-    expect(dots[2]).toContain("dot-off")
-    const text = w.find(".mcp-section").text()
+    await mk()
+    const tones = bodyRows().map((r) => r.querySelector("[data-tone]")?.getAttribute("data-tone"))
+    expect(tones).toEqual(["ok", "bad", "off"])
+    const text = mcp().textContent
     for (const s of [
       "always on",
       "stops after 10 min idle",
@@ -237,47 +268,45 @@ describe("SystemPage", () => {
 
   it("shows the MCP empty state with a short title", async () => {
     data["/api/mcp"] = []
-    const w = await mk()
-    const s = w
-      .findAllComponents({ name: "StateBlock" })
-      .find((b: any) => b.props("title") === "No MCP servers.")!
-    expect(s.props("text")).toBe("Add one under `mcp` in config.yaml, then tap Reload MCP.")
+    await mk()
+    expect(within(mcp()).getByText("No MCP servers.")).toBeTruthy()
+    expect(
+      within(mcp()).getByText("Add one under `mcp` in config.yaml, then tap Reload MCP."),
+    ).toBeTruthy()
   })
 
   it("shows only N tools in the Tools cell, with 1 tool for one", async () => {
     ;(data["/api/mcp"] as any[]).push(
       mcpRow({ name: "search", connected: true, tools: 1, tool_names: ["find"] }),
     )
-    const w = await mk()
-    const cell = (name: string) =>
-      w
-        .findAll(".mcp-section tbody tr")
-        .find((r: any) => r.text().includes(name))!
-        .findAll("td")[3]
-    expect(cell("github").text().startsWith("2 tools")).toBe(true)
-    expect(cell("search").find("summary").text()).toBe("1 tool")
-    expect(cell("linear").text()).toBe("0 tools")
+    await mk()
+    expect(cell3("github").textContent?.startsWith("2 tools")).toBe(true)
+    expect(within(cell3("search")).getByRole("button", { name: "1 tool" })).toBeTruthy()
+    expect(cell3("linear").textContent?.trim()).toBe("0 tools")
   })
 
   it("shows the batch id apart from its state, the duration, and the Markdown summary", async () => {
     const b = (data["/api/runtime"] as any).batches[0]
     b.results[0].duration_s = 125.4
     b.results[0].summary = "**Done.**\n\n- one\n- two\n- three\n- four"
-    const w = await mk()
-    expect(w.text()).toContain("b1 running · 1 task")
-    expect(w.findAll("span.c-2").some((s: any) => s.text() === "running · 1 task")).toBe(true)
-    expect(w.text()).toContain("scan · failed · 4 tool calls · 2 m 5 s")
-    expect(w.text()).not.toContain("125.4")
-    const sum = w.find(".batch-summary")
-    expect(sum.classes()).toEqual(expect.arrayContaining(["md", "clamp-3"]))
-    expect(sum.find("strong").text()).toBe("Done.")
-    expect(sum.findAll("li")).toHaveLength(4)
+    await mk()
+    const text = document.body.textContent
+    expect(text).toContain("b1 running · 1 task")
+    expect(screen.getByText("running · 1 task")).toBeTruthy()
+    expect(text).toContain("scan · failed · 4 tool calls · 2 m 5 s")
+    expect(text).not.toContain("125.4")
+    const sum = screen.getByText("Done.").closest(".typeset")!
+    expect(sum.classList.contains("typeset-chat")).toBe(true)
+    expect(sum.classList.contains("line-clamp-3")).toBe(true)
+    expect(sum.querySelector("strong")?.textContent).toBe("Done.")
+    expect(sum.querySelectorAll("li")).toHaveLength(4)
   })
 
   it("shows the MCP error time and the process start in the short format", async () => {
-    const w = await mk()
-    expect(w.text()).toContain(`npx: not found (${shortTime(local(13, 40))})`)
-    expect(w.text()).toContain(`started ${shortTime(local(14, 2))}`)
+    await mk()
+    const text = document.body.textContent
+    expect(text).toContain(`npx: not found (${shortTime(local(13, 40))})`)
+    expect(text).toContain(`started ${shortTime(local(14, 2))}`)
   })
 
   it("asks before Reload MCP and shows the report in a result note", async () => {
@@ -294,8 +323,8 @@ describe("SystemPage", () => {
           done = r
         }),
     )
-    const w = await mk()
-    await btn(w, "Reload MCP").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Reload MCP"))
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Reload the MCP servers?",
@@ -306,71 +335,72 @@ describe("SystemPage", () => {
       result: expect.anything(),
       title: "Reload MCP",
     })
-    expect(btn(w, "Reload MCP").attributes("disabled")).toBeDefined()
+    expect((button("Reload MCP") as HTMLButtonElement).disabled).toBe(true)
     vi.mocked(api).mockClear()
     done("info")
     await flushPromises()
-    expect(btn(w, "Reload MCP").attributes("disabled")).toBeUndefined()
+    expect((button("Reload MCP") as HTMLButtonElement).disabled).toBe(false)
     expect(api).toHaveBeenCalledWith("GET", "/api/mcp")
-    const notes = w
-      .findAllComponents(ResultNote)
-      .map((n: any) => n.props("note"))
-      .filter(Boolean)
-    expect(notes[0]).toMatchObject({ text: "🔌 MCP reloaded: 3 servers." })
+    expect(notes()[0]).toMatchObject({ text: "🔌 MCP reloaded: 3 servers." })
   })
 
   it("does not reload MCP when the owner declines", async () => {
     vi.mocked(confirm).mockResolvedValue(false)
-    const w = await mk()
-    await btn(w, "Reload MCP").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Reload MCP"))
     await flushPromises()
     expect(h.run).not.toHaveBeenCalled()
   })
 
   it("shows the counts of the doctor in its header and links a page name", async () => {
-    const w = await mk()
-    expect(w.find(".doctor-card .card-h").text()).toContain("ran 14:02 · 1 ✓ · 0 ⚠ · 1 ✗")
-    expect(w.find('.doctor-card a[href="/models"]').text()).toBe("the Models page")
+    await mk()
+    expect(screen.getByText("ran 14:02 · 1 ✓ · 0 ⚠ · 1 ✗")).toBeTruthy()
+    expect(screen.getByRole("link", { name: "the Models page" }).getAttribute("href")).toBe(
+      "/models",
+    )
   })
 
   it("shows an empty doctor with Run doctor", async () => {
     data["/api/doctor"] = { ran_at: "0001-01-01T00:00:00Z", task_id: "", checks: [] }
-    const w = await mk()
-    expect(w.text()).toContain("The doctor has not run yet.")
-    await btn(w, "Run doctor").trigger("click")
+    const { user } = await mk()
+    expect(screen.getByText("The doctor has not run yet.")).toBeTruthy()
+    await user.click(button("Run doctor"))
     await vi.waitFor(() => expect(api).toHaveBeenCalledWith("POST", "/api/doctor"))
   })
 
   it("follows the doctor by the task event and dims the old checks", async () => {
-    const w = await mk()
-    await btn(w, "Run again").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Run again"))
     await flushPromises()
-    expect(btn(w, "Running…").attributes("disabled")).toBeDefined()
-    expect(w.find(".doctor-card .checks").classes()).toContain("is-stale")
+    expect((button(/Running…/) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByRole("list", { name: "Doctor checks" }).getAttribute("aria-busy")).toBe(
+      "true",
+    )
     vi.mocked(api).mockClear()
     h.follow.get("t1")!(task({ state: "done" }))
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/doctor")
-    expect(btn(w, "Run again").attributes("disabled")).toBeUndefined()
+    expect((button("Run again") as HTMLButtonElement).disabled).toBe(false)
   })
 
   it("shows the error and the lost text of a doctor task in a result note", async () => {
-    const w = await mk()
-    await btn(w, "Run again").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Run again"))
     await flushPromises()
     h.follow.get("t1")!(task({ state: "error", text: "no provider answered" }))
     await flushPromises()
-    const note = () =>
-      w
-        .findAllComponents(ResultNote)
-        .map((n: any) => n.props("note"))
-        .filter(Boolean)[0]
-    expect(note()).toMatchObject({ title: "Doctor", kind: "error", text: "no provider answered" })
-    await btn(w, "Run again").trigger("click")
+    expect(notes()[0]).toMatchObject({
+      title: "Doctor",
+      kind: "error",
+      text: "no provider answered",
+    })
+    await user.click(button("Run again"))
     await flushPromises()
     h.follow.get("t1")!(task({ state: "lost" }))
     await flushPromises()
-    expect(note()).toMatchObject({ text: "The gateway restarted. The result of the task is lost." })
+    expect(notes()[0]).toMatchObject({
+      text: "The gateway restarted. The result of the task is lost.",
+    })
   })
 
   it("keeps the server text of a refused doctor run", async () => {
@@ -379,8 +409,8 @@ describe("SystemPage", () => {
         throw new (ApiError as any)(429, "The doctor ran 12 s ago. Try again in 48 s.")
       return data[p] as any
     })
-    const w = await mk()
-    await btn(w, "Run again").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Run again"))
     await flushPromises()
     expect(toast).toHaveBeenCalledWith("The doctor ran 12 s ago. Try again in 48 s.", "error")
   })
@@ -396,20 +426,21 @@ describe("SystemPage", () => {
   })
 
   it("lists the batch tasks and cuts the summary at 3 lines", async () => {
-    const w = await mk()
-    expect(w.text()).toContain("scan · failed · 4 tool calls · 12 s")
-    expect(w.text()).toContain("timeout")
-    expect(w.find(".batch-summary").classes()).toContain("clamp-3")
-    await btn(w, "Show all").trigger("click")
-    expect(w.find(".batch-summary").classes()).not.toContain("clamp-3")
+    const { user } = await mk()
+    const text = document.body.textContent
+    expect(text).toContain("scan · failed · 4 tool calls · 12 s")
+    expect(text).toContain("timeout")
+    expect(summary().classList.contains("line-clamp-3")).toBe(true)
+    await user.click(button("Show all"))
+    expect(summary().classList.contains("line-clamp-3")).toBe(false)
   })
 
   it("shows the first 20 processes, then Show all N", async () => {
     ;(data["/api/runtime"] as any).processes = Array.from({ length: 25 }, (_, i) => proc(1000 + i))
-    const w = await mk()
-    expect(w.findAll(".proc-row")).toHaveLength(20)
-    await btn(w, "Show all 25").trigger("click")
-    expect(w.findAll(".proc-row")).toHaveLength(25)
+    const { user } = await mk()
+    expect(items()).toHaveLength(20)
+    await user.click(button("Show all 25"))
+    expect(items()).toHaveLength(25)
   })
 
   it("reloads on the end of a doctor task and on a change of the running work", async () => {
@@ -426,12 +457,12 @@ describe("SystemPage", () => {
   })
 
   it("switches to Operations with the tabs", async () => {
-    const w = await mk()
-    const tabs = w.findAll('[role="tab"]')
-    expect(tabs.map((t: any) => t.text())).toEqual(["Health", "Operations"])
-    expect(tabs[0].attributes("aria-selected")).toBe("true")
-    await tabs[1].trigger("click")
+    const { user, router } = await mk()
+    const tabs = screen.getAllByRole("tab")
+    expect(tabs.map((t) => t.textContent?.trim())).toEqual(["Health", "Operations"])
+    expect(tabs[0].getAttribute("aria-selected")).toBe("true")
+    await user.click(tabs[1])
     await flushPromises()
-    expect(w.router.currentRoute.value.name).toBe("ops")
+    expect(router.currentRoute.value.name).toBe("ops")
   })
 })

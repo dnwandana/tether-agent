@@ -1,19 +1,29 @@
 <script setup lang="ts">
-import { computed, ref } from "vue"
+import { computed } from "vue"
 import type { AnsweredCard } from "../../api/types.gen"
+import {
+  Trace,
+  TraceCollapsible,
+  TraceCollapsibleContent,
+  TraceCollapsibleTrigger,
+  TraceDescription,
+  TraceLine,
+  TraceTitle,
+} from "@/components/ui/trace"
 
 const props = defineProps<{ record: AnsweredCard }>()
-const open = ref(false)
 
-// The mark at the start of the header gives the color: allowed, denied, or no answer.
-const tone = computed(() => {
+const TONE = { ok: "text-success", bad: "", warn: "text-warning" } as const
+
+// The mark at the start of the header gives the tone: allowed, denied, or no answer.
+const tone = computed<"ok" | "bad" | "warn">(() => {
   const mark = props.record.header
     .replace(/\uFE0F/g, "")
     .trim()
     .charAt(0)
-  if (mark === "✅") return "c-ok"
-  if (mark === "❌") return "c-bad"
-  return "c-warn"
+  if (mark === "✅") return "ok"
+  if (mark === "❌") return "bad"
+  return "warn"
 })
 const time = computed(() => {
   const d = new Date(props.record.at)
@@ -23,47 +33,27 @@ const time = computed(() => {
 </script>
 
 <template>
-  <div class="rec">
-    <div class="collapsed">
-      <span class="rec-h" :class="tone">{{ record.header }}</span>
-      <span class="sum">{{ record.preview }}</span>
-      <span class="rec-t t-12 c-3">{{ time }}</span>
-      <button
-        type="button"
-        class="chev"
-        :aria-expanded="open"
-        aria-label="Show the record"
-        @click="open = !open"
-      >
-        ▸
-      </button>
-    </div>
-    <div v-if="open" class="rec-detail">
-      <div class="cmd">{{ record.preview }}</div>
-      <RouterLink :to="{ name: 'security', query: { tab: 'log', scope: 'dashboard' } }">
-        Open the approval log
-      </RouterLink>
-    </div>
-  </div>
+  <Trace>
+    <TraceCollapsible v-slot="{ open }">
+      <TraceCollapsibleTrigger>
+        <TraceLine
+          :data-tone="tone"
+          :status="tone === 'bad' ? 'error' : undefined"
+          :class="TONE[tone]"
+        >
+          <TraceTitle class="shrink-0">{{ record.header }}</TraceTitle>
+          <span class="min-w-0 truncate">{{ record.preview }}</span>
+          <TraceDescription>{{ time }}</TraceDescription>
+        </TraceLine>
+      </TraceCollapsibleTrigger>
+      <TraceCollapsibleContent v-if="open">
+        <div class="flex flex-col gap-2">
+          <div class="whitespace-pre-wrap break-words">{{ record.preview }}</div>
+          <RouterLink :to="{ name: 'security', query: { tab: 'log', scope: 'dashboard' } }">
+            Open the approval log
+          </RouterLink>
+        </div>
+      </TraceCollapsibleContent>
+    </TraceCollapsible>
+  </Trace>
 </template>
-
-<style scoped>
-.rec-h {
-  flex: none;
-  white-space: nowrap;
-}
-.rec-t {
-  flex: none;
-}
-.rec-detail {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2, 8px);
-  max-width: 640px;
-  padding: 8px 14px;
-}
-.rec-detail .cmd {
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-</style>

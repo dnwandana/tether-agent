@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import type { CostView } from "../../api/types.gen"
+import { MessageFooter } from "@/components/ui/message"
 import { duration } from "../../lib/time"
 
 const props = defineProps<{ cost: CostView }>()
@@ -21,12 +22,12 @@ const usd = computed(() => "$" + props.cost.usd.toFixed(4) + (props.cost.unprice
 </script>
 
 <template>
-  <div class="cost-foot">
+  <MessageFooter class="flex-wrap gap-x-3 gap-y-1">
     <span>{{ model }}</span>
     <span>{{ cost.calls }} calls</span>
     <span>{{ tokens(cost.in) }} in ({{ tokens(cost.cached) }} cached)</span>
     <span>{{ tokens(cost.out) }} out</span>
     <span>{{ usd }}</span>
     <span>{{ duration(cost.seconds) }}</span>
-  </div>
+  </MessageFooter>
 </template>

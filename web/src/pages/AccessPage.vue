@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue"
 import { api } from "../api/client"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
 import type { AccessView, PairingRow } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
@@ -179,13 +184,15 @@ async function denyRow(row: PairingRow): Promise<void> {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Access</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight">Access</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-      <router-link class="link" :to="{ name: 'start' }">Getting started</router-link>
+      <RouterLink :to="{ name: 'start' }" class="text-sm underline-offset-4 hover:underline"
+        >Getting started</RouterLink
+      >
     </div>
-    <p class="c-2">
+    <p class="text-muted-foreground">
       Telegram pairing. An approved person is an owner: they can chat, approve commands, and change
       settings.
     </p>
@@ -198,18 +205,20 @@ async function denyRow(row: PairingRow): Promise<void> {
       action="Retry"
       @action="refresh"
     />
-    <div v-else-if="!pairingOn" class="warn-banner" role="status">
-      Pairing needs Telegram. Set <code>telegram.enabled: true</code>, then restart the gateway.
-    </div>
+    <Alert v-else-if="!pairingOn" role="status">
+      <AlertDescription>
+        Pairing needs Telegram. Set <code>telegram.enabled: true</code>, then restart the gateway.
+      </AlertDescription>
+    </Alert>
     <template v-else>
-      <div class="section-h">
-        <h2>
-          Pending <span class="badge">{{ pending.length }}</span>
-        </h2>
-      </div>
-      <div v-if="locked" class="bad-banner" role="status">
-        Pairing is locked until {{ hhmm(lockedUntil) }} after too many wrong codes.
-      </div>
+      <h2 class="flex items-center gap-2 text-base font-semibold">
+        Pending <Badge variant="secondary">{{ pending.length }}</Badge>
+      </h2>
+      <Alert v-if="locked" variant="destructive" role="status">
+        <AlertDescription>
+          Pairing is locked until {{ hhmm(lockedUntil) }} after too many wrong codes.
+        </AlertDescription>
+      </Alert>
       <StateBlock
         v-if="pending.length === 0"
         state="empty"
@@ -218,53 +227,53 @@ async function denyRow(row: PairingRow): Promise<void> {
       />
       <DataTable v-else :columns="pendingColumns" :rows="asRows(pending)" row-key="key">
         <template #cell-name="{ row }">
-          <b>{{ asRow(row).name }}</b>
-          <div class="mono c-3 t-12">{{ asRow(row).platform }} · {{ asRow(row).user_id }}</div>
+          <b class="font-medium">{{ asRow(row).name }}</b>
+          <div class="font-mono text-xs text-muted-foreground">
+            {{ asRow(row).platform }} · {{ asRow(row).user_id }}
+          </div>
         </template>
-        <template #cell-since="{ row }"
-          ><span
-            data-test="since"
-            style="white-space: nowrap"
-            :title="fullTime(asRow(row).since)"
-            >{{ when(asRow(row).since) }}</span
-          ></template
-        >
+        <template #cell-since="{ row }">
+          <span class="whitespace-nowrap" :title="fullTime(asRow(row).since)">{{
+            when(asRow(row).since)
+          }}</span>
+        </template>
         <template #cell-expires="{ row }">{{ inMinutes(asRow(row).expires) }}</template>
         <template #cell-code="{ row }">
-          <label class="sr" :for="'code-' + rowKey(asRow(row))"
-            >Code of {{ asRow(row).name }}</label
-          >
-          <input
-            :id="'code-' + rowKey(asRow(row))"
-            v-model="codes[rowKey(asRow(row))]"
-            class="input mono"
-            maxlength="8"
-            placeholder="8-char code"
-            :aria-label="`Code of ${asRow(row).name}`"
-            autocapitalize="characters"
-            autocomplete="off"
-            spellcheck="false"
-            @keydown.enter.prevent="approve(asRow(row))"
-          />
-          <button
-            class="btn btn-primary"
-            type="button"
-            :disabled="locked || busyRows[rowKey(asRow(row))]"
-            @click="approve(asRow(row))"
-          >
-            Approve
-          </button>
-          <button
-            class="btn btn-secondary"
-            type="button"
-            :disabled="busyRows[rowKey(asRow(row))]"
-            @click="deny(asRow(row))"
-          >
-            Deny
-          </button>
+          <div class="flex flex-wrap items-center gap-2">
+            <Label class="sr-only" :for="'code-' + rowKey(asRow(row))"
+              >Code of {{ asRow(row).name }}</Label
+            >
+            <Input
+              :id="'code-' + rowKey(asRow(row))"
+              v-model="codes[rowKey(asRow(row))]"
+              class="w-36 font-mono"
+              maxlength="8"
+              placeholder="8-char code"
+              :aria-label="`Code of ${asRow(row).name}`"
+              autocapitalize="characters"
+              autocomplete="off"
+              spellcheck="false"
+              @keydown.enter.prevent="approve(asRow(row))"
+            />
+            <Button
+              type="button"
+              :disabled="locked || busyRows[rowKey(asRow(row))]"
+              @click="approve(asRow(row))"
+            >
+              Approve
+            </Button>
+            <Button
+              variant="outline"
+              type="button"
+              :disabled="busyRows[rowKey(asRow(row))]"
+              @click="deny(asRow(row))"
+            >
+              Deny
+            </Button>
+          </div>
         </template>
       </DataTable>
-      <p class="pill-note">
+      <p class="text-sm text-muted-foreground">
         The person reads the code from the bot. 5 wrong codes lock pairing for 1 hour<template
           v-if="triesLeft !== null"
         >
@@ -272,7 +281,7 @@ async function denyRow(row: PairingRow): Promise<void> {
         >.
       </p>
 
-      <div class="section-h"><h2>Approved</h2></div>
+      <h2 class="text-base font-semibold">Approved</h2>
       <DataTable
         v-if="approved.length > 0"
         :columns="approvedColumns"
@@ -280,42 +289,40 @@ async function denyRow(row: PairingRow): Promise<void> {
         row-key="key"
       >
         <template #cell-name="{ row }">
-          <b>{{ asRow(row).name }}</b>
-          <div class="mono c-3 t-12">{{ asRow(row).platform }} · {{ asRow(row).user_id }}</div>
+          <b class="font-medium">{{ asRow(row).name }}</b>
+          <div class="font-mono text-xs text-muted-foreground">
+            {{ asRow(row).platform }} · {{ asRow(row).user_id }}
+          </div>
         </template>
-        <template #cell-role><span class="chip">owner</span></template>
-        <template #cell-since="{ row }"
-          ><span
-            data-test="since"
-            style="white-space: nowrap"
-            :title="fullTime(asRow(row).since)"
-            >{{ when(asRow(row).since) }}</span
-          ></template
-        >
+        <template #cell-role><Badge variant="outline">owner</Badge></template>
+        <template #cell-since="{ row }">
+          <span class="whitespace-nowrap" :title="fullTime(asRow(row).since)">{{
+            when(asRow(row).since)
+          }}</span>
+        </template>
         <template #cell-actions="{ row }">
-          <button class="btn btn-danger-soft" type="button" @click="revoke(asRow(row))">
+          <Button variant="destructive" size="sm" type="button" @click="revoke(asRow(row))">
             Revoke
-          </button>
+          </Button>
         </template>
       </DataTable>
       <StateBlock v-else state="empty" text="Nobody is approved yet." />
 
-      <section v-if="revoked.length > 0" class="revoked">
-        <h2 class="h">Revoked</h2>
-        <p class="c-3 t-12">They can send /start again.</p>
+      <section v-if="revoked.length > 0" aria-labelledby="revoked-h" class="flex flex-col gap-2">
+        <h2 id="revoked-h" class="text-base font-semibold">Revoked</h2>
+        <p class="text-xs text-muted-foreground">They can send /start again.</p>
         <DataTable :columns="revokedColumns" :rows="asRows(revoked)" row-key="key">
           <template #cell-name="{ row }">
-            <b>{{ asRow(row).name }}</b>
-            <div class="mono c-3 t-12">{{ asRow(row).platform }} · {{ asRow(row).user_id }}</div>
+            <b class="font-medium">{{ asRow(row).name }}</b>
+            <div class="font-mono text-xs text-muted-foreground">
+              {{ asRow(row).platform }} · {{ asRow(row).user_id }}
+            </div>
           </template>
-          <template #cell-since="{ row }"
-            ><span
-              data-test="since"
-              style="white-space: nowrap"
-              :title="fullTime(asRow(row).since)"
-              >{{ when(asRow(row).since) }}</span
-            ></template
-          >
+          <template #cell-since="{ row }">
+            <span class="whitespace-nowrap" :title="fullTime(asRow(row).since)">{{
+              when(asRow(row).since)
+            }}</span>
+          </template>
         </DataTable>
       </section>
     </template>

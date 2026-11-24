@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 
 vi.mock("../../api/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/client")>()),
@@ -13,7 +15,6 @@ vi.mock("../../stores/ui", async (importOriginal) => ({
 }))
 import { runCommand } from "../../api/client"
 import { ui } from "../../stores/ui"
-import ResultNote from "../ResultNote.vue"
 import SecretsTab from "./SecretsTab.vue"
 import { fullTime } from "../../lib/time"
 
@@ -57,20 +58,21 @@ beforeEach(() => {
 describe("SecretsTab", () => {
   it("shows the time of a failed check in the short format, with the full time in the title", () => {
     const at = new Date(new Date().getFullYear(), 10, 20, 9, 12).toISOString()
-    const w = mount(SecretsTab, {
-      props: { secrets: [{ ...secrets[0], state: "check", failed_at: at }] },
-    })
-    const chip = w.find(".chip-warn")
-    expect(chip.text()).toBe("✓ set · auth failed Nov 20 09:12")
-    expect(chip.attributes("title")).toBe(fullTime(at))
+    render(SecretsTab, { props: { secrets: [{ ...secrets[0], state: "check", failed_at: at }] } })
+    const chip = screen.getByText("✓ set · auth failed Nov 20 09:12")
+    expect(chip.getAttribute("data-slot")).toBe("badge")
+    expect(chip.getAttribute("title")).toBe(fullTime(at))
   })
 
   it("shows each pin with its path and a short hash", async () => {
-    const w = mount(SecretsTab, { props: { secrets } })
-    expect(w.text()).toContain("/usr/bin/gh")
-    expect(w.text()).toContain(sha.slice(0, 12))
-    expect(w.find("details").text()).toContain(sha)
-    expect(w.text()).toContain("No allowed programs.")
+    const r = render(SecretsTab, { props: { secrets } })
+    expect(r.container.textContent).toContain("/usr/bin/gh")
+    const folds = screen.getAllByRole("button", { name: sha.slice(0, 12) })
+    expect(folds).toHaveLength(2)
+    expect(screen.queryByText(sha)).toBeNull()
+    await userEvent.setup().click(folds[0])
+    expect(screen.getByText(sha)).toBeTruthy()
+    expect(screen.getByText("No allowed programs.")).toBeTruthy()
   })
 
   it("unpins one program by its path, also with a space in it", async () => {
@@ -79,33 +81,25 @@ describe("SecretsTab", () => {
         "Removed the allowed program `/opt/my tools/gh` of GITHUB_TOKEN. The next use asks again.",
       ),
     )
-    const w = mount(SecretsTab, { props: { secrets } })
-    await w
-      .findAll("button")
-      .filter((b) => b.text() === "Unpin")[1]
-      .trigger("click")
+    const r = render(SecretsTab, { props: { secrets } })
+    await userEvent.setup().click(screen.getAllByRole("button", { name: "Unpin" })[1])
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/secrets unpin GITHUB_TOKEN /opt/my tools/gh")
-    expect(w.findComponent(ResultNote).props("note").text).toContain("Removed the allowed program")
-    expect(w.emitted("changed")).toHaveLength(1)
+    expect(screen.getByText(/Removed the allowed program/)).toBeTruthy()
+    expect(r.emitted().changed).toHaveLength(1)
   })
 
   it("opens the tray after Set value", async () => {
-    const w = mount(SecretsTab, { props: { secrets } })
-    await w
-      .findAll("button")
-      .filter((b) => b.text() === "Set value…")[1]
-      .trigger("click")
+    render(SecretsTab, { props: { secrets } })
+    await userEvent.setup().click(screen.getAllByRole("button", { name: "Set value…" })[1])
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/secrets set PYPI_TOKEN")
     expect(ui.trayOpen).toBe(true)
-    expect(w.findComponent(ResultNote).props("note").text).toBe(
-      "Type the value in the 🔑 card in ⏳ Waiting.",
-    )
+    expect(screen.getByText("Type the value in the 🔑 card in ⏳ Waiting.")).toBeTruthy()
   })
 
   it("shows the empty text with no bound secrets", () => {
-    const w = mount(SecretsTab, { props: { secrets: [] } })
-    expect(w.text()).toContain("No bound secrets.")
+    const r = render(SecretsTab, { props: { secrets: [] } })
+    expect(r.container.textContent).toContain("No bound secrets.")
   })
 })

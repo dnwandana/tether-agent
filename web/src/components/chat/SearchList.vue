@@ -1,5 +1,15 @@
 <script setup lang="ts">
 import { computed } from "vue"
+import {
+  Trace,
+  TraceCollapsible,
+  TraceCollapsibleContent,
+  TraceCollapsibleTrigger,
+  TraceDescription,
+  TraceIcon,
+  TraceLine,
+  TraceTitle,
+} from "@/components/ui/trace"
 import { parseSessionSearch, parseWebSearch } from "./parse"
 
 const props = defineProps<{ kind: "web" | "session"; text: string; query: string }>()
@@ -15,44 +25,63 @@ function safe(url: string): boolean {
 </script>
 
 <template>
-  <div class="result" :class="{ untrusted: kind === 'web' }">
-    <div class="result-h">
-      <span>🔍</span>
-      <span class="path">{{ query }}</span>
-      <span class="grow"></span>
-      <span class="c-3">{{ count }} {{ count === 1 ? "result" : "results" }}</span>
-    </div>
-    <div class="list">
-      <template v-if="kind === 'web'">
-        <div v-for="(h, i) in web" :key="i" class="li">
-          <span class="c-3 mono">{{ i + 1 }}.</span>
-          <b>{{ h.title }}</b>
-          <a
-            v-if="safe(h.url)"
-            :href="h.url"
-            target="_blank"
-            rel="noopener noreferrer"
-            class="mono t-12"
-            >{{ h.url }}</a
-          >
-          <span v-else class="mono t-12">{{ h.url }}</span>
-          <span v-if="h.snippet" class="c-2">{{ h.snippet }}</span>
-        </div>
-      </template>
-      <template v-else>
-        <div v-for="(h, i) in sessions" :key="i" class="li">
-          <RouterLink
-            :to="{
-              name: 'transcript',
-              params: { id: h.sessionId },
-              query: { message: String(h.messageId) },
-            }"
-            >{{ h.title }}</RouterLink
-          >
-          <span class="c-3 t-12">{{ h.date }}</span>
-          <span class="c-2">{{ h.snippet }}</span>
-        </div>
-      </template>
-    </div>
-  </div>
+  <Trace
+    :data-untrusted="kind === 'web' || undefined"
+    class="data-[untrusted=true]:rounded-md data-[untrusted=true]:border data-[untrusted=true]:border-dashed data-[untrusted=true]:border-warning/60 data-[untrusted=true]:p-2"
+  >
+    <TraceCollapsible default-open>
+      <TraceCollapsibleTrigger>
+        <TraceLine>
+          <TraceIcon>🔍</TraceIcon>
+          <TraceTitle>{{ query }}</TraceTitle>
+          <TraceDescription>{{ count }} {{ count === 1 ? "result" : "results" }}</TraceDescription>
+        </TraceLine>
+      </TraceCollapsibleTrigger>
+      <TraceCollapsibleContent>
+        <Trace>
+          <template v-if="kind === 'web'">
+            <div v-for="(h, i) in web" :key="i" class="flex min-w-0 flex-col gap-0.5">
+              <a
+                v-if="safe(h.url)"
+                :href="h.url"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="w-fit max-w-full"
+              >
+                <TraceLine>
+                  <TraceTitle>{{ i + 1 }}. {{ h.title }}</TraceTitle>
+                  <TraceDescription class="font-mono">{{ h.url }}</TraceDescription>
+                </TraceLine>
+              </a>
+              <span v-else class="w-fit max-w-full">
+                <TraceLine>
+                  <TraceTitle>{{ i + 1 }}. {{ h.title }}</TraceTitle>
+                  <TraceDescription class="font-mono">{{ h.url }}</TraceDescription>
+                </TraceLine>
+              </span>
+              <p v-if="h.snippet" class="text-xs text-muted-foreground">{{ h.snippet }}</p>
+            </div>
+          </template>
+          <template v-else>
+            <div v-for="(h, i) in sessions" :key="i" class="flex min-w-0 flex-col gap-0.5">
+              <RouterLink
+                :to="{
+                  name: 'transcript',
+                  params: { id: h.sessionId },
+                  query: { message: String(h.messageId) },
+                }"
+                class="w-fit max-w-full"
+              >
+                <TraceLine>
+                  <TraceTitle>{{ h.title }}</TraceTitle>
+                  <TraceDescription>{{ h.date }}</TraceDescription>
+                </TraceLine>
+              </RouterLink>
+              <p class="text-xs text-muted-foreground">{{ h.snippet }}</p>
+            </div>
+          </template>
+        </Trace>
+      </TraceCollapsibleContent>
+    </TraceCollapsible>
+  </Trace>
 </template>

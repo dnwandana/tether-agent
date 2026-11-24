@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Button } from "@/components/ui/button"
 import { computed } from "vue"
 
 const props = defineProps<{ updatedAt: Date | null; stale: boolean }>()
@@ -12,19 +13,19 @@ const time = computed(() => {
 </script>
 
 <template>
-  <span class="live-h t-12 c-3" :aria-busy="stale">
+  <span class="inline-flex items-center gap-2 text-xs text-muted-foreground" :aria-busy="stale">
     <template v-if="updatedAt">Updated {{ time }} · </template>
-    <button type="button" class="link" data-act="refresh" @click="emit('refresh')">
-      ↻ Refresh
-    </button>
-    <a
-      class="help-link"
+    <Button type="button" variant="ghost" size="xs" @click="emit('refresh')">↻ Refresh</Button>
+    <Button
+      as="a"
+      variant="ghost"
+      size="icon-xs"
       href="https://github.com/dnwandana/tether-agent/wiki/Dashboard#pages"
       target="_blank"
       rel="noreferrer"
       title="docs/wiki/Dashboard.md#pages"
       aria-label="Help for the pages: docs/wiki/Dashboard.md#pages"
-      >?</a
+      >?</Button
     >
   </span>
 </template>

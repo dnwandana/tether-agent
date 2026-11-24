@@ -1,5 +1,5 @@
-import { mount } from "@vue/test-utils"
 import { describe, expect, it } from "vitest"
+import { render } from "@testing-library/vue"
 import CostFooter from "./CostFooter.vue"
 
 const cost = {
@@ -14,22 +14,18 @@ const cost = {
   seconds: 38,
   answered_by: "",
 }
+const foot = (c: Element) => c.querySelector('[data-slot="message-footer"]')!
 
 describe("CostFooter", () => {
   it("shows the turn cost", () => {
-    const w = mount(CostFooter, { props: { cost } })
-    expect(w.findAll(".cost-foot span").map((s) => s.text())).toEqual([
-      "glm-4.6",
-      "6 calls",
-      "61.4k in (52.0k cached)",
-      "2.3k out",
-      "$0.0291",
-      "38 s",
-    ])
+    const r = render(CostFooter, { props: { cost } })
+    expect(
+      Array.from(foot(r.container).querySelectorAll("span")).map((s) => s.textContent!.trim()),
+    ).toEqual(["glm-4.6", "6 calls", "61.4k in (52.0k cached)", "2.3k out", "$0.0291", "38 s"])
   })
 
   it("marks an unknown price and a fallback answer", () => {
-    const w = mount(CostFooter, {
+    const r = render(CostFooter, {
       props: {
         cost: {
           ...cost,
@@ -41,7 +37,7 @@ describe("CostFooter", () => {
         },
       },
     })
-    const t = w.find(".cost-foot").text()
+    const t = foot(r.container).textContent!
     expect(t).toContain("glm-4.6 · answered by backup")
     expect(t).toContain("1.3M in")
     expect(t).toContain("512 out")

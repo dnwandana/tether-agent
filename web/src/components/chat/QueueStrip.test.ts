@@ -1,10 +1,11 @@
-import { mount } from "@vue/test-utils"
 import { describe, expect, it } from "vitest"
+import { render, screen } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
 import QueueStrip from "./QueueStrip.vue"
 
 describe("QueueStrip", () => {
   it("lists the queue and runs it now", async () => {
-    const w = mount(QueueStrip, {
+    const r = render(QueueStrip, {
       props: {
         items: [
           { kind: "media", preview: "📎 notes.md" },
@@ -12,14 +13,21 @@ describe("QueueStrip", () => {
         ],
       },
     })
-    expect(w.find(".qhead").text()).toContain("Waiting · 2 / 20")
-    expect(w.find(".qhead").text()).toContain("They run after the current task, one at a time.")
-    expect(w.findAll(".qitem:not(.qhead)").map((q) => q.text())).toEqual([
-      "1📎 notes.md",
+    const head = screen.getByText("Waiting · 2 / 20").closest('[data-slot="item"]')!
+    expect(head.textContent).toContain("They run after the current task, one at a time.")
+    expect(screen.getAllByRole("listitem").map((q) => q.textContent!.replace(/\s+/g, ""))).toEqual([
+      "1📎notes.md",
       "2/release-notes",
     ])
-    await w.find("button").trigger("click")
-    expect(w.find("button").text()).toBe("⚡ Do this now")
-    expect(w.emitted("now")).toHaveLength(1)
+    expect(screen.getAllByRole("listitem")[0].getAttribute("data-slot")).toBe("item")
+    const now = screen.getByRole("button", { name: "⚡ Do this now" })
+    expect(head.contains(now)).toBe(true)
+    await userEvent.setup().click(now)
+    expect(r.emitted().now).toHaveLength(1)
+  })
+
+  it("shows nothing when the queue is empty", () => {
+    const r = render(QueueStrip, { props: { items: [] } })
+    expect(r.container.querySelector('[data-slot="item"]')).toBeNull()
   })
 })

@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../../api/client", async (importOriginal) => ({
@@ -50,9 +52,8 @@ const logPage = {
 }
 const base = "/api/security/log?"
 
-let router: ReturnType<typeof createRouter>
-async function mk(path = "/security?tab=log") {
-  router = createRouter({
+async function mk(path = "/security?tab=log", user = userEvent.setup({ pointerEventsCheck: 0 })) {
+  const router = createRouter({
     history: createMemoryHistory(),
     routes: [
       { path: "/security", name: "security", component: Blank },
@@ -60,7 +61,7 @@ async function mk(path = "/security?tab=log") {
     ],
   })
   await router.push(path)
-  const w = mount(ApprovalLog, {
+  const r = render(ApprovalLog, {
     props: {
       scopes: ["dashboard", "telegram:-100:7"],
       scopeLabels: { dashboard: "Dashboard", "telegram:-100:7": "Telegram › Ops › topic 7" },
@@ -68,9 +69,14 @@ async function mk(path = "/security?tab=log") {
     global: { plugins: [router], stubs: { teleport: true } },
   })
   await flushPromises()
-  return w
+  return { r, user }
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
+const scopeSel = () => screen.getByRole("combobox", { name: "Scope" }) as HTMLSelectElement
+const decisionSel = () => screen.getByRole("combobox", { name: "Decision" }) as HTMLSelectElement
+const search = () => screen.getByRole("searchbox", { name: "Search the previews" })
+// Returns the body rows. Row 0 of the table is the header row.
+const bodyRows = () => screen.getAllByRole("row").slice(1)
+const cells = (i: number) => within(bodyRows()[i]).getAllByRole("cell")
 
 beforeEach(() => {
   window.matchMedia = ((q: string) => ({
@@ -84,10 +90,10 @@ beforeEach(() => {
 
 describe("ApprovalLog", () => {
   it("reads the first page with all filter keys and pages it", async () => {
-    const w = await mk()
+    const { user } = await mk()
     expect(api).toHaveBeenCalledWith("GET", base + "scope=&decision=&source=&q=&offset=0&limit=20")
-    expect(w.find(".pager").text()).toContain("1–2 of 412")
-    await btn(w, "Next ▶").trigger("click")
+    expect(screen.getByText("1–2 of 412")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Next ▶" }))
     expect(api).toHaveBeenLastCalledWith(
       "GET",
       base + "scope=&decision=&source=&q=&offset=20&limit=20",
@@ -95,18 +101,20 @@ describe("ApprovalLog", () => {
   })
 
   it("filters by scope, decision, and No answer on the server", async () => {
-    const w = await mk()
-    await w.find("select[aria-label='Scope']").setValue("dashboard")
+    const { user } = await mk()
+    await user.selectOptions(scopeSel(), "dashboard")
     expect(api).toHaveBeenLastCalledWith(
       "GET",
       base + "scope=dashboard&decision=&source=&q=&offset=0&limit=20",
     )
-    await w.find("select[aria-label='Decision']").setValue("denied")
+    await user.selectOptions(decisionSel(), "denied")
     expect(api).toHaveBeenLastCalledWith(
       "GET",
       base + "scope=dashboard&decision=denied&source=&q=&offset=0&limit=20",
     )
-    await w.find("input[type='checkbox']").setValue(true)
+    const noAnswer = screen.getByRole("checkbox", { name: "No answer" })
+    expect(noAnswer.getAttribute("data-slot")).toBe("checkbox")
+    await user.click(noAnswer)
     expect(api).toHaveBeenLastCalledWith(
       "GET",
       base + "scope=dashboard&decision=denied&source=timeout&q=&offset=0&limit=20",
@@ -116,8 +124,11 @@ describe("ApprovalLog", () => {
   it("searches the preview after a short delay", async () => {
     vi.useFakeTimers()
     try {
-      const w = await mk()
-      await w.find("input[type='search']").setValue("rm -rf")
+      const { user } = await mk(
+        "/security?tab=log",
+        userEvent.setup({ advanceTimers: vi.advanceTimersByTime, pointerEventsCheck: 0 }),
+      )
+      await user.type(search(), "rm -rf")
       await vi.advanceTimersByTimeAsync(300)
       expect(api).toHaveBeenLastCalledWith(
         "GET",
@@ -137,27 +148,26 @@ describe("ApprovalLog", () => {
   })
 
   it("adds an option for a route scope that is not in the list", async () => {
-    const w = await mk("/security?tab=log&scope=cli")
-    const sel = w.find("select[aria-label='Scope']")
-    expect((sel.element as HTMLSelectElement).value).toBe("cli")
-    expect(sel.findAll("option").map((o) => o.attributes("value"))).toEqual([
-      "",
-      "cli",
-      "dashboard",
-      "telegram:-100:7",
-    ])
+    await mk("/security?tab=log&scope=cli")
+    expect(scopeSel().value).toBe("cli")
+    expect(scopeSel().getAttribute("data-slot")).toBe("native-select")
+    expect(
+      within(scopeSel())
+        .getAllByRole("option")
+        .map((o) => o.getAttribute("value")),
+    ).toEqual(["", "cli", "dashboard", "telegram:-100:7"])
   })
 
   it("shows the scope labels in the select and keeps the keys as the values", async () => {
-    const w = await mk("/security?tab=log&scope=cli")
-    const opts = w.find("select[aria-label='Scope']").findAll("option")
-    expect(opts.map((o) => o.text())).toEqual([
+    await mk("/security?tab=log&scope=cli")
+    const opts = within(scopeSel()).getAllByRole("option")
+    expect(opts.map((o) => o.textContent!.trim())).toEqual([
       "All scopes",
       "cli",
       "Dashboard",
       "Telegram › Ops › topic 7",
     ])
-    expect(opts.map((o) => o.attributes("value"))).toEqual([
+    expect(opts.map((o) => o.getAttribute("value"))).toEqual([
       "",
       "cli",
       "dashboard",
@@ -166,8 +176,8 @@ describe("ApprovalLog", () => {
   })
 
   it("shows the main columns and moves the session and the MCP tool to the details", async () => {
-    const w = await mk()
-    expect(w.findAll("th").map((t) => t.text())).toEqual([
+    const { user } = await mk()
+    expect(screen.getAllByRole("columnheader").map((t) => t.textContent!.trim())).toEqual([
       "Time",
       "Scope",
       "Tool",
@@ -176,77 +186,75 @@ describe("ApprovalLog", () => {
       "Answer",
       "Preview",
     ])
-    expect(w.find("table a[href='/sessions/0123456789abcdef012']").exists()).toBe(false)
-    await w.findAll("tbody tr")[0].trigger("click")
-    expect(w.find(".log-detail a[href='/sessions/0123456789abcdef012']").exists()).toBe(true)
-    await w.findAll("tbody tr")[1].trigger("click")
-    expect(w.find(".log-detail").text()).toContain("gmail")
-    expect(w.find(".log-detail").text()).toContain("send_message")
+    expect(screen.queryByRole("link", { name: "0123456789abcdef012" })).toBeNull()
+    await user.click(bodyRows()[0])
+    expect(screen.getByRole("link", { name: "0123456789abcdef012" }).getAttribute("href")).toBe(
+      "/sessions/0123456789abcdef012",
+    )
+    await user.click(bodyRows()[1])
+    expect(screen.getByText("gmail")).toBeTruthy()
+    expect(screen.getByText("send_message")).toBeTruthy()
   })
 
   it("shows the rule description with the rule id in the tooltip", async () => {
-    const w = await mk()
-    const rule = w.findAll("tbody tr")[0].findAll("td")[3].find("span")
-    expect(rule.text()).toBe("recursive delete")
-    expect(rule.attributes("title")).toBe("rm_recursive")
+    await mk()
+    const rule = within(cells(0)[3]).getByText("recursive delete")
+    expect(rule.getAttribute("title")).toBe("rm_recursive")
   })
 
   it("shows a short time on one line and the scope label in bdi", async () => {
-    const w = await mk()
-    const tds = w.findAll("tbody tr")[1].findAll("td")
-    const at = tds[0].find("span")
-    expect(at.text()).toBe(shortTime("2026-11-20T14:05:00Z"))
-    expect(at.attributes("title")).toBe(fullTime("2026-11-20T14:05:00Z"))
-    expect(at.attributes("style")).toContain("white-space: nowrap")
-    const bdi = tds[1].find("bdi")
-    expect(bdi.text()).toBe("Telegram › Ops › topic 7")
-    expect(bdi.attributes("title")).toBe("Telegram › Ops › topic 7")
+    await mk()
+    const at = within(cells(1)[0]).getByText(shortTime("2026-11-20T14:05:00Z"))
+    expect(at.getAttribute("title")).toBe(fullTime("2026-11-20T14:05:00Z"))
+    expect(at.classList.contains("whitespace-nowrap")).toBe(true)
+    const bdi = cells(1)[1].querySelector("bdi")!
+    expect(bdi.textContent).toBe("Telegram › Ops › topic 7")
+    expect(bdi.getAttribute("title")).toBe("Telegram › Ops › topic 7")
   })
 
   it("shows a dash for a time that is not known", async () => {
     vi.mocked(api).mockResolvedValue({ ...logPage, rows: [entry({ at: "" })] })
-    const w = await mk()
-    expect(w.findAll("tbody tr")[0].findAll("td")[0].find("span").text()).toBe("—")
+    await mk()
+    expect(cells(0)[0].textContent!.trim()).toBe("—")
   })
 
   it("lets the search box grow in the toolbar", async () => {
-    const w = await mk()
-    const q = w.find("input[type='search']")
-    expect(q.classes()).toEqual(expect.arrayContaining(["input", "grow-search"]))
-    expect(q.element.parentElement!.classList.contains("toolbar")).toBe(true)
+    await mk()
+    const q = search()
+    expect(q.getAttribute("data-slot")).toBe("input")
+    expect(q.classList.contains("flex-1")).toBe(true)
+    expect(within(q.parentElement!).getByRole("combobox", { name: "Scope" })).toBeTruthy()
   })
 
   it("opens the detail of a row", async () => {
-    const w = await mk()
-    await w.findAll("tbody tr")[1].trigger("click")
-    const panel = w.findComponent({ name: "SidePanel" })
-    expect(panel.props("open")).toBe(true)
-    expect(panel.props("title")).toBe("Approval detail")
-    expect(w.find(".log-detail").text()).toContain("to: x")
-    expect(w.find(".log-detail").text()).toContain("send_message")
+    const { user } = await mk()
+    await user.click(bodyRows()[1])
+    expect(screen.getAllByText("Approval detail").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("to: x")).toHaveLength(2)
+    expect(screen.getByText("send_message")).toBeTruthy()
   })
 
   it("disables the pager while a page loads and drops an old reply", async () => {
     let release!: (v: unknown) => void
-    const w = await mk()
-    vi.mocked(api).mockImplementationOnce(() => new Promise((r) => (release = r)) as any)
-    await btn(w, "Next ▶").trigger("click")
-    expect(btn(w, "Next ▶").attributes("disabled")).toBeDefined()
-    expect(btn(w, "◀ Prev").attributes("disabled")).toBeDefined()
+    const { user, r } = await mk()
+    vi.mocked(api).mockImplementationOnce(() => new Promise((res) => (release = res)) as any)
+    await user.click(screen.getByRole("button", { name: "Next ▶" }))
+    expect(screen.getByRole("button", { name: "Next ▶" }).hasAttribute("disabled")).toBe(true)
+    expect(screen.getByRole("button", { name: "◀ Prev" }).hasAttribute("disabled")).toBe(true)
     vi.mocked(api).mockResolvedValueOnce({ ...logPage, rows: [entry({ preview: "newest" })] })
-    await w.find("select[aria-label='Decision']").setValue("blocked")
+    await user.selectOptions(decisionSel(), "blocked")
     await flushPromises()
     release({ ...logPage, offset: 20, rows: [entry({ preview: "old page" })] })
     await flushPromises()
-    expect(w.text()).toContain("newest")
-    expect(w.text()).not.toContain("old page")
+    expect(r.container.textContent).toContain("newest")
+    expect(r.container.textContent).not.toContain("old page")
   })
 
   it("shows the empty text with Show all scopes", async () => {
     vi.mocked(api).mockResolvedValue({ total: 0, offset: 0, limit: 20, rows: [] })
-    const w = await mk("/security?tab=log&scope=dashboard")
-    expect(w.text()).toContain("No approvals in this scope.")
-    w.findComponent({ name: "StateBlock" }).vm.$emit("action")
+    const { user } = await mk("/security?tab=log&scope=dashboard")
+    expect(screen.getByText("No approvals in this scope.")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Show all scopes" }))
     await flushPromises()
     expect(api).toHaveBeenLastCalledWith(
       "GET",

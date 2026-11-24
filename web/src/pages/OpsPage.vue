@@ -1,6 +1,17 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue"
 import { useRouter } from "vue-router"
+import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { api } from "../api/client"
 import type { BackupView, BootstrapView, ConfigView, TaskView, UpdateInfo } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
@@ -301,9 +312,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">System</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight">System</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
     </div>
     <Tabs
@@ -314,142 +325,171 @@ onBeforeUnmount(() => {
       ]"
     />
 
-    <div class="card">
-      <div class="card-h">
-        <h3>config.yaml</h3>
-        <select
-          v-if="configState === 'ready'"
-          v-model="group"
-          class="input"
-          aria-label="Config group"
-        >
-          <option value="">All keys</option>
-          <option v-for="k in groupKeys" :key="k" :value="k">{{ k }}</option>
-        </select>
-        <span class="c-3 t-12">read-only · a change needs a restart</span>
-      </div>
-      <StateBlock v-if="configState === 'loading'" state="loading" />
-      <StateBlock
-        v-else-if="configState === 'error'"
-        state="error"
-        :text="configError"
-        action="Retry"
-        @action="loadConfig"
-      />
-      <pre v-else class="code-block config-view">{{ shownConfig }}</pre>
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>config.yaml</CardTitle>
+        <CardDescription>read-only · a change needs a restart</CardDescription>
+        <CardAction>
+          <NativeSelect v-if="configState === 'ready'" v-model="group" aria-label="Config group">
+            <NativeSelectOption value="">All keys</NativeSelectOption>
+            <NativeSelectOption v-for="k in groupKeys" :key="k" :value="k">{{
+              k
+            }}</NativeSelectOption>
+          </NativeSelect>
+        </CardAction>
+      </CardHeader>
+      <CardContent>
+        <StateBlock v-if="configState === 'loading'" state="loading" />
+        <StateBlock
+          v-else-if="configState === 'error'"
+          state="error"
+          :text="configError"
+          action="Retry"
+          @action="loadConfig"
+        />
+        <pre v-else class="max-h-96 overflow-auto rounded-md bg-muted p-3 font-mono text-xs">{{
+          shownConfig
+        }}</pre>
+      </CardContent>
+    </Card>
 
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-h"><h3>Update</h3></div>
-        <div class="li">
-          <span class="grow">tether {{ boot?.version ?? update?.current ?? "" }}</span>
-          <span v-if="checking" class="c-3">checking…</span>
-          <span v-else-if="!update" class="c-3">not checked yet</span>
-          <span v-else-if="update.newer">
-            {{ update.latest }} is available
-            <a :href="update.notes_url" target="_blank" rel="noopener noreferrer">release notes</a>
-          </span>
-          <span v-else class="c-3">up to date</span>
-        </div>
-        <div v-if="checkedAt" class="li c-3 t-12">Checked {{ checkedAt }}</div>
-        <ResultNote :note="updateNote" @close="updateNote = null" />
-        <div v-if="update && !update.newer" class="li c-3 t-12">You have the newest version.</div>
-        <div v-if="update && update.newer && !update.writable" class="li c-3 t-12">
-          The binary at {{ update.path }} is not writable by this user. Run `tether update` as a
-          user who can write it.
-        </div>
-        <div class="li">
-          <button class="btn btn-secondary" type="button" :disabled="checking" @click="checkUpdate">
-            Check for update
-          </button>
-          <button
-            class="btn btn-primary"
-            type="button"
+    <div class="grid grid-cols-1 gap-4 tab:grid-cols-2">
+      <Card>
+        <CardHeader>
+          <CardTitle>Update</CardTitle>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-2 text-sm">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span>tether {{ boot?.version ?? update?.current ?? "" }}</span>
+            <span v-if="checking" class="text-muted-foreground">checking…</span>
+            <span v-else-if="!update" class="text-muted-foreground">not checked yet</span>
+            <span v-else-if="update.newer">
+              {{ update.latest }} is available
+              <a
+                class="underline"
+                :href="update.notes_url"
+                target="_blank"
+                rel="noopener noreferrer"
+                >release notes</a
+              >
+            </span>
+            <span v-else class="text-muted-foreground">up to date</span>
+          </div>
+          <div v-if="checkedAt" class="text-xs text-muted-foreground">Checked {{ checkedAt }}</div>
+          <ResultNote :note="updateNote" @close="updateNote = null" />
+          <div v-if="update && !update.newer" class="text-xs text-muted-foreground">
+            You have the newest version.
+          </div>
+          <div
+            v-if="update && update.newer && !update.writable"
+            class="text-xs text-muted-foreground"
+          >
+            The binary at {{ update.path }} is not writable by this user. Run `tether update` as a
+            user who can write it.
+          </div>
+        </CardContent>
+        <CardFooter class="flex flex-wrap gap-2">
+          <Button variant="outline" :disabled="checking" @click="checkUpdate"
+            >Check for update</Button
+          >
+          <Button
             :disabled="updating || !(update && update.newer && update.writable)"
             @click="runUpdate"
+            >Update and restart</Button
           >
-            Update and restart
-          </button>
-        </div>
-      </div>
+        </CardFooter>
+      </Card>
 
-      <div class="card">
-        <div class="card-h"><h3>Restart</h3></div>
-        <div class="li c-2">
-          Running turns finish first (up to {{ drain }} s). Cut replies and goals resume after the
-          start.
-        </div>
-        <ResultNote :note="restartNote" @close="restartNote = null" />
-        <div class="li">
-          <button class="btn btn-secondary" type="button" :disabled="restarting" @click="restart">
-            Restart the gateway
-          </button>
-        </div>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Restart</CardTitle>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-2 text-sm">
+          <div class="text-muted-foreground">
+            Running turns finish first (up to {{ drain }} s). Cut replies and goals resume after the
+            start.
+          </div>
+          <ResultNote :note="restartNote" @close="restartNote = null" />
+        </CardContent>
+        <CardFooter>
+          <Button variant="outline" :disabled="restarting" @click="restart"
+            >Restart the gateway</Button
+          >
+        </CardFooter>
+      </Card>
 
-      <div class="card">
-        <div class="card-h"><h3>Backup</h3></div>
-        <div class="li c-2">
-          A .tar.gz of state.db, memory, skills, scripts, and config.yaml. No .env; literal keys
-          become ${NAME}.
-        </div>
-        <div class="li">
-          <button
-            class="btn btn-secondary"
-            type="button"
-            :disabled="backingUp"
-            @click="createBackup"
-          >
-            Create backup
-          </button>
-          <span v-if="backingUp" class="c-3">Creating the backup…</span>
-        </div>
-        <ResultNote :note="backupNote" @close="backupNote = null" />
-        <DataTable v-if="rows.length" class="backups" :columns="cols" :rows="rows" row-key="name">
-          <template #cell-modified="{ row }"
-            ><span style="white-space: nowrap" :title="fullTime(String(row.modified))">{{
-              shortTime(String(row.modified)) || "—"
-            }}</span></template
-          >
-          <template #cell-actions="{ row }">
-            <button
-              class="btn btn-secondary btn-sm"
-              type="button"
-              @click="download('/api/backup/' + row.name, String(row.name))"
+      <Card>
+        <CardHeader>
+          <CardTitle>Backup</CardTitle>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-3 text-sm">
+          <div class="text-muted-foreground">
+            A .tar.gz of state.db, memory, skills, scripts, and config.yaml. No .env; literal keys
+            become ${NAME}.
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <Button variant="outline" :disabled="backingUp" @click="createBackup"
+              >Create backup</Button
             >
-              Download
-            </button>
-          </template>
-        </DataTable>
-        <StateBlock v-else state="empty" text="No backups yet." />
-      </div>
+            <span v-if="backingUp" class="text-muted-foreground">Creating the backup…</span>
+          </div>
+          <ResultNote :note="backupNote" @close="backupNote = null" />
+          <DataTable v-if="rows.length" :columns="cols" :rows="rows" row-key="name">
+            <template #cell-modified="{ row }"
+              ><span class="whitespace-nowrap" :title="fullTime(String(row.modified))">{{
+                shortTime(String(row.modified)) || "—"
+              }}</span></template
+            >
+            <template #cell-actions="{ row }">
+              <Button
+                variant="outline"
+                size="sm"
+                @click="download('/api/backup/' + row.name, String(row.name))"
+                >Download</Button
+              >
+            </template>
+          </DataTable>
+          <StateBlock v-else state="empty" text="No backups yet." />
+        </CardContent>
+      </Card>
 
-      <div class="card">
-        <div class="card-h">
-          <h3>Restore</h3>
-          <span class="c-3 t-12">on the host</span>
-        </div>
-        <div class="li c-2">
-          Restore replaces state.db, so it runs only while the gateway is stopped.
-        </div>
-        <div v-if="backups?.files.length" class="li">
-          <select v-model="chosen" class="input" aria-label="Backup to restore">
-            <option v-for="f in backups.files" :key="f.name" :value="f.name">{{ f.name }}</option>
-          </select>
-        </div>
-        <pre class="code-block restore-steps">{{ restoreText }}</pre>
-        <p class="t-12 c-3">The dashboard goes offline until step 3.</p>
-        <button v-if="isSecure()" class="btn btn-secondary" type="button" @click="copyRestore">
-          Copy all 3
-        </button>
-        <p v-else class="t-12 c-3">Copy needs HTTPS or localhost.</p>
-      </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Restore</CardTitle>
+          <CardDescription>on the host</CardDescription>
+        </CardHeader>
+        <CardContent class="flex flex-col gap-3 text-sm">
+          <div class="text-muted-foreground">
+            Restore replaces state.db, so it runs only while the gateway is stopped.
+          </div>
+          <NativeSelect
+            v-if="backups?.files.length"
+            v-model="chosen"
+            aria-label="Backup to restore"
+          >
+            <NativeSelectOption v-for="f in backups.files" :key="f.name" :value="f.name">{{
+              f.name
+            }}</NativeSelectOption>
+          </NativeSelect>
+          <pre class="overflow-auto rounded-md bg-muted p-3 font-mono text-xs">{{
+            restoreText
+          }}</pre>
+          <p class="text-xs text-muted-foreground">The dashboard goes offline until step 3.</p>
+          <div>
+            <Button v-if="isSecure()" variant="outline" @click="copyRestore">Copy all 3</Button>
+            <p v-else class="text-xs text-muted-foreground">Copy needs HTTPS or localhost.</p>
+          </div>
+        </CardContent>
+      </Card>
     </div>
 
-    <div class="card">
-      <div class="card-h"><h3>Logs</h3></div>
-      <LogViewer />
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle>Logs</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <LogViewer />
+      </CardContent>
+    </Card>
   </div>
 </template>

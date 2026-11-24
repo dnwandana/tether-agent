@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue"
+import { CircleAlertIcon, InfoIcon, TriangleAlertIcon } from "@lucide/vue"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
 import type { ResultNoteData } from "../lib/command"
 import { renderMarkdown } from "../lib/markdown"
 
@@ -14,57 +17,25 @@ const time = computed(() => {
 </script>
 
 <template>
-  <div
+  <Alert
     v-if="note"
-    class="rnote"
-    :class="`rnote-${note.kind}`"
     :role="note.kind === 'error' ? 'alert' : 'status'"
+    :variant="note.kind === 'error' ? 'destructive' : 'default'"
+    :data-kind="note.kind"
+    class="mt-3"
   >
-    <div class="rnote-h">
-      <span class="rnote-t">{{ note.title }}</span>
-      <span class="rnote-at">{{ time }}</span>
-      <button type="button" class="btn btn-ghost btn-sm" aria-label="Close" @click="emit('close')">
+    <InfoIcon v-if="note.kind === 'info'" class="text-info" />
+    <TriangleAlertIcon v-else-if="note.kind === 'warn'" class="text-warning" />
+    <CircleAlertIcon v-else />
+    <AlertTitle class="flex items-center gap-2">
+      <span data-title class="font-semibold [overflow-wrap:anywhere]">{{ note.title }}</span>
+      <span data-time class="ml-auto text-xs text-muted-foreground">{{ time }}</span>
+      <Button variant="ghost" size="icon" type="button" aria-label="Close" @click="emit('close')">
         ✕
-      </button>
-    </div>
-    <div class="rnote-b md" v-html="renderMarkdown(note.text)"></div>
-  </div>
+      </Button>
+    </AlertTitle>
+    <AlertDescription>
+      <div class="typeset typeset-chat" v-html="renderMarkdown(note.text)"></div>
+    </AlertDescription>
+  </Alert>
 </template>
-
-<style scoped>
-.rnote {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-left-width: 3px;
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-}
-.rnote-info {
-  border-left-color: var(--info);
-}
-.rnote-warn {
-  border-left-color: var(--warning);
-}
-.rnote-error {
-  border-left-color: var(--danger);
-}
-.rnote-h {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.rnote-t {
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-.rnote-at {
-  margin-left: auto;
-  color: var(--text-3);
-  font-size: var(--fs-12);
-}
-.rnote-b {
-  margin-top: 6px;
-  overflow-wrap: anywhere;
-}
-</style>

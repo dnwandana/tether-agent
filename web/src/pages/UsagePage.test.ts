@@ -1,6 +1,17 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from "vitest"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
+
+// The page has a fallback for a browser with no ResizeObserver. Remove the setup stub for this file.
+const savedObserver = (globalThis as any).ResizeObserver
+beforeAll(() => {
+  delete (globalThis as any).ResizeObserver
+})
+afterAll(() => {
+  if (savedObserver) (globalThis as any).ResizeObserver = savedObserver
+})
 
 const h = vi.hoisted(() => ({
   live: null as null | { load: () => Promise<void>; opts?: { events?: string[] } },
@@ -92,9 +103,10 @@ async function mk() {
     ],
   })
   await router.push("/usage")
-  const w = mount(UsagePage, { global: { plugins: [router], stubs: { LiveHeader: true } } })
+  const user = userEvent.setup()
+  const r = render(UsagePage, { global: { plugins: [router], stubs: { LiveHeader: true } } })
   await flushPromises()
-  return w
+  return { ...r, user }
 }
 
 const reply = (d: object, c: object = cron, u: object = usage) =>
@@ -113,9 +125,19 @@ const dayRow = (model: string, usd: number) => ({
   out: 1,
 })
 const d = (day: string) => ({ day, model: "m", usd: 1, unpriced: false, in: 1, out: 1 })
-const labels = (w: any) => w.findAll(".axis-x span").map((s: any) => s.text())
-const ticks = (w: any) => w.findAll(".axis-y span").map((s: any) => s.text())
-const shown = (w: any) => w.findAll(".axis-x span").filter((s: any) => s.text() !== "")
+const btn = (name: string) => screen.getByRole("button", { name })
+// The chart bars: each bar is a button named "<label>: $<total>".
+const bars = () => screen.queryAllByRole("button", { name: /: \$\d/ })
+const axis = (c: HTMLElement, a: "x" | "y") =>
+  [...c.querySelectorAll(`[data-axis="${a}"] > span`)].map((s) => s.textContent!.trim())
+const labels = (c: HTMLElement) => axis(c, "x")
+const ticks = (c: HTMLElement) => axis(c, "y")
+const shown = (c: HTMLElement) => labels(c).filter((s) => s !== "")
+const bodyRows = (el: HTMLElement) =>
+  within(el)
+    .getAllByRole("row")
+    .filter((r) => within(r).queryAllByRole("cell").length > 0)
+const cronRegion = () => screen.getByRole("region", { name: "Cron cost by job" })
 const one = (usd: number) => ({
   range: "30d",
   from: "2026-11-19",
@@ -123,7 +145,6 @@ const one = (usd: number) => ({
   days: [{ ...dayRow("m", usd) }],
 })
 let cb: (e: { contentRect: { width: number } }[]) => void = () => {}
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
 
 beforeEach(() => {
   window.matchMedia = ((q: string) => ({
@@ -155,19 +176,23 @@ describe("UsagePage", () => {
             ? cron
             : { ...usage, rows: [r, { ...r, provider: "backup · zai", calls: 7 }] }) as any,
     )
-    const w = await mk()
-    expect(w.findAll("tbody tr").filter((t) => t.text().includes("glm-4.6"))).toHaveLength(2)
+    await mk()
+    const rows = screen
+      .getAllByRole("row")
+      .filter(
+        (t) => t.textContent!.includes("glm-4.6") && within(t).queryAllByRole("cell").length > 0,
+      )
+    expect(rows).toHaveLength(2)
   })
 
   it("loads the three routes for 30 days and shows the tiles", async () => {
-    const w = await mk()
+    await mk()
     for (const p of [
       "/api/usage?range=30d",
       "/api/usage/daily?range=30d",
       "/api/usage/cron?range=30d",
     ])
       expect(api).toHaveBeenCalledWith("GET", p)
-    const tiles = w.find(".grid-4").text()
     for (const s of [
       "$14.00+",
       "96 calls have no price",
@@ -177,34 +202,36 @@ describe("UsagePage", () => {
       "85%",
       "12 compactions",
     ])
-      expect(tiles).toContain(s)
+      expect(screen.getByText(s)).toBeTruthy()
   })
 
   it("shows the model table with the hit rate and the unpriced mark", async () => {
-    const w = await mk()
-    expect(w.text()).toContain("86%")
-    expect(w.text()).toContain("$1.1203+")
-    expect(w.text()).toContain("💸 1")
-    expect(w.find('a[href="/jobs/j1"]').text()).toBe("nightly-backup")
+    await mk()
+    const text = document.body.textContent!
+    expect(text).toContain("86%")
+    expect(text).toContain("$1.1203+")
+    expect(text).toContain("💸 1")
+    expect(
+      within(cronRegion()).getByRole("link", { name: "nightly-backup" }).getAttribute("href"),
+    ).toBe("/jobs/j1")
   })
 
   it("draws one stacked bar for each day", async () => {
-    const w = await mk()
-    const bars = w.findAll(".sbar")
-    expect(bars).toHaveLength(2)
-    expect(bars[0].findAll("i").map((i) => i.attributes("style"))).toEqual([
+    await mk()
+    const b = bars()
+    expect(b).toHaveLength(2)
+    expect([...b[0].querySelectorAll("i")].map((i) => i.getAttribute("style"))).toEqual([
       "height: 50%;",
       "height: 25%;",
     ])
-    expect(bars[1].find("i").classes()).toContain("s1")
+    expect(b[1].querySelector("i")!.getAttribute("data-series")).toBe("s1")
   })
 
   it("loads again for another range", async () => {
-    const w = await mk()
-    await w
-      .findAll(".seg button")
-      .find((b) => b.text() === "Today")!
-      .trigger("click")
+    const { user } = await mk()
+    await user.click(
+      within(screen.getByRole("group", { name: "Range" })).getByRole("button", { name: "Today" }),
+    )
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/usage?range=today")
     expect(api).toHaveBeenCalledWith("GET", "/api/usage/daily?range=today")
@@ -219,9 +246,9 @@ describe("UsagePage", () => {
             ? { range: "today", jobs: [], flagged: [] }
             : { ...usage, rows: [] }) as any,
     )
-    const w = await mk()
-    expect(w.text()).toContain("No usage in this range.")
-    await btn(w, "Show 30 days").trigger("click")
+    const { user } = await mk()
+    expect(screen.getByText("No usage in this range.")).toBeTruthy()
+    await user.click(btn("Show 30 days"))
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/usage?range=30d")
   })
@@ -233,8 +260,13 @@ describe("UsagePage", () => {
       to: "2026-11-19",
       days: ["a", "b", "c", "d", "e", "f", "g"].map((m, i) => dayRow(m, 7 - i)),
     })
-    const w = await mk()
-    expect(w.findAll(".lg").map((l: any) => [l.text(), l.find("i").classes()[0]])).toEqual([
+    const { container } = await mk()
+    expect(
+      [...container.querySelectorAll("[data-legend]")].map((l) => [
+        l.textContent!.trim(),
+        l.querySelector("i")!.getAttribute("data-series"),
+      ]),
+    ).toEqual([
       ["a", "s1"],
       ["b", "s2"],
       ["c", "s3"],
@@ -242,42 +274,40 @@ describe("UsagePage", () => {
       ["e", "s5"],
       ["Other", "s6"],
     ])
-    expect(w.find(".sbar").findAll("i.s6")).toHaveLength(1)
+    expect(bars()[0].querySelectorAll('i[data-series="s6"]')).toHaveLength(1)
   })
 
   it("puts the dates on the x-axis and makes each bar a button", async () => {
-    const w = await mk()
-    expect(w.findAll(".axis-x span").map((s: any) => s.text())).toEqual(["Nov 19", "Nov 20"])
-    const bar = w.find(".sbar")
-    expect(bar.element.tagName).toBe("BUTTON")
-    expect(bar.attributes("type")).toBe("button")
-    expect(bar.attributes("aria-label")).toBe("Nov 19: $0.75")
+    const { container } = await mk()
+    expect(labels(container)).toEqual(["Nov 19", "Nov 20"])
+    const bar = bars()[0]
+    expect(bar.tagName).toBe("BUTTON")
+    expect(bar.getAttribute("type")).toBe("button")
+    expect(bar.getAttribute("aria-label")).toBe("Nov 19: $0.75")
   })
 
   it("marks a day with a flagged cron run", async () => {
-    const w = await mk()
-    const bars = w.findAll(".sbar")
-    expect(bars[0].find(".spike").text()).toBe("💸")
-    expect(bars[1].find(".spike").exists()).toBe(false)
+    await mk()
+    const b = bars()
+    expect(b[0].querySelector("[data-spike]")!.textContent).toBe("💸")
+    expect(b[1].querySelector("[data-spike]")).toBeNull()
   })
 
   it("shows the days as a table", async () => {
-    const w = await mk()
-    await btn(w, "View as table").trigger("click")
-    const t = w.find("table.days")
-    expect(t.findAll("th").map((x: any) => x.text())).toEqual([
-      "Day",
-      "Total",
-      "Tokens in · out",
-      "Top model",
-    ])
+    const { container, user } = await mk()
+    await user.click(btn("View as table"))
+    const t = screen.getByRole("table", { name: "Spend per day" })
     expect(
-      t
-        .findAll("tbody tr")[0]
-        .findAll("td")
-        .map((x: any) => x.text()),
+      within(t)
+        .getAllByRole("columnheader")
+        .map((x) => x.textContent!.trim()),
+    ).toEqual(["Day", "Total", "Tokens in · out", "Top model"])
+    expect(
+      within(bodyRows(t)[0])
+        .getAllByRole("cell")
+        .map((x) => x.textContent!.trim()),
     ).toEqual(["Nov 19", "$0.75", "2 · 2", "glm-4.6"])
-    expect(w.find(".sbars").exists()).toBe(false)
+    expect(container.querySelector('[data-chart="bars"]')).toBeNull()
   })
 
   it("groups the range All by week above 60 days and by month above 365 days", async () => {
@@ -287,11 +317,11 @@ describe("UsagePage", () => {
       to: "2026-11-09",
       days: [d("2026-09-01"), d("2026-09-02"), d("2026-11-09")],
     })
-    const w = await mk()
-    await btn(w, "All").trigger("click")
+    const { container, user } = await mk()
+    await user.click(btn("All"))
     await flushPromises()
-    expect(labels(w)).toHaveLength(11)
-    expect(labels(w).filter(Boolean)).toEqual([
+    expect(labels(container)).toHaveLength(11)
+    expect(labels(container).filter(Boolean)).toEqual([
       "Aug 31",
       "Sep 14",
       "Sep 28",
@@ -305,11 +335,11 @@ describe("UsagePage", () => {
       to: "2026-02-01",
       days: [d("2025-01-05"), d("2025-01-20"), d("2026-02-01")],
     })
-    await btn(w, "7 days").trigger("click")
-    await btn(w, "All").trigger("click")
+    await user.click(btn("7 days"))
+    await user.click(btn("All"))
     await flushPromises()
-    expect(labels(w)).toHaveLength(14)
-    expect(labels(w).filter(Boolean)).toEqual([
+    expect(labels(container)).toHaveLength(14)
+    expect(labels(container).filter(Boolean)).toEqual([
       "Jan 2025",
       "Mar 2025",
       "May 2025",
@@ -322,21 +352,23 @@ describe("UsagePage", () => {
 
   it("hides the chart and the cron card for This session and shows the title", async () => {
     session.title = "Release prep"
-    const w = await mk()
-    await btn(w, "This session").trigger("click")
+    const { container, user } = await mk()
+    await user.click(btn("This session"))
     await flushPromises()
-    expect(w.find(".sbars").exists()).toBe(false)
-    expect(w.text()).not.toContain("Cron cost by job")
-    expect(w.text()).toContain("This session: Release prep")
+    expect(container.querySelector('[data-chart="bars"]')).toBeNull()
+    expect(document.body.textContent).not.toContain("Cron cost by job")
+    expect(document.body.textContent).toContain("This session: Release prep")
     session.title = ""
   })
 
   it("lists the flagged runs and adds a total row to the cron table", async () => {
-    const w = await mk()
-    expect(w.find(".flagged").text()).toContain("2026-11-19 · $0.9000 · median $0.3000")
-    const rows = w.findAll(".cron-cost tbody tr")
-    expect(rows[rows.length - 1].text()).toContain("Total · 1 job")
-    expect(rows[rows.length - 1].text()).toContain("$0.3120")
+    await mk()
+    expect(screen.getByRole("region", { name: "Flagged runs" }).textContent).toContain(
+      "2026-11-19 · $0.9000 · median $0.3000",
+    )
+    const rows = bodyRows(cronRegion())
+    expect(rows[rows.length - 1].textContent).toContain("Total · 1 job")
+    expect(rows[rows.length - 1].textContent).toContain("$0.3120")
   })
 
   it("shows a deleted job as text", async () => {
@@ -345,28 +377,30 @@ describe("UsagePage", () => {
       jobs: [{ job_id: "j9", job_name: "", usd: 0.1, unpriced: false }],
       flagged: [],
     })
-    const w = await mk()
-    expect(w.find('a[href="/jobs/j9"]').exists()).toBe(false)
-    expect(w.find(".cron-cost").text()).toContain("Deleted job")
+    await mk()
+    expect(screen.queryAllByRole("link").some((a) => a.getAttribute("href") === "/jobs/j9")).toBe(
+      false,
+    )
+    expect(cronRegion().textContent).toContain("Deleted job")
   })
 
   it("fills each day from from to to, and shows one bar for Today", async () => {
     reply({ ...daily, from: "2026-11-17", to: "2026-11-21" })
-    const w = await mk()
-    expect(w.findAll(".sbar").map((b: any) => b.attributes("aria-label"))).toEqual([
+    const { user } = await mk()
+    expect(bars().map((b) => b.getAttribute("aria-label"))).toEqual([
       "Nov 17: $0.00",
       "Nov 18: $0.00",
       "Nov 19: $0.75",
       "Nov 20: $1.00",
       "Nov 21: $0.00",
     ])
-    await btn(w, "View as table").trigger("click")
-    expect(w.findAll("table.days tbody tr")).toHaveLength(5)
+    await user.click(btn("View as table"))
+    expect(bodyRows(screen.getByRole("table", { name: "Spend per day" }))).toHaveLength(5)
     reply({ range: "today", from: "2026-11-20", to: "2026-11-20", days: [d("2026-11-20")] })
-    await btn(w, "View as chart").trigger("click")
-    await btn(w, "Today").trigger("click")
+    await user.click(btn("View as chart"))
+    await user.click(btn("Today"))
     await flushPromises()
-    expect(w.findAll(".sbar")).toHaveLength(1)
+    expect(bars()).toHaveLength(1)
   })
 
   it("spaces the labels by the width of the bar area, not the card", async () => {
@@ -381,13 +415,13 @@ describe("UsagePage", () => {
     const spy = vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(function (
       this: Element,
     ) {
-      return this.classList.contains("sbars") ? 300 : 0
+      return this.getAttribute("data-chart") === "bars" ? 300 : 0
     })
     try {
-      const w = await mk()
+      const { container } = await mk()
       cb([{ contentRect: { width: 600 } }])
       await flushPromises()
-      expect(shown(w)).toHaveLength(4) // 300 px of bars: step 6, not step 3
+      expect(shown(container)).toHaveLength(4) // 300 px of bars: step 6, not step 3
     } finally {
       spy.mockRestore()
       delete (globalThis as any).ResizeObserver
@@ -395,11 +429,11 @@ describe("UsagePage", () => {
   })
 
   it("shows round ticks for a normal, a small, and a zero max", async () => {
-    expect(ticks(await mk())).toEqual(["$1", "$0.50", "$0"])
+    expect(ticks((await mk()).container)).toEqual(["$1", "$0.50", "$0"])
     reply(one(0.0013))
-    expect(ticks(await mk())).toEqual(["$0.002", "$0.001", "$0"])
+    expect(ticks((await mk()).container)).toEqual(["$0.002", "$0.001", "$0"])
     reply(one(0))
-    expect(ticks(await mk())).toEqual(["$1", "$0.50", "$0"])
+    expect(ticks((await mk()).container)).toEqual(["$1", "$0.50", "$0"])
   })
 
   it("spaces the labels by the measured width and keeps two ticks on a short chart", async () => {
@@ -408,12 +442,12 @@ describe("UsagePage", () => {
     // 31 bars at the default 600 px: step 3. A middle label keeps 1.5 steps from each end,
     // because the first and the last label grow inward by their full width.
     const first = await mk()
-    expect(shown(first)).toHaveLength(9)
-    const at = first
-      .findAll(".axis-x span")
-      .map((s: any, i: number) => (s.text() ? i : -1))
-      .filter((i: number) => i >= 0)
+    expect(shown(first.container)).toHaveLength(9)
+    const at = labels(first.container)
+      .map((s, i) => (s ? i : -1))
+      .filter((i) => i >= 0)
     expect(at).toEqual([0, 6, 9, 12, 15, 18, 21, 24, 30])
+    first.unmount()
     ;(globalThis as any).ResizeObserver = class {
       constructor(f: typeof cb) {
         cb = f
@@ -424,17 +458,17 @@ describe("UsagePage", () => {
     const spy = vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (
       this: Element,
     ) {
-      return this.classList.contains("sbars") ? 120 : 0
+      return this.getAttribute("data-chart") === "bars" ? 120 : 0
     })
     try {
       const w = await mk()
       cb([{ contentRect: { width: 300 } }])
       await flushPromises()
-      expect(shown(w)).toHaveLength(4) // step 6
+      expect(shown(w.container)).toHaveLength(4) // step 6
       cb([{ contentRect: { width: 0 } }])
       await flushPromises()
-      expect(shown(w)).toHaveLength(4) // a width of 0 keeps the last width
-      expect(w.findAll(".axis-y span").map((s: any) => s.text())).toEqual(["$1", "$0"])
+      expect(shown(w.container)).toHaveLength(4) // a width of 0 keeps the last width
+      expect(ticks(w.container)).toEqual(["$1", "$0"])
     } finally {
       spy.mockRestore()
       delete (globalThis as any).ResizeObserver
@@ -442,10 +476,8 @@ describe("UsagePage", () => {
   })
 
   it("opens the tooltip on hover and click, and closes it on Esc and an outside tap", async () => {
-    const w = await mk()
-    const bars = w.findAll(".sbar")
-    await bars[0].trigger("pointerenter")
-    const tip = () => w.find(".usage-tip")
+    const { user } = await mk()
+    await user.hover(bars()[0])
     for (const s of [
       "Nov 19",
       "glm-4.6",
@@ -455,29 +487,36 @@ describe("UsagePage", () => {
       "Total",
       "$0.7500+",
     ])
-      expect(tip().text()).toContain(s)
-    await bars[1].trigger("click")
-    await bars[1].trigger("click")
-    expect(tip().text()).toContain("Nov 20")
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }))
-    await flushPromises()
-    expect(tip().exists()).toBe(false)
-    await bars[1].trigger("click")
-    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }))
-    await flushPromises()
-    expect(tip().exists()).toBe(false)
+      expect(screen.getByRole("tooltip").textContent).toContain(s)
+    await user.click(bars()[1])
+    await user.click(bars()[1])
+    expect(screen.getByRole("tooltip").textContent).toContain("Nov 20")
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("tooltip")).toBeNull()
+    await user.click(bars()[1])
+    await user.click(document.body)
+    expect(screen.queryByRole("tooltip")).toBeNull()
   })
 
   it("marks an unpriced job cost in the cron table", async () => {
     reply(daily, { ...cron, jobs: [{ ...cron.jobs[0], unpriced: true }] })
-    const w = await mk()
-    const rows = w.findAll(".cron-cost tbody tr")
-    expect(rows[0].text()).toContain("$0.3120+")
-    expect(rows[rows.length - 1].text()).toContain("$0.3120+")
+    await mk()
+    const rows = bodyRows(cronRegion())
+    expect(rows[0].textContent).toContain("$0.3120+")
+    expect(rows[rows.length - 1].textContent).toContain("$0.3120+")
   })
 
   it("reloads only on a focus and a reconnect", async () => {
     await mk()
     expect(h.live!.opts?.events).toBeUndefined()
+  })
+
+  it("uses no legacy class", async () => {
+    const { container } = await mk()
+    expect(
+      container.querySelector(
+        ".page-h, .seg, .grid-4, .tile, .eyebrow, .sbars, .sbar, .axis-x, .axis-y, .lg, .usage-tip, .popover, .section-h, .cron-cost, .flagged, .li, .btn, .s1",
+      ),
+    ).toBeNull()
   })
 })

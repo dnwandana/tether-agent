@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { ICON } from "../lib/icons"
+import { BRAND_PATH } from "../lib/icons"
 </script>
 
 <template>
-  <span class="rail-mark" aria-hidden="true">
+  <span
+    data-slot="brand-mark"
+    class="inline-flex size-6 shrink-0 items-center justify-center rounded-md bg-foreground text-background"
+    aria-hidden="true"
+  >
     <!-- The path holds the padding of the tile, so the SVG fills the whole 24 px tile. -->
     <svg viewBox="0 0 24 24" width="24" height="24">
       <path
-        :d="ICON.mark"
+        :d="BRAND_PATH"
         fill="none"
         stroke="currentColor"
         stroke-width="3.1"

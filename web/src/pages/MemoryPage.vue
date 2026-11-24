@@ -1,5 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue"
+import { cn } from "@/lib/utils"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Field, FieldError } from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
+import { Item, ItemActions, ItemContent, ItemGroup } from "@/components/ui/item"
+import { Textarea } from "@/components/ui/textarea"
 import { api } from "../api/client"
 import type {
   MemoryEntry,
@@ -71,9 +80,10 @@ function pct(target: Target): number {
   const l = limit(target)
   return l > 0 ? (used(target) / l) * 100 : 0
 }
-function meterClass(target: Target): string {
+// Returns "bad" at the limit, "warn" above 85 %, else "".
+function meterLevel(target: Target): "bad" | "warn" | "" {
   const p = pct(target)
-  return p >= 100 ? "meter-bad" : p > 85 ? "meter-warn" : ""
+  return p >= 100 ? "bad" : p > 85 ? "warn" : ""
 }
 // The inbox note name in the reply of the memory tool.
 const INBOX = /\bnote (inbox-[a-z0-9-]+)/
@@ -342,19 +352,17 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Memory</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight">Memory</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-      <div class="search">
-        <input
-          v-model="query"
-          class="input"
-          type="search"
-          placeholder="Search memory and notes"
-          aria-label="Search memory and notes"
-        />
-      </div>
+      <Input
+        v-model="query"
+        type="search"
+        class="w-full tab:w-64"
+        placeholder="Search memory and notes"
+        aria-label="Search memory and notes"
+      />
     </div>
 
     <StateBlock v-if="state === 'loading'" state="loading" />
@@ -366,173 +374,245 @@ onBeforeUnmount(() => {
       @action="load"
     />
     <template v-else-if="view">
-      <div v-if="hits || searching" class="card hits">
-        <div class="card-h"><h3>Search hits</h3></div>
-        <div v-if="searching" class="li c-3">Searching…</div>
-        <template v-if="hits">
-          <div v-if="hits.length === 0 && !searching" class="li c-3">No hits</div>
-          <div v-for="(h, i) in hits" :key="i" class="li">
-            <span class="mono">{{ h.file }}</span>
-            <button class="link grow" type="button" @click="openHit(h)">{{ h.entry }}</button>
-            <span class="c-3 t-12">{{ h.match }}</span>
-          </div>
-        </template>
-      </div>
+      <Card v-if="hits || searching">
+        <CardHeader><CardTitle>Search hits</CardTitle></CardHeader>
+        <CardContent class="flex flex-col gap-2">
+          <p v-if="searching" class="text-sm text-muted-foreground">Searching…</p>
+          <template v-if="hits">
+            <p v-if="hits.length === 0 && !searching" class="text-sm text-muted-foreground">
+              No hits
+            </p>
+            <div v-for="(h, i) in hits" :key="i" class="flex items-center gap-2">
+              <span class="font-mono text-xs">{{ h.file }}</span>
+              <Button
+                variant="link"
+                class="h-auto flex-1 justify-start p-0"
+                type="button"
+                @click="openHit(h)"
+                >{{ h.entry }}</Button
+              >
+              <span class="text-xs text-muted-foreground">{{ h.match }}</span>
+            </div>
+          </template>
+        </CardContent>
+      </Card>
 
-      <div class="warn-banner">
-        An edit applies to new sessions. A running session keeps its prompt as it is.
-      </div>
+      <Alert>
+        <AlertDescription>
+          An edit applies to new sessions. A running session keeps its prompt as it is.
+        </AlertDescription>
+      </Alert>
       <ResultNote :note="note" @close="note = null" />
 
-      <div class="grid-2">
-        <div v-for="fl in files" :key="fl.target" class="card">
-          <div class="card-h">
-            <h3>{{ fl.title }}</h3>
-          </div>
-          <div class="card-b">
+      <div class="grid gap-4 lg:grid-cols-2">
+        <Card v-for="fl in files" :key="fl.target">
+          <CardHeader>
+            <CardTitle>{{ fl.title }}</CardTitle>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-3">
             <div
-              class="meter"
-              :class="meterClass(fl.target)"
+              class="h-2 overflow-hidden rounded-full bg-muted"
               role="meter"
+              :data-level="meterLevel(fl.target)"
               aria-valuemin="0"
               :aria-valuenow="used(fl.target)"
               :aria-valuemax="limit(fl.target)"
               :aria-label="fl.title + ' size'"
             >
-              <span :style="{ width: Math.min(100, pct(fl.target)) + '%' }" />
+              <div
+                :class="
+                  cn(
+                    'h-full bg-primary',
+                    meterLevel(fl.target) === 'warn' && 'bg-warning',
+                    meterLevel(fl.target) === 'bad' && 'bg-destructive',
+                  )
+                "
+                :style="{ width: Math.min(100, pct(fl.target)) + '%' }"
+              />
             </div>
-            <div class="t-12 c-3">
+            <div class="text-xs text-muted-foreground">
               {{ num(used(fl.target)) }} / {{ num(limit(fl.target)) }} chars ·
               {{ Math.round(pct(fl.target)) }}% of the limit
             </div>
-            <div v-if="pct(fl.target) >= 100" class="t-12 c-bad">
+            <div v-if="pct(fl.target) >= 100" class="text-xs text-destructive">
               The next add goes to the inbox.
             </div>
-          </div>
-          <StateBlock
-            v-if="entriesOf(fl.target).length === 0 && editing !== `${fl.target}:new`"
-            state="empty"
-            text="No entries yet."
-            action="+ Add entry"
-            @action="startEdit(`${fl.target}:new`, '')"
-          />
-          <div
-            v-for="e in entriesOf(fl.target)"
-            :key="e.id"
-            :ref="(el) => setEntryEl(`${fl.target}:${e.id}`, el)"
-            class="li"
-            :class="{ pulse: pulsing === `${fl.target}:${e.id}` }"
-            :data-entry="`${fl.target}:${e.id}`"
-          >
-            <template v-if="e.blocked">
-              <span class="grow"
-                ><b>[BLOCKED {{ e.id }}]</b> {{ " "
-                }}<span class="c-3">the memory scan blocked this entry</span></span
+            <StateBlock
+              v-if="entriesOf(fl.target).length === 0 && editing !== `${fl.target}:new`"
+              state="empty"
+              text="No entries yet."
+              action="+ Add entry"
+              @action="startEdit(`${fl.target}:new`, '')"
+            />
+            <ItemGroup>
+              <Item
+                v-for="e in entriesOf(fl.target)"
+                :key="e.id"
+                :ref="(el) => setEntryEl(`${fl.target}:${e.id}`, (el as any)?.$el ?? el)"
+                role="listitem"
+                size="sm"
+                :class="{ pulse: pulsing === `${fl.target}:${e.id}` }"
+                :data-entry="`${fl.target}:${e.id}`"
               >
-              <button
-                class="btn btn-danger-soft btn-sm"
-                type="button"
-                @click="remove(fl.target, e)"
-              >
-                Remove
-              </button>
-            </template>
-            <template v-else-if="editing === `${fl.target}:${e.id}`">
-              <div class="grow">
-                <textarea
-                  v-model="draft"
-                  class="input"
-                  rows="4"
-                  :maxlength="view.entry_limit"
-                  aria-label="Entry text"
-                />
-                <div class="t-12 c-3">
-                  After save: {{ num(afterSave(fl.target)) }} / {{ num(limit(fl.target)) }}
-                </div>
-                <div v-if="fieldError" class="t-12 c-bad">{{ fieldError }}</div>
-              </div>
-              <button class="btn btn-secondary btn-sm" type="button" @click="cancel">Cancel</button>
-              <button
-                class="btn btn-primary btn-sm"
-                type="button"
-                :disabled="saving"
-                @click="save(fl.target, 'replace', draft, e.text, e.id)"
-              >
-                {{ saving ? "Saving…" : "Save" }}
-              </button>
-            </template>
-            <template v-else>
-              <span class="grow note-text">{{ e.text }}</span>
-              <span v-if="masked(e)" class="t-12 c-3"
-                >Masked secret. Edit it with the memory tool.</span
-              >
-              <button
-                class="btn btn-secondary btn-sm"
-                type="button"
-                :disabled="masked(e)"
-                :title="
-                  masked(e)
-                    ? 'This entry holds a masked secret. Edit it with the memory tool.'
-                    : undefined
-                "
-                @click="startEdit(`${fl.target}:${e.id}`, e.text)"
-              >
-                Edit
-              </button>
-              <button
-                class="btn btn-danger-soft btn-sm"
-                type="button"
-                @click="remove(fl.target, e)"
-              >
-                Remove
-              </button>
-            </template>
-          </div>
-          <div v-if="undo?.target === fl.target" class="li">
-            <span class="grow">Removed an entry.</span>
-            <button class="btn btn-secondary btn-sm" type="button" @click="undoRemove">
-              ↩️ Undo
-            </button>
-          </div>
-          <div v-if="editing === `${fl.target}:new`" class="li">
-            <div class="grow">
-              <textarea
-                v-model="draft"
-                class="input"
-                rows="4"
-                :maxlength="view.entry_limit"
-                aria-label="New entry text"
-              />
-              <div class="t-12 c-3">
-                After save: {{ num(afterSave(fl.target)) }} / {{ num(limit(fl.target)) }}
-              </div>
-              <div v-if="fieldError" class="t-12 c-bad">{{ fieldError }}</div>
-            </div>
-            <button class="btn btn-secondary btn-sm" type="button" @click="cancel">Cancel</button>
-            <button
-              class="btn btn-primary btn-sm"
-              type="button"
-              :disabled="saving"
-              @click="save(fl.target, 'add', draft, '')"
-            >
-              {{ saving ? "Saving…" : "Save" }}
-            </button>
-          </div>
-          <div class="card-f">
-            <button
-              class="btn btn-secondary btn-sm"
+                <template v-if="e.blocked">
+                  <ItemContent
+                    ><span
+                      ><b>[BLOCKED {{ e.id }}]</b> {{ " "
+                      }}<span class="text-muted-foreground"
+                        >the memory scan blocked this entry</span
+                      ></span
+                    ></ItemContent
+                  >
+                  <ItemActions>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      class="max-tab:h-11"
+                      type="button"
+                      @click="remove(fl.target, e)"
+                    >
+                      Remove
+                    </Button>
+                  </ItemActions>
+                </template>
+                <template v-else-if="editing === `${fl.target}:${e.id}`">
+                  <ItemContent>
+                    <Field :data-invalid="!!fieldError || undefined">
+                      <Textarea
+                        v-model="draft"
+                        rows="4"
+                        :maxlength="view.entry_limit"
+                        aria-label="Entry text"
+                        :aria-invalid="!!fieldError || undefined"
+                      />
+                      <div class="text-xs text-muted-foreground">
+                        After save: {{ num(afterSave(fl.target)) }} / {{ num(limit(fl.target)) }}
+                      </div>
+                      <FieldError v-if="fieldError">{{ fieldError }}</FieldError>
+                    </Field>
+                  </ItemContent>
+                  <ItemActions>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      class="max-tab:h-11"
+                      type="button"
+                      @click="cancel"
+                      >Cancel</Button
+                    >
+                    <Button
+                      size="sm"
+                      class="max-tab:h-11"
+                      type="button"
+                      :disabled="saving"
+                      @click="save(fl.target, 'replace', draft, e.text, e.id)"
+                    >
+                      {{ saving ? "Saving…" : "Save" }}
+                    </Button>
+                  </ItemActions>
+                </template>
+                <template v-else>
+                  <ItemContent class="whitespace-pre-wrap break-words">{{ e.text }}</ItemContent>
+                  <span v-if="masked(e)" class="text-xs text-muted-foreground"
+                    >Masked secret. Edit it with the memory tool.</span
+                  >
+                  <ItemActions>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      class="max-tab:h-11"
+                      type="button"
+                      :disabled="masked(e)"
+                      :title="
+                        masked(e)
+                          ? 'This entry holds a masked secret. Edit it with the memory tool.'
+                          : undefined
+                      "
+                      @click="startEdit(`${fl.target}:${e.id}`, e.text)"
+                    >
+                      Edit
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      class="max-tab:h-11"
+                      type="button"
+                      @click="remove(fl.target, e)"
+                    >
+                      Remove
+                    </Button>
+                  </ItemActions>
+                </template>
+              </Item>
+              <Item v-if="undo?.target === fl.target" role="listitem" size="sm">
+                <ItemContent>Removed an entry.</ItemContent>
+                <ItemActions>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="max-tab:h-11"
+                    type="button"
+                    @click="undoRemove"
+                  >
+                    ↩️ Undo
+                  </Button>
+                </ItemActions>
+              </Item>
+              <Item v-if="editing === `${fl.target}:new`" role="listitem" size="sm">
+                <ItemContent>
+                  <Field :data-invalid="!!fieldError || undefined">
+                    <Textarea
+                      v-model="draft"
+                      rows="4"
+                      :maxlength="view.entry_limit"
+                      aria-label="New entry text"
+                      :aria-invalid="!!fieldError || undefined"
+                    />
+                    <div class="text-xs text-muted-foreground">
+                      After save: {{ num(afterSave(fl.target)) }} / {{ num(limit(fl.target)) }}
+                    </div>
+                    <FieldError v-if="fieldError">{{ fieldError }}</FieldError>
+                  </Field>
+                </ItemContent>
+                <ItemActions>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="max-tab:h-11"
+                    type="button"
+                    @click="cancel"
+                    >Cancel</Button
+                  >
+                  <Button
+                    size="sm"
+                    class="max-tab:h-11"
+                    type="button"
+                    :disabled="saving"
+                    @click="save(fl.target, 'add', draft, '')"
+                  >
+                    {{ saving ? "Saving…" : "Save" }}
+                  </Button>
+                </ItemActions>
+              </Item>
+            </ItemGroup>
+          </CardContent>
+          <CardFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              class="max-tab:h-11"
               type="button"
               @click="startEdit(`${fl.target}:new`, '')"
             >
               + Add entry
-            </button>
-          </div>
-        </div>
+            </Button>
+          </CardFooter>
+        </Card>
       </div>
 
-      <div class="section-h">
-        <h2>Topic notes</h2>
-        <span class="c-3 t-12 mono">memory/notes/</span>
+      <div class="flex items-center gap-2">
+        <h2 class="text-lg font-semibold">Topic notes</h2>
+        <span class="font-mono text-xs text-muted-foreground">memory/notes/</span>
       </div>
       <StateBlock v-if="view.topics.length === 0" state="empty" text="No topic notes" />
       <DataTable
@@ -542,49 +622,62 @@ onBeforeUnmount(() => {
         row-key="name"
       >
         <template #cell-name="{ row }"
-          ><span class="mono">{{ t(row).name }}</span> {{ " "
-          }}<span v-if="t(row).name.startsWith('inbox-')" class="chip chip-warn"
-            >inbox</span
+          ><span class="font-mono">{{ t(row).name }}</span> {{ " "
+          }}<Badge
+            v-if="t(row).name.startsWith('inbox-')"
+            variant="outline"
+            class="border-warning/40 text-warning"
+            data-tone="warn"
+            >inbox</Badge
           ></template
         >
         <template #cell-modified="{ row }"
           ><span
             data-test="modified"
-            style="white-space: nowrap"
+            class="whitespace-nowrap"
             :title="fullTime(t(row).modified)"
             >{{ when(t(row).modified) }}</span
           ></template
         >
         <template #cell-actions="{ row }">
-          <button
-            class="btn btn-secondary btn-sm"
+          <Button
+            variant="outline"
+            size="sm"
+            class="max-tab:h-11"
             type="button"
             @click.stop="openTopic(t(row).name)"
           >
             Open
-          </button>
+          </Button>
         </template>
       </DataTable>
     </template>
 
     <SidePanel :open="topicOpen" :title="`memory/notes/${topicName}.md`" @close="topicOpen = false">
-      <template v-if="topicList.length > 0">
-        <div v-for="(text, i) in topicList" :key="i" class="li topic-entry">
-          <span class="grow note-text">{{ text }}</span>
-          <span v-if="MASKED.test(text)" class="t-12 c-3"
+      <ItemGroup v-if="topicList.length > 0" aria-label="Entries of the note">
+        <Item v-for="(text, i) in topicList" :key="i" role="listitem" size="sm">
+          <ItemContent class="whitespace-pre-wrap break-words">{{ text }}</ItemContent>
+          <span v-if="MASKED.test(text)" class="text-xs text-muted-foreground"
             >Masked secret. Edit it with the memory tool.</span
           >
-          <button
-            class="btn btn-danger-soft btn-sm"
-            type="button"
-            :disabled="MASKED.test(text)"
-            @click="removeTopicEntry(text)"
-          >
-            Remove
-          </button>
-        </div>
-      </template>
-      <div v-else class="code-block">{{ topicText }}</div>
+          <ItemActions>
+            <Button
+              variant="destructive"
+              size="sm"
+              class="max-tab:h-11"
+              type="button"
+              :disabled="MASKED.test(text)"
+              @click="removeTopicEntry(text)"
+            >
+              Remove
+            </Button>
+          </ItemActions>
+        </Item>
+      </ItemGroup>
+      <pre
+        v-else
+        class="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
+        >{{ topicText }}</pre>
     </SidePanel>
   </div>
 </template>

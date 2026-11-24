@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { flushPromises } from "@vue/test-utils"
+import { render, screen, within, cleanup } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../../api/client", () => ({
@@ -30,13 +32,9 @@ async function mk() {
     ],
   })
   await router.push("/")
-  const w = mount(ChatHeader, {
-    global: { plugins: [router], stubs: { SidePanel: true } },
-    attachTo: document.body,
-  })
-  return { w, router }
+  const view = render(ChatHeader, { global: { plugins: [router] } })
+  return { ...view, router }
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
 
 beforeEach(() => {
   vi.mocked(runCommand).mockReset().mockResolvedValue(reply("Done."))
@@ -53,8 +51,7 @@ beforeEach(() => {
   })
 })
 
-const rectOf = (left: number, width: number) =>
-  ({ left, width, right: left + width, top: 0, bottom: 32, height: 32, x: left, y: 0 }) as DOMRect
+const modelChip = () => screen.getByRole("button", { name: /^model / })
 const effortReply = () =>
   vi.mocked(runCommand).mockResolvedValueOnce(
     reply("Pick.", [
@@ -66,40 +63,35 @@ const effortReply = () =>
     ]),
   )
 
-async function openAt(boxLeft: number, boxWidth: number, chipLeft: number) {
-  effortReply()
-  const { w } = await mk()
-  vi.spyOn(w.find(".chat-h").element, "getBoundingClientRect").mockReturnValue(
-    rectOf(boxLeft, boxWidth),
-  )
-  const chip = w.findAll("button.chip")[1]
-  vi.spyOn(chip.element, "getBoundingClientRect").mockReturnValue(rectOf(chipLeft, 120))
-  await chip.trigger("click")
-  await flushPromises()
-  return w
-}
-
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+})
 
 describe("ChatHeader", () => {
   it("renames the session", async () => {
-    const { w } = await mk()
-    await w.find(".chat-title").trigger("click")
-    const i = w.find("input.chat-title-input")
-    await i.setValue("Release notes")
-    await i.trigger("keydown", { key: "Enter" })
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "Old" }))
+    const i = screen.getByRole("textbox", { name: "Session title" })
+    await user.clear(i)
+    await user.type(i, "Release notes{Enter}")
     expect(runCommand).toHaveBeenCalledWith("/rename Release notes")
     expect(runCommand).toHaveBeenCalledTimes(1)
-    w.unmount()
   })
 
   it("shows the context meter and runs Compact", async () => {
     session.context = { tokens: 12345, window: 200000, threshold: 0.5 }
-    const { w } = await mk()
-    expect(w.find(".ctx").text()).toContain("~12.3k / 200k")
-    await btn(w, "Compact").trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    expect(screen.queryByRole("button", { name: "Compact" })).toBeNull()
+    await user.click(screen.getByRole("button", { name: /~12\.3k \/ 200k/ }))
+    const bar = await screen.findByRole("progressbar", { name: "Context used" })
+    expect(Number(bar.getAttribute("aria-valuenow"))).toBeCloseTo(6.17, 1)
+    const mark = document.querySelector('[data-slot="context-threshold"]') as HTMLElement
+    expect(mark.style.left).toBe("50%")
+    await user.click(screen.getByRole("button", { name: "Compact" }))
     expect(runCommand).toHaveBeenCalledWith("/compact")
-    w.unmount()
   })
 
   it("opens the model picker from the /model reply", async () => {
@@ -110,13 +102,14 @@ describe("ChatHeader", () => {
         [{ text: "c", data: "/model c" }],
       ]),
     )
-    const { w } = await mk()
-    await w.findAll("button.chip")[0].trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: /^model / }))
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/model")
-    await btn(w, "primary").trigger("click")
+    expect(screen.getByRole("menu").textContent).toContain("Pick a provider.")
+    await user.click(screen.getByRole("menuitem", { name: "primary" }))
     expect(runCommand).toHaveBeenLastCalledWith("/model primary")
-    w.unmount()
   })
 
   it("asks before a delete and sends the confirm action", async () => {
@@ -129,9 +122,10 @@ describe("ChatHeader", () => {
       ]),
     )
     vi.mocked(confirm).mockResolvedValue(true)
-    const { w } = await mk()
-    await w.find('button[aria-label="Session menu"]').trigger("click")
-    await btn(w, "Delete…").trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "Session menu" }))
+    await user.click(screen.getByRole("menuitem", { name: "Delete…" }))
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/delete s1")
     expect(confirm).toHaveBeenCalledWith({
@@ -142,17 +136,15 @@ describe("ChatHeader", () => {
       markdown: true,
     })
     expect(runCommand).toHaveBeenLastCalledWith("/delete s1 confirm")
-    w.unmount()
   })
 
   it("opens the goal from the goal chip", async () => {
     session.goalLine = "↻ Goal 8/20: two tests fail"
-    const { w, router } = await mk()
-    await w.find(".chip-acc").trigger("click")
+    const user = userEvent.setup()
+    const { router } = await mk()
+    await user.click(screen.getByRole("button", { name: "↻ Goal 8/20: two tests fail" }))
     await flushPromises()
-    expect(w.find(".chip-acc").text()).toBe("↻ Goal 8/20: two tests fail")
     expect(router.currentRoute.value.fullPath).toBe("/goals/s1")
-    w.unmount()
   })
 
   it("shows a plain reply as a toast and closes the popover on Esc", async () => {
@@ -165,18 +157,19 @@ describe("ChatHeader", () => {
         [{ text: "c", data: "/effort c" }],
       ]),
     )
-    const { w } = await mk()
-    await w.findAll("button.chip")[1].trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: /^effort / }))
     await flushPromises()
-    expect(btn(w, "·").attributes("disabled")).toBeDefined()
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", cancelable: true }))
+    expect(screen.getByRole("menuitem", { name: "·" }).getAttribute("aria-disabled")).toBe("true")
+    await user.keyboard("{Escape}")
     await flushPromises()
-    expect(w.find(".popover").exists()).toBe(false)
-    await w.findAll("button.chip")[0].trigger("click")
+    expect(screen.queryByRole("menu")).toBeNull()
+    await user.click(screen.getByRole("button", { name: /^model / }))
     await flushPromises()
     expect(vi.mocked(toast).mock.calls.at(-1)!.slice(0, 2)).toEqual(["Done.", "info"])
-    w.unmount()
   })
+
   it("revokes the export URL after a delay, not at once", async () => {
     vi.useFakeTimers()
     try {
@@ -188,16 +181,15 @@ describe("ChatHeader", () => {
         vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["x"]) })),
       )
       const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {})
-      const { w } = await mk()
-      await w.find('button[aria-label="Session menu"]').trigger("click")
-      await btn(w, "Export JSONL").trigger("click")
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      await mk()
+      await user.click(screen.getByRole("button", { name: "Session menu" }))
+      await user.click(screen.getByRole("menuitem", { name: "Export JSONL" }))
       await vi.advanceTimersByTimeAsync(0)
       expect(click).toHaveBeenCalled()
       expect(revoke).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(30_000)
       expect(revoke).toHaveBeenCalledWith("blob:x")
-      click.mockRestore()
-      w.unmount()
     } finally {
       vi.useRealTimers()
       vi.unstubAllGlobals()
@@ -206,87 +198,100 @@ describe("ChatHeader", () => {
 
   it("shows New session for an empty title", async () => {
     session.title = ""
-    const { w } = await mk()
-    expect(w.find(".chat-title").text()).toBe("New session")
-    expect(w.find(".chat-title").classes()).toContain("c-3")
-    w.unmount()
+    await mk()
+    const t = screen.getByRole("button", { name: "New session" })
+    expect(t.classList.contains("text-muted-foreground")).toBe(true)
   })
 
   it("shows the model chip as model (entry)", async () => {
-    const { w } = await mk()
-    expect(w.findAll("button.chip")[0].text()).toBe("model glm-4.6 (primary) ▾")
+    await mk()
+    expect(modelChip().textContent!.trim()).toBe("model glm-4.6 (primary) ▾")
     session.entry = ""
     await flushPromises()
-    expect(w.findAll("button.chip")[0].text()).toBe("model glm-4.6 ▾")
-    w.unmount()
+    expect(modelChip().textContent!.trim()).toBe("model glm-4.6 ▾")
   })
 
   it("hides the session actions while no session exists", async () => {
     session.id = ""
     session.title = ""
-    const { w } = await mk()
-    expect(w.find("button.chat-title").exists()).toBe(false)
-    expect(w.find(".chat-title").text()).toBe("New session")
-    await w.find('button[aria-label="Session menu"]').trigger("click")
-    const items = w.findAll(".menu .menu-item").map((b) => b.text())
-    expect(items).toEqual(["Custom prompt…"])
-    w.unmount()
+    const user = userEvent.setup()
+    await mk()
+    expect(screen.queryByRole("button", { name: "New session" })).toBeNull()
+    expect(screen.getByText("New session")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Session menu" }))
+    expect(screen.getAllByRole("menuitem").map((b) => b.textContent!.trim())).toEqual([
+      "Custom prompt…",
+    ])
   })
 
   it("links to the Pages help of the wiki", async () => {
-    const { w } = await mk()
-    const a = w.find("a.help-link")
-    expect(a.attributes("href")).toBe(
+    await mk()
+    const a = screen.getByRole("link", { name: /Help for the pages/ })
+    expect(a.getAttribute("href")).toBe(
       "https://github.com/dnwandana/tether-agent/wiki/Dashboard#pages",
     )
-    expect(a.attributes("rel")).toBe("noreferrer")
-    w.unmount()
-  })
-  it("opens the reply popover under the clicked chip", async () => {
-    const w = await openAt(100, 1000, 340)
-    expect(w.find(".popover").attributes("style")).toContain("left: 240px")
-    w.unmount()
+    expect(a.getAttribute("rel")).toBe("noreferrer")
   })
 
-  it("keeps the popover inside the header at the right end", async () => {
-    const w = await openAt(100, 1000, 1050)
-    expect(w.find(".popover").attributes("style")).toContain("left: 572px")
-    w.unmount()
-  })
-
-  it("keeps the popover inside the header on a phone", async () => {
-    const w = await openAt(0, 390, 200)
-    expect(w.find(".popover").attributes("style")).toContain("left: 8px")
-    w.unmount()
+  it("opens the reply menu under the clicked chip", async () => {
+    effortReply()
+    const user = userEvent.setup()
+    await mk()
+    const chip = screen.getByRole("button", { name: /^effort / })
+    await user.click(chip)
+    await flushPromises()
+    const menu = screen.getByRole("menu")
+    expect(chip.getAttribute("aria-expanded")).toBe("true")
+    expect(chip.getAttribute("aria-controls")).toBe(menu.id)
+    expect(menu.getAttribute("data-side")).toBe("bottom")
+    expect(menu.getAttribute("data-align")).toBe("start")
   })
 
   it("puts help, the menu, and Details in one end group", async () => {
-    const { w } = await mk()
-    const end = w.find(".chat-h-end")
-    expect(end.find("a.help-link").exists()).toBe(true)
-    expect(end.find('button[aria-label="Session menu"]').exists()).toBe(true)
-    expect(end.find("button.aside-toggle").text()).toBe("Details")
-    expect(w.find(".chat-h > .grow").exists()).toBe(false)
-    w.unmount()
+    await mk()
+    const link = screen.getByRole("link", { name: /Help for the pages/ })
+    const menu = screen.getByRole("button", { name: "Session menu" })
+    const details = screen.getByRole("button", { name: "Details" })
+    expect(menu.parentElement).toBe(link.parentElement)
+    expect(details.parentElement).toBe(link.parentElement)
+    expect(details.classList.contains("max-tab:hidden")).toBe(true)
   })
 
   it("moves Compact into the session menu on a phone", async () => {
     session.context = { tokens: 12345, window: 200000, threshold: 0.5 }
-    const { w } = await mk()
-    expect(w.find(".ctx button").classes()).toContain("hide-phone")
-    await w.find('button[aria-label="Session menu"]').trigger("click")
-    const item = w.findAll(".menu .menu-item").find((b) => b.text() === "Compact")!
-    expect(item.classes()).toContain("only-phone")
-    await item.trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "Session menu" }))
+    const item = screen.getByRole("menuitem", { name: "Compact" })
+    expect(item.classList.contains("tab:hidden")).toBe(true)
+    await user.click(item)
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/compact")
-    w.unmount()
   })
 
   it("has no Compact menu item without a context meter", async () => {
-    const { w } = await mk()
-    await w.find('button[aria-label="Session menu"]').trigger("click")
-    expect(w.findAll(".menu .menu-item").map((b) => b.text())).not.toContain("Compact")
-    w.unmount()
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "Session menu" }))
+    expect(screen.getAllByRole("menuitem").map((b) => b.textContent!.trim())).not.toContain(
+      "Compact",
+    )
+  })
+
+  it("saves and clears the custom prompt in a dialog", async () => {
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "Session menu" }))
+    await user.click(screen.getByRole("menuitem", { name: "Custom prompt…" }))
+    const dlg = await screen.findByRole("dialog", { name: "Custom prompt of this session" })
+    await user.type(within(dlg).getByRole("textbox", { name: "Custom prompt" }), "Be short.")
+    await user.click(within(dlg).getByRole("button", { name: "Save" }))
+    expect(runCommand).toHaveBeenLastCalledWith("/prompt set Be short.")
+    await flushPromises()
+    expect(screen.queryByRole("dialog")).toBeNull()
+    await user.click(screen.getByRole("button", { name: "Session menu" }))
+    await user.click(screen.getByRole("menuitem", { name: "Custom prompt…" }))
+    await user.click(await screen.findByRole("button", { name: "🧹 Use the base prompt" }))
+    expect(runCommand).toHaveBeenLastCalledWith("/prompt clear")
   })
 })

@@ -6,6 +6,23 @@ import type { ReplyView } from "../../api/types.gen"
 import { turn } from "../../stores/turn"
 import { isSecure, toast } from "../../stores/ui"
 import { friendlyError } from "../../lib/errors"
+import { ArrowUpIcon, CameraIcon, MicIcon, PaperclipIcon, SquareIcon, XIcon } from "@lucide/vue"
+import { Button } from "@/components/ui/button"
+import {
+  Attachment,
+  AttachmentAction,
+  AttachmentActions,
+  AttachmentContent,
+  AttachmentGroup,
+  AttachmentTitle,
+} from "@/components/ui/attachment"
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupTextarea,
+} from "@/components/ui/input-group"
+import { cn } from "@/lib/utils"
 import HttpsNote from "../HttpsNote.vue"
 import AckChip from "./AckChip.vue"
 import QueueStrip from "./QueueStrip.vue"
@@ -33,6 +50,8 @@ const sendError = ref("")
 // True only when a send failed. A voice error has nothing to send again.
 const canRetry = ref(false)
 const files = ref<Att[]>([])
+// The files of a running send. The chips stay visible while the request runs.
+const inflight = ref<Att[]>([])
 const clientId = ref("")
 const commands = ref<Row[]>([])
 const skills = ref<Row[]>([])
@@ -44,12 +63,20 @@ const recMs = ref(0)
 const secure = isSecure()
 
 const dock = ref<HTMLElement | null>(null)
-const field = ref<HTMLTextAreaElement | null>(null)
+const field = ref<InstanceType<typeof InputGroupTextarea> | null>(null)
+// The root of the copied textarea component is the <textarea> element.
+function fieldEl(): HTMLTextAreaElement | null {
+  return (field.value?.$el as HTMLTextAreaElement | undefined) ?? null
+}
 const fileIn = ref<HTMLInputElement | null>(null)
 const photoIn = ref<HTMLInputElement | null>(null)
 
 const busy = computed(() => turn.view?.running === true)
 const empty = computed(() => draft.value.trim() === "" && files.value.length === 0)
+const chips = computed(() => (sending.value ? inflight.value : files.value))
+const chipState = computed<"uploading" | "error" | "idle">(() =>
+  sending.value ? "uploading" : canRetry.value ? "error" : "idle",
+)
 const liveAcks = computed(() => turn.acks.filter((a) => a.request_id === ""))
 
 const matches = computed<Row[]>(() => {
@@ -75,7 +102,7 @@ watch(draft, (v) => {
 
 // Sets the height of the text field from its scroll height, between 1 and 8 lines.
 function grow(): void {
-  const el = field.value
+  const el = fieldEl()
   if (!el) return
   el.style.height = "auto"
   el.style.height = `${Math.min(el.scrollHeight, MAX_HEIGHT)}px`
@@ -106,6 +133,7 @@ async function send(): Promise<void> {
   if (!clientId.value) clientId.value = newClientId()
   const id = clientId.value
   draft.value = ""
+  inflight.value = atts
   files.value = []
   await nextTick(grow)
   const payload = { text, files: atts.map((a) => a.file.name) }
@@ -134,6 +162,7 @@ async function send(): Promise<void> {
       atts.length === 0 && isBuiltin(text) ? "/api/command" : "/api/messages",
     )
   } finally {
+    inflight.value = []
     sending.value = false
   }
 }
@@ -141,7 +170,7 @@ async function send(): Promise<void> {
 function pick(name: string): void {
   draft.value = `${name} `
   menuClosed.value = true
-  void nextTick(() => field.value?.focus())
+  void nextTick(() => fieldEl()?.focus())
 }
 
 function onKey(e: KeyboardEvent): void {
@@ -296,7 +325,7 @@ function takeDraft(): void {
   draft.value = v
   void router?.replace({ query: {} })
   void nextTick(() => {
-    field.value?.focus()
+    fieldEl()?.focus()
     grow()
   })
 }
@@ -341,158 +370,137 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="dock" class="dock">
-    <div class="dock-in">
-      <div class="live-acks">
+  <div
+    ref="dock"
+    class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-background from-70% to-transparent px-3 pt-6 pb-3"
+  >
+    <div class="pointer-events-auto mx-auto flex max-w-[760px] flex-col gap-2">
+      <div class="flex flex-col gap-1">
         <AckChip v-for="a in liveAcks" :key="a.id" :ack="a" @action="runAck" />
       </div>
       <QueueStrip :items="turn.queue" @now="runAck('/now')" />
-      <div v-if="sendError" class="composer-err c-bad t-13" role="alert">
+      <div
+        v-if="sendError"
+        role="alert"
+        class="flex flex-wrap items-center gap-2 px-1 text-sm text-destructive"
+      >
         <span>{{ sendError }}</span>
-        <button v-if="canRetry" type="button" class="btn btn-secondary btn-sm" @click="send">
+        <Button v-if="canRetry" type="button" variant="secondary" size="sm" @click="send">
           Send again
-        </button>
+        </Button>
       </div>
-      <div class="composer2">
-        <div v-if="menuOpen" class="menu slash-pop" role="listbox">
-          <button
+      <div class="relative">
+        <div
+          v-if="menuOpen"
+          role="listbox"
+          aria-label="Commands"
+          class="absolute inset-x-0 bottom-full mb-2 rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
+        >
+          <div
             v-for="(r, i) in matches"
             :key="r.name"
-            type="button"
-            class="menu-item"
-            :class="{ 'is-hi': i === hi }"
+            role="option"
+            :aria-selected="i === hi"
+            :class="
+              cn(
+                'flex cursor-pointer items-baseline gap-3 rounded-sm px-2 py-1.5 text-sm',
+                i === hi && 'bg-accent text-accent-foreground',
+              )
+            "
             @mousedown.prevent="pick(r.name)"
           >
-            <span class="mono">{{ r.name }}</span
-            ><span class="r">{{ r.description }}</span>
-          </button>
+            <span class="font-mono">{{ r.name }}</span>
+            <span class="truncate text-muted-foreground">{{ r.description }}</span>
+          </div>
         </div>
-        <div v-if="files.length > 0" class="attach-row">
-          <span v-for="(a, i) in files" :key="i" class="att">
-            {{ a.label }}
-            <button
+        <InputGroup class="bg-background">
+          <InputGroupAddon v-if="chips.length > 0" align="block-start">
+            <AttachmentGroup>
+              <Attachment v-for="(a, i) in chips" :key="i" size="sm" :state="chipState">
+                <AttachmentContent>
+                  <AttachmentTitle>{{ a.label }}</AttachmentTitle>
+                </AttachmentContent>
+                <AttachmentActions>
+                  <AttachmentAction
+                    type="button"
+                    :aria-label="`Remove ${a.file.name}`"
+                    :disabled="sending"
+                    @click="removeFile(i)"
+                  >
+                    <XIcon />
+                  </AttachmentAction>
+                </AttachmentActions>
+              </Attachment>
+            </AttachmentGroup>
+          </InputGroupAddon>
+          <InputGroupTextarea
+            ref="field"
+            v-model="draft"
+            rows="1"
+            class="min-h-0 field-sizing-fixed max-tab:min-h-11 max-tab:text-base"
+            placeholder="Message Tether…  / for commands"
+            aria-label="Message"
+            @keydown="onKey"
+            @input="grow"
+          />
+          <InputGroupAddon align="block-end">
+            <InputGroupButton
               type="button"
-              class="icon-btn"
-              :aria-label="`Remove ${a.file.name}`"
-              @click="removeFile(i)"
+              size="icon-sm"
+              class="max-tab:size-11"
+              title="Attach files"
+              aria-label="Attach files"
+              @click="fileIn?.click()"
             >
-              ✕
-            </button>
-          </span>
-        </div>
-        <textarea
-          ref="field"
-          v-model="draft"
-          rows="1"
-          placeholder="Message Tether…  / for commands"
-          aria-label="Message"
-          @keydown="onKey"
-          @input="grow"
-        ></textarea>
-        <div class="cbar">
-          <button
-            type="button"
-            class="icon-btn"
-            title="Attach files"
-            aria-label="Attach files"
-            @click="fileIn?.click()"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="20"
-              height="20"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
+              <PaperclipIcon />
+            </InputGroupButton>
+            <InputGroupButton
+              type="button"
+              size="icon-sm"
+              class="max-tab:size-11"
+              title="Take or attach a photo"
+              aria-label="Photo"
+              @click="photoIn?.click()"
             >
-              <path
-                d="M20 11l-8.5 8.5a5 5 0 0 1-7-7L13 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L14 7"
-              />
-            </svg>
-          </button>
-          <button
-            type="button"
-            class="icon-btn"
-            title="Take or attach a photo"
-            aria-label="Photo"
-            @click="photoIn?.click()"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="20"
-              height="20"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
+              <CameraIcon />
+            </InputGroupButton>
+            <InputGroupButton
+              v-if="secure"
+              type="button"
+              size="icon-sm"
+              class="max-tab:size-11"
+              title="Hold to record a voice note"
+              aria-label="Hold to record"
+              @pointerdown="startRecord"
             >
-              <path d="M4 8h3l2-3h6l2 3h3v11H4zM12 10a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z" />
-            </svg>
-          </button>
-          <button
-            v-if="secure"
-            type="button"
-            class="icon-btn"
-            title="Hold to record a voice note"
-            aria-label="Hold to record"
-            @pointerdown="startRecord"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="20"
-              height="20"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path
-                d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3"
-              />
-            </svg>
-          </button>
-          <span class="rec-hint">{{ hint }}</span>
-          <span class="send-slot">
-            <button
+              <MicIcon />
+            </InputGroupButton>
+            <span class="text-xs text-destructive">{{ hint }}</span>
+            <InputGroupButton
               v-if="busy && empty"
               type="button"
-              class="round-btn is-stop"
+              size="icon-sm"
+              variant="destructive"
+              class="ml-auto rounded-full max-tab:size-11"
               aria-label="Stop the task"
               @click="stopTask"
             >
-              <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M7 7h10v10H7z" />
-              </svg>
-            </button>
-            <button
+              <SquareIcon />
+            </InputGroupButton>
+            <InputGroupButton
               v-else
               type="button"
-              class="round-btn"
+              size="icon-sm"
+              variant="default"
+              class="ml-auto rounded-full max-tab:size-11"
               aria-label="Send"
               :disabled="empty"
               @click="send"
             >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M12 19V5M5.5 11.5L12 5l6.5 6.5" />
-              </svg>
-            </button>
-          </span>
-        </div>
+              <ArrowUpIcon />
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
       </div>
       <HttpsNote v-if="!secure" />
       <input ref="fileIn" type="file" multiple hidden @change="addFiles($event, false)" />
@@ -507,13 +515,3 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
-
-<style scoped>
-.composer-err {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 0 4px 8px;
-}
-</style>

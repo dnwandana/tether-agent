@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen, within, fireEvent, cleanup, waitFor } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -16,8 +18,6 @@ import { confirm, toast } from "../stores/ui"
 import { api, runCommand } from "../api/client"
 import { session } from "../stores/session"
 import SessionsPage from "./SessionsPage.vue"
-import StateBlock from "../components/StateBlock.vue"
-import LiveHeader from "../components/LiveHeader.vue"
 import { fullTime, shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
@@ -80,20 +80,19 @@ async function mk(path = "/sessions") {
     ],
   })
   await router.push(path)
-  const w = mount(SessionsPage, { global: { plugins: [router], stubs: { teleport: true } } })
+  const r = render(SessionsPage, { global: { plugins: [router] } })
   await flushPromises()
-  return { w, router }
+  return { ...r, router }
 }
-const btn = (w: any, t: string) => w.findAll("button").filter((b: any) => b.text() === t)
-const menu = async (w: any, rowTitle: string, label: string) => {
-  const tr = w.findAll("tr").find((r: any) => r.text().includes(rowTitle))!
-  await tr.find("button[aria-label='More actions']").trigger("click")
-  await tr
-    .findAll(".menu-item")
-    .find((b: any) => b.text() === label)!
-    .trigger("click")
+const rowOf = (text: string) =>
+  screen.getAllByRole("row").find((r) => r.textContent!.includes(text))!
+async function menu(user: ReturnType<typeof userEvent.setup>, rowText: string, label: string) {
+  await user.click(within(rowOf(rowText)).getByRole("button", { name: "More actions" }))
+  await user.click(await screen.findByRole("menuitem", { name: label }))
   await flushPromises()
 }
+const names = (els: HTMLElement[]) => els.map((b) => b.textContent!.trim())
+const setup = () => userEvent.setup({ pointerEventsCheck: 0 })
 
 beforeEach(() => {
   window.matchMedia = ((q: string) => ({
@@ -111,47 +110,49 @@ beforeEach(() => {
   session.id = "s1"
 })
 
+const kidRows = () => screen.queryAllByRole("row").filter((r) => r.textContent!.includes("↳"))
+
 describe("SessionsPage", () => {
   it("loads the first page with all filter keys", async () => {
-    const { w } = await mk()
+    await mk()
     expect(api).toHaveBeenCalledWith(
       "GET",
       "/api/sessions?source=&kind=chat&search=&archived=0&limit=50&offset=0",
     )
-    expect(w.text()).toContain("Release notes")
-    expect(w.text()).toContain("Telegram › DM")
-    expect(w.find(".pager").text()).toContain("1–4 of 4")
+    expect(screen.getByText("Release notes")).toBeTruthy()
+    expect(screen.getByText("Telegram › DM")).toBeTruthy()
+    expect(screen.getByText("1–4 of 4")).toBeTruthy()
   })
 
   it("folds the child rows behind a toggle that stays open across a reload", async () => {
-    const { w } = await mk()
-    expect(w.find(".cellrow.is-child").exists()).toBe(false)
-    const t = w.find("button.kids-toggle")
-    expect(t.text()).toBe("▸ 1 child session")
-    expect(t.attributes("aria-expanded")).toBe("false")
-    await t.trigger("click")
-    const child = w.find(".cellrow.is-child")
-    expect(child.text()).toContain("↳")
-    expect(child.find(".kid-label").text()).toBe("subagent run")
-    expect(child.find(".chip").text()).toBe("subagent")
-    expect(w.find("button.kids-toggle").text()).toBe("▾ 1 child session")
-    expect(w.find("button.kids-toggle").attributes("aria-expanded")).toBe("true")
-    w.findComponent(LiveHeader).vm.$emit("refresh")
+    const user = setup()
+    await mk()
+    expect(screen.queryByText("subagent run")).toBeNull()
+    const t = screen.getByRole("button", { name: "▸ 1 child session" })
+    expect(t.getAttribute("aria-expanded")).toBe("false")
+    await user.click(t)
+    const child = rowOf("subagent run")
+    expect(child.textContent).toContain("↳")
+    expect(within(child).getByText("subagent").getAttribute("data-slot")).toBe("badge")
+    const t2 = screen.getByRole("button", { name: "▾ 1 child session" })
+    expect(t2.getAttribute("aria-expanded")).toBe("true")
+    await user.click(screen.getByRole("button", { name: "↻ Refresh" }))
     await flushPromises()
-    expect(w.find(".cellrow.is-child").exists()).toBe(true)
-    await w.find("button.kids-toggle").trigger("click")
-    expect(w.find(".cellrow.is-child").exists()).toBe(false)
+    expect(screen.getByText("subagent run")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "▾ 1 child session" }))
+    expect(screen.queryByText("subagent run")).toBeNull()
   })
 
   it("shows New session in the muted color for an untitled row", async () => {
     vi.mocked(api).mockResolvedValue({ total: 1, rows: [row({ id: "s9", title: "" })] })
-    const { w } = await mk()
-    const a = w.find("a[href='/sessions/s9']")
-    expect(a.text()).toBe("New session")
-    expect(a.classes()).toContain("c-3")
+    await mk()
+    const a = screen.getByRole("link", { name: "New session" })
+    expect(a.getAttribute("href")).toBe("/sessions/s9")
+    expect(a.classList.contains("text-muted-foreground")).toBe(true)
   })
 
   it("names a child once when its title equals its kind", async () => {
+    const user = setup()
     vi.mocked(api).mockResolvedValue({
       total: 1,
       rows: [
@@ -165,68 +166,70 @@ describe("SessionsPage", () => {
         }),
       ],
     })
-    const { w } = await mk()
-    expect(w.find("button.kids-toggle").text()).toBe("▸ 2 child sessions")
-    await w.find("button.kids-toggle").trigger("click")
-    const kids = w.findAll(".cellrow.is-child")
-    expect(kids.map((k) => k.find(".kid-label").text())).toEqual(["Background review", "subagent"])
-    expect(kids.map((k) => k.find(".chip").exists())).toEqual([false, false])
+    await mk()
+    await user.click(screen.getByRole("button", { name: "▸ 2 child sessions" }))
+    const kids = kidRows()
+    expect(kids).toHaveLength(2)
+    expect(within(kids[0]).getByText("Background review")).toBeTruthy()
+    expect(within(kids[1]).getByText("subagent")).toBeTruthy()
+    for (const k of kids) expect(k.querySelector('[data-slot="badge"]')).toBeNull()
   })
 
   it("gives the toggle row no dates, no cost, and no buttons", async () => {
-    const { w } = await mk()
-    const tr = w.find("button.kids-toggle").element.closest("tr")!
-    const buttons = Array.from(tr.querySelectorAll("button")).map((b) => b.textContent?.trim())
-    expect(buttons).toEqual(["▸ 1 child session"])
-    expect(tr.textContent).not.toContain("—")
-    expect(tr.textContent).not.toContain("$")
+    await mk()
+    const toggleRow = rowOf("1 child session")
+    expect(names(within(toggleRow).getAllByRole("button"))).toEqual(["▸ 1 child session"])
+    expect(toggleRow.textContent).not.toContain("—")
+    expect(toggleRow.textContent).not.toContain("$")
   })
 
   it("opens the active session and resumes another one", async () => {
-    const { w, router } = await mk()
-    expect(btn(w, "Open")).toHaveLength(1)
-    await btn(w, "Resume")[0].trigger("click")
+    const user = setup()
+    const { router } = await mk()
+    expect(screen.getAllByRole("button", { name: "Open" })).toHaveLength(1)
+    await user.click(screen.getAllByRole("button", { name: "Resume" })[0])
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/resume s3")
     expect(router.currentRoute.value.name).toBe("chat")
   })
 
   it("forks a read-only session into the dashboard", async () => {
-    const { w } = await mk()
-    await menu(w, "Photos", "Fork into dashboard")
+    const user = setup()
+    await mk()
+    await menu(user, "Photos", "Fork into dashboard")
     expect(runCommand).toHaveBeenCalledWith("/fork from s2")
   })
 
   it("shows the error state and retries", async () => {
+    const user = setup()
     vi.mocked(api).mockRejectedValueOnce(new Error("HTTP 500"))
-    const { w } = await mk()
-    expect(w.findComponent(StateBlock).props("state")).toBe("error")
-    w.findComponent(StateBlock).vm.$emit("action")
+    await mk()
+    expect(screen.getByRole("alert")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Retry" }))
     await flushPromises()
     // The failed load made one call. The reload makes two: the list and the other total.
     expect(api).toHaveBeenCalledTimes(3)
-    expect(w.text()).toContain("Release notes")
+    expect(screen.getByText("Release notes")).toBeTruthy()
   })
 
   it("keeps the list when the request for the other total fails", async () => {
     vi.mocked(api).mockResolvedValueOnce(page).mockRejectedValueOnce(new Error("HTTP 500"))
-    const { w } = await mk()
-    expect(
-      w.findComponent(StateBlock).exists() && w.findComponent(StateBlock).props("state"),
-    ).not.toBe("error")
-    expect(w.text()).toContain("Release notes")
-    expect(w.find(".seg").text()).toContain("Active · 4")
+    await mk()
+    expect(screen.queryByRole("alert")).toBeNull()
+    expect(screen.getByText("Release notes")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Active · 4" })).toBeTruthy()
   })
 
   it("shows a Busy refusal as a warn toast with the Stop button", async () => {
+    const user = setup()
     vi.mocked(runCommand).mockResolvedValueOnce({
       request_id: "r",
       text: "⏳ **Busy**\n`/archive` cannot run during a task. Wait for the answer, or stop the task.",
       buttons: [[{ text: "⏹ Stop the task", data: "/stop" }]],
       edit: false,
     })
-    const { w } = await mk()
-    await menu(w, "Old chat", "Archive")
+    await mk()
+    await menu(user, "Old chat", "Archive")
     expect(runCommand).toHaveBeenCalledWith("/archive s3")
     expect(toast).toHaveBeenCalledWith(
       expect.stringContaining("⏳ **Busy**"),
@@ -236,15 +239,16 @@ describe("SessionsPage", () => {
   })
 
   it("archives by id with an Undo that unarchives", async () => {
+    const user = setup()
     vi.mocked(runCommand).mockResolvedValueOnce({
       request_id: "r",
       text: '🗄 **Archived "Old chat"**\nThe session list does not show it now.',
       buttons: [[{ text: "↩️ Undo", data: "/unarchive s3" }]],
       edit: false,
     })
-    const { w } = await mk()
+    await mk()
     vi.mocked(api).mockClear()
-    await menu(w, "Old chat", "Archive")
+    await menu(user, "Old chat", "Archive")
     expect(toast).toHaveBeenCalledWith(
       expect.stringContaining("Archived"),
       "ok",
@@ -255,72 +259,84 @@ describe("SessionsPage", () => {
   })
 
   it("offers Unarchive and Resume on an archived row", async () => {
-    const { w } = await mk()
-    const tr = w.findAll("tr").find((r) => r.text().includes("Archived chat"))!
-    expect(tr.findAll("button").map((b) => b.text())).toEqual(
+    const user = setup()
+    await mk()
+    const tr = rowOf("Archived chat")
+    expect(names(within(tr).getAllByRole("button"))).toEqual(
       expect.arrayContaining(["Unarchive", "Resume"]),
     )
-    await tr
-      .findAll("button")
-      .find((b) => b.text() === "Unarchive")!
-      .trigger("click")
+    await user.click(within(tr).getByRole("button", { name: "Unarchive" }))
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/unarchive s4")
   })
 
   it("does not go to Chat when the resume is refused", async () => {
+    const user = setup()
     vi.mocked(runCommand).mockResolvedValueOnce({
       request_id: "r",
       text: "⏳ **Busy**\n`/resume` cannot run during a task. Wait for the answer, or stop the task.",
       buttons: [[{ text: "⏹ Stop the task", data: "/stop" }]],
       edit: false,
     })
-    const { w, router } = await mk()
-    await btn(w, "Resume")[0].trigger("click")
+    const { router } = await mk()
+    await user.click(screen.getAllByRole("button", { name: "Resume" })[0])
     await flushPromises()
     expect(router.currentRoute.value.name).toBe("sessions")
   })
 
   it("goes to Chat after a fork from the list", async () => {
+    const user = setup()
     vi.mocked(runCommand).mockResolvedValueOnce({
       request_id: "r",
       text: "🍴 **Copied to a new dashboard session**",
       buttons: [],
       edit: false,
     })
-    const { w, router } = await mk()
-    await menu(w, "Photos", "Fork into dashboard")
+    const { router } = await mk()
+    await menu(user, "Photos", "Fork into dashboard")
     await flushPromises()
     expect(router.currentRoute.value.name).toBe("chat")
   })
 
   it("renames inline with Save, Enter, Esc, and blur", async () => {
-    const { w } = await mk()
-    await menu(w, "Release notes", "Rename")
-    const input = w.find("input[aria-label='New title']")
-    expect(input.attributes("autofocus")).toBeDefined()
-    await input.setValue("Release notes v2")
-    await btn(w, "Save")[0].trigger("click")
+    const user = setup()
+    await mk()
+    await menu(user, "Release notes", "Rename")
+    const input = screen.getByRole("textbox", { name: "New title" })
+    expect(input.hasAttribute("autofocus")).toBe(true)
+    await waitFor(() => expect(document.activeElement).toBe(input))
+    await user.clear(input)
+    await user.type(input, "Release notes v2")
+    await user.click(screen.getByRole("button", { name: "Save" }))
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/rename s1 Release notes v2")
-    await menu(w, "Release notes", "Rename")
-    await w.find("input[aria-label='New title']").trigger("keydown", { key: "Escape" })
-    expect(w.find("input[aria-label='New title']").exists()).toBe(false)
-    await menu(w, "Release notes", "Rename")
-    await w.find("input[aria-label='New title']").trigger("blur")
-    expect(w.find("input[aria-label='New title']").exists()).toBe(false)
+    await menu(user, "Release notes", "Rename")
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "New title" })),
+    )
+    await user.keyboard("{Escape}")
+    expect(screen.queryByRole("textbox", { name: "New title" })).toBeNull()
+    await menu(user, "Release notes", "Rename")
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "New title" })),
+    )
+    await fireEvent.blur(screen.getByRole("textbox", { name: "New title" }))
+    expect(screen.queryByRole("textbox", { name: "New title" })).toBeNull()
   })
 
   it("links each title to its transcript and marks the active session", async () => {
-    const { w } = await mk()
-    expect(w.find("a[href='/sessions/s1']").text()).toBe("Release notes")
-    const active = w.findAll("tr").find((r) => r.text().includes("Release notes"))!
-    expect(active.find(".chip").text()).toBe("active")
+    await mk()
+    expect(screen.getByRole("link", { name: "Release notes" }).getAttribute("href")).toBe(
+      "/sessions/s1",
+    )
+    expect(within(rowOf("Release notes")).getByText("active").getAttribute("data-slot")).toBe(
+      "badge",
+    )
   })
 
   it("hides the Kind column for Chats, shows it for all kinds, and shows the counts", async () => {
-    const { w } = await mk()
-    expect(w.findAll("th").map((t) => t.text())).toEqual([
+    const first = await mk()
+    expect(screen.getAllByRole("columnheader").map((h) => h.textContent!.trim())).toEqual([
       "Session",
       "Source",
       "Started",
@@ -329,55 +345,61 @@ describe("SessionsPage", () => {
       "Cost",
       "",
     ])
-    expect(w.find(".seg").text()).toContain("Active · 4")
-    expect(w.find(".seg").text()).toContain("Archived · 4")
-    expect(w.find(".pager").text()).toContain("Page 1 of 1")
-    const { w: all } = await mk("/sessions?kind=")
-    expect(all.findAll("th").map((t) => t.text())).toContain("Kind")
+    expect(screen.getByRole("button", { name: "Active · 4" })).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Archived · 4" })).toBeTruthy()
+    expect(screen.getByText("Page 1 of 1")).toBeTruthy()
+    first.unmount()
+    cleanup()
+    await mk("/sessions?kind=")
+    expect(screen.getAllByRole("columnheader").map((h) => h.textContent!.trim())).toContain("Kind")
   })
 
   it("gives a read-only row one View button and the fork and export in the menu", async () => {
-    const { w } = await mk()
-    const tr = w.findAll("tr").find((r) => r.text().includes("Photos"))!
-    const plain = tr.findAll("button").filter((b) => b.attributes("aria-label") !== "More actions")
-    expect(plain.map((b) => b.text())).toEqual(["View"])
-    await tr.find("button[aria-label='More actions']").trigger("click")
-    expect(tr.findAll(".menu-item").map((b) => b.text())).toEqual(["Fork into dashboard", "Export"])
+    const user = setup()
+    await mk()
+    const tr = rowOf("Photos")
+    const plain = within(tr)
+      .getAllByRole("button")
+      .filter((b) => b.getAttribute("aria-label") !== "More actions")
+    expect(names(plain)).toEqual(["View"])
+    await user.click(within(tr).getByRole("button", { name: "More actions" }))
+    expect(names(await screen.findAllByRole("menuitem"))).toEqual(["Fork into dashboard", "Export"])
   })
 
   it("cuts a long title with the full title in the tooltip", async () => {
-    const { w } = await mk()
-    const a = w.find("a[href='/sessions/s1']")
-    expect(a.classes()).toContain("cell-title")
-    expect(a.attributes("title")).toBe("Release notes")
+    await mk()
+    const a = screen.getByRole("link", { name: "Release notes" })
+    expect(a.classList.contains("truncate")).toBe(true)
+    expect(a.getAttribute("title")).toBe("Release notes")
   })
 
   it("styles the filter selects as inputs", async () => {
-    const { w } = await mk()
-    expect(w.find("select[aria-label='Source']").classes()).toContain("input")
-    expect(w.find("select[aria-label='Kind']").classes()).toContain("input")
+    await mk()
+    for (const name of ["Source", "Kind"])
+      expect(screen.getByRole("combobox", { name }).getAttribute("data-slot")).toBe("native-select")
   })
 
   it("shows short dates on one line with the full date in the tooltip", async () => {
-    const { w } = await mk()
-    const tds = w.findAll("tbody tr")[0].findAll("td")
-    const started = tds[2].find("span")
-    expect(started.text()).toBe(shortTime("2026-11-19T09:00:00Z"))
-    expect(started.attributes("title")).toBe(fullTime("2026-11-19T09:00:00Z"))
-    expect(started.attributes("style")).toContain("white-space: nowrap")
-    expect(tds[3].find("span").text()).toBe(shortTime("2026-11-20T09:00:00Z"))
+    await mk()
+    const row1 = screen.getAllByRole("row")[1]
+    const started = within(row1).getByTitle(fullTime("2026-11-19T09:00:00Z"))
+    expect(started.textContent).toBe(shortTime("2026-11-19T09:00:00Z"))
+    expect(started.classList.contains("whitespace-nowrap")).toBe(true)
+    expect(within(row1).getByTitle(fullTime("2026-11-20T09:00:00Z")).textContent).toBe(
+      shortTime("2026-11-20T09:00:00Z"),
+    )
   })
 
   it("isolates the source label and keeps its full text in the tooltip", async () => {
-    const { w } = await mk()
-    const tr = w.findAll("tr").find((r) => r.text().includes("Photos"))!
-    const bdi = tr.find("bdi")
-    expect(bdi.text()).toBe("Telegram › DM")
-    expect(bdi.attributes("title")).toBe("Telegram › DM")
-    expect(bdi.classes()).toContain("cell-title")
+    await mk()
+    const bdi = within(rowOf("Photos")).getByText("Telegram › DM")
+    expect(bdi.tagName).toBe("BDI")
+    expect(bdi.getAttribute("title")).toBe("Telegram › DM")
+    expect(bdi.classList.contains("truncate")).toBe(true)
   })
 
   it("asks the confirm of /delete before it deletes", async () => {
+    const user = setup()
     vi.mocked(runCommand)
       .mockResolvedValueOnce({
         request_id: "r",
@@ -386,8 +408,8 @@ describe("SessionsPage", () => {
         edit: false,
       })
       .mockResolvedValueOnce({ request_id: "r2", text: "🗑 Deleted.", buttons: [], edit: false })
-    const { w } = await mk()
-    await menu(w, "Old chat", "Delete…")
+    await mk()
+    await menu(user, "Old chat", "Delete…")
     expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ confirmLabel: "🗑 Delete" }))
     expect(runCommand).toHaveBeenLastCalledWith("/delete s3 confirm")
   })
@@ -397,6 +419,10 @@ describe("SessionsPage", () => {
     const createURL = URL.createObjectURL
     const revokeURL = URL.revokeObjectURL
     try {
+      const user = userEvent.setup({
+        advanceTimers: vi.advanceTimersByTime,
+        pointerEventsCheck: 0,
+      })
       const revoke = vi.fn()
       URL.createObjectURL = vi.fn(() => "blob:x")
       URL.revokeObjectURL = revoke
@@ -405,20 +431,14 @@ describe("SessionsPage", () => {
         vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["x"]) })),
       )
       const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {})
-      const { w } = await mk()
-      const tr = w.findAll("tr").find((r: any) => r.text().includes("Photos"))!
-      await tr.find("button[aria-label='More actions']").trigger("click")
-      await tr
-        .findAll(".menu-item")
-        .find((b: any) => b.text() === "Export")!
-        .trigger("click")
+      await mk()
+      await menu(user, "Photos", "Export")
       await vi.advanceTimersByTimeAsync(0)
       expect(click).toHaveBeenCalled()
       expect(revoke).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(30_000)
       expect(revoke).toHaveBeenCalledWith("blob:x")
       click.mockRestore()
-      w.unmount()
     } finally {
       URL.createObjectURL = createURL
       URL.revokeObjectURL = revokeURL
@@ -438,88 +458,97 @@ describe("SessionsPage", () => {
     )
     vi.useFakeTimers()
     try {
-      const { w } = await mk()
-      await w.find("input[type='checkbox']").setValue(true)
-      await w.find("input[type='search']").setValue("flaky")
+      const user = userEvent.setup({
+        advanceTimers: vi.advanceTimersByTime,
+        pointerEventsCheck: 0,
+      })
+      await mk()
+      await user.click(screen.getByRole("checkbox", { name: "Full text" }))
+      await user.type(screen.getByRole("searchbox", { name: "Search all messages" }), "flaky")
       await vi.advanceTimersByTimeAsync(300)
       await flushPromises()
       expect(api).toHaveBeenCalledWith(
         "GET",
         "/api/search?q=flaky&limit=20&offset=0&source=&kind=chat&archived=0",
       )
-      expect(w.find("table").exists()).toBe(false)
-      expect(w.text()).toContain("20 hits")
-      await btn(w, "Load more")[0].trigger("click")
+      expect(screen.queryByRole("table")).toBeNull()
+      expect(screen.getByText("20 hits")).toBeTruthy()
+      await user.click(screen.getByRole("button", { name: "Load more" }))
       await flushPromises()
       expect(api).toHaveBeenCalledWith(
         "GET",
         "/api/search?q=flaky&limit=20&offset=20&source=&kind=chat&archived=0",
       )
-      expect(w.text()).toContain("21 hits")
-      expect(btn(w, "Load more")).toHaveLength(0)
+      expect(screen.getByText("21 hits")).toBeTruthy()
+      expect(screen.queryByRole("button", { name: "Load more" })).toBeNull()
     } finally {
       vi.useRealTimers()
     }
   })
 
   it("renders the match markers as mark elements", async () => {
+    const user = setup()
     vi.mocked(api).mockImplementation(
       async (_m: string, p: string) =>
         (p.startsWith("/api/search") ? [hit({ snippet: "<b>x</b> [flaky] test" })] : page) as any,
     )
-    const { w } = await mk("/sessions?q=flaky")
-    await w.find("input[type='checkbox']").setValue(true)
+    const { container } = await mk("/sessions?q=flaky")
+    await user.click(screen.getByRole("checkbox", { name: "Full text" }))
     await flushPromises()
-    const marks = w.findAll(".hits mark").map((m) => m.text())
-    expect(marks).toEqual(["flaky"])
+    expect(Array.from(container.querySelectorAll("mark")).map((m) => m.textContent)).toEqual([
+      "flaky",
+    ])
     // The snippet is text, so a tag in it shows as typed.
-    expect(w.find(".hits").text()).toContain("<b>x</b>")
+    expect(screen.getByRole("link", { name: /Release notes/ }).textContent).toContain("<b>x</b>")
   })
 
   it("puts a space between the title and the snippet of a hit", async () => {
+    const user = setup()
     vi.mocked(api).mockImplementation(
       async (_m: string, p: string) => (p.startsWith("/api/search") ? [hit({})] : page) as any,
     )
-    const { w } = await mk("/sessions?q=flaky")
-    await w.find("input[type='checkbox']").setValue(true)
+    await mk("/sessions?q=flaky")
+    await user.click(screen.getByRole("checkbox", { name: "Full text" }))
     await flushPromises()
-    expect(w.find(".hits .li .grow").text().replace(/\s+/g, " ")).toBe(
-      "Release notes the flaky test in cron",
-    )
+    expect(
+      screen.getByRole("link", { name: /Release notes/ }).textContent!.replace(/\s+/g, " "),
+    ).toContain("Release notes the flaky test in cron")
   })
 
   it("shows a search error under the box and keeps the list", async () => {
+    const user = setup()
     vi.mocked(api).mockImplementation(async (_m: string, p: string) => {
       if (p.startsWith("/api/search")) throw new TypeError("Failed to fetch")
       return page as any
     })
-    const { w } = await mk("/sessions?q=flaky")
-    await w.find("input[type='checkbox']").setValue(true)
+    await mk("/sessions?q=flaky")
+    await user.click(screen.getByRole("checkbox", { name: "Full text" }))
     await flushPromises()
-    expect(w.find(".search-err").text()).toBe(
+    const alerts = screen.getAllByRole("alert")
+    expect(alerts).toHaveLength(1)
+    expect(alerts[0].textContent).toBe(
       "Search failed: Cannot reach the gateway. Check the network, then try again.",
     )
-    expect(
-      w.findComponent(StateBlock).exists() && w.findComponent(StateBlock).props("state"),
-    ).not.toBe("error")
   })
 
   it("reads the filters from the route query and writes them back", async () => {
-    const { w, router } = await mk("/sessions?q=flaky&src=telegram&kind=&arch=1&off=50")
+    const user = setup()
+    const { router } = await mk("/sessions?q=flaky&src=telegram&kind=&arch=1&off=50")
     expect(api).toHaveBeenCalledWith(
       "GET",
       "/api/sessions?source=telegram&kind=&search=flaky&archived=1&limit=50&offset=50",
     )
-    await w.find("select[aria-label='Source']").setValue("cli")
+    await user.selectOptions(screen.getByRole("combobox", { name: "Source" }), "cli")
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({ q: "flaky", src: "cli", kind: "", arch: "1" })
   })
 
   it("sets Kind to all when the source is Cron", async () => {
-    const { w } = await mk()
-    await w.find("select[aria-label='Source']").setValue("cron")
+    const user = setup()
+    await mk()
+    await user.selectOptions(screen.getByRole("combobox", { name: "Source" }), "cron")
     await flushPromises()
-    expect((w.find("select[aria-label='Kind']").element as HTMLSelectElement).value).toBe("")
+    expect((screen.getByRole("combobox", { name: "Kind" }) as HTMLSelectElement).value).toBe("")
     expect(api).toHaveBeenCalledWith(
       "GET",
       expect.stringContaining("/api/sessions?source=cron&kind=&"),
@@ -527,6 +556,7 @@ describe("SessionsPage", () => {
   })
 
   it("drops a reply that comes after a newer one", async () => {
+    const user = setup()
     const first = deferred<unknown>()
     let n = 0
     vi.mocked(api).mockImplementation(async (_m: string, p: string) => {
@@ -535,22 +565,21 @@ describe("SessionsPage", () => {
       if (n === 1) return first.p as any
       return { total: 1, rows: [row({ id: "t1", title: "From Telegram" })] } as any
     })
-    const { w } = await mk()
-    await w.find("select[aria-label='Source']").setValue("telegram")
+    await mk()
+    await user.selectOptions(screen.getByRole("combobox", { name: "Source" }), "telegram")
     await flushPromises()
     first.resolve(page)
     await flushPromises()
-    expect(w.text()).toContain("From Telegram")
-    expect(w.text()).not.toContain("Old chat")
+    expect(screen.getByText("From Telegram")).toBeTruthy()
+    expect(screen.queryByText("Old chat")).toBeNull()
   })
 
   it("offers Clear filters when the filters match nothing", async () => {
+    const user = setup()
     vi.mocked(api).mockResolvedValue({ total: 0, rows: [] })
-    const { w, router } = await mk("/sessions?src=cli")
-    expect(w.text()).toContain("No sessions match the filters.")
-    w.findAllComponents(StateBlock)
-      .find((s) => s.props("action") === "Clear filters")!
-      .vm.$emit("action")
+    const { router } = await mk("/sessions?src=cli")
+    expect(screen.getByText("No sessions match the filters.")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Clear filters" }))
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({})
     expect(api).toHaveBeenCalledWith(

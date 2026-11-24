@@ -1,7 +1,8 @@
-import { mount } from "@vue/test-utils"
-import { afterEach, describe, expect, it } from "vitest"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { describe, expect, it } from "vitest"
+import { nextTick } from "vue"
 import Tabs from "./Tabs.vue"
-import tabsSource from "./Tabs.vue?raw"
 
 const tabs = [
   { id: "modes", label: "Modes" },
@@ -9,89 +10,90 @@ const tabs = [
   { id: "log", label: "Approval log" },
 ]
 
-// Mounts the tabs. The update handler writes the new value back, the same as v-model.
+// Renders the tabs. The update handler writes the new value back, the same as v-model.
 function mk(value = "modes", slot = true) {
-  let w!: ReturnType<typeof mount>
-  w = mount(Tabs, {
+  const r = render(Tabs, {
     props: {
       tabs,
       modelValue: value,
-      "onUpdate:modelValue": (v: string) => void w.setProps({ modelValue: v }),
+      "onUpdate:modelValue": (v: string) => void r.rerender({ modelValue: v }),
     },
-    slots: slot ? { default: '<p class="body">content</p>' } : {},
-    attachTo: document.body,
+    slots: slot ? { default: "<p>content</p>" } : {},
   })
-  return w
+  return r
 }
-
-afterEach(() => (document.body.innerHTML = ""))
+const tabEls = () => screen.getAllByRole("tab")
+const last = (r: ReturnType<typeof mk>) => r.emitted()["update:modelValue"]?.at(-1)
 
 describe("Tabs", () => {
-  it("renders a tab list with the selected tab", () => {
-    const w = mk("grants")
-    expect(w.find(".tabs").attributes("role")).toBe("tablist")
-    const t = w.findAll('[role="tab"]')
-    expect(t.map((x) => x.text())).toEqual(["Modes", "Always answers", "Approval log"])
-    expect(t.map((x) => x.attributes("aria-selected"))).toEqual(["false", "true", "false"])
-    expect(t.map((x) => x.attributes("tabindex"))).toEqual(["-1", "0", "-1"])
-    expect(t[1].classes()).toContain("is-on")
+  it("renders a tab list with the selected tab", async () => {
+    mk("grants")
+    await nextTick()
+    const list = screen.getByRole("tablist")
+    expect(list.className).toContain("max-tab:flex-wrap")
+    expect(tabEls().map((x) => x.textContent?.trim())).toEqual([
+      "Modes",
+      "Always answers",
+      "Approval log",
+    ])
+    expect(tabEls().map((x) => x.getAttribute("aria-selected"))).toEqual(["false", "true", "false"])
+    // Reka makes the list the tab stop. The focus then goes to the selected tab.
+    expect(list.getAttribute("tabindex")).toBe("0")
+    tabEls()[1].focus()
+    await nextTick()
+    expect(tabEls().map((x) => x.getAttribute("tabindex"))).toEqual(["-1", "0", "-1"])
+    expect(tabEls()[1].getAttribute("data-state")).toBe("active")
   })
 
-  it("shows the count of a tab as a badge", () => {
-    const w = mk("modes")
-    w.setProps({
+  it("shows the count of a tab as a badge", async () => {
+    const r = mk("modes")
+    await r.rerender({
       tabs: [
         { id: "modes", label: "Modes" },
         { id: "grants", label: "Always", count: 0 },
       ],
     })
-    return w.vm.$nextTick().then(() => {
-      const t = w.findAll('[role="tab"]')
-      expect(t[0].find(".badge").exists()).toBe(false)
-      expect(t[1].find(".badge").text()).toBe("0")
-    })
+    expect(tabEls()[0].querySelector('[data-slot="badge"]')).toBeNull()
+    expect(within(tabEls()[1]).getByText("0").getAttribute("data-slot")).toBe("badge")
   })
 
-  it("links the selected tab and the panel", () => {
-    const w = mk("grants")
-    const tab = w.findAll('[role="tab"]')[1]
-    const panel = w.find('[role="tabpanel"]')
-    expect(tab.attributes("aria-controls")).toBe(panel.attributes("id"))
-    expect(panel.attributes("aria-labelledby")).toBe(tab.attributes("id"))
-    expect(panel.find(".body").exists()).toBe(true)
+  it("links the selected tab and the panel", async () => {
+    mk("grants")
+    await nextTick()
+    const tab = tabEls()[1]
+    const panel = screen.getByRole("tabpanel")
+    expect(tab.getAttribute("aria-controls")).toBe(panel.id)
+    expect(panel.getAttribute("aria-labelledby")).toBe(tab.id)
+    expect(within(panel).getByText("content")).toBeTruthy()
   })
 
   it("has no panel and no aria-controls with no slot", () => {
-    const w = mk("modes", false)
-    expect(w.find('[role="tabpanel"]').exists()).toBe(false)
-    expect(w.findAll('[role="tab"]')[0].attributes("aria-controls")).toBeUndefined()
+    mk("modes", false)
+    expect(screen.queryByRole("tabpanel")).toBeNull()
+    expect(tabEls()[0].hasAttribute("aria-controls")).toBe(false)
   })
 
   it("selects a tab on a click", async () => {
-    const w = mk("modes")
-    await w.findAll('[role="tab"]')[2].trigger("click")
-    expect(w.emitted("update:modelValue")).toEqual([["log"]])
+    const user = userEvent.setup()
+    const r = mk("modes")
+    await user.click(tabEls()[2])
+    expect(r.emitted()["update:modelValue"]).toEqual([["log"]])
   })
 
   it("moves with the arrow keys, Home, and End, and moves the focus", async () => {
-    const w = mk("modes")
-    const t = () => w.findAll('[role="tab"]')
-    await t()[0].trigger("keydown", { key: "ArrowRight" })
-    expect(w.emitted("update:modelValue")!.at(-1)).toEqual(["grants"])
-    expect(document.activeElement).toBe(t()[1].element)
-    await t()[1].trigger("keydown", { key: "ArrowLeft" })
-    expect(w.emitted("update:modelValue")!.at(-1)).toEqual(["modes"])
-    await t()[0].trigger("keydown", { key: "ArrowLeft" })
-    expect(w.emitted("update:modelValue")!.at(-1)).toEqual(["log"])
-    await t()[2].trigger("keydown", { key: "Home" })
-    expect(w.emitted("update:modelValue")!.at(-1)).toEqual(["modes"])
-    await t()[0].trigger("keydown", { key: "End" })
-    expect(w.emitted("update:modelValue")!.at(-1)).toEqual(["log"])
-  })
-
-  it("wraps the tabs below 600 px", () => {
-    const src = tabsSource.replace(/\s+/g, " ")
-    expect(src).toMatch(/@media \(max-width: 599px\) \{ \.tabs \{[^}]*flex-wrap: wrap/)
-    expect(src).toMatch(/@media \(max-width: 599px\) \{ \.tabs \{[^}]*overflow-x: visible/)
+    const user = userEvent.setup()
+    const r = mk("modes")
+    tabEls()[0].focus()
+    await user.keyboard("{ArrowRight}")
+    expect(last(r)).toEqual(["grants"])
+    expect(document.activeElement).toBe(tabEls()[1])
+    await user.keyboard("{ArrowLeft}")
+    expect(last(r)).toEqual(["modes"])
+    await user.keyboard("{ArrowLeft}")
+    expect(last(r)).toEqual(["log"])
+    await user.keyboard("{Home}")
+    expect(last(r)).toEqual(["modes"])
+    await user.keyboard("{End}")
+    expect(last(r)).toEqual(["log"])
   })
 })

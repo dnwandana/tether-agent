@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -77,18 +79,17 @@ async function mk() {
     ],
   })
   await router.push("/goals")
-  const w = mount(GoalsPage, { global: { plugins: [router], stubs: { teleport: true } } })
+  const r = render(GoalsPage, { global: { plugins: [router] } })
   await flushPromises()
-  return { w, router }
+  return { ...r, router }
 }
-const rowOf = (w: any, goalText: string) =>
-  w.findAll("tr").find((r: any) => r.text().includes(goalText))!
-const rowBtn = (w: any, goalText: string, label: string) =>
-  rowOf(w, goalText)
-    .findAll("button")
-    .find((b: any) => b.text() === label)
-
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)
+const rowOf = (text: string) =>
+  screen.getAllByRole("row").find((r) => r.textContent!.includes(text))!
+const rowBtn = (text: string, label: string) =>
+  within(rowOf(text)).queryByRole("button", { name: label })
+const filterGroup = () =>
+  screen.getByRole("button", { name: "All open" }).closest('[role="group"]') as HTMLElement
+const setup = () => userEvent.setup({ pointerEventsCheck: 0 })
 
 beforeEach(() => {
   vi.mocked(api).mockReset().mockResolvedValue(list)
@@ -101,22 +102,20 @@ beforeEach(() => {
 
 describe("GoalsPage", () => {
   it("lists the goals with the session title", async () => {
-    const { w } = await mk()
+    await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/goals")
-    expect(w.text()).toContain("Dashboard · “Release notes for v0.24” · 8/20 turns")
-    expect(w.text()).toContain("Telegram · “Photos to the NAS” · 8/20 turns · waits on pid 48211")
-    expect(w.text()).toContain("parked")
+    expect(screen.getByText("Dashboard · “Release notes for v0.24” · 8/20 turns")).toBeTruthy()
+    expect(
+      screen.getByText("Telegram · “Photos to the NAS” · 8/20 turns · waits on pid 48211"),
+    ).toBeTruthy()
+    expect(screen.getByText("parked")).toBeTruthy()
   })
 
   it("asks before Clear", async () => {
+    const user = setup()
     vi.mocked(confirm).mockResolvedValue(false)
-    const { w } = await mk()
-    await w
-      .findAll("tr")
-      .find((r) => r.text().includes("Ship v0.24"))!
-      .findAll("button")
-      .find((b) => b.text() === "Clear")!
-      .trigger("click")
+    await mk()
+    await user.click(rowBtn("Ship v0.24", "Clear")!)
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Clear the goal?",
@@ -128,101 +127,101 @@ describe("GoalsPage", () => {
   })
 
   it("shows one control for the open filters and the finished goals", async () => {
-    const { w } = await mk()
-    expect(w.findAll(".seg")).toHaveLength(1)
-    expect(w.findAll(".seg button").map((b: any) => b.text())).toEqual([
-      "All open",
-      "Active",
-      "Parked",
-      "Paused",
-      "Finished (30 d)",
-    ])
-    await btn(w, "Finished (30 d)")!.trigger("click")
+    const user = setup()
+    const { container } = await mk()
+    expect(container.querySelectorAll('[data-slot="toggle-group"]')).toHaveLength(1)
+    expect(
+      within(filterGroup())
+        .getAllByRole("button")
+        .map((b) => b.textContent!.trim()),
+    ).toEqual(["All open", "Active", "Parked", "Paused", "Finished (30 d)"])
+    await user.click(screen.getByRole("button", { name: "Finished (30 d)" }))
     await flushPromises()
     expect(api).toHaveBeenLastCalledWith("GET", "/api/goals?finished=1")
-    expect(btn(w, "Finished (30 d)")!.attributes("aria-pressed")).toBe("true")
-    expect(w.text()).toContain("Last goal of each session")
-    await btn(w, "Parked")!.trigger("click")
+    expect(
+      screen.getByRole("button", { name: "Finished (30 d)" }).getAttribute("aria-pressed"),
+    ).toBe("true")
+    expect(screen.getByText("Last goal of each session")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Parked" }))
     await flushPromises()
     expect(api).toHaveBeenLastCalledWith("GET", "/api/goals")
-    expect(w.text()).not.toContain("Last goal of each session")
-    expect(w.text()).toContain("Migrate photos")
-    expect(w.text()).not.toContain("Ship v0.24")
+    expect(screen.queryByText("Last goal of each session")).toBeNull()
+    expect(screen.getByText("Migrate photos")).toBeTruthy()
+    expect(screen.queryByText("Ship v0.24 with green tests")).toBeNull()
   })
 
   it("does not load again for a filter of the open goals", async () => {
-    const { w } = await mk()
+    const user = setup()
+    await mk()
     vi.mocked(api).mockClear()
-    await btn(w, "Active")!.trigger("click")
+    await user.click(screen.getByRole("button", { name: "Active" }))
     await flushPromises()
     expect(api).not.toHaveBeenCalled()
   })
 
   it("shows the last turn in the short format inside a page stack", async () => {
-    const { w } = await mk()
-    expect(w.find(".page-stack").exists()).toBe(true)
-    const cell = rowOf(w, "Ship v0.24").find(`[title="${fullTime("2026-11-20T09:30:00Z")}"]`)
-    expect(cell.text()).toBe(shortTime("2026-11-20T09:30:00Z"))
-    expect(rowOf(w, "Migrate photos").text()).toContain("—")
+    await mk()
+    const cell = within(rowOf("Ship v0.24")).getByTitle(fullTime("2026-11-20T09:30:00Z"))
+    expect(cell.textContent).toBe(shortTime("2026-11-20T09:30:00Z"))
+    expect(rowOf("Migrate photos").textContent).toContain("—")
   })
 
   it("shows the Last verdict and Last turn columns", async () => {
-    const { w } = await mk()
-    const heads = w.findAll("th").map((t) => t.text())
+    await mk()
+    const heads = screen.getAllByRole("columnheader").map((t) => t.textContent!.trim())
     expect(heads).toEqual(expect.arrayContaining(["Last verdict", "Last turn"]))
-    expect(rowOf(w, "Ship v0.24").text()).toContain("continue")
+    expect(rowOf("Ship v0.24").textContent).toContain("continue")
   })
 
   it("gives Pause and Clear to dashboard and Telegram rows", async () => {
-    const { w } = await mk()
-    await rowBtn(w, "Ship v0.24", "⏸ Pause")!.trigger("click")
+    const user = setup()
+    await mk()
+    await user.click(rowBtn("Ship v0.24", "⏸ Pause")!)
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal pause")
-    await rowBtn(w, "Migrate photos", "⏸ Pause")!.trigger("click")
+    await user.click(rowBtn("Migrate photos", "⏸ Pause")!)
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal pause --session s2")
     vi.mocked(confirm).mockResolvedValue(true)
-    await rowBtn(w, "Migrate photos", "Clear")!.trigger("click")
+    await user.click(rowBtn("Migrate photos", "Clear")!)
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal clear --session s2")
   })
 
   it("keeps Resume and Unwait on the active dashboard session only", async () => {
+    const user = setup()
     vi.mocked(api).mockResolvedValue([
       { ...list[0], waiting: true, wait_target: "pid 7" },
       { ...list[1], status: "paused", waiting: false },
     ])
-    const { w } = await mk()
-    await rowBtn(w, "Ship v0.24", "Unwait")!.trigger("click")
+    await mk()
+    await user.click(rowBtn("Ship v0.24", "Unwait")!)
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal unwait")
-    expect(rowBtn(w, "Migrate photos", "▶ Resume")).toBeUndefined()
-    expect(rowBtn(w, "Migrate photos", "Clear")).toBeDefined()
+    expect(rowBtn("Migrate photos", "▶ Resume")).toBeNull()
+    expect(rowBtn("Migrate photos", "Clear")).not.toBeNull()
   })
 
   it("shows a CLI goal as view only", async () => {
-    const { w } = await mk()
-    const cli = rowOf(w, "Free 20 GB")
-    expect(cli.findAll("button")).toHaveLength(0)
-    expect(cli.text()).toContain("view only")
-    expect(cli.text()).toContain("Open session")
+    await mk()
+    const cli = rowOf("Free 20 GB")
+    expect(within(cli).queryAllByRole("button")).toHaveLength(0)
+    expect(cli.textContent).toContain("view only")
+    expect(within(cli).getByRole("link", { name: "Open session" }).getAttribute("href")).toBe(
+      "/sessions/s3",
+    )
   })
 
   it("filters the open goals by state", async () => {
-    const { w } = await mk()
-    await w
-      .findAll(".seg button")
-      .find((b) => b.text() === "Parked")!
-      .trigger("click")
-    expect(w.text()).toContain("Migrate photos")
-    expect(w.text()).not.toContain("Ship v0.24")
-    expect(w.text()).not.toContain("Free 20 GB")
-    await w
-      .findAll(".seg button")
-      .find((b) => b.text() === "Paused")!
-      .trigger("click")
-    expect(w.text()).toContain("Free 20 GB")
-    expect(w.text()).not.toContain("Migrate photos")
+    const user = setup()
+    await mk()
+    await user.click(within(filterGroup()).getByRole("button", { name: "Parked" }))
+    expect(screen.getByText("Migrate photos")).toBeTruthy()
+    expect(screen.queryByText("Ship v0.24 with green tests")).toBeNull()
+    expect(screen.queryByText("Free 20 GB")).toBeNull()
+    await user.click(within(filterGroup()).getByRole("button", { name: "Paused" }))
+    expect(screen.getByText("Free 20 GB")).toBeTruthy()
+    expect(screen.queryByText("Migrate photos")).toBeNull()
   })
 
   it("loads again on the goal.state event", async () => {
@@ -234,12 +233,11 @@ describe("GoalsPage", () => {
   })
 
   it("shows No open goals with Open chat", async () => {
+    const user = setup()
     vi.mocked(api).mockResolvedValue([])
-    const { w, router } = await mk()
-    expect(w.text()).toContain("No open goals.")
-    w.findAllComponents({ name: "StateBlock" })
-      .find((s) => s.props("action") === "Open chat")!
-      .vm.$emit("action")
+    const { router } = await mk()
+    expect(screen.getByText("No open goals.")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Open chat" }))
     await flushPromises()
     expect(router.currentRoute.value.name).toBe("chat")
   })

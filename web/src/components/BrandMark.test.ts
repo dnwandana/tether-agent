@@ -5,7 +5,7 @@ import BrandMark from "./BrandMark.vue"
 describe("BrandMark", () => {
   it("draws the T-hook path and the dot in currentColor on a hidden tile", () => {
     const w = mount(BrandMark)
-    const tile = w.find("span.rail-mark")
+    const tile = w.find('span[data-slot="brand-mark"]')
     expect(tile.exists()).toBe(true)
     expect(tile.attributes("aria-hidden")).toBe("true")
     const svg = tile.find("svg")

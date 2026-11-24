@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { defineComponent, h as hv } from "vue"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 const h = vi.hoisted(() => ({
@@ -41,8 +44,6 @@ vi.mock("../lib/live", async () => {
 })
 import { api } from "../api/client"
 import { confirm, toast, ui } from "../stores/ui"
-import FileViewer from "../components/FileViewer.vue"
-import ResultNote from "../components/ResultNote.vue"
 import SkillDetailPage from "./SkillDetailPage.vue"
 import { fullTime, shortTime } from "../lib/time"
 
@@ -95,6 +96,23 @@ const task = (o: object) => ({
   ...o,
 })
 
+// Keeps the last props of the stubbed children.
+const seen: { note: any; file: any } = { note: null, file: null }
+const NoteStub = defineComponent({
+  name: "ResultNote",
+  props: ["note"],
+  setup(p) {
+    return () => ((seen.note = p.note), p.note ? hv("div", p.note.text) : null)
+  },
+})
+const FileStub = defineComponent({
+  name: "FileViewer",
+  props: ["skill", "path", "line"],
+  setup(p) {
+    return () => ((seen.file = { skill: p.skill, path: p.path, line: p.line }), hv("div"))
+  },
+})
+
 async function mk() {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -104,20 +122,42 @@ async function mk() {
     ],
   })
   await router.push("/skills/release-notes")
-  const w = mount(SkillDetailPage, {
-    global: { plugins: [router], stubs: { LiveHeader: true, FileViewer: true } },
+  const user = userEvent.setup()
+  const r = render(SkillDetailPage, {
+    global: {
+      plugins: [router],
+      stubs: { LiveHeader: true, FileViewer: FileStub, ResultNote: NoteStub },
+    },
   })
   await flushPromises()
-  return Object.assign(w, { router })
+  return { ...r, router, user }
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
-const note = (w: any) => w.findComponent(ResultNote).props("note")
+const btn = (name: string) => screen.getByRole("button", { name })
+const note = () => seen.note
+const bodyRows = () =>
+  screen.getAllByRole("row").filter((r) => within(r).queryAllByRole("cell").length > 0)
+const tone = (el: HTMLElement) => el.closest("[data-tone]")?.getAttribute("data-tone")
+// The h1 of the page. The Markdown of SKILL.md can hold its own h1.
+const pageTitle = () =>
+  screen.getAllByRole("heading", { level: 1 }).find((x) => !x.closest(".typeset"))!
+// The buttons of the page header: the row that holds the h1.
+const headerButtons = () =>
+  within(pageTitle().parentElement!)
+    .queryAllByRole("button")
+    .map((b) => b.textContent!.trim())
+const text = () => document.body.textContent!.replace(/\s+/g, " ")
 const end = async (t: object) => {
   h.follow.get("t1")!(task(t))
   await flushPromises()
 }
+const click = async (user: ReturnType<typeof userEvent.setup>, name: string) => {
+  await user.click(btn(name))
+  await flushPromises()
+}
 
 beforeEach(() => {
+  seen.note = null
+  seen.file = null
   h.follow.clear()
   h.live = null
   ui.trayOpen = false
@@ -153,22 +193,25 @@ describe("SkillDetailPage", () => {
     vi.mocked(api).mockResolvedValue(
       view({ findings: [finding("critical"), finding("high"), finding("medium")] }),
     )
-    const w = await mk()
-    const chips = w.findAll("td .chip").map((c) => [c.text(), c.classes().includes("chip-bad")])
-    expect(chips).toEqual([
+    await mk()
+    const rows = bodyRows()
+    expect(rows).toHaveLength(3)
+    const badges = rows.map((r) => {
+      const b = r.querySelector<HTMLElement>("[data-tone]")!
+      return [b.textContent!.trim(), tone(b) === "bad"]
+    })
+    expect(badges).toEqual([
       ["critical", true],
       ["high", true],
       ["medium", false],
     ])
-    expect(w.findAll("tbody tr")).toHaveLength(3)
   })
 
   it("shows the error text of a failed task in a result note", async () => {
-    const w = await mk()
-    await btn(w, "Update").trigger("click")
-    await flushPromises()
+    const { user } = await mk()
+    await click(user, "Update")
     await end({ state: "error", text: "network down" })
-    expect(note(w)).toMatchObject({ title: "/release-notes", kind: "error", text: "network down" })
+    expect(note()).toMatchObject({ title: "/release-notes", kind: "error", text: "network down" })
   })
 
   it("reloads the detail only at the end of a skills task", async () => {
@@ -181,26 +224,16 @@ describe("SkillDetailPage", () => {
   })
 
   it("opens a support file in the viewer", async () => {
-    const w = await mk()
-    await btn(w, "scripts/notes.sh").trigger("click")
-    await flushPromises()
-    expect(w.findComponent(FileViewer).props()).toEqual({
-      skill: "release-notes",
-      path: "scripts/notes.sh",
-      line: null,
-    })
+    const { user } = await mk()
+    await click(user, "scripts/notes.sh")
+    expect(seen.file).toEqual({ skill: "release-notes", path: "scripts/notes.sh", line: null })
   })
 
   it("links a finding to its line and shows its pattern", async () => {
-    const w = await mk()
-    expect(w.text()).toContain("cron_persistence")
-    await btn(w, "SKILL.md:41").trigger("click")
-    await flushPromises()
-    expect(w.findComponent(FileViewer).props()).toEqual({
-      skill: "release-notes",
-      path: "SKILL.md",
-      line: 41,
-    })
+    const { user } = await mk()
+    expect(screen.getByText("cron_persistence")).toBeTruthy()
+    await click(user, "SKILL.md:41")
+    expect(seen.file).toEqual({ skill: "release-notes", path: "SKILL.md", line: 41 })
   })
 
   it("shows the description, the env, the run line, the override, and the unscanned files", async () => {
@@ -208,22 +241,20 @@ describe("SkillDetailPage", () => {
       async (m: string, p: string) =>
         (p.startsWith("/api/tasks") ? [] : view({ override: true })) as any,
     )
-    const w = await mk()
-    expect(w.text()).toContain("Writes the release notes.")
-    expect(w.text()).toContain("Needs: GH_TOKEN")
-    expect(w.text()).toContain("Run it in chat: /release-notes")
-    expect(w.find(".chip-warn").text()).toBe("Owner override")
-    expect(w.text()).toContain("Not scanned: big.bin")
+    await mk()
+    expect(text()).toContain("Writes the release notes.")
+    expect(text()).toContain("Needs: GH_TOKEN")
+    expect(text()).toContain("Run it in chat: /release-notes")
+    expect(tone(screen.getByText("Owner override"))).toBe("warn")
+    expect(text()).toContain("Not scanned: big.bin")
   })
 
   it("offers Update anyway after a caution refusal and posts force", async () => {
-    const w = await mk()
-    await btn(w, "Update").trigger("click")
-    await flushPromises()
+    const { user } = await mk()
+    await click(user, "Update")
     await end({ state: "error", code: "need_force", text: "caution: 1 finding" })
-    expect(note(w)).toMatchObject({ kind: "warn", text: "caution: 1 finding" })
-    await btn(w, "Update anyway…").trigger("click")
-    await flushPromises()
+    expect(note()).toMatchObject({ kind: "warn", text: "caution: 1 finding" })
+    await click(user, "Update anyway…")
     expect(confirm).toHaveBeenCalledWith({
       title: "Update /release-notes anyway?",
       body: "The skill guard rated it caution. A confirm card follows in ⏳ Waiting.",
@@ -234,33 +265,31 @@ describe("SkillDetailPage", () => {
   })
 
   it("opens the terminal panel after a dangerous refusal", async () => {
-    const w = await mk()
-    await btn(w, "Update").trigger("click")
-    await flushPromises()
+    const { user } = await mk()
+    await click(user, "Update")
     await end({ state: "error", code: "need_override", text: "dangerous: 2 findings" })
-    expect(w.text()).toContain("tether skills update release-notes")
-    expect(w.text()).toContain("The terminal asks you to type the name of the skill.")
-    expect(w.text()).not.toContain("--force")
+    expect(text()).toContain("tether skills update release-notes")
+    expect(text()).toContain("The terminal asks you to type the name of the skill.")
+    expect(text()).not.toContain("--force")
   })
 
   it("disables the actions while a task runs and tells the owner to answer the card", async () => {
-    const w = await mk()
-    await btn(w, "Update").trigger("click")
-    await flushPromises()
-    expect(btn(w, "Update").attributes("disabled")).toBeDefined()
-    expect(btn(w, "Uninstall").attributes("disabled")).toBeDefined()
-    expect(w.find(".page-h").text()).toContain("Running…")
+    const { user } = await mk()
+    await click(user, "Update")
+    expect((btn("Update") as HTMLButtonElement).disabled).toBe(true)
+    expect((btn("Uninstall") as HTMLButtonElement).disabled).toBe(true)
+    expect(within(pageTitle().parentElement!).getByText("Running…")).toBeTruthy()
     await end({ waiting: true })
-    expect(w.text()).toContain("Answer the card in ⏳ Waiting.")
-    await btn(w, "Open Waiting").trigger("click")
+    expect(screen.getByText("Answer the card in ⏳ Waiting.")).toBeTruthy()
+    await click(user, "Open Waiting")
     expect(ui.trayOpen).toBe(true)
     await end({ state: "done", text: "" })
     expect(toast).toHaveBeenCalledWith("Updated /release-notes. It loads in new sessions.", "ok")
   })
 
   it("asks one confirm before an uninstall and says Not removed. after No on the card", async () => {
-    const w = await mk()
-    await btn(w, "Uninstall").trigger("click")
+    const { user, router } = await mk()
+    await user.click(btn("Uninstall"))
     await vi.waitFor(() => expect(h.follow.has("t1")).toBe(true))
     expect(confirm).toHaveBeenCalledWith({
       title: "Remove /release-notes?",
@@ -270,68 +299,66 @@ describe("SkillDetailPage", () => {
     })
     await end({ state: "error", text: "Remove /x?\nCancelled.\ncancelled" })
     expect(toast).toHaveBeenCalledWith("Not removed.", "info")
-    expect(w.router.currentRoute.value.name).toBe("skill")
+    expect(router.currentRoute.value.name).toBe("skill")
   })
 
   it("stops following a task when the page unmounts", async () => {
-    const w = await mk()
-    await btn(w, "Update").trigger("click")
+    const { user, unmount } = await mk()
+    await user.click(btn("Update"))
     await vi.waitFor(() => expect(h.follow.has("t1")).toBe(true))
-    w.unmount()
+    unmount()
     expect(h.follow.has("t1")).toBe(false)
   })
 
   it("stops a follow that starts after the page unmounts", async () => {
-    const w = await mk()
+    const { user, unmount } = await mk()
     let post!: (v: unknown) => void
     vi.mocked(api).mockImplementationOnce(() => new Promise((r) => (post = r)) as never)
-    await btn(w, "Update").trigger("click")
-    await flushPromises()
-    w.unmount()
+    await click(user, "Update")
+    unmount()
     post({ task_id: "t1" })
     await flushPromises()
     expect(h.follow.has("t1")).toBe(false)
   })
 
   it("keeps the shown skill when a reload fails", async () => {
-    const w = await mk()
+    await mk()
     vi.mocked(api).mockRejectedValueOnce(new Error("The gateway did not answer."))
     await h.live!.load()
     await flushPromises()
-    expect(w.text()).toContain("release-notes")
-    expect(w.findComponent({ name: "StateBlock" }).exists()).toBe(false)
+    expect(pageTitle().textContent).toBe("/release-notes")
+    expect(screen.queryByText("The gateway did not answer.")).toBeNull()
     expect(toast).toHaveBeenCalledWith("The gateway did not answer.", "error")
   })
 
   it("goes back to Skills after an uninstall", async () => {
-    const w = await mk()
-    await btn(w, "Uninstall").trigger("click")
-    await flushPromises()
+    const { user, router } = await mk()
+    await click(user, "Uninstall")
     await end({ state: "done", text: "Removed." })
     await flushPromises()
-    expect(w.router.currentRoute.value.name).toBe("skills")
+    expect(router.currentRoute.value.name).toBe("skills")
   })
 
   it("shows the lost text when the gateway restarted", async () => {
-    const w = await mk()
-    await btn(w, "Update").trigger("click")
-    await flushPromises()
+    const { user } = await mk()
+    await click(user, "Update")
     await end({ state: "lost" })
-    expect(note(w)).toMatchObject({
+    expect(note()).toMatchObject({
       kind: "error",
       text: "The gateway restarted. The result of the task is lost.",
     })
   })
 
   it("shows SKILL.md as safe Markdown, the lock data, and the findings", async () => {
-    const w = await mk()
+    const { container } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/skills/release-notes")
-    expect(w.find(".md script").exists()).toBe(false)
-    expect(w.text()).toContain("8c41d0e")
-    expect(w.text()).toContain("1 finding · 1 not scanned")
-    expect(w.text()).toContain("SKILL.md:41")
-    expect(w.text()).toContain("scripts/notes.sh")
-    expect(w.findAll(".page-h button").map((b) => b.text())).toEqual(["Update", "Uninstall"])
+    expect(container.querySelector(".typeset")).not.toBeNull()
+    expect(container.querySelector(".typeset script")).toBeNull()
+    expect(text()).toContain("8c41d0e")
+    expect(text()).toContain("1 finding · 1 not scanned")
+    expect(text()).toContain("SKILL.md:41")
+    expect(text()).toContain("scripts/notes.sh")
+    expect(headerButtons()).toEqual(["Update", "Uninstall"])
   })
 
   it("shows no scan for a builtin skill", async () => {
@@ -341,26 +368,35 @@ describe("SkillDetailPage", () => {
         { trust: "builtin", source: "", commit: "", actions: ["reset"] },
       ),
     )
-    const w = await mk()
-    expect(w.text()).not.toContain("Guard scan")
-    expect(w.text()).toContain("Not installed from a source.")
-    expect(w.findAll(".page-h button").map((b) => b.text())).toEqual(["Reset"])
+    await mk()
+    expect(screen.queryByText("Guard scan")).toBeNull()
+    expect(screen.getByText("Not installed from a source.")).toBeTruthy()
+    expect(headerButtons()).toEqual(["Reset"])
   })
 
   it("shows the install date in the shared short format", async () => {
-    const w = await mk()
-    const dd = w.find('[data-test="installed-at"]')
-    expect(dd.text()).toBe(shortTime("2026-11-02T10:00:00Z"))
-    const span = dd.find("span")
-    expect(span.attributes("title")).toBe(fullTime("2026-11-02T10:00:00Z"))
-    expect(span.attributes("style")).toContain("white-space: nowrap")
-    const upd = w.find('[data-test="updated-at"] span')
-    expect(upd.attributes("style")).toContain("white-space: nowrap")
+    const { container } = await mk()
+    const dd = container.querySelector('[data-test="installed-at"]')!
+    expect(dd.textContent!.trim()).toBe(shortTime("2026-11-02T10:00:00Z"))
+    const span = dd.querySelector("span")!
+    expect(span.getAttribute("title")).toBe(fullTime("2026-11-02T10:00:00Z"))
+    expect(span.classList.contains("whitespace-nowrap")).toBe(true)
+    const upd = container.querySelector('[data-test="updated-at"] span')!
+    expect(upd.classList.contains("whitespace-nowrap")).toBe(true)
   })
 
   it("shows a dash for an empty install date", async () => {
     vi.mocked(api).mockResolvedValue(view({ installed_at: "", updated_at: "" }) as any)
-    const w = await mk()
-    expect(w.find('[data-test="installed-at"]').text()).toBe("—")
+    const { container } = await mk()
+    expect(container.querySelector('[data-test="installed-at"]')!.textContent!.trim()).toBe("—")
+  })
+
+  it("uses no legacy class", async () => {
+    const { container } = await mk()
+    expect(
+      container.querySelector(
+        ".page-h, .back, .chip, .btn, .li, .grid-2, .card-h, .kv, .md, .section-h, .mono, .c-3",
+      ),
+    ).toBeNull()
   })
 })

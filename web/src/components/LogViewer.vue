@@ -1,10 +1,15 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from "vue"
 import { api } from "../api/client"
 import { setFollowLogs } from "../api/stream"
 import type { LogEvent, LogLineView, LogView } from "../api/types.gen"
 import { onEvent } from "../lib/bus"
 import { friendlyError } from "../lib/errors"
+import { cn } from "@/lib/utils"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import StateBlock from "./StateBlock.vue"
 
 const levels = [
@@ -66,22 +71,29 @@ async function load(): Promise<void> {
   }
 }
 
-// Maps a Go level (INFO, WARN, ERROR, DEBUG) to the CSS class of the log.
-function lvClass(lv: string): string {
+type LevelKey = "debug" | "info" | "warn" | "error"
+
+// Maps a Go level (INFO, WARN, ERROR, DEBUG) to one of four level keys.
+function lvKey(lv: string): LevelKey {
   const k = lv.toLowerCase()
-  if (k.startsWith("warn")) return "lv-warn"
-  if (k.startsWith("err")) return "lv-err"
-  if (k.startsWith("debug") || k === "dbg") return "lv-dbg"
-  return "lv-info"
+  if (k.startsWith("warn")) return "warn"
+  if (k.startsWith("err")) return "error"
+  if (k.startsWith("debug") || k === "dbg") return "debug"
+  return "info"
 }
+
+const TONE: Record<LevelKey, string> = {
+  debug: "text-muted-foreground",
+  info: "text-info",
+  warn: "text-warning",
+  error: "text-destructive",
+}
+
+const RANK: Record<LevelKey, number> = { debug: 0, info: 1, warn: 2, error: 3 }
 
 // Returns the rank of a level: debug 0, info 1, warn 2, error 3.
 function rank(lv: string): number {
-  const c = lvClass(lv)
-  if (c === "lv-dbg") return 0
-  if (c === "lv-warn") return 2
-  if (c === "lv-err") return 3
-  return 1
+  return RANK[lvKey(lv)]
 }
 
 // Applies the level floor and the text filter to a followed line, like the server does.
@@ -120,6 +132,15 @@ function pick(v: string): void {
   void load()
 }
 
+// Reka sends an empty value when the owner taps the pressed item. Keep the level then.
+function onLevel(v: unknown): void {
+  if (v === undefined || v === null || v === "") return
+  pick(v === "all" ? "" : String(v))
+}
+
+const followId = useId()
+const wrapId = useId()
+
 watch(follow, setFollow)
 watch(q, () => {
   if (filterTimer !== null) clearTimeout(filterTimer)
@@ -137,27 +158,37 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div>
-    <div class="toolbar">
-      <div class="seg">
-        <button
-          v-for="l in levels"
-          :key="l.value"
-          type="button"
-          :class="{ 'is-on': level === l.value }"
-          :aria-pressed="level === l.value"
-          @click="pick(l.value)"
-        >
+  <div class="flex flex-col gap-2">
+    <div class="flex flex-wrap items-center gap-2">
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        aria-label="Level"
+        :model-value="level || 'all'"
+        @update:model-value="onLevel"
+      >
+        <ToggleGroupItem v-for="l in levels" :key="l.value" :value="l.value || 'all'">
           {{ l.label }}
-        </button>
+        </ToggleGroupItem>
+      </ToggleGroup>
+      <Input
+        v-model="q"
+        type="search"
+        placeholder="Filter"
+        aria-label="Filter"
+        class="w-auto min-w-40 flex-1"
+      />
+      <div class="flex items-center gap-2">
+        <Checkbox :id="followId" v-model="follow" />
+        <Label :for="followId">Follow</Label>
       </div>
-      <div class="search">
-        <input v-model="q" class="input" type="search" placeholder="Filter" aria-label="Filter" />
+      <div class="flex items-center gap-2">
+        <Checkbox :id="wrapId" v-model="wrap" />
+        <Label :for="wrapId">Wrap lines</Label>
       </div>
-      <label class="check"><input v-model="follow" type="checkbox" /> Follow</label>
-      <label class="check"><input v-model="wrap" type="checkbox" /> Wrap lines</label>
     </div>
-    <p class="t-12 c-3">The log shows the lines since the gateway started.</p>
+    <p class="text-xs text-muted-foreground">The log shows the lines since the gateway started.</p>
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
       v-else-if="state === 'error'"
@@ -166,13 +197,28 @@ onBeforeUnmount(() => {
       action="Retry"
       @action="load"
     />
-    <div v-else ref="box" class="log log-view" :class="{ 'is-wrap': wrap }">
-      <div v-if="lines.length === 0" class="c-3">No lines match.</div>
-      <div v-for="(l, i) in lines" :key="i">
-        <span class="c-3">{{ when(l.time) }}</span>
-        <span :class="lvClass(l.level)"> {{ l.level.toUpperCase() }}</span>
+    <div
+      v-else
+      ref="box"
+      role="region"
+      aria-label="Log lines"
+      tabindex="0"
+      :data-wrap="wrap || undefined"
+      :class="
+        cn(
+          'max-h-[60dvh] overflow-auto rounded-md border bg-muted/30 p-2 font-mono text-xs',
+          wrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre',
+        )
+      "
+    >
+      <div v-if="lines.length === 0" class="text-muted-foreground">No lines match.</div>
+      <div v-for="(l, i) in lines" :key="i" data-line>
+        <span class="text-muted-foreground">{{ when(l.time) }}</span>
+        <span :data-level="lvKey(l.level)" :class="TONE[lvKey(l.level)]">
+          {{ l.level.toUpperCase() }}</span
+        >
         {{ l.msg }}
-        <span class="c-3">{{ l.attrs }}</span>
+        <span class="text-muted-foreground">{{ l.attrs }}</span>
       </div>
     </div>
   </div>

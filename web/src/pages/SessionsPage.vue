@@ -3,6 +3,15 @@ import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api } from "../api/client"
 import type { SearchHitView, SessionPage, SessionRow } from "../api/types.gen"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Field, FieldLabel } from "@/components/ui/field"
+import { Input } from "@/components/ui/input"
+import { NativeSelect } from "@/components/ui/native-select"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { cn } from "@/lib/utils"
 import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
 import RowMenu from "../components/RowMenu.vue"
@@ -320,7 +329,21 @@ async function fork(id: string): Promise<void> {
   else await refresh()
 }
 
-const vFocus = { mounted: (el: HTMLElement) => el.focus() }
+// The row menu gives the focus back to its trigger when it closes. A focus at mount
+// time loses to that, so the field takes the focus in a timer.
+const vFocus = { mounted: (el: HTMLElement) => void setTimeout(() => el.focus(), 0) }
+
+// A blur to the menu trigger comes from the menu, not from the user. The field takes the
+// focus again. Any other blur cancels the rename.
+function onRenameBlur(e: FocusEvent): void {
+  const to = e.relatedTarget
+  if (to instanceof HTMLElement && to.dataset.slot === "dropdown-menu-trigger") {
+    const el = e.target as HTMLElement
+    setTimeout(() => el.focus(), 0)
+    return
+  }
+  cancelRename()
+}
 
 function startRename(r: SessionRow): void {
   renaming.value = r.id
@@ -379,6 +402,11 @@ watch([fullText, source, kind, archived], () => {
   void load()
 })
 
+// A tap on the pressed item sends an empty value. It changes nothing.
+function pickArchived(v: unknown): void {
+  if (v === "active" || v === "archived") archived.value = v === "archived"
+}
+
 function page(delta: number): void {
   offset.value = Math.max(0, offset.value + delta)
   syncRoute()
@@ -404,46 +432,48 @@ onBeforeUnmount(() => clearTimeout(timer))
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Sessions</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-2">
+      <h1 class="text-xl font-semibold tracking-tight">Sessions</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-      <button class="btn btn-primary" type="button" @click="newSession">+ New session</button>
+      <Button class="ml-auto" type="button" @click="newSession">+ New session</Button>
     </div>
 
-    <div class="toolbar">
-      <div class="search">
-        <input
-          v-model="search"
-          class="input"
-          type="search"
-          :placeholder="fullText ? 'Search all messages' : 'Search titles'"
-          :aria-label="fullText ? 'Search all messages' : 'Search titles'"
-        />
-      </div>
-      <label class="check"><input v-model="fullText" type="checkbox" /> Full text</label>
-      <select v-model="source" class="input" aria-label="Source">
+    <div class="flex flex-wrap items-center gap-2">
+      <Input
+        v-model="search"
+        class="w-auto min-w-48 flex-1"
+        type="search"
+        :placeholder="fullText ? 'Search all messages' : 'Search titles'"
+        :aria-label="fullText ? 'Search all messages' : 'Search titles'"
+      />
+      <Field orientation="horizontal" class="w-auto">
+        <Checkbox id="sessions-full-text" v-model="fullText" />
+        <FieldLabel for="sessions-full-text">Full text</FieldLabel>
+      </Field>
+      <NativeSelect v-model="source" aria-label="Source">
         <option value="">All sources</option>
         <option value="dashboard">Dashboard</option>
         <option value="cli">CLI</option>
         <option value="telegram">Telegram</option>
         <option value="cron">Cron</option>
-      </select>
-      <select v-model="kind" class="input" aria-label="Kind">
+      </NativeSelect>
+      <NativeSelect v-model="kind" aria-label="Kind">
         <option value="chat">Chats</option>
         <option value="">Chats and cron runs</option>
-      </select>
-      <div class="seg">
-        <button type="button" :class="{ 'is-on': !archived }" @click="archived = false">
-          Active · {{ activeTotal }}
-        </button>
-        <button type="button" :class="{ 'is-on': archived }" @click="archived = true">
-          Archived · {{ archivedTotal }}
-        </button>
-      </div>
+      </NativeSelect>
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        :model-value="archived ? 'archived' : 'active'"
+        @update:model-value="pickArchived"
+      >
+        <ToggleGroupItem value="active">Active · {{ activeTotal }}</ToggleGroupItem>
+        <ToggleGroupItem value="archived">Archived · {{ archivedTotal }}</ToggleGroupItem>
+      </ToggleGroup>
     </div>
 
-    <p v-if="searchError" class="t-12 c-bad search-err" role="alert">{{ searchError }}</p>
+    <p v-if="searchError" class="text-sm text-destructive" role="alert">{{ searchError }}</p>
 
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
@@ -455,40 +485,46 @@ onBeforeUnmount(() => clearTimeout(timer))
     />
     <template v-else>
       <template v-if="searching">
-        <div v-if="hits.length > 0" class="card hits">
-          <div class="card-h">
-            <h2 class="h">{{ hits.length }} hits</h2>
-          </div>
-          <router-link
-            v-for="h in hits"
-            :key="h.session_id + ':' + h.message_id"
-            class="li"
-            :to="{
-              name: 'transcript',
-              params: { id: h.session_id },
-              query: { message: String(h.message_id) },
-            }"
-          >
-            <span class="grow"
-              ><b>{{ h.title }}</b
-              >{{ " "
-              }}<span class="c-2"
-                ><template v-for="(p, i) in markParts(h.snippet)" :key="i"
-                  ><mark v-if="p.mark">{{ p.text }}</mark
-                  ><template v-else>{{ p.text }}</template></template
-                ></span
-              ></span
+        <Card v-if="hits.length > 0">
+          <CardHeader>
+            <CardTitle>{{ hits.length }} hits</CardTitle>
+          </CardHeader>
+          <CardContent class="flex flex-col gap-2">
+            <RouterLink
+              v-for="h in hits"
+              :key="h.session_id + ':' + h.message_id"
+              class="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"
+              :to="{
+                name: 'transcript',
+                params: { id: h.session_id },
+                query: { message: String(h.message_id) },
+              }"
             >
-            <span class="chip">{{ h.source }}</span>
-            <span class="chip">{{ h.kind }}</span>
-            <span class="c-3 t-12" style="white-space: nowrap" :title="fullTime(h.date)">{{
-              shortTime(h.date) || "—"
-            }}</span>
-          </router-link>
-          <button v-if="hitsMore" class="btn btn-secondary" type="button" @click="loadMoreHits">
-            Load more
-          </button>
-        </div>
+              <span class="min-w-0 flex-1"
+                ><b>{{ h.title }}</b
+                >{{ " "
+                }}<span class="text-muted-foreground"
+                  ><template v-for="(p, i) in markParts(h.snippet)" :key="i"
+                    ><mark v-if="p.mark" class="rounded-sm bg-muted px-0.5 text-foreground">{{
+                      p.text
+                    }}</mark
+                    ><template v-else>{{ p.text }}</template></template
+                  ></span
+                ></span
+              >
+              <Badge variant="outline">{{ h.source }}</Badge>
+              <Badge variant="outline">{{ h.kind }}</Badge>
+              <span
+                class="text-xs whitespace-nowrap text-muted-foreground"
+                :title="fullTime(h.date)"
+                >{{ shortTime(h.date) || "—" }}</span
+              >
+            </RouterLink>
+          </CardContent>
+          <CardFooter v-if="hitsMore">
+            <Button variant="secondary" type="button" @click="loadMoreHits">Load more</Button>
+          </CardFooter>
+        </Card>
         <StateBlock v-else-if="!searchError" state="empty" text="No messages match the search." />
       </template>
       <template v-else>
@@ -507,9 +543,10 @@ onBeforeUnmount(() => clearTimeout(timer))
               row-key="id"
             >
               <template #cell-title="{ row }">
-                <button
+                <Button
                   v-if="(row as unknown as TableRow).toggle"
-                  class="link kids-toggle"
+                  variant="link"
+                  size="sm"
                   type="button"
                   :aria-expanded="openKids.has((row as unknown as TableRow).parent_id)"
                   @click="toggleKids((row as unknown as TableRow).parent_id)"
@@ -519,59 +556,64 @@ onBeforeUnmount(() => clearTimeout(timer))
                   {{
                     (row as unknown as TableRow).count === 1 ? "child session" : "child sessions"
                   }}
-                </button>
-                <span v-else-if="(row as unknown as TableRow).child" class="cellrow is-child">
+                </Button>
+                <span
+                  v-else-if="(row as unknown as TableRow).child"
+                  class="flex items-center gap-1.5 pl-4"
+                >
                   <span aria-hidden="true">↳</span>
-                  <span v-if="childLabel(row as unknown as TableRow).chip" class="chip">{{
+                  <Badge v-if="childLabel(row as unknown as TableRow).chip" variant="secondary">{{
                     childLabel(row as unknown as TableRow).chip
-                  }}</span>
-                  <span class="kid-label">{{ childLabel(row as unknown as TableRow).text }}</span>
+                  }}</Badge>
+                  <span class="truncate">{{ childLabel(row as unknown as TableRow).text }}</span>
                 </span>
-                <input
+                <Input
                   v-else-if="renaming === (row as unknown as TableRow).id"
                   v-model="renameText"
                   v-focus
                   autofocus
-                  class="input"
                   aria-label="New title"
                   @keydown.enter.prevent="finishRename((row as unknown as TableRow).id)"
                   @keydown.esc.prevent="cancelRename"
-                  @blur="cancelRename"
+                  @blur="onRenameBlur"
                 />
-                <span v-else class="cellrow">
-                  <router-link
-                    class="cell-title"
-                    :class="{ 'c-3': !(row as unknown as TableRow).title }"
+                <span v-else class="flex min-w-0 items-center gap-2">
+                  <RouterLink
+                    :class="
+                      cn(
+                        'truncate font-semibold',
+                        !(row as unknown as TableRow).title && 'text-muted-foreground',
+                      )
+                    "
                     :to="{ name: 'transcript', params: { id: (row as unknown as TableRow).id } }"
                     :title="(row as unknown as TableRow).title"
-                    ><b>{{ (row as unknown as TableRow).title || "New session" }}</b></router-link
+                    >{{ (row as unknown as TableRow).title || "New session" }}</RouterLink
                   >
-                  <span v-if="(row as unknown as TableRow).id === session.id" class="chip chip-acc"
-                    >active</span
-                  >
+                  <Badge v-if="(row as unknown as TableRow).id === session.id">active</Badge>
                 </span>
                 <template v-if="renaming === (row as unknown as TableRow).id">
-                  <button
-                    class="btn btn-primary btn-sm"
+                  <Button
+                    size="sm"
                     type="button"
                     @mousedown.prevent
                     @click="finishRename((row as unknown as TableRow).id)"
                   >
                     Save
-                  </button>
-                  <button
-                    class="btn btn-ghost btn-sm"
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
                     type="button"
                     @mousedown.prevent
                     @click="cancelRename"
                   >
                     Cancel
-                  </button>
+                  </Button>
                 </template>
               </template>
               <template #cell-source_label="{ row }"
                 ><template v-if="!(row as unknown as TableRow).toggle"
-                  ><bdi class="cell-title" :title="(row as unknown as TableRow).source_label">{{
+                  ><bdi class="truncate" :title="(row as unknown as TableRow).source_label">{{
                     (row as unknown as TableRow).source_label
                   }}</bdi></template
                 ></template
@@ -579,7 +621,7 @@ onBeforeUnmount(() => clearTimeout(timer))
               <template #cell-started="{ row }"
                 ><template v-if="!(row as unknown as TableRow).toggle"
                   ><span
-                    style="white-space: nowrap"
+                    class="whitespace-nowrap"
                     :title="fullTime((row as unknown as TableRow).started)"
                     >{{ shortTime((row as unknown as TableRow).started) || "—" }}</span
                   ></template
@@ -588,7 +630,7 @@ onBeforeUnmount(() => clearTimeout(timer))
               <template #cell-last_active="{ row }"
                 ><template v-if="!(row as unknown as TableRow).toggle"
                   ><span
-                    style="white-space: nowrap"
+                    class="whitespace-nowrap"
                     :title="fullTime((row as unknown as TableRow).last_active)"
                     >{{ shortTime((row as unknown as TableRow).last_active) || "—" }}</span
                   ></template
@@ -602,39 +644,69 @@ onBeforeUnmount(() => clearTimeout(timer))
               <template #cell-actions="{ row }">
                 <template v-for="r in [row as unknown as TableRow]" :key="r.id">
                   <template v-if="!r.toggle">
-                    <button v-if="r.child" class="btn btn-ghost" type="button" @click="view(r.id)">
+                    <Button
+                      v-if="r.child"
+                      size="sm"
+                      variant="ghost"
+                      class="max-tab:min-h-11"
+                      type="button"
+                      @click="view(r.id)"
+                    >
                       View
-                    </button>
+                    </Button>
                     <template v-else-if="r.read_only">
-                      <button class="btn btn-secondary" type="button" @click="view(r.id)">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        class="max-tab:min-h-11"
+                        type="button"
+                        @click="view(r.id)"
+                      >
                         View
-                      </button>
+                      </Button>
                       <RowMenu :items="readOnlyItems" @select="(a) => onMenu(r, a)" />
                     </template>
                     <template v-else>
                       <template v-if="r.archived">
-                        <button
-                          class="btn btn-secondary"
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          class="max-tab:min-h-11"
                           type="button"
                           @click="command('/unarchive ' + r.id)"
                         >
                           Unarchive
-                        </button>
-                        <button class="btn btn-ghost" type="button" @click="resume(r.id)">
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          class="max-tab:min-h-11"
+                          type="button"
+                          @click="resume(r.id)"
+                        >
                           Resume
-                        </button>
+                        </Button>
                       </template>
-                      <button
+                      <Button
                         v-else-if="r.id === session.id"
-                        class="btn btn-secondary"
+                        size="sm"
+                        variant="secondary"
+                        class="max-tab:min-h-11"
                         type="button"
                         @click="router.push({ name: 'chat' })"
                       >
                         Open
-                      </button>
-                      <button v-else class="btn btn-secondary" type="button" @click="resume(r.id)">
+                      </Button>
+                      <Button
+                        v-else
+                        size="sm"
+                        variant="secondary"
+                        class="max-tab:min-h-11"
+                        type="button"
+                        @click="resume(r.id)"
+                      >
                         Resume
-                      </button>
+                      </Button>
                       <RowMenu :items="menuItems(r)" @select="(a) => onMenu(r, a)" />
                     </template>
                   </template>
@@ -642,26 +714,33 @@ onBeforeUnmount(() => clearTimeout(timer))
               </template>
             </DataTable>
           </div>
-          <div class="pager">
-            <span class="grow">{{ range }}</span>
+          <div class="flex items-center gap-2 text-sm text-muted-foreground">
+            <span class="flex-1">{{ range }}</span>
             <span>{{ pageText }}</span>
-            <button class="btn btn-ghost" type="button" :disabled="offset === 0" @click="page(-50)">
+            <Button
+              variant="ghost"
+              size="sm"
+              type="button"
+              :disabled="offset === 0"
+              @click="page(-50)"
+            >
               ◀ Prev
-            </button>
-            <button
-              class="btn btn-ghost"
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               type="button"
               :disabled="offset + rows.length >= total"
               @click="page(50)"
             >
               Next ▶
-            </button>
+            </Button>
           </div>
         </template>
       </template>
     </template>
 
-    <p class="pill-note">
+    <p class="text-sm text-muted-foreground">
       Telegram, CLI, and cron sessions are read-only here. “Fork into dashboard” copies one into a
       new dashboard session.
     </p>

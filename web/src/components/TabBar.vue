@@ -1,8 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
 import { useRoute } from "vue-router"
-import { ICON } from "../lib/icons"
-import { useOverlay } from "../lib/overlay"
+import type { Component } from "vue"
+import { Badge } from "@/components/ui/badge"
+import { Button, buttonVariants } from "@/components/ui/button"
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
+import { ICONS, type IconName } from "@/lib/icons"
+import { guardOutside } from "@/lib/layer"
+import { cn } from "@/lib/utils"
 import { cards } from "../stores/cards"
 import { prefs, setTheme, ui, type Theme } from "../stores/ui"
 
@@ -45,10 +50,10 @@ const GROUPS: { label: string; pages: { name: string; label: string }[] }[] = [
   },
 ]
 
-const THEMES: { value: Theme; label: string; icon: string }[] = [
-  { value: "system", label: "System", icon: "monitor" },
-  { value: "dark", label: "Dark", icon: "moon" },
-  { value: "light", label: "Light", icon: "sun" },
+const THEMES: { value: Theme; label: string; icon: Component }[] = [
+  { value: "system", label: "System", icon: ICONS.monitor },
+  { value: "dark", label: "Dark", icon: ICONS.moon },
+  { value: "light", label: "Light", icon: ICONS.sun },
 ]
 
 const route = useRoute()
@@ -60,9 +65,7 @@ const section = computed(() => {
 const current = computed(() => (route.name === "ops" ? "ops" : section.value))
 const sheetOpen = ref(false)
 const themeOpen = ref(false)
-const sheetEl = ref<HTMLElement | null>(null)
 
-useOverlay(sheetOpen, sheetEl, { onClose: () => (sheetOpen.value = false), modal: true })
 watch(sheetOpen, (on) => {
   if (!on) themeOpen.value = false
 })
@@ -79,183 +82,127 @@ function chooseTheme(t: Theme): void {
   sheetOpen.value = false
 }
 
+// The classes of a tab of the bar. The data-active attribute marks the tab that is on.
+const TAB =
+  "text-muted-foreground data-[active]:text-foreground relative flex min-h-14 flex-col items-center justify-center gap-0.5 rounded-md text-xs font-medium outline-none focus-visible:ring-3 focus-visible:ring-ring/50 data-[active]:font-semibold [&_svg:not([class*='size-'])]:size-5"
+// The classes of a row of the More sheet.
+const ROW =
+  "min-h-11 w-full justify-start gap-3 px-4 text-base data-[active]:bg-accent data-[active]:text-accent-foreground data-[active]:font-semibold"
+
 function themeLabel(): string {
   return THEMES.find((t) => t.value === prefs.theme)?.label ?? "System"
 }
 </script>
 
 <template>
-  <nav class="tabbar" aria-label="Main">
+  <nav
+    class="bg-background grid shrink-0 grid-cols-4 gap-1 border-t px-2 pt-1 pb-[env(safe-area-inset-bottom)] tab:hidden"
+    aria-label="Main"
+  >
     <RouterLink
       :to="{ name: 'chat' }"
-      class="tab"
-      :class="{ 'is-on': section === 'chat' && !ui.trayOpen }"
+      :class="TAB"
+      :data-active="section === 'chat' && !ui.trayOpen ? '' : undefined"
       :aria-current="section === 'chat' ? 'page' : undefined"
     >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.75"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path :d="ICON.chat" />
-      </svg>
+      <component :is="ICONS.chat" aria-hidden="true" />
       <span>Chat</span>
     </RouterLink>
     <RouterLink
       :to="{ name: 'jobs' }"
-      class="tab"
-      :class="{ 'is-on': section === 'jobs' && !ui.trayOpen }"
+      :class="TAB"
+      :data-active="section === 'jobs' && !ui.trayOpen ? '' : undefined"
       :aria-current="section === 'jobs' ? 'page' : undefined"
     >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.75"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path :d="ICON.jobs" />
-      </svg>
+      <component :is="ICONS.jobs" aria-hidden="true" />
       <span>Jobs</span>
     </RouterLink>
     <button
       type="button"
-      class="tab"
-      :class="{ 'is-on': ui.trayOpen }"
+      :class="TAB"
+      :data-active="ui.trayOpen ? '' : undefined"
       :aria-expanded="ui.trayOpen"
       @click="ui.trayOpen = true"
     >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.75"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path :d="ICON.waiting" />
-      </svg>
+      <component :is="ICONS.waiting" aria-hidden="true" />
       <span>Waiting</span>
-      <span v-if="cards.open.length" class="badge badge-bad">{{ cards.open.length }}</span>
+      <Badge v-if="cards.open.length" variant="destructive" class="absolute top-1 right-1/4">
+        {{ cards.open.length }}
+      </Badge>
     </button>
     <button
       type="button"
-      class="tab"
-      :class="{ 'is-on': section !== 'chat' && section !== 'jobs' && !ui.trayOpen }"
+      :class="TAB"
+      :data-active="section !== 'chat' && section !== 'jobs' && !ui.trayOpen ? '' : undefined"
       :aria-current="section !== 'chat' && section !== 'jobs' ? 'page' : undefined"
       @click="sheetOpen = true"
     >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.75"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path :d="ICON.more" />
-      </svg>
+      <component :is="ICONS.more" aria-hidden="true" />
       <span>More</span>
     </button>
-    <div v-if="sheetOpen" class="ov scrim is-open" @click.self="sheetOpen = false">
-      <div ref="sheetEl" class="dialog" role="dialog" aria-label="More">
-        <div class="grabber"></div>
-        <div class="list">
-          <button type="button" class="li" @click="openPalette">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.75"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path :d="ICON.search" />
-            </svg>
+    <Sheet v-model:open="sheetOpen">
+      <SheetContent
+        side="bottom"
+        :aria-describedby="undefined"
+        class="max-h-[85dvh] pb-[env(safe-area-inset-bottom)]"
+        @pointer-down-outside="guardOutside"
+        @interact-outside="guardOutside"
+      >
+        <SheetHeader>
+          <SheetTitle class="sr-only">More</SheetTitle>
+        </SheetHeader>
+        <div
+          data-slot="more-body"
+          class="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-2 pb-2"
+        >
+          <Button variant="ghost" data-slot="more-item" :class="ROW" @click="openPalette">
+            <component :is="ICONS.search" aria-hidden="true" />
             Commands and skills
-          </button>
+          </Button>
           <template v-for="g in GROUPS" :key="g.label">
-            <div class="eyebrow">{{ g.label }}</div>
+            <div class="text-muted-foreground px-4 pt-2 text-xs font-medium uppercase">
+              {{ g.label }}
+            </div>
             <RouterLink
               v-for="p in g.pages"
               :key="p.name"
               :to="{ name: p.name }"
-              class="li"
-              :class="{ 'is-on': current === p.name }"
+              data-slot="more-item"
+              :class="cn(buttonVariants({ variant: 'ghost' }), ROW)"
+              :data-active="current === p.name ? '' : undefined"
               :aria-current="current === p.name ? 'page' : undefined"
               @click="sheetOpen = false"
             >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.75"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path :d="ICON[p.name]" />
-              </svg>
+              <component :is="ICONS[p.name as IconName]" aria-hidden="true" />
               {{ p.label }}
             </RouterLink>
           </template>
-          <button type="button" class="li" @click="themeOpen = !themeOpen">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.75"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path :d="ICON.theme" />
-            </svg>
+          <Button
+            variant="ghost"
+            data-slot="more-item"
+            :class="ROW"
+            @click="themeOpen = !themeOpen"
+          >
+            <component :is="ICONS.theme" aria-hidden="true" />
             Theme: {{ themeLabel() }} ▸
-          </button>
+          </Button>
           <template v-if="themeOpen">
-            <button
+            <Button
               v-for="t in THEMES"
               :key="t.value"
-              type="button"
-              class="li theme-choice"
+              variant="ghost"
+              data-slot="more-item"
+              :class="ROW"
               :aria-pressed="prefs.theme === t.value"
               @click="chooseTheme(t.value)"
             >
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.75"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path :d="ICON[t.icon]" />
-              </svg>
-              <span class="grow">{{ t.label }}</span>
+              <component :is="t.icon" aria-hidden="true" />
+              <span class="flex-1 text-left">{{ t.label }}</span>
               <span v-if="prefs.theme === t.value" aria-hidden="true">✓</span>
-            </button>
+            </Button>
           </template>
         </div>
-      </div>
-    </div>
+      </SheetContent>
+    </Sheet>
   </nav>
 </template>
-
-<style scoped>
-.tt .li.is-on {
-  background: var(--nav-on, var(--border));
-  color: var(--text);
-  font-weight: 600;
-}
-</style>

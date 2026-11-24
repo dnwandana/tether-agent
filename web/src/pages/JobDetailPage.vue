@@ -3,6 +3,11 @@ import { computed, ref } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, ApiError } from "../api/client"
 import type { JobDetail, RunRow } from "../api/types.gen"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { cn } from "@/lib/utils"
 import DataTable from "../components/DataTable.vue"
 import JobForm from "../components/JobForm.vue"
 import LiveHeader from "../components/LiveHeader.vue"
@@ -10,7 +15,7 @@ import SidePanel from "../components/SidePanel.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
-import { costText, lastSeven, stateGlyph } from "../lib/jobbars"
+import { costText, lastSeven, stateGlyph, type Bar } from "../lib/jobbars"
 import { useLiveData } from "../lib/live"
 import { readableSchedule } from "../lib/schedule"
 import { fullTime, shortTime } from "../lib/time"
@@ -59,6 +64,17 @@ const pauseText = computed(() =>
       ? "The schedule is not valid"
       : "—",
 )
+
+// Returns the color class of a bar of the last 7 runs.
+function barClass(b: Bar): string {
+  return b === "ok"
+    ? "bg-success"
+    : b === "bad"
+      ? "bg-destructive"
+      : b === "stop"
+        ? "bg-warning"
+        : "bg-muted"
+}
 
 function usd(n: number): string {
   return "$" + n.toFixed(4)
@@ -151,8 +167,10 @@ function closeForm(): void {
 </script>
 
 <template>
-  <div class="page">
-    <router-link class="back" :to="{ name: 'jobs' }">‹ Jobs</router-link>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <RouterLink class="text-sm text-muted-foreground hover:text-foreground" :to="{ name: 'jobs' }"
+      >‹ Jobs</RouterLink
+    >
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
       v-else-if="state === 'error'"
@@ -161,141 +179,162 @@ function closeForm(): void {
       action="Retry"
       @action="refresh"
     />
-    <div v-else-if="detail && j" class="page-stack" :aria-busy="stale || undefined">
-      <div class="page-h">
-        <h1 class="t-20">{{ stateGlyph[j.state] }} {{ j.name }}</h1>
+    <div v-else-if="detail && j" class="flex flex-col gap-6" :aria-busy="stale || undefined">
+      <div class="flex flex-wrap items-center gap-2">
+        <h1 class="text-xl font-semibold tracking-tight">{{ stateGlyph[j.state] }} {{ j.name }}</h1>
         <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-        <span v-if="done" class="c-3">done</span>
+        <span v-if="done" class="text-muted-foreground">done</span>
         <template v-else>
-          <button
+          <Button
             v-if="j.enabled"
-            class="btn btn-secondary"
+            variant="secondary"
             type="button"
             @click="command(`/jobs pause ${j.id}`)"
           >
             ⏸ Pause
-          </button>
-          <button
-            v-else
-            class="btn btn-secondary"
-            type="button"
-            @click="command(`/jobs resume ${j.id}`)"
-          >
+          </Button>
+          <Button v-else variant="secondary" type="button" @click="command(`/jobs resume ${j.id}`)">
             ▶ Resume
-          </button>
-          <button
-            class="btn btn-secondary"
+          </Button>
+          <Button
+            variant="secondary"
             type="button"
             :disabled="!j.enabled"
             @click="command(`/jobs run ${j.id}`)"
           >
             ⚡ Run now
-          </button>
-          <span v-if="!j.enabled" class="t-12 c-3">Resume the job first.</span>
+          </Button>
+          <span v-if="!j.enabled" class="text-xs text-muted-foreground">Resume the job first.</span>
         </template>
-        <button class="btn btn-secondary" type="button" @click="formOpen = true">✎ Edit</button>
-        <button class="btn btn-danger-soft" type="button" @click="del()">🗑 Delete…</button>
+        <Button variant="secondary" type="button" @click="formOpen = true">✎ Edit</Button>
+        <Button variant="destructive" type="button" @click="del()">🗑 Delete…</Button>
       </div>
 
-      <div v-if="detail.last_error" class="bad-banner">
-        <span>⚠ Failing · {{ j.fail_streak }} in a row.</span
-        ><span class="mono">{{ detail.last_error }}</span>
-      </div>
-      <div v-if="j.pause_reason === 'schedule'" class="warn-banner">
-        ⏸ Paused: the schedule {{ j.schedule }} is not valid. Edit the schedule to resume.
-      </div>
+      <Alert v-if="detail.last_error" variant="destructive">
+        <AlertTitle>⚠ Failing · {{ j.fail_streak }} in a row.</AlertTitle>
+        <AlertDescription class="font-mono">{{ detail.last_error }}</AlertDescription>
+      </Alert>
+      <Alert v-if="j.pause_reason === 'schedule'" class="text-warning">
+        <AlertDescription>
+          ⏸ Paused: the schedule {{ j.schedule }} is not valid. Edit the schedule to resume.
+        </AlertDescription>
+      </Alert>
 
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-h"><h3>Definition</h3></div>
-          <dl class="kv card-b">
-            <dt>Schedule</dt>
-            <dd :title="sched(j.schedule).title">{{ sched(j.schedule).text }}</dd>
-            <template v-if="detail.no_agent">
-              <dt>Script</dt>
-              <dd class="mono">{{ detail.script }}</dd>
-            </template>
-            <template v-else>
-              <dt>Prompt</dt>
-              <dd>{{ detail.prompt }}</dd>
-              <template v-if="detail.script">
-                <dt>Script</dt>
-                <dd class="mono">{{ detail.script }}</dd>
+      <div class="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Definition</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+              <dt class="text-muted-foreground">Schedule</dt>
+              <dd class="min-w-0 break-words" :title="sched(j.schedule).title">
+                {{ sched(j.schedule).text }}
+              </dd>
+              <template v-if="detail.no_agent">
+                <dt class="text-muted-foreground">Script</dt>
+                <dd class="min-w-0 font-mono break-words">{{ detail.script }}</dd>
               </template>
-            </template>
-            <dt>Deliver to</dt>
-            <dd>{{ detail.deliver_label || detail.deliver || "—" }}</dd>
-            <dt>Model · effort</dt>
-            <dd>{{ detail.model || "default" }} · {{ detail.effort || "default" }}</dd>
-            <dt>Skills</dt>
-            <dd>{{ (detail.skills ?? []).join(", ") || "—" }}</dd>
-            <dt>Toolsets</dt>
-            <dd>{{ (detail.toolsets ?? []).join(", ") || "—" }}</dd>
-            <dt>Workdir</dt>
-            <dd class="mono">{{ detail.workdir || "—" }}</dd>
-            <dt>Options</dt>
-            <dd>
-              {{
-                [
-                  j.watch && "watch",
-                  j.draft_only && "draft only",
-                  detail.continuity && "continuity",
-                  detail.no_agent && "no agent",
-                ]
-                  .filter(Boolean)
-                  .join(", ") || "—"
-              }}
-            </dd>
-            <dt>Repeat</dt>
-            <dd>{{ detail.repeat_left > 0 ? `${detail.repeat_left} left` : "forever" }}</dd>
-          </dl>
-        </div>
-        <div class="card">
-          <div class="card-h"><h3>Health</h3></div>
-          <dl class="kv card-b">
-            <dt>Last run</dt>
-            <dd>
-              <span style="white-space: nowrap" :title="fullTime(j.last_run)">{{
-                when(j.last_run)
-              }}</span
-              >{{ j.last_status ? ` · ${j.last_status}` : "" }}
-            </dd>
-            <dt>Next run</dt>
-            <dd>
-              <span style="white-space: nowrap" :title="fullTime(j.next_run)">{{
-                when(j.next_run)
-              }}</span>
-            </dd>
-            <dt>Last 7</dt>
-            <dd>
-              <span class="runs7"
-                ><i v-for="(b, n) in bars" :key="n" :class="b === 'ok' ? '' : b"
-              /></span>
-            </dd>
-            <dt>This week</dt>
-            <dd>{{ detail.week_ok }} of {{ detail.week_total }} OK · {{ costText(j) }}</dd>
-            <dt>Fail streak</dt>
-            <dd>
-              {{ j.fail_streak
-              }}{{ detail.fail_limit > 0 ? ` (pauses at ${detail.fail_limit})` : "" }}
-            </dd>
-            <dt>Pause reason</dt>
-            <dd>{{ pauseText }}</dd>
-            <dt>Last output</dt>
-            <dd class="mono">{{ detail.last_output || "—" }}</dd>
-            <template v-if="detail.watch_limit_hit"
-              ><dt>Watch</dt>
-              <dd class="c-warn">The watch limit is reached.</dd></template
-            >
-            <template v-if="detail.watch_output"
-              ><dt>Watch output</dt>
-              <dd>{{ detail.watch_output }}</dd></template
-            >
-          </dl>
-        </div>
+              <template v-else>
+                <dt class="text-muted-foreground">Prompt</dt>
+                <dd class="min-w-0 break-words">{{ detail.prompt }}</dd>
+                <template v-if="detail.script">
+                  <dt class="text-muted-foreground">Script</dt>
+                  <dd class="min-w-0 font-mono break-words">{{ detail.script }}</dd>
+                </template>
+              </template>
+              <dt class="text-muted-foreground">Deliver to</dt>
+              <dd class="min-w-0 break-words">
+                {{ detail.deliver_label || detail.deliver || "—" }}
+              </dd>
+              <dt class="text-muted-foreground">Model · effort</dt>
+              <dd class="min-w-0 break-words">
+                {{ detail.model || "default" }} · {{ detail.effort || "default" }}
+              </dd>
+              <dt class="text-muted-foreground">Skills</dt>
+              <dd class="min-w-0 break-words">{{ (detail.skills ?? []).join(", ") || "—" }}</dd>
+              <dt class="text-muted-foreground">Toolsets</dt>
+              <dd class="min-w-0 break-words">{{ (detail.toolsets ?? []).join(", ") || "—" }}</dd>
+              <dt class="text-muted-foreground">Workdir</dt>
+              <dd class="min-w-0 font-mono break-words">{{ detail.workdir || "—" }}</dd>
+              <dt class="text-muted-foreground">Options</dt>
+              <dd class="min-w-0 break-words">
+                {{
+                  [
+                    j.watch && "watch",
+                    j.draft_only && "draft only",
+                    detail.continuity && "continuity",
+                    detail.no_agent && "no agent",
+                  ]
+                    .filter(Boolean)
+                    .join(", ") || "—"
+                }}
+              </dd>
+              <dt class="text-muted-foreground">Repeat</dt>
+              <dd class="min-w-0 break-words">
+                {{ detail.repeat_left > 0 ? `${detail.repeat_left} left` : "forever" }}
+              </dd>
+            </dl>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Health</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+              <dt class="text-muted-foreground">Last run</dt>
+              <dd class="min-w-0 break-words">
+                <span class="whitespace-nowrap" :title="fullTime(j.last_run)">{{
+                  when(j.last_run)
+                }}</span
+                >{{ j.last_status ? ` · ${j.last_status}` : "" }}
+              </dd>
+              <dt class="text-muted-foreground">Next run</dt>
+              <dd class="min-w-0 break-words">
+                <span class="whitespace-nowrap" :title="fullTime(j.next_run)">{{
+                  when(j.next_run)
+                }}</span>
+              </dd>
+              <dt class="text-muted-foreground">Last 7</dt>
+              <dd class="min-w-0 break-words">
+                <span data-runs7 class="inline-flex gap-0.5"
+                  ><i
+                    v-for="(b, n) in bars"
+                    :key="n"
+                    :data-bar="b"
+                    :class="cn('h-3 w-1.5 rounded-sm', barClass(b))"
+                /></span>
+              </dd>
+              <dt class="text-muted-foreground">This week</dt>
+              <dd class="min-w-0 break-words">
+                {{ detail.week_ok }} of {{ detail.week_total }} OK · {{ costText(j) }}
+              </dd>
+              <dt class="text-muted-foreground">Fail streak</dt>
+              <dd class="min-w-0 break-words">
+                {{ j.fail_streak
+                }}{{ detail.fail_limit > 0 ? ` (pauses at ${detail.fail_limit})` : "" }}
+              </dd>
+              <dt class="text-muted-foreground">Pause reason</dt>
+              <dd class="min-w-0 break-words">{{ pauseText }}</dd>
+              <dt class="text-muted-foreground">Last output</dt>
+              <dd class="min-w-0 font-mono break-words">{{ detail.last_output || "—" }}</dd>
+              <template v-if="detail.watch_limit_hit"
+                ><dt class="text-muted-foreground">Watch</dt>
+                <dd class="min-w-0 break-words text-warning">
+                  The watch limit is reached.
+                </dd></template
+              >
+              <template v-if="detail.watch_output"
+                ><dt class="text-muted-foreground">Watch output</dt>
+                <dd class="min-w-0 break-words">{{ detail.watch_output }}</dd></template
+              >
+            </dl>
+          </CardContent>
+        </Card>
       </div>
 
-      <div class="section-h"><h2>📜 Runs</h2></div>
+      <h2 class="text-lg font-semibold">📜 Runs</h2>
       <StateBlock
         v-if="j.history_off"
         state="empty"
@@ -324,16 +363,17 @@ function closeForm(): void {
             >{{ ((row as unknown as RunRow).duration_ms / 1000).toFixed(1) }} s</template
           >
           <template #cell-status="{ row }">
-            <span
-              class="chip"
-              :class="(row as unknown as RunRow).status === 'ok' ? 'chip-ok' : 'chip-bad'"
-              >{{ (row as unknown as RunRow).status }}</span
+            <Badge
+              :variant="(row as unknown as RunRow).status === 'ok' ? 'secondary' : 'destructive'"
+              >{{ (row as unknown as RunRow).status }}</Badge
             >
           </template>
           <template #cell-delivery_err="{ row }">
-            <span v-if="(row as unknown as RunRow).delivery_err" class="mono c-bad">{{
-              (row as unknown as RunRow).delivery_err
-            }}</span>
+            <span
+              v-if="(row as unknown as RunRow).delivery_err"
+              class="font-mono text-destructive"
+              >{{ (row as unknown as RunRow).delivery_err }}</span
+            >
           </template>
           <template #cell-cost="{ row }">
             {{
@@ -343,16 +383,20 @@ function closeForm(): void {
             }}{{ (row as unknown as RunRow).cost_flag ? " 💸" : "" }}
           </template>
           <template #cell-actions="{ row }">
-            <button
-              class="btn btn-secondary btn-sm"
+            <Button
+              variant="secondary"
+              size="sm"
+              class="max-tab:min-h-11"
               type="button"
               @click.stop="showOutput(row as unknown as RunRow)"
             >
               Output
-            </button>
-            <button
+            </Button>
+            <Button
               v-if="(row as unknown as RunRow).session_id"
-              class="btn btn-secondary btn-sm"
+              variant="secondary"
+              size="sm"
+              class="max-tab:min-h-11"
               type="button"
               @click.stop="
                 router.push({
@@ -362,52 +406,59 @@ function closeForm(): void {
               "
             >
               Session
-            </button>
+            </Button>
           </template>
         </DataTable>
-        <div class="pager">
-          <span class="grow c-2 t-12"
+        <div class="flex items-center gap-2">
+          <span class="flex-1 text-xs text-muted-foreground"
             >{{ runs.length === 0 ? 0 : offset + 1 }}–{{ offset + runs.length }} of
             {{ detail.runs_total }}</span
           >
-          <button
-            class="btn btn-secondary btn-sm"
+          <Button
+            variant="secondary"
+            size="sm"
             type="button"
             :disabled="offset === 0"
             @click="loadRuns(Math.max(0, offset - PAGE))"
           >
             ◀ Prev
-          </button>
-          <button
-            class="btn btn-secondary btn-sm"
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
             type="button"
             :disabled="offset + runs.length >= detail.runs_total"
             @click="loadRuns(offset + PAGE)"
           >
             Next ▶
-          </button>
+          </Button>
         </div>
       </template>
-      <div v-if="output && phone" class="card run-output-card">
-        <div class="card-h">
-          <h3 class="h">{{ outputTitle }}</h3>
-          <button
-            class="btn btn-ghost btn-icon"
+      <Card v-if="output && phone" role="region" :aria-label="outputTitle">
+        <CardHeader class="flex items-center justify-between gap-2">
+          <CardTitle>{{ outputTitle }}</CardTitle>
+          <Button
+            variant="ghost"
+            size="icon"
             type="button"
             aria-label="Close"
             @click="output = null"
           >
             ✕
-          </button>
-        </div>
-        <div class="card-b">
-          <pre class="code-block run-output">{{ output.output }}</pre>
-        </div>
-      </div>
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <pre
+            class="max-h-[60dvh] overflow-auto rounded-md bg-muted p-3 font-mono text-sm whitespace-pre-wrap"
+            >{{ output.output }}</pre>
+        </CardContent>
+      </Card>
     </div>
 
     <SidePanel :open="!!output && !phone" :title="outputTitle" @close="output = null">
-      <pre class="code-block run-output">{{ output?.output }}</pre>
+      <pre
+        class="max-h-[60dvh] overflow-auto rounded-md bg-muted p-3 font-mono text-sm whitespace-pre-wrap"
+        >{{ output?.output }}</pre>
     </SidePanel>
     <SidePanel
       :open="formOpen"

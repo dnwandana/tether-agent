@@ -1,22 +1,41 @@
 <script setup lang="ts">
 import type { QueueItem } from "../../api/types.gen"
+import { Button } from "@/components/ui/button"
+import {
+  Item,
+  ItemActions,
+  ItemContent,
+  ItemDescription,
+  ItemMedia,
+  ItemTitle,
+} from "@/components/ui/item"
 
 withDefaults(defineProps<{ items: QueueItem[]; max?: number }>(), { max: 20 })
 const emit = defineEmits<{ now: [] }>()
 </script>
 
 <template>
-  <div v-if="items.length > 0" class="queue-strip">
-    <div class="qitem qhead">
-      <span class="t-12 w-600">Waiting · {{ items.length }} / {{ max }}</span>
-      <span class="grow t-12 c-3 truncate">They run after the current task, one at a time.</span>
-      <button type="button" class="btn btn-secondary btn-sm" @click="emit('now')">
-        ⚡ Do this now
-      </button>
-    </div>
-    <div v-for="(it, i) in items" :key="i" class="qitem">
-      <span class="n">{{ i + 1 }}</span>
-      <span class="grow truncate">{{ it.preview }}</span>
-    </div>
+  <div v-if="items.length > 0" class="flex flex-col gap-1">
+    <Item variant="muted" size="sm">
+      <ItemContent>
+        <ItemTitle>Waiting · {{ items.length }} / {{ max }}</ItemTitle>
+        <ItemDescription class="truncate">
+          They run after the current task, one at a time.
+        </ItemDescription>
+      </ItemContent>
+      <ItemActions>
+        <Button type="button" variant="secondary" size="sm" @click="emit('now')">
+          ⚡ Do this now
+        </Button>
+      </ItemActions>
+    </Item>
+    <ol class="flex flex-col gap-1">
+      <Item v-for="(it, i) in items" :key="i" as="li" size="sm">
+        <ItemMedia>{{ i + 1 }}</ItemMedia>
+        <ItemContent>
+          <span class="truncate">{{ it.preview }}</span>
+        </ItemContent>
+      </Item>
+    </ol>
   </div>
 </template>

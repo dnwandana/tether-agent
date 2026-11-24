@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { flushPromises } from "@vue/test-utils"
+import { defineComponent, h as hh, type PropType } from "vue"
+import { cleanup, render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import type { ResultNoteData } from "../lib/command"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 const h = vi.hoisted(() => ({
@@ -50,12 +54,11 @@ vi.mock("../lib/live", async () => {
 })
 import { api } from "../api/client"
 import { confirm, isSecure, toast } from "../stores/ui"
-import ResultNote from "../components/ResultNote.vue"
 import OpsPage from "./OpsPage.vue"
 import { fullTime, shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
-const local = (hh: number, mm: number) => new Date(2026, 10, 20, hh, mm).toISOString()
+const local = (hour: number, min: number) => new Date(2026, 10, 20, hour, min).toISOString()
 let update: Record<string, unknown>
 let backups: { dir: string; files: { name: string; size: number; modified: string }[] }
 const newFile = {
@@ -67,7 +70,22 @@ const oldFile = { name: "tether-backup-2026-11-19.tar.gz", size: 1048576, modifi
 const config =
   "agent:\n  model: glm-4.6\nproviders:\n  primary:\n    api_key: «masked»\ntelegram:\n  enabled: true\n"
 
-async function mk() {
+const NoteStub = defineComponent({
+  props: { note: { type: Object as PropType<ResultNoteData | null>, default: null } },
+  setup: (p) => () =>
+    p.note
+      ? hh("output", { "data-title": p.note.title, "data-kind": p.note.kind }, p.note.text)
+      : null,
+})
+const notes = () =>
+  [...document.querySelectorAll("output")].map((o) => ({
+    title: (o as HTMLElement).dataset.title,
+    kind: (o as HTMLElement).dataset.kind,
+    text: o.textContent,
+  }))
+
+// Renders the page on /system/ops with today's two routes (system: Blank, ops: OpsPage).
+async function mk(user = userEvent.setup()) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -76,18 +94,19 @@ async function mk() {
     ],
   })
   await router.push("/system/ops")
-  const w = mount(OpsPage, {
-    global: { plugins: [router], stubs: { LogViewer: true, LiveHeader: true } },
+  const r = render(OpsPage, {
+    global: {
+      plugins: [router],
+      stubs: { LogViewer: true, LiveHeader: true, ResultNote: NoteStub },
+    },
   })
   await flushPromises()
-  return Object.assign(w, { router })
+  return Object.assign(r, { router, user })
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
-const notes = (w: any) =>
-  w
-    .findAllComponents(ResultNote)
-    .map((n: any) => n.props("note"))
-    .filter(Boolean)
+const button = (name: string) => screen.getByRole("button", { name })
+const backupRows = () => within(screen.getByRole("table")).getAllByRole("row").slice(1)
+const upd = () => button("Update and restart") as HTMLButtonElement
+const bodyText = () => document.body.textContent ?? ""
 const task = (o: object) => ({
   id: "t1",
   kind: "backup",
@@ -146,49 +165,49 @@ afterEach(() => vi.useRealTimers())
 
 describe("OpsPage", () => {
   it("shows the backup date in the short format, on one line, with the full time in the title", async () => {
-    const w = await mk()
-    const cell = w.find(".backups tbody tr td:nth-child(3) span")
-    expect(cell.text()).toBe(shortTime(oldFile.modified))
-    expect(cell.text()).toContain("09:00")
-    expect(cell.attributes("title")).toBe(fullTime(oldFile.modified))
-    expect(cell.attributes("style")).toContain("white-space: nowrap")
+    await mk()
+    const span = within(backupRows()[0]).getAllByRole("cell")[2].querySelector("[title]")!
+    expect(span.textContent).toBe(shortTime(oldFile.modified))
+    expect(span.textContent).toContain("09:00")
+    expect(span.getAttribute("title")).toBe(fullTime(oldFile.modified))
+    expect(span.classList).toContain("whitespace-nowrap")
   })
 
   it("shows the masked config and filters it by a top-level key", async () => {
-    const w = await mk()
+    const { user } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/config")
-    expect(w.find(".config-view").text()).toContain("api_key: «masked»")
-    await w.find('select[aria-label="Config group"]').setValue("providers")
-    const text = w.find(".config-view").text()
-    expect(text).toContain("primary:")
+    expect(screen.getByText(/api_key: «masked»/)).toBeTruthy()
+    await user.selectOptions(screen.getByRole("combobox", { name: "Config group" }), "providers")
+    const text = screen.getByText(/primary:/).textContent!
     expect(text).not.toContain("agent:")
     expect(text).not.toContain("telegram:")
   })
 
   it("checks for an update at load and shows the version and the check time", async () => {
-    const w = await mk()
+    await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/bootstrap")
     expect(api).toHaveBeenCalledWith("GET", "/api/update")
-    expect(w.text()).toContain("tether v0.23.0")
-    expect(w.text()).toContain("v0.24.0 is available")
-    expect(w.text()).toContain("Checked 14:05")
+    expect(bodyText()).toContain("tether v0.23.0")
+    expect(bodyText()).toContain("v0.24.0 is available")
+    expect(bodyText()).toContain("Checked 14:05")
   })
 
   it("shows the reason that Update and restart is disabled", async () => {
     update = { ...update, newer: false }
-    let w = await mk()
-    expect(btn(w, "Update and restart").attributes("disabled")).toBeDefined()
-    expect(w.text()).toContain("You have the newest version.")
+    await mk()
+    expect((button("Update and restart") as HTMLButtonElement).disabled).toBe(true)
+    expect(bodyText()).toContain("You have the newest version.")
+    cleanup()
     update = { ...update, newer: true, writable: false }
-    w = await mk()
-    expect(w.text()).toContain(
+    await mk()
+    expect(bodyText()).toContain(
       "The binary at /home/o/.local/bin/tether is not writable by this user. Run `tether update` as a user who can write it.",
     )
   })
 
   it("updates after a danger confirm with the drain time, and shows a failure", async () => {
-    const w = await mk()
-    await btn(w, "Update and restart").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Update and restart"))
     await vi.waitFor(() =>
       expect(api).toHaveBeenCalledWith("POST", "/api/update", { confirm: true }),
     )
@@ -200,16 +219,16 @@ describe("OpsPage", () => {
       danger: true,
     })
     expect(api).toHaveBeenCalledWith("POST", "/api/update", { confirm: true })
-    expect(w.text()).not.toContain("Restarting…")
+    expect(bodyText()).not.toContain("Restarting…")
     h.follow.get("t2")!(
       task({ id: "t2", kind: "update", state: "error", text: "checksum mismatch" }),
     )
     await flushPromises()
-    expect(notes(w)[0]).toMatchObject({ title: "Update", kind: "error", text: "checksum mismatch" })
+    expect(notes()[0]).toMatchObject({ title: "Update", kind: "error", text: "checksum mismatch" })
   })
 
   it("stops an update follow that starts after the page unmounts", async () => {
-    const w = await mk()
+    const { user, unmount } = await mk()
     let post!: (v: unknown) => void
     const base = vi.mocked(api).getMockImplementation()!
     vi.mocked(api).mockImplementation((m: string, p: string, ...rest: unknown[]) =>
@@ -217,18 +236,18 @@ describe("OpsPage", () => {
         ? (new Promise((r) => (post = r)) as never)
         : (base as (...a: unknown[]) => never)(m, p, ...rest),
     )
-    await btn(w, "Update and restart").trigger("click")
+    await user.click(button("Update and restart"))
     await vi.waitFor(() => expect(post).toBeTypeOf("function"))
-    w.unmount()
+    unmount()
     post({ task_id: "t2" })
     await flushPromises()
     expect(h.follow.has("t2")).toBe(false)
   })
 
   it("restarts through useCommand after a danger confirm, with no overlay", async () => {
-    const w = await mk()
-    expect(w.text()).toContain("Running turns finish first (up to 120 s).")
-    await btn(w, "Restart the gateway").trigger("click")
+    const { user } = await mk()
+    expect(bodyText()).toContain("Running turns finish first (up to 120 s).")
+    await user.click(button("Restart the gateway"))
     await vi.waitFor(() =>
       expect(h.run).toHaveBeenCalledWith("/restart", {
         result: expect.anything(),
@@ -241,52 +260,55 @@ describe("OpsPage", () => {
       confirmLabel: "Restart",
       danger: true,
     })
-    expect(w.find(".state .spin").exists()).toBe(false)
+    expect(document.querySelector('[aria-busy="true"]')).toBeNull()
   })
 
   it("disables Restart while /restart runs", async () => {
     const hold: { end: (v: string) => void } = { end: () => {} }
     h.run.mockReturnValue(new Promise<string>((r) => (hold.end = r)))
-    const w = await mk()
-    await btn(w, "Restart the gateway").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Restart the gateway"))
     await vi.waitFor(() =>
-      expect(btn(w, "Restart the gateway").attributes("disabled")).toBeDefined(),
+      expect((button("Restart the gateway") as HTMLButtonElement).disabled).toBe(true),
     )
     hold.end("ok")
     await vi.waitFor(() =>
-      expect(btn(w, "Restart the gateway").attributes("disabled")).toBeUndefined(),
+      expect((button("Restart the gateway") as HTMLButtonElement).disabled).toBe(false),
     )
   })
 
   it("disables Update and restart until the task ends, and stops the follow on done", async () => {
-    const w = await mk()
-    await btn(w, "Update and restart").trigger("click")
+    const { user } = await mk()
+    await user.click(upd())
     await vi.waitFor(() => expect(h.follow.has("t2")).toBe(true))
-    expect(btn(w, "Update and restart").attributes("disabled")).toBeDefined()
+    expect(upd().disabled).toBe(true)
     h.follow.get("t2")!(task({ id: "t2", kind: "update", state: "running" }))
     await flushPromises()
-    expect(btn(w, "Update and restart").attributes("disabled")).toBeDefined()
+    expect(upd().disabled).toBe(true)
     h.follow.get("t2")!(task({ id: "t2", kind: "update", state: "done" }))
     await flushPromises()
     expect(h.follow.has("t2")).toBe(false)
-    expect(btn(w, "Update and restart").attributes("disabled")).toBeUndefined()
+    expect(upd().disabled).toBe(false)
   })
 
   it("lists the backups with the size, the date, and Download", async () => {
-    const w = await mk()
-    const rows = w.findAll(".backups tbody tr")
-    expect(rows).toHaveLength(1)
-    expect(rows[0].text()).toContain("tether-backup-2026-11-19.tar.gz")
-    expect(rows[0].text()).toContain("1.0 MB")
-    expect(rows[0].findAll("button").map((b: any) => b.text())).toEqual(["Download"])
+    await mk()
+    expect(backupRows()).toHaveLength(1)
+    expect(backupRows()[0].textContent).toContain("tether-backup-2026-11-19.tar.gz")
+    expect(backupRows()[0].textContent).toContain("1.0 MB")
+    expect(
+      within(backupRows()[0])
+        .getAllByRole("button")
+        .map((b) => b.textContent?.trim()),
+    ).toEqual(["Download"])
   })
 
   it("shows the report of a new backup and lists it", async () => {
-    const w = await mk()
-    await btn(w, "Create backup").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Create backup"))
     await flushPromises()
     expect(api).toHaveBeenCalledWith("POST", "/api/backup")
-    expect(btn(w, "Create backup").attributes("disabled")).toBeDefined()
+    expect((button("Create backup") as HTMLButtonElement).disabled).toBe(true)
     h.follow.get("t1")!(
       task({
         state: "done",
@@ -303,45 +325,46 @@ describe("OpsPage", () => {
       }),
     )
     await flushPromises()
-    expect(notes(w)[0]).toMatchObject({
+    expect(notes()[0]).toMatchObject({
       title: "Backup",
       kind: "info",
       text: "Saved tether-backup-2026-11-20.tar.gz (13002342 bytes).\nSessions: 12 · Messages: 3,400 · Cron jobs: 4\nReplaced keys: providers.primary.api_key",
     })
-    expect(w.findAll(".backups tbody tr")).toHaveLength(2)
-    expect(btn(w, "Create backup").attributes("disabled")).toBeUndefined()
+    expect(backupRows()).toHaveLength(2)
+    expect((button("Create backup") as HTMLButtonElement).disabled).toBe(false)
   })
 
   it("shows the error of a failed backup task", async () => {
-    const w = await mk()
-    await btn(w, "Create backup").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Create backup"))
     await flushPromises()
     h.follow.get("t1")!(task({ state: "error", text: "disk full" }))
     await flushPromises()
-    expect(notes(w)[0]).toMatchObject({ title: "Backup", kind: "error", text: "disk full" })
-    expect(btn(w, "Create backup").attributes("disabled")).toBeUndefined()
+    expect(notes()[0]).toMatchObject({ title: "Backup", kind: "error", text: "disk full" })
+    expect((button("Create backup") as HTMLButtonElement).disabled).toBe(false)
   })
 
   it("shows the lost text when the gateway restarted during a backup", async () => {
-    const w = await mk()
-    await btn(w, "Create backup").trigger("click")
+    const { user } = await mk()
+    await user.click(button("Create backup"))
     await flushPromises()
     h.follow.get("t1")!(task({ state: "lost" }))
     await flushPromises()
-    expect(notes(w)[0]).toMatchObject({
+    expect(notes()[0]).toMatchObject({
       text: "The gateway restarted. The result of the task is lost.",
     })
   })
 
   it("shows the restore steps as three numbered lines with the real file", async () => {
     const writeText = vi.fn(async () => {})
+    const { user } = await mk()
+    // user-event installs its own clipboard stub in setup, so replace it after mk().
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
-    const w = await mk()
-    expect(w.find(".restore-steps").text()).toBe(
+    expect(screen.getByText(/^1\. systemctl --user stop tether\.service/).textContent).toBe(
       "1. systemctl --user stop tether.service\n2. tether restore ~/.tether/backups/tether-backup-2026-11-19.tar.gz\n3. systemctl --user start tether.service",
     )
-    expect(w.text()).toContain("The dashboard goes offline until step 3.")
-    await btn(w, "Copy all 3").trigger("click")
+    expect(bodyText()).toContain("The dashboard goes offline until step 3.")
+    await user.click(button("Copy all 3"))
     await flushPromises()
     expect(writeText).toHaveBeenCalledWith(
       "systemctl --user stop tether.service\ntether restore ~/.tether/backups/tether-backup-2026-11-19.tar.gz\nsystemctl --user start tether.service",
@@ -350,19 +373,19 @@ describe("OpsPage", () => {
 
   it("shows the HTTPS note in place of Copy all 3 on plain HTTP", async () => {
     vi.mocked(isSecure).mockReturnValue(false)
-    const w = await mk()
-    expect(btn(w, "Copy all 3")).toBeUndefined()
-    expect(w.text()).toContain("Copy needs HTTPS or localhost.")
+    await mk()
+    expect(screen.queryByRole("button", { name: "Copy all 3" })).toBeNull()
+    expect(screen.getByText("Copy needs HTTPS or localhost.")).toBeTruthy()
   })
 
   it("marks the Operations tab with the tabs component", async () => {
-    const w = await mk()
-    const tabs = w.findAll('[role="tab"]')
-    expect(tabs.map((t: any) => t.text())).toEqual(["Health", "Operations"])
-    expect(tabs[1].attributes("aria-selected")).toBe("true")
-    await tabs[0].trigger("click")
+    const { user, router } = await mk()
+    const tabs = screen.getAllByRole("tab")
+    expect(tabs.map((t) => t.textContent?.trim())).toEqual(["Health", "Operations"])
+    expect(tabs[1].getAttribute("aria-selected")).toBe("true")
+    await user.click(tabs[0])
     await flushPromises()
-    expect(w.router.currentRoute.value.name).toBe("system")
+    expect(router.currentRoute.value.name).toBe("system")
   })
 
   it("reloads on the end of a backup or update task and on a restart event", async () => {
@@ -391,15 +414,15 @@ describe("OpsPage", () => {
         vi.fn(async () => ({ ok: true, status: 200, blob: async () => new Blob(["x"]) })),
       )
       const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {})
-      const w = await mk()
-      await btn(w, "Download").trigger("click")
+      const { user, unmount } = await mk(userEvent.setup({ advanceTimers: vi.advanceTimersByTime }))
+      await user.click(button("Download"))
       await vi.advanceTimersByTimeAsync(0)
       expect(click).toHaveBeenCalled()
       expect(revoke).not.toHaveBeenCalled()
       await vi.advanceTimersByTimeAsync(30_000)
       expect(revoke).toHaveBeenCalledWith("blob:x")
       click.mockRestore()
-      w.unmount()
+      unmount()
     } finally {
       URL.createObjectURL = createURL
       URL.revokeObjectURL = revokeURL

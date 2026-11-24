@@ -1,5 +1,17 @@
 <script setup lang="ts">
 import { computed } from "vue"
+import { CircleCheckIcon, CircleXIcon } from "@lucide/vue"
+import { Badge } from "@/components/ui/badge"
+import {
+  Trace,
+  TraceCollapsible,
+  TraceCollapsibleContent,
+  TraceCollapsibleTrigger,
+  TraceDescription,
+  TraceIcon,
+  TraceLine,
+  TraceTitle,
+} from "@/components/ui/trace"
 import { parseDelegate } from "./parse"
 import { duration } from "../../lib/time"
 
@@ -34,19 +46,28 @@ function calls(n: number): string {
 </script>
 
 <template>
-  <div v-if="res && res.results.length" class="child-cards">
-    <div v-for="r in res.results" :key="r.task" class="child">
-      <div class="row">
-        <b>{{ goal(r.task) }}</b>
-        <span class="grow"></span>
-        <span class="chip" :class="r.status === 'ok' ? 'chip-ok' : 'chip-bad'">{{ r.status }}</span>
-      </div>
-      <span v-if="r.summary" class="c-2">{{ r.summary }}</span>
-      <span v-if="r.error" class="c-bad t-12">{{ r.error }}</span>
-      <span class="meta">{{ calls(r.tool_calls) }} · {{ duration(r.duration_s) }}</span>
-    </div>
-  </div>
-  <p v-else-if="res && res.batch" class="t-13">
+  <Trace v-if="res && res.results.length">
+    <TraceCollapsible v-for="r in res.results" :key="r.task" :default-open="r.status !== 'ok'">
+      <TraceCollapsibleTrigger>
+        <TraceLine :status="r.status === 'ok' ? undefined : 'error'">
+          <TraceIcon>
+            <CircleCheckIcon v-if="r.status === 'ok'" />
+            <CircleXIcon v-else />
+          </TraceIcon>
+          <TraceTitle>{{ goal(r.task) }}</TraceTitle>
+          <TraceDescription
+            >{{ calls(r.tool_calls) }} · {{ duration(r.duration_s) }}</TraceDescription
+          >
+          <Badge :variant="r.status === 'ok' ? 'secondary' : 'destructive'">{{ r.status }}</Badge>
+        </TraceLine>
+      </TraceCollapsibleTrigger>
+      <TraceCollapsibleContent>
+        <p v-if="r.summary">{{ r.summary }}</p>
+        <p v-if="r.error" class="text-destructive">{{ r.error }}</p>
+      </TraceCollapsibleContent>
+    </TraceCollapsible>
+  </Trace>
+  <p v-else-if="res && res.batch" class="text-sm">
     Started batch {{ res.batch.id }} with {{ res.batch.children.length }}
     {{ res.batch.children.length === 1 ? "child" : "children" }}:
     {{ res.batch.children.join(", ") }}

@@ -1,41 +1,56 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import type { AckView } from "../../api/types.gen"
+import { Button } from "@/components/ui/button"
+import { Marker, MarkerContent } from "@/components/ui/marker"
+import { cn } from "@/lib/utils"
+
+type Tone = "pending" | "run" | "ok" | "warn" | "bad"
 
 const props = defineProps<{ ack: AckView }>()
 const emit = defineEmits<{ action: [data: string] }>()
 
-// The ack class of each kind. An unknown kind has no extra class.
-const KIND: Record<string, string> = {
-  pending: "ack-pending",
-  queue: "ack-pending",
-  queued: "ack-pending",
-  steer: "ack-run",
-  run: "ack-run",
-  ok: "ack-ok",
-  done: "ack-ok",
-  read: "ack-ok",
-  busy: "ack-warn",
-  warn: "ack-warn",
-  error: "ack-bad",
-  bad: "ack-bad",
+// The tone of each ack kind. An unknown kind has no tone.
+const TONE_OF: Record<string, Tone> = {
+  pending: "pending",
+  queue: "pending",
+  queued: "pending",
+  steer: "run",
+  run: "run",
+  ok: "ok",
+  done: "ok",
+  read: "ok",
+  busy: "warn",
+  warn: "warn",
+  error: "bad",
+  bad: "bad",
 }
 
-const cls = computed(() => KIND[props.ack.kind] ?? "")
+// The text color of each tone. It uses the status tokens only.
+const TONE_CLASS: Record<Tone, string> = {
+  pending: "text-muted-foreground",
+  run: "text-info",
+  ok: "text-success",
+  warn: "text-warning",
+  bad: "text-destructive",
+}
+
+const tone = computed<Tone | undefined>(() => TONE_OF[props.ack.kind])
 const buttons = computed(() => (props.ack.buttons ?? []).flat())
 </script>
 
 <template>
-  <span class="ack" :class="cls">
-    {{ ack.text }}
-    <button
+  <Marker :data-tone="tone" :class="cn('w-auto flex-wrap', tone && TONE_CLASS[tone])">
+    <MarkerContent>{{ ack.text }}</MarkerContent>
+    <Button
       v-for="(b, i) in buttons"
       :key="i"
       type="button"
-      class="btn btn-ghost btn-sm"
+      variant="ghost"
+      size="xs"
       @click="emit('action', b.data)"
     >
       {{ b.text }}
-    </button>
-  </span>
+    </Button>
+  </Marker>
 </template>

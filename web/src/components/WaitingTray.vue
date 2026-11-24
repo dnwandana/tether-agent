@@ -4,15 +4,20 @@ const firstSeen = new Map<string, number>()
 </script>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onBeforeUnmount, reactive, ref, toRef, watch } from "vue"
+import { createReusableTemplate } from "@vueuse/core"
+import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
 import { useRouter } from "vue-router"
 import type { Card, CardAnswer } from "../api/types.gen"
-import { useOverlay } from "../lib/overlay"
+import { guardOutside } from "../lib/layer"
 import { answerCard, bulkAnswer, cards } from "../stores/cards"
 import { confirm, toast, ui } from "../stores/ui"
 import ApprovalCard from "./cards/ApprovalCard.vue"
 import ClarifyCard from "./cards/ClarifyCard.vue"
 import SecretCard from "./cards/SecretCard.vue"
+import { Badge } from "./ui/badge"
+import { Button } from "./ui/button"
+import { Popover, PopoverAnchor, PopoverContent } from "./ui/popover"
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "./ui/sheet"
 
 const router = useRouter()
 
@@ -40,8 +45,31 @@ function close(): void {
   ui.trayOpen = false
 }
 
-const trayEl = ref<HTMLElement | null>(null)
-useOverlay(toRef(ui, "trayOpen"), trayEl, { onClose: close, modal: true })
+// True below 600 px. The tray is a bottom sheet then.
+const phone = ref(false)
+onMounted(() => {
+  if (typeof window.matchMedia !== "function") return
+  const mq = window.matchMedia("(max-width: 599px)")
+  phone.value = mq.matches
+  const onChange = (e: MediaQueryListEvent) => (phone.value = e.matches)
+  mq.addEventListener("change", onChange)
+  onBeforeUnmount(() => mq.removeEventListener("change", onChange))
+})
+
+// The status bar Waiting button. The popover anchors to it. It is read each time the tray opens.
+const anchor = ref<HTMLElement | null>(null)
+watch(
+  () => ui.trayOpen,
+  (open) => {
+    if (open) anchor.value = document.querySelector<HTMLElement>("[data-waiting-anchor]")
+  },
+  { immediate: true },
+)
+
+const [DefineBody, ReuseBody] = createReusableTemplate()
+function setOpen(v: boolean): void {
+  ui.trayOpen = v
+}
 
 // Fills the first-seen map and drops the cards that are gone.
 watch(
@@ -135,31 +163,35 @@ const TrayCard = defineComponent({
       if (c.kind === "approval" || c.kind === "pin") return h(ApprovalCard, { card: c, id })
       if (c.kind === "clarify") return h(ClarifyCard, { card: c, id })
       if (c.kind === "secret") return h(SecretCard, { card: c, id })
-      return h("div", { class: "tray-signin", id }, [
+      return h("div", { class: "flex flex-col gap-2 py-2", id }, [
         h("b", label(c)),
         h("span", { class: "truncate" }, detail(c)),
-        h("div", { class: "row" }, [
+        h("div", { class: "flex flex-wrap gap-2" }, [
           h(
-            "button",
+            Button,
             {
               type: "button",
-              class: "btn btn-secondary btn-sm",
+              variant: "secondary",
+              size: "sm",
+              class: "max-tab:min-h-11",
               disabled: busy.has(c.id),
               onClick: () => answer(c, "deny"),
             },
-            "❌ Deny",
+            () => "❌ Deny",
           ),
         ]),
-        h("div", { class: "row" }, [
+        h("div", { class: "flex flex-wrap gap-2" }, [
           h(
-            "button",
+            Button,
             {
               type: "button",
-              class: "btn btn-primary btn-sm",
+              variant: "default",
+              size: "sm",
+              class: "max-tab:min-h-11",
               disabled: busy.has(c.id),
               onClick: () => answer(c, "allow"),
             },
-            "✅ Allow",
+            () => "✅ Allow",
           ),
         ]),
       ])
@@ -228,93 +260,109 @@ function openCard(c: Card): void {
 </script>
 
 <template>
-  <div v-if="ui.trayOpen" class="ov scrim is-open tray-ov" @click.self="close">
-    <div ref="trayEl" class="tray" role="dialog" aria-label="Waiting for you" tabindex="-1">
-      <div class="grabber" aria-hidden="true" />
-      <div class="tray-h">
-        <b>Waiting for you</b>
-        <span class="badge" :class="{ 'badge-bad': list.length > 0 }">{{ list.length }}</span>
+  <DefineBody>
+    <div class="flex min-h-0 flex-1 flex-col gap-2 p-4">
+      <div class="flex flex-wrap items-center gap-2">
+        <b v-if="!phone">Waiting for you</b>
+        <Badge :variant="list.length > 0 ? 'destructive' : 'secondary'">{{ list.length }}</Badge>
         <span class="grow" />
         <template v-if="bulkable">
-          <button
+          <Button
             type="button"
-            class="btn btn-secondary btn-sm"
+            variant="secondary"
+            size="sm"
+            class="max-tab:min-h-11"
             data-act="deny-all"
             @click="denyAll"
           >
             ❌ Deny all
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            class="btn btn-secondary btn-sm"
+            variant="secondary"
+            size="sm"
+            class="max-tab:min-h-11"
             data-act="approve-all"
             @click="approveAll"
           >
             ✅ Approve all once…
-          </button>
+          </Button>
         </template>
       </div>
-      <p v-if="humanOnlyCount > 0" class="tray-note t-12 c-3">
+      <p v-if="humanOnlyCount > 0" class="text-muted-foreground text-xs">
         {{ humanOnlyCount }} 🔒 human-only
         {{ humanOnlyCount === 1 ? "approval stays" : "approvals stay" }} open.
       </p>
-      <div class="tray-list">
-        <div v-if="first" class="tray-full">
+      <div data-slot="tray-body" class="min-h-0 flex-1 overflow-y-auto">
+        <div v-if="first" class="flex flex-col gap-2 pb-2">
           <TrayCard :card="first" />
-          <div class="row">
-            <button
+          <div class="flex flex-wrap gap-2">
+            <Button
               type="button"
-              class="btn btn-ghost btn-sm"
+              variant="ghost"
+              size="sm"
+              class="max-tab:min-h-11"
               data-act="open"
               @click="openCard(first)"
             >
               Open
-            </button>
+            </Button>
           </div>
         </div>
-        <div v-for="c in rest" :key="c.id" class="tray-row">
-          <div class="tray-row-h">
-            <span class="k">{{ icon(c) }}</span>
+        <ul v-if="rest.length > 0" class="flex flex-col">
+          <li
+            v-for="c in rest"
+            :key="c.id"
+            class="flex min-w-0 flex-wrap items-center gap-2 border-t py-1.5"
+          >
+            <span>{{ icon(c) }}</span>
             <span class="grow truncate">{{ detail(c) || label(c) }}</span>
-            <span class="muted t-12">{{ age(c) }}</span>
-            <button type="button" class="btn btn-ghost btn-sm" @click="toggle(c.id)">
+            <span class="text-muted-foreground text-xs">{{ age(c) }}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              class="max-tab:min-h-11"
+              @click="toggle(c.id)"
+            >
               {{ opened.has(c.id) ? "Hide ▴" : "Show ▾" }}
-            </button>
-          </div>
-          <TrayCard v-if="opened.has(c.id)" :card="c" />
-        </div>
-        <p v-if="list.length === 0" class="empty-hint">
+            </Button>
+            <TrayCard v-if="opened.has(c.id)" :card="c" class="w-full" />
+          </li>
+        </ul>
+        <p v-if="list.length === 0" class="text-muted-foreground text-sm">
           Nothing waits. A card shows up here when a dashboard turn asks you something, or when a
           new device asks to sign in.
         </p>
       </div>
     </div>
-  </div>
-</template>
+  </DefineBody>
 
-<style scoped>
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.muted {
-  color: var(--text-3);
-}
-.tray-full {
-  padding-bottom: 8px;
-}
-.tray-row {
-  border-top: 1px solid var(--border);
-  padding: 6px 0;
-}
-.tray-row-h {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.tray-note {
-  margin: 0 0 8px;
-}
-</style>
+  <Sheet v-if="phone" :open="ui.trayOpen" @update:open="setOpen">
+    <SheetContent
+      side="bottom"
+      class="max-h-[85dvh] pb-[env(safe-area-inset-bottom)]"
+      aria-label="Waiting for you"
+      :aria-describedby="undefined"
+      @pointer-down-outside="guardOutside"
+      @interact-outside="guardOutside"
+    >
+      <SheetHeader class="pb-0">
+        <SheetTitle>Waiting for you</SheetTitle>
+      </SheetHeader>
+      <ReuseBody />
+    </SheetContent>
+  </Sheet>
+  <Popover v-else :open="ui.trayOpen" modal @update:open="setOpen">
+    <PopoverAnchor :reference="anchor ?? undefined" />
+    <PopoverContent
+      align="end"
+      class="flex max-h-[80dvh] w-[28rem] flex-col p-0"
+      aria-label="Waiting for you"
+      @pointer-down-outside="guardOutside"
+      @interact-outside="guardOutside"
+    >
+      <ReuseBody />
+    </PopoverContent>
+  </Popover>
+</template>

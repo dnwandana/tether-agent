@@ -6,6 +6,12 @@ import type { LogEntry, LogPage } from "../../api/types.gen"
 import { friendlyError } from "../../lib/errors"
 import { useLiveData } from "../../lib/live"
 import { fullTime, shortTime } from "../../lib/time"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { NativeSelect } from "@/components/ui/native-select"
 import DataTable from "../DataTable.vue"
 import SidePanel from "../SidePanel.vue"
 import StateBlock from "../StateBlock.vue"
@@ -14,10 +20,10 @@ const props = defineProps<{ scopes: string[]; scopeLabels: Record<string, string
 
 const route = useRoute()
 const PAGE = 20
-const DECISION: Record<string, string> = {
-  allowed: "chip-ok",
-  denied: "chip-bad",
-  blocked: "chip-warn",
+const DECISION: Record<string, "secondary" | "destructive" | "outline"> = {
+  allowed: "secondary",
+  denied: "destructive",
+  blocked: "outline",
 }
 
 const firstScope = route.query.scope
@@ -161,26 +167,29 @@ const fields = computed(() => {
 
 <template>
   <div>
-    <div class="toolbar">
-      <select v-model="scope" class="input" aria-label="Scope">
+    <div class="flex flex-wrap items-center gap-2">
+      <NativeSelect v-model="scope" aria-label="Scope">
         <option value="">All scopes</option>
         <option v-for="s in scopeOptions" :key="s" :value="s">{{ scopeName(s) }}</option>
-      </select>
-      <select v-model="decision" class="input" aria-label="Decision">
+      </NativeSelect>
+      <NativeSelect v-model="decision" aria-label="Decision">
         <option value="">All decisions</option>
         <option value="allowed">allowed</option>
         <option value="denied">denied</option>
         <option value="blocked">blocked</option>
-      </select>
-      <label class="check"><input v-model="noAnswer" type="checkbox" /> No answer</label>
-      <input
+      </NativeSelect>
+      <div class="flex items-center gap-2">
+        <Checkbox id="log-no-answer" v-model="noAnswer" />
+        <Label for="log-no-answer">No answer</Label>
+      </div>
+      <Input
         v-model="q"
-        class="input grow-search"
         type="search"
         aria-label="Search the previews"
         placeholder="Search the previews"
+        class="w-auto min-w-40 flex-1"
       />
-      <span class="c-3 t-12">Kept 180 days.</span>
+      <span class="text-xs text-muted-foreground">Kept 180 days.</span>
     </div>
     <StateBlock v-if="state === 'loading' && !page" state="loading" />
     <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @action="read(offset)" />
@@ -192,14 +201,14 @@ const fields = computed(() => {
       @action="showAll"
     />
     <template v-else>
-      <DataTable :columns="cols" :rows="rows" row-key="idx" class="table-dense" @row-click="open">
+      <DataTable :columns="cols" :rows="rows" row-key="idx" @row-click="open">
         <template #cell-at="{ row }"
-          ><span style="white-space: nowrap" :title="fullTime(row.at as string)">{{
+          ><span class="whitespace-nowrap" :title="fullTime(row.at as string)">{{
             shortTime(row.at as string) || "—"
           }}</span></template
         >
         <template #cell-scope="{ row }"
-          ><bdi class="cell-title" :title="String(row.scope_label || row.scope)">{{
+          ><bdi class="block max-w-48 truncate" :title="String(row.scope_label || row.scope)">{{
             row.scope_label || row.scope
           }}</bdi></template
         >
@@ -207,44 +216,46 @@ const fields = computed(() => {
           ><span :title="row.rule as string">{{ row.rule_description || row.rule }}</span></template
         >
         <template #cell-decision="{ row }">
-          <span class="chip" :class="DECISION[row.decision as string] ?? 'chip-plain'">{{
-            row.decision
-          }}</span>
+          <Badge :variant="DECISION[row.decision as string] ?? 'outline'">{{ row.decision }}</Badge>
         </template>
         <template #cell-preview="{ row }"
-          ><code>{{ row.preview }}</code></template
+          ><code class="font-mono text-xs break-all">{{ row.preview }}</code></template
         >
       </DataTable>
-      <div class="pager">
-        <span class="grow"
+      <div class="flex items-center gap-2 pt-2">
+        <span class="flex-1 text-sm text-muted-foreground"
           >{{ total === 0 ? "0" : (page?.offset ?? 0) + 1 }}–{{ to }} of {{ total }}</span
         >
-        <button
-          class="btn btn-secondary btn-sm"
+        <Button
+          variant="outline"
+          size="sm"
+          class="max-tab:h-11"
           type="button"
           :disabled="busy || offset === 0"
           @click="read(Math.max(0, offset - PAGE))"
         >
           ◀ Prev
-        </button>
-        <button
-          class="btn btn-secondary btn-sm"
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          class="max-tab:h-11"
           type="button"
           :disabled="busy || to >= total"
           @click="read(offset + PAGE)"
         >
           Next ▶
-        </button>
+        </Button>
       </div>
     </template>
     <SidePanel :open="detail !== null" title="Approval detail" @close="detail = null">
-      <dl v-if="detail" class="kv log-detail">
+      <dl v-if="detail" class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
         <template v-for="[k, v] in fields" :key="k">
-          <dt>{{ k }}</dt>
-          <dd>{{ v || "—" }}</dd>
+          <dt class="text-muted-foreground">{{ k }}</dt>
+          <dd class="min-w-0 break-words">{{ v || "—" }}</dd>
         </template>
-        <dt>Session</dt>
-        <dd>
+        <dt class="text-muted-foreground">Session</dt>
+        <dd class="min-w-0 break-words">
           <router-link
             v-if="detail.session_id"
             :to="{ name: 'transcript', params: { id: detail.session_id } }"
@@ -252,9 +263,11 @@ const fields = computed(() => {
           >
           <template v-else>—</template>
         </dd>
-        <dt>Preview</dt>
-        <dd>
-          <pre class="code-block">{{ detail.preview }}</pre>
+        <dt class="text-muted-foreground">Preview</dt>
+        <dd class="min-w-0 break-words">
+          <pre class="rounded-md bg-muted p-2 font-mono text-xs break-all whitespace-pre-wrap">{{
+            detail.preview
+          }}</pre>
         </dd>
       </dl>
     </SidePanel>

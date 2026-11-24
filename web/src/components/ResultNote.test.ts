@@ -1,4 +1,5 @@
-import { mount } from "@vue/test-utils"
+import { render, screen } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
 import { describe, expect, it } from "vitest"
 import ResultNote from "./ResultNote.vue"
 import type { ResultNoteData } from "../lib/command"
@@ -10,42 +11,49 @@ const note = (over: Partial<ResultNoteData> = {}): ResultNoteData => ({
   kind: "info",
   ...over,
 })
+const box = () => document.querySelector<HTMLElement>('[data-slot="alert"]')
 
 describe("ResultNote", () => {
   it("renders nothing with no note", () => {
-    const w = mount(ResultNote, { props: { note: null } })
-    expect(w.find(".rnote").exists()).toBe(false)
+    render(ResultNote, { props: { note: null } })
+    expect(box()).toBeNull()
   })
 
   it("shows the title, the time, and the Markdown body", () => {
-    const w = mount(ResultNote, { props: { note: note() } })
-    expect(w.find(".rnote-t").text()).toBe("Doctor")
-    expect(w.find(".rnote-at").text()).toBe("09:05")
-    expect(w.find(".rnote-b strong").text()).toBe("12")
-    expect(w.find(".rnote-b li").text()).toBe("chrome: OK")
-    expect(w.find(".rnote").attributes("role")).toBe("status")
-    expect(w.find(".rnote").classes()).toContain("rnote-info")
+    render(ResultNote, { props: { note: note() } })
+    expect(box()!.querySelector("[data-title]")?.textContent).toBe("Doctor")
+    expect(box()!.querySelector("[data-time]")?.textContent).toBe("09:05")
+    const body = box()!.querySelector<HTMLElement>(".typeset.typeset-chat")!
+    expect(body.querySelector("strong")?.textContent).toBe("12")
+    expect(body.querySelector("li")?.textContent).toBe("chrome: OK")
+    expect(screen.getByRole("status")).toBe(box())
+    expect(box()!.dataset.kind).toBe("info")
   })
 
   it("shows the title as typed", () => {
-    const w = mount(ResultNote, { props: { note: note({ title: "**Backup** <b>x</b>" }) } })
-    expect(w.find(".rnote-t").text()).toBe("**Backup** <b>x</b>")
-    expect(w.find(".rnote-t b").exists()).toBe(false)
+    render(ResultNote, { props: { note: note({ title: "**Backup** <b>x</b>" }) } })
+    const title = box()!.querySelector<HTMLElement>("[data-title]")!
+    expect(title.textContent).toBe("**Backup** <b>x</b>")
+    expect(title.querySelector("b")).toBeNull()
   })
 
-  it("uses an alert for an error and a class for each kind", () => {
-    const w = mount(ResultNote, {
+  it("uses an alert for an error and a data-kind for each kind", () => {
+    const r = render(ResultNote, {
       props: { note: note({ kind: "error", text: "⚠️ **/doctor failed**" }) },
     })
-    expect(w.find(".rnote").attributes("role")).toBe("alert")
-    expect(w.find(".rnote").classes()).toContain("rnote-error")
-    const warn = mount(ResultNote, { props: { note: note({ kind: "warn" }) } })
-    expect(warn.find(".rnote").classes()).toContain("rnote-warn")
+    expect(screen.getByRole("alert")).toBe(box())
+    expect(box()!.dataset.kind).toBe("error")
+    r.unmount()
+    render(ResultNote, { props: { note: note({ kind: "warn" }) } })
+    expect(box()!.dataset.kind).toBe("warn")
   })
 
   it("emits close on ✕", async () => {
-    const w = mount(ResultNote, { props: { note: note() } })
-    await w.find('button[aria-label="Close"]').trigger("click")
-    expect(w.emitted("close")).toHaveLength(1)
+    const user = userEvent.setup()
+    const { emitted } = render(ResultNote, { props: { note: note() } })
+    const close = screen.getByRole("button", { name: "Close" })
+    expect(close.textContent?.trim()).toBe("✕")
+    await user.click(close)
+    expect(emitted().close).toHaveLength(1)
   })
 })

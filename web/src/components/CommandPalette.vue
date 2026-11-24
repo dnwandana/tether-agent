@@ -1,113 +1,118 @@
 <template>
-  <div v-if="open" class="ov scrim pal-ov is-open" @click.self="emit('close')">
-    <div ref="pal" class="pal" role="dialog" aria-modal="true" aria-label="Command palette">
-      <div class="pal-in">
-        <span class="pal-glass">
-          <svg
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.75"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            aria-hidden="true"
-          >
-            <path :d="ICON.search" />
-          </svg>
-        </span>
-        <input
-          ref="input"
-          v-model="query"
-          role="combobox"
-          aria-expanded="true"
-          aria-autocomplete="list"
-          aria-controls="pal-list"
-          :aria-activedescendant="shown.length ? 'pal-opt-' + hi : undefined"
-          placeholder="Type a command or search…"
-          autocomplete="off"
-          spellcheck="false"
-          @keydown="onKey"
-        />
-        <button class="pal-esc" type="button" aria-label="Close" @click="emit('close')">esc</button>
-        <button
-          type="button"
-          class="btn btn-secondary btn-touch only-phone pal-close"
-          @click="emit('close')"
+  <Dialog :open="open" @update:open="(v: boolean) => !v && emit('close')">
+    <DialogContent
+      class="gap-0 overflow-hidden p-0"
+      :show-close-button="false"
+      @pointer-down-outside="guardOutside"
+      @interact-outside="guardOutside"
+      @close-auto-focus="onCloseAutoFocus"
+    >
+      <DialogHeader class="sr-only">
+        <DialogTitle>Command palette</DialogTitle>
+        <DialogDescription>Type a command or search…</DialogDescription>
+      </DialogHeader>
+      <Command @highlight="onHighlight">
+        <div
+          class="flex items-center gap-2 border-b px-3 py-2 [&>svg]:size-4 [&>svg]:shrink-0 [&>svg]:text-muted-foreground"
+          @keydown.capture="onWrapKey"
         >
-          Close
-        </button>
-      </div>
-      <div id="pal-list" ref="list" class="pal-list" role="listbox">
-        <template v-if="groups.length">
-          <template v-for="g in groups" :key="g.name">
-            <div class="pal-group">{{ g.label }}</div>
-            <button
-              v-for="r in g.rows"
-              :key="r.row.group + r.row.label"
-              type="button"
-              :id="'pal-opt-' + r.index"
-              class="pal-row"
-              :class="{ 'is-hi': r.index === hi, 'pal-all': !!r.row.more }"
-              role="option"
-              :aria-selected="r.index === hi"
-              @mousemove="hi = r.index"
-              @click="run(r.row)"
-            >
-              <template v-if="r.row.more">
-                <span class="pl">Show all {{ g.total }}</span>
-              </template>
-              <template v-else>
-                <span class="pi-ico">
-                  <svg
-                    v-if="r.row.page"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.75"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <path :d="ICON[r.row.page]" />
-                  </svg>
-                  <span v-else class="slash">/</span>
-                </span>
-                <span class="pl">{{ r.row.label }}</span>
-                <span class="pd">{{ r.row.desc }}</span>
-                <span class="pk"><span class="kbd pk-enter">↵</span></span>
-              </template>
-            </button>
-          </template>
-        </template>
-        <div v-else class="pal-empty">
-          <b>No match for “{{ query.trim() }}”</b>
-          <span class="t-12 c-3">Try a page name, or a command such as /usage.</span>
+          <component :is="ICONS.search" />
+          <ListboxFilter
+            v-model="query"
+            auto-focus
+            role="combobox"
+            aria-expanded="true"
+            aria-autocomplete="list"
+            aria-controls="pal-list"
+            placeholder="Type a command or search…"
+            autocomplete="off"
+            spellcheck="false"
+            class="min-w-0 flex-1 bg-transparent text-base outline-hidden placeholder:text-muted-foreground tab:text-sm"
+            @keydown.tab.prevent="complete"
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            class="max-tab:hidden"
+            aria-label="Close"
+            @click="emit('close')"
+          >
+            esc
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            class="tab:hidden min-h-11"
+            @click="emit('close')"
+          >
+            Close
+          </Button>
         </div>
-      </div>
-      <div class="pal-foot">
-        <span><span class="kbd">↑</span><span class="kbd">↓</span> to move</span>
-        <span><span class="kbd">↵</span> {{ enterHint }}</span>
-        <span><span class="kbd">esc</span> to close</span>
-        <span class="grow"></span>
-        <span>{{ hits.length }} results</span>
-      </div>
-    </div>
-  </div>
+        <CommandList id="pal-list">
+          <template v-if="groups.length">
+            <CommandGroup v-for="g in groups" :key="g.name" :heading="g.label">
+              <CommandItem
+                v-for="r in g.rows"
+                :key="keyOf(r.row)"
+                :value="keyOf(r.row)"
+                @select="run(r.row)"
+              >
+                <template v-if="r.row.more">
+                  <span>Show all {{ g.total }}</span>
+                </template>
+                <template v-else>
+                  <component :is="ICONS[r.row.page]" v-if="r.row.page" />
+                  <span v-else class="w-4 shrink-0 text-center text-muted-foreground">/</span>
+                  <span data-label class="font-medium">{{ r.row.label }}</span>
+                  <span class="truncate text-xs text-muted-foreground">{{ r.row.desc }}</span>
+                  <Kbd class="ml-auto">↵</Kbd>
+                </template>
+              </CommandItem>
+            </CommandGroup>
+          </template>
+          <div v-else class="flex flex-col items-center gap-1 px-4 py-8 text-center">
+            <b>No match for “{{ query.trim() }}”</b>
+            <span class="text-xs text-muted-foreground">
+              Try a page name, or a command such as /usage.
+            </span>
+          </div>
+        </CommandList>
+        <div class="flex items-center gap-4 border-t px-3 py-2 text-xs text-muted-foreground">
+          <span><Kbd>↑</Kbd><Kbd>↓</Kbd> to move</span>
+          <span><Kbd>↵</Kbd> {{ enterHint }}</span>
+          <span><Kbd>esc</Kbd> to close</span>
+          <span class="ml-auto">{{ hits.length }} results</span>
+        </div>
+      </Command>
+    </DialogContent>
+  </Dialog>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, toRef, watch } from "vue"
+import { ListboxFilter } from "reka-ui"
+import { computed, reactive, ref, toRef, watch } from "vue"
 import { useRouter } from "vue-router"
 import { api } from "../api/client"
-import { ICON } from "../lib/icons"
-import { useOverlay } from "../lib/overlay"
+import { Button } from "@/components/ui/button"
+import { Command, CommandGroup, CommandItem, CommandList } from "@/components/ui/command"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Kbd } from "@/components/ui/kbd"
+import { guardOutside, rememberOpener, useReturnFocus } from "../lib/layer"
+import { ICONS, type IconName } from "../lib/icons"
 import { ui } from "../stores/ui"
 
 interface Row {
   group: "Pages" | "Commands" | "Skills"
   label: string
   desc: string
-  page?: string
+  page?: IconName
   action?: "tray"
   more?: string
 }
@@ -154,16 +159,25 @@ const pageRows: Row[] = [
 ]
 
 const query = ref("")
-const hi = ref(0)
-const input = ref<HTMLInputElement | null>(null)
-const list = ref<HTMLElement | null>(null)
-const pal = ref<HTMLElement | null>(null)
+// The key of the highlighted row.
+const hiKey = ref<string | undefined>()
+// The element that had the focus when the palette opened.
+let openedFrom: HTMLElement | null = null
 const extra = ref<Row[]>([])
 const CAP = 12
 // The groups that show all their rows.
 const expanded = reactive(new Set<string>())
 
-useOverlay(toRef(props, "open"), pal, { onClose: () => emit("close"), modal: true })
+const { onCloseAutoFocus } = useReturnFocus(toRef(props, "open"))
+
+// Gives a row a stable value.
+function keyOf(row: Row): string {
+  return row.more ? "more:" + row.more : row.group + ":" + row.label
+}
+
+function onHighlight(p?: { value: unknown }): void {
+  hiKey.value = p ? String(p.value) : undefined
+}
 
 // Loads the commands and the skills from /api/bootstrap on each open.
 async function loadBootstrap(): Promise<void> {
@@ -223,25 +237,21 @@ const groups = computed(() => {
 const shown = computed(() => groups.value.flatMap((g) => g.rows.map((r) => r.row)))
 
 const enterHint = computed(() => {
-  const row = shown.value[hi.value]
+  const row = shown.value.find((r) => keyOf(r) === hiKey.value)
   if (row?.more) return "to show all"
   if (row && row.group !== "Pages") return "to insert"
   return "to open"
-})
-
-watch(query, () => {
-  hi.value = 0
 })
 
 watch(
   () => props.open,
   (o) => {
     if (!o) return
+    openedFrom = document.activeElement as HTMLElement | null
     query.value = ""
-    hi.value = 0
+    hiKey.value = undefined
     expanded.clear()
     void loadBootstrap()
-    void nextTick(() => input.value?.focus())
   },
   { immediate: true },
 )
@@ -253,8 +263,10 @@ function run(row: Row): void {
     expanded.add(row.more)
     return
   }
-  if (row.action === "tray") ui.trayOpen = true
-  else if (row.page) void router.push({ name: row.page })
+  if (row.action === "tray") {
+    rememberOpener(openedFrom)
+    ui.trayOpen = true
+  } else if (row.page) void router.push({ name: row.page })
   else {
     const q = query.value.trimStart()
     const draft = q.toLowerCase().startsWith(row.label.toLowerCase() + " ") ? q : row.label + " "
@@ -263,32 +275,23 @@ function run(row: Row): void {
   emit("close")
 }
 
-function move(d: number): void {
-  const n = shown.value.length
-  if (!n) return
-  hi.value = (hi.value + d + n) % n
-  void nextTick(() => {
-    const el = list.value?.querySelectorAll(".pal-row")[hi.value] as HTMLElement | undefined
-    if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "nearest" })
-  })
+// Tab completes the highlighted row. A command or a skill gets a trailing space.
+function complete(): void {
+  const row = shown.value.find((r) => keyOf(r) === hiKey.value)
+  if (row && !row.more) query.value = row.group === "Pages" ? row.label : row.label + " "
 }
 
-function onKey(e: KeyboardEvent): void {
-  if (e.key === "ArrowDown") {
-    e.preventDefault()
-    move(1)
-  } else if (e.key === "ArrowUp") {
-    e.preventDefault()
-    move(-1)
-  } else if (e.key === "Enter") {
-    e.preventDefault()
-    const row = shown.value[hi.value]
-    if (row) run(row)
-  } else if (e.key === "Tab") {
-    // Tab completes the highlighted row. A command or a skill gets a trailing space.
-    e.preventDefault()
-    const row = shown.value[hi.value]
-    if (row && !row.more) query.value = row.group === "Pages" ? row.label : row.label + " "
-  }
+// Wraps the highlight at the ends. Reka handles the Home and End keys.
+function onWrapKey(e: KeyboardEvent): void {
+  const list = shown.value
+  if (!list.length) return
+  const down = e.key === "ArrowDown" && hiKey.value === keyOf(list[list.length - 1])
+  const up = e.key === "ArrowUp" && hiKey.value === keyOf(list[0])
+  if (!down && !up) return
+  e.preventDefault()
+  e.stopPropagation()
+  e.target?.dispatchEvent(
+    new KeyboardEvent("keydown", { key: down ? "Home" : "End", bubbles: true, cancelable: true }),
+  )
 }
 </script>

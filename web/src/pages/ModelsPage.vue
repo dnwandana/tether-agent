@@ -9,8 +9,17 @@ import { friendlyError } from "../lib/errors"
 import { useLiveData } from "../lib/live"
 import { status } from "../stores/status"
 import { toast } from "../stores/ui"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
 
 type ModelEntry = ModelEntryRow
+type Tone = "ok" | "warn" | "bad"
+// Maps a tone to its semantic text color.
+const TONE: Readonly<Record<Tone, string>> = {
+  ok: "text-success",
+  warn: "text-warning",
+  bad: "text-destructive",
+}
 
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
@@ -35,21 +44,18 @@ function skipEnd(e: { skip_until: string }): number {
   return realTime(e.skip_until)
 }
 
-// Gives the status text and its class from the Health snapshot of one entry.
-function entryStatus(
-  e: ModelEntry,
-  at: number,
-): { text: string; cls: "c-ok" | "c-warn" | "c-bad" } {
-  if (e.status === "unusable") return { text: `✗ not usable: ${e.cause}`, cls: "c-bad" }
+// Gives the status text and its tone from the Health snapshot of one entry.
+function entryStatus(e: ModelEntry, at: number): { text: string; tone: Tone } {
+  if (e.status === "unusable") return { text: `✗ not usable: ${e.cause}`, tone: "bad" }
   const end = skipEnd(e)
   if (end > at) {
     const sec = Math.ceil((end - at) / 1000)
-    return { text: `⚠ skipped for ${sec} s · ${e.cause} at ${hhmm(e.failed_at)}`, cls: "c-warn" }
+    return { text: `⚠ skipped for ${sec} s · ${e.cause} at ${hhmm(e.failed_at)}`, tone: "warn" }
   }
   if (e.status === "failed") {
-    return { text: `⚠ last failed ${hhmm(e.failed_at)} · ${e.cause}`, cls: "c-warn" }
+    return { text: `⚠ last failed ${hhmm(e.failed_at)} · ${e.cause}`, tone: "warn" }
   }
-  return { text: "✓ answers now", cls: "c-ok" }
+  return { text: "✓ answers now", tone: "ok" }
 }
 
 function skipRuns(): boolean {
@@ -87,13 +93,13 @@ async function load(): Promise<void> {
 }
 
 // Gives the step state of one chain entry from its health row.
-function stepState(name: string, at: number): { text: string; cls: "c-ok" | "c-warn" } {
+function stepState(name: string, at: number): { text: string; tone: "ok" | "warn" } {
   const hv: HealthView | undefined = (view.value?.health ?? []).find((x) => x.entry === name)
   if (hv) {
-    if (realTime(hv.skip_until) > at) return { text: "⚠ skipped", cls: "c-warn" }
-    if (realTime(hv.failed_at) > 0) return { text: "⚠ failed", cls: "c-warn" }
+    if (realTime(hv.skip_until) > at) return { text: "⚠ skipped", tone: "warn" }
+    if (realTime(hv.failed_at) > 0) return { text: "⚠ failed", tone: "warn" }
   }
-  return { text: "✓ answers", cls: "c-ok" }
+  return { text: "✓ answers", tone: "ok" }
 }
 
 const chain = computed(() =>
@@ -186,8 +192,8 @@ function isUnused(row: unknown): boolean {
 }
 
 // Narrows the cell value of the status column.
-function st(v: unknown): { text: string; cls: string } {
-  return v as { text: string; cls: string }
+function st(v: unknown): { text: string; tone: Tone } {
+  return v as { text: string; tone: Tone }
 }
 
 const { stale, updatedAt, refresh } = useLiveData(load, {
@@ -198,9 +204,9 @@ onBeforeUnmount(stopTimer)
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Models</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight">Models</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
     </div>
     <StateBlock v-if="state === 'loading'" state="loading" />
@@ -211,45 +217,52 @@ onBeforeUnmount(stopTimer)
       text="No model entries. Run `tether setup` on the host."
     />
     <template v-else>
-      <div v-if="banner" class="warn-banner">{{ banner }}</div>
-      <div class="section-h"><h2>Fallback chain</h2></div>
-      <ol class="chain">
+      <Alert v-if="banner"
+        ><AlertDescription>{{ banner }}</AlertDescription></Alert
+      >
+      <h2 id="models-chain-h" class="text-base font-semibold">Fallback chain</h2>
+      <ol aria-labelledby="models-chain-h" class="flex flex-wrap items-center gap-2">
         <template v-for="(c, i) in chain" :key="c.name">
-          <li v-if="i > 0" aria-hidden="true">→</li>
-          <li class="chain-step">
-            <span class="role">{{ c.role }}</span>
-            <span v-if="!c.same" class="name">{{ c.name }}</span>
-            <span class="step-state" :class="c.state.cls">{{ c.state.text }}</span>
+          <li v-if="i > 0" aria-hidden="true" class="text-muted-foreground">→</li>
+          <li class="flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm">
+            <span class="font-medium">{{ c.role }}</span>
+            <span v-if="!c.same" class="font-mono text-muted-foreground">{{ c.name }}</span>
+            <span :data-tone="c.state.tone" :class="TONE[c.state.tone]">{{ c.state.text }}</span>
           </li>
         </template>
       </ol>
       <DataTable :columns="columns" :rows="rows" row-key="name">
         <template #cell-name="{ value, row }"
-          ><b>{{ value }}</b
+          ><b class="font-medium">{{ value }}</b
           ><template v-if="isUnused(row)"
-            >{{ " " }}<span class="chip">not used</span></template
+            >{{ " " }}<Badge variant="outline">not used</Badge></template
           ></template
         >
         <template #cell-model="{ value }"
-          ><span class="mono wrap-any">{{ value }}</span></template
+          ><span class="font-mono wrap-anywhere">{{ value }}</span></template
         >
         <template #cell-base_url="{ value }"
-          ><span class="mono wrap-any">{{ value }}</span></template
+          ><span class="font-mono wrap-anywhere">{{ value }}</span></template
         >
         <template #cell-status="{ value }">
-          <span class="status" :class="st(value).cls">{{ st(value).text }}</span>
+          <span :data-tone="st(value).tone" :class="TONE[st(value).tone]">{{
+            st(value).text
+          }}</span>
         </template>
       </DataTable>
-      <div class="section-h"><h2>Roles</h2></div>
+      <h2 class="text-base font-semibold">Roles</h2>
       <DataTable :columns="roleColumns" :rows="roleRows" row-key="key">
         <template #cell-key="{ value }"
-          ><span class="mono">{{ value }}</span></template
+          ><span class="font-mono">{{ value }}</span></template
         >
         <template #cell-value="{ value, row }"
-          >{{ value }}<span v-if="!usable(row)" class="c-warn"> ⚠️ entry unusable</span></template
+          >{{ value
+          }}<span v-if="!usable(row)" data-tone="warn" class="text-warning">
+            ⚠️ entry unusable</span
+          ></template
         >
       </DataTable>
-      <p class="pill-note">
+      <p class="text-sm text-muted-foreground">
         Entries and roles come from config.yaml. Edit the file on the host, then restart. The model
         of the dashboard session changes with the model chip in Chat.
       </p>

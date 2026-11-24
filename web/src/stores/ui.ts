@@ -1,4 +1,4 @@
-import { reactive, watch } from "vue"
+import { reactive, ref, watch } from "vue"
 
 export type ToastKind = "ok" | "info" | "warn" | "error"
 export type ToastAction = { label: string; data: string }
@@ -82,6 +82,15 @@ export function releaseToast(id: number): void {
   startToastTimer(id, rec.left)
 }
 
+// The toaster holds all toasts together, because vue-sonner expands the whole stack on hover.
+export function holdAllToasts(): void {
+  for (const t of toasts) holdToast(t.id)
+}
+
+export function releaseAllToasts(): void {
+  for (const t of toasts) releaseToast(t.id)
+}
+
 export function toast(
   text: string,
   kind: ToastKind = "info",
@@ -126,26 +135,41 @@ watch(
   (v) => writeKey(KEY_ROUTE, v),
 )
 
+// The tokens are oklch, and a browser bar may not read oklch. The meta gets white and the hex
+// value of Tailwind gray-950.
+export const THEME_COLOR: Readonly<Record<"light" | "dark", string>> = Object.freeze({
+  light: "#ffffff",
+  dark: "#030712",
+})
+
 let mediaWatched = false
+// A listener of the OS query increments the counter, so a computed that calls resolvedTheme
+// updates on an OS change.
+const osTick = ref(0)
+
+// Returns the theme that shows. With no matchMedia, System is light, as in the CSS.
+export function resolvedTheme(): "light" | "dark" {
+  void osTick.value
+  if (prefs.theme !== "system") return prefs.theme
+  return globalThis.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light"
+}
 
 export function applyTheme(): void {
-  let name: "light" | "dark" = prefs.theme === "light" ? "light" : "dark"
-  if (prefs.theme === "system") {
-    const mq = globalThis.matchMedia?.("(prefers-color-scheme: light)")
-    name = mq?.matches ? "light" : "dark"
-    if (mq && !mediaWatched) {
+  const root = document.documentElement
+  root.classList.remove("dark", "light")
+  if (prefs.theme !== "system") root.classList.add(resolvedTheme())
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+  if (meta) meta.content = THEME_COLOR[resolvedTheme()]
+  if (!mediaWatched) {
+    const mq = globalThis.matchMedia?.("(prefers-color-scheme: dark)")
+    if (mq) {
       mediaWatched = true
       mq.addEventListener("change", () => {
+        osTick.value++
         if (prefs.theme === "system") applyTheme()
       })
     }
   }
-  document.documentElement.className = `tt theme-${name}`
-  // The browser bar takes the --bg color of the theme, so the color stays in tokens.css.
-  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
-  if (!meta) return
-  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()
-  if (bg) meta.content = bg
 }
 
 export function setTheme(t: Theme): void {
@@ -180,4 +204,5 @@ export function confirm(opts: ConfirmOpts): Promise<boolean> {
 }
 
 // The open flag of the one WaitingTray in App.vue. The status bar, the tab bar, and the palette set it.
-export const ui = reactive({ trayOpen: false })
+// updateReady shows the banner "A new version is ready · Reload".
+export const ui = reactive({ trayOpen: false, updateReady: false })

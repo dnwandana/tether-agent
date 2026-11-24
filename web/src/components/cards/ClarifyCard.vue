@@ -2,6 +2,11 @@
 import { ref, onMounted, onUnmounted, useId, type Ref } from "vue"
 import type { Card } from "../../api/types.gen"
 import { answerCard } from "../../stores/cards"
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Item, ItemContent, ItemHeader } from "@/components/ui/item"
+import { Label } from "@/components/ui/label"
+import { Progress } from "@/components/ui/progress"
 
 const props = defineProps<{ card: Card }>()
 
@@ -94,73 +99,72 @@ function sendText(): void {
 </script>
 
 <template>
-  <div :id="'card-' + card.id" class="icard" role="group" :aria-label="card.header">
-    <div class="icard-h">
+  <Item
+    :id="'card-' + card.id"
+    variant="outline"
+    role="group"
+    :aria-label="card.header"
+    class="min-w-0 bg-card"
+  >
+    <ItemHeader>
       <span>{{ card.header }}</span>
-      <span v-if="card.child" class="t-12 c-3">· {{ card.child }}</span>
-      <span v-if="cd.text.value" class="cd" role="timer" :aria-label="cd.aria.value">{{
-        cd.text.value
-      }}</span>
-    </div>
-    <div v-if="cd.text.value" class="countdown">
-      <span :style="{ width: cd.pct.value + '%' }"></span>
-    </div>
-    <div class="icard-b">
-      <p v-if="card.summary" class="clarify-q">{{ card.summary }}</p>
+      <span v-if="card.child" class="text-xs text-muted-foreground">· {{ card.child }}</span>
+      <span
+        v-if="cd.text.value"
+        class="ml-auto text-xs text-muted-foreground tabular-nums"
+        role="timer"
+        :aria-label="cd.aria.value"
+        >{{ cd.text.value }}</span
+      >
+    </ItemHeader>
+    <Progress v-if="cd.text.value" :model-value="cd.pct.value" class="h-1 basis-full" />
+    <ItemContent class="min-w-0 basis-full gap-2">
+      <p v-if="card.summary" class="text-sm break-words whitespace-pre-wrap text-foreground">
+        {{ card.summary }}
+      </p>
       <template v-if="card.choices.length">
-        <div class="choices">
-          <button
+        <div class="flex flex-wrap gap-2">
+          <Button
             v-for="c in card.choices"
             :key="c"
-            class="btn btn-secondary choice"
-            :class="{ 'is-on': picked.includes(c) }"
             type="button"
+            variant="secondary"
+            class="max-tab:h-11"
             :disabled="busy"
+            :aria-pressed="card.multi ? picked.includes(c) : undefined"
             @click="choose(c)"
           >
             <template v-if="card.multi">{{ picked.includes(c) ? "✓ " : "☐ " }}</template
             >{{ c }}
-          </button>
+          </Button>
         </div>
-        <div v-if="card.multi" class="icard-row">
-          <button
-            class="btn btn-primary"
+        <div v-if="card.multi" data-row class="flex flex-wrap gap-2">
+          <Button
             type="button"
+            class="max-tab:h-11"
             :disabled="busy || !picked.length"
             @click="done"
           >
             Done
-          </button>
+          </Button>
         </div>
       </template>
       <template v-else>
-        <label class="t-12 c-3" :for="answerId">Your answer</label>
-        <input
+        <Label :for="answerId" class="text-xs text-muted-foreground">Your answer</Label>
+        <Input
           :id="answerId"
           v-model="text"
-          class="input"
           type="text"
           placeholder="Type your answer"
           @keydown.enter="sendText"
         />
-        <div class="icard-row">
-          <button class="btn btn-primary" type="button" :disabled="busy" @click="sendText">
+        <div data-row class="flex flex-wrap gap-2">
+          <Button type="button" class="max-tab:h-11" :disabled="busy" @click="sendText">
             Send
-          </button>
+          </Button>
         </div>
       </template>
-      <div v-if="error" class="t-12 c-bad">{{ error }}</div>
-    </div>
-  </div>
+      <div v-if="error" role="alert" class="text-xs text-destructive">{{ error }}</div>
+    </ItemContent>
+  </Item>
 </template>
-
-<style scoped>
-.clarify-q {
-  margin: 0;
-  font-size: var(--fs-14);
-  line-height: var(--lh-14);
-  color: var(--text);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-</style>

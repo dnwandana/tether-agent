@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { defineComponent, h as hv } from "vue"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 const h = vi.hoisted(() => ({
@@ -41,7 +44,6 @@ vi.mock("../lib/live", async () => {
 })
 import { api } from "../api/client"
 import { confirm, isSecure, toast, ui } from "../stores/ui"
-import ResultNote from "../components/ResultNote.vue"
 import SkillsPage from "./SkillsPage.vue"
 
 const Blank = { render: () => null }
@@ -110,6 +112,16 @@ let tasks: unknown[] = []
 let rowsOf = installed
 let catalogOf: unknown[] = catalog
 
+// Keeps the last note prop, so the tests check the kind and the title of the result note.
+let lastNote: any = null
+const NoteStub = defineComponent({
+  name: "ResultNote",
+  props: ["note"],
+  setup(p) {
+    return () => ((lastNote = p.note), p.note ? hv("div", p.note.text) : null)
+  },
+})
+
 async function mk(path = "/skills") {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -119,18 +131,26 @@ async function mk(path = "/skills") {
     ],
   })
   await router.push(path)
-  const w = mount(SkillsPage, { global: { plugins: [router], stubs: { LiveHeader: true } } })
+  const user = userEvent.setup()
+  const r = render(SkillsPage, {
+    global: { plugins: [router], stubs: { LiveHeader: true, ResultNote: NoteStub } },
+  })
   await flushPromises()
-  return Object.assign(w, { router })
+  return { ...r, router, user }
 }
-const btns = (w: any, t: string) => w.findAll("button").filter((b: any) => b.text() === t)
-const note = (w: any) => w.findComponent(ResultNote).props("note")
+const btns = (name: string) => screen.queryAllByRole("button", { name })
+const note = () => lastNote
+const bodyRows = () =>
+  screen.getAllByRole("row").filter((r) => within(r).queryAllByRole("cell").length > 0)
+const rowOf = (text: string) => bodyRows().find((r) => r.textContent!.includes(text))!
+const tone = (el: HTMLElement) => el.closest("[data-tone]")?.getAttribute("data-tone")
 const end = async (id: string, t: object) => {
   h.follow.get(id)!(task(t))
   await flushPromises()
 }
 
 beforeEach(() => {
+  lastNote = null
   h.follow.clear()
   h.live = null
   tasks = []
@@ -166,11 +186,11 @@ describe("SkillsPage", () => {
         actions: ["uninstall"],
       }),
     ]
-    const w = await mk()
-    const row = w.findAll("tr").find((r) => r.text().includes("my-notes"))!
-    expect(row.find(".chip-info").text()).toBe("local")
-    expect(row.text()).not.toContain("agent-created")
-    expect(row.find(".clamp-3").attributes("title")).toBe(long)
+    await mk()
+    const row = rowOf("my-notes")
+    expect(tone(within(row).getByText("local"))).toBe("info")
+    expect(row.textContent).not.toContain("agent-created")
+    expect(within(row).getByTitle(long).classList.contains("line-clamp-3")).toBe(true)
   })
 
   it("shows a catalog source trust agent-created as local and clamps the description", async () => {
@@ -185,23 +205,23 @@ describe("SkillsPage", () => {
         source_trust: "agent-created",
       },
     ]
-    const w = await mk("/skills?tab=catalog")
-    const row = w.findAll("tr").find((r) => r.text().includes("own-sync"))!
-    expect(row.find(".chip-info").text()).toBe("local")
-    expect(row.text()).not.toContain("agent-created")
-    expect(row.find(".clamp-3").attributes("title")).toBe(long)
+    await mk("/skills?tab=catalog")
+    const row = rowOf("own-sync")
+    expect(tone(within(row).getByText("local"))).toBe("info")
+    expect(row.textContent).not.toContain("agent-created")
+    expect(within(row).getByTitle(long).classList.contains("line-clamp-3")).toBe(true)
   })
 
   it("shows the error text of a failed task in a result note", async () => {
-    const w = await mk("/skills?tab=catalog")
-    await btns(w, "Install")[0].trigger("click")
+    const { user } = await mk("/skills?tab=catalog")
+    await user.click(btns("Install")[0])
     await flushPromises()
     await end("t1", {
       state: "error",
       subject: "changelog-check",
       text: "The guard found a problem.",
     })
-    expect(note(w)).toMatchObject({
+    expect(note()).toMatchObject({
       title: "/changelog-check",
       kind: "error",
       text: "The guard found a problem.",
@@ -220,8 +240,8 @@ describe("SkillsPage", () => {
   })
 
   it("asks one confirm before an uninstall and says Not removed. after No on the card", async () => {
-    const w = await mk()
-    await btns(w, "Uninstall")[1].trigger("click")
+    const { user } = await mk()
+    await user.click(btns("Uninstall")[1])
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Remove /pr-review?",
@@ -236,12 +256,12 @@ describe("SkillsPage", () => {
       text: "Remove /data/skills/pr-review?\nCancelled.\ncancelled",
     })
     expect(toast).toHaveBeenCalledWith("Not removed.", "info")
-    expect(note(w)).toBeNull()
+    expect(note()).toBeNull()
   })
 
   it("offers Install anyway after a caution refusal and posts force", async () => {
-    const w = await mk("/skills?tab=catalog")
-    await btns(w, "Install")[0].trigger("click")
+    const { user } = await mk("/skills?tab=catalog")
+    await user.click(btns("Install")[0])
     await flushPromises()
     await end("t1", {
       state: "error",
@@ -249,8 +269,8 @@ describe("SkillsPage", () => {
       subject: "changelog-check",
       text: "caution: 1 finding",
     })
-    expect(note(w)).toMatchObject({ kind: "warn", text: "caution: 1 finding" })
-    await btns(w, "Install anyway…")[0].trigger("click")
+    expect(note()).toMatchObject({ kind: "warn", text: "caution: 1 finding" })
+    await user.click(btns("Install anyway…")[0])
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Install /changelog-check anyway?",
@@ -265,11 +285,11 @@ describe("SkillsPage", () => {
 
   it("says that Install anyway replaces a skill of the same name from another source", async () => {
     catalogOf = [{ ...catalog[0], name: "release-notes", url: "github.com/b/release-notes" }]
-    const w = await mk("/skills?tab=catalog")
-    await btns(w, "Install")[0].trigger("click")
+    const { user } = await mk("/skills?tab=catalog")
+    await user.click(btns("Install")[0])
     await flushPromises()
     await end("t1", { state: "error", code: "need_force", subject: "release-notes" })
-    await btns(w, "Install anyway…")[0].trigger("click")
+    await user.click(btns("Install anyway…")[0])
     await flushPromises()
     expect(vi.mocked(confirm).mock.calls[0][0].body).toBe(
       "The skill guard rated it caution. A confirm card follows in ⏳ Waiting. It replaces the installed /release-notes from src.",
@@ -277,8 +297,8 @@ describe("SkillsPage", () => {
   })
 
   it("opens the terminal panel after a dangerous refusal", async () => {
-    const w = await mk()
-    await btns(w, "Update")[0].trigger("click")
+    const { user } = await mk()
+    await user.click(btns("Update")[0])
     await flushPromises()
     await end("t1", {
       state: "error",
@@ -286,40 +306,40 @@ describe("SkillsPage", () => {
       subject: "release-notes",
       text: "dangerous: 2 findings",
     })
-    expect(w.text()).toContain("tether skills update release-notes")
-    expect(w.text()).toContain("The terminal asks you to type the name of the skill.")
-    expect(w.text()).toContain("dangerous: 2 findings")
+    const text = document.body.textContent!
+    expect(text).toContain("tether skills update release-notes")
+    expect(text).toContain("The terminal asks you to type the name of the skill.")
+    expect(text).toContain("dangerous: 2 findings")
   })
 
   it("tells the owner to answer the card while the task waits", async () => {
-    const w = await mk()
-    await btns(w, "Update")[0].trigger("click")
+    const { user } = await mk()
+    await user.click(btns("Update")[0])
     await flushPromises()
     await end("t1", { waiting: true, subject: "release-notes" })
-    expect(w.text()).toContain("Answer the card in ⏳ Waiting.")
-    await btns(w, "Open Waiting")[0].trigger("click")
+    expect(screen.getByText("Answer the card in ⏳ Waiting.")).toBeTruthy()
+    await user.click(btns("Open Waiting")[0])
     expect(ui.trayOpen).toBe(true)
   })
 
   it("disables each skill action while a task runs and marks the running skill", async () => {
-    const w = await mk()
-    await btns(w, "Update")[0].trigger("click")
+    const { user } = await mk()
+    await user.click(btns("Update")[0])
     await flushPromises()
     for (const t of ["Update", "Reset", "Uninstall", "Check for updates"])
-      for (const b of btns(w, t)) expect(b.attributes("disabled"), t).toBeDefined()
-    const row = w.findAll("tr").find((r: any) => r.text().includes("release-notes"))!
-    expect(row.text()).toContain("Running…")
+      for (const b of btns(t)) expect((b as HTMLButtonElement).disabled, t).toBe(true)
+    expect(within(rowOf("release-notes")).getByText("Running…")).toBeTruthy()
     await end("t1", { state: "done", subject: "release-notes", text: "ok" })
-    expect(btns(w, "Update")[0].attributes("disabled")).toBeUndefined()
+    expect((btns("Update")[0] as HTMLButtonElement).disabled).toBe(false)
     expect(toast).toHaveBeenCalledWith("Updated /release-notes. It loads in new sessions.", "ok")
   })
 
   it("shows the lost text when the gateway restarted", async () => {
-    const w = await mk()
-    await btns(w, "Update")[0].trigger("click")
+    const { user } = await mk()
+    await user.click(btns("Update")[0])
     await flushPromises()
     await end("t1", { state: "lost", subject: "release-notes" })
-    expect(note(w)).toMatchObject({
+    expect(note()).toMatchObject({
       kind: "error",
       text: "The gateway restarted. The result of the task is lost.",
     })
@@ -327,54 +347,53 @@ describe("SkillsPage", () => {
 
   it("shows the newest skills task again on return", async () => {
     tasks = [task({ id: "t9", state: "done", subject: "release-notes", text: "Updated." })]
-    const w = await mk()
+    await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/tasks?kind=skills")
-    expect(note(w)).toMatchObject({ title: "/release-notes", kind: "info", text: "Updated." })
+    expect(note()).toMatchObject({ title: "/release-notes", kind: "info", text: "Updated." })
   })
 
   it("follows a skills task that still runs on return", async () => {
     tasks = [task({ id: "t8", subject: "pr-review" })]
-    const w = await mk()
+    await mk()
     expect(h.follow.has("t8")).toBe(true)
-    expect(btns(w, "Uninstall")[0].attributes("disabled")).toBeDefined()
+    expect((btns("Uninstall")[0] as HTMLButtonElement).disabled).toBe(true)
   })
 
   it("stops following a task when the page unmounts", async () => {
     tasks = [task({ id: "t8", subject: "pr-review" })]
-    const w = await mk()
+    const { unmount } = await mk()
     expect(h.follow.has("t8")).toBe(true)
-    w.unmount()
+    unmount()
     expect(h.follow.has("t8")).toBe(false)
   })
 
   it("keeps the list and shows a toast when a live reload fails", async () => {
-    const w = await mk()
-    expect(w.text()).toContain("pr-review")
+    await mk()
+    expect(screen.getByText("/pr-review")).toBeTruthy()
     vi.mocked(api).mockImplementation(async () => {
       throw new Error("boom")
     })
     await h.live!.load()
     await flushPromises()
-    expect(w.text()).toContain("pr-review")
+    expect(screen.getByText("/pr-review")).toBeTruthy()
     expect(toast).toHaveBeenCalledWith("boom", "error")
   })
 
   it("switches to the catalog with the tabs", async () => {
-    const w = await mk()
-    const tab = w.findAll('[role="tab"]').find((t: any) => t.text() === "Catalog")!
-    await tab.trigger("click")
+    const { user, router } = await mk()
+    await user.click(screen.getByRole("tab", { name: "Catalog" }))
     await flushPromises()
-    expect(w.router.currentRoute.value.query.tab).toBe("catalog")
+    expect(router.currentRoute.value.query.tab).toBe("catalog")
     expect(api).toHaveBeenCalledWith("GET", "/api/skills/catalog")
   })
 
   it("shows the empty state with Open the catalog", async () => {
     rowsOf = []
-    const w = await mk()
-    expect(w.text()).toContain("No skills installed.")
-    await btns(w, "Open the catalog")[0].trigger("click")
+    const { user, router } = await mk()
+    expect(screen.getByText("No skills installed.")).toBeTruthy()
+    await user.click(btns("Open the catalog")[0])
     await flushPromises()
-    expect(w.router.currentRoute.value.query.tab).toBe("catalog")
+    expect(router.currentRoute.value.query.tab).toBe("catalog")
   })
 
   it("pages the catalog 20 at a time and filters by trust and by install", async () => {
@@ -386,59 +405,56 @@ describe("SkillsPage", () => {
       verdict: "safe",
       source_trust: i < 3 ? "builtin" : "community",
     }))
-    const w = await mk("/skills?tab=catalog")
-    expect(w.findAll("tbody tr")).toHaveLength(20)
-    expect(w.text()).toContain("Page 1 of 2")
-    await btns(w, "Next ▶")[0].trigger("click")
-    expect(w.findAll("tbody tr")).toHaveLength(5)
-    await w.find('select[aria-label="Trust"]').setValue("local")
-    expect(w.findAll("tbody tr").map((r: any) => r.find("b").text())).toEqual([
+    const { user } = await mk("/skills?tab=catalog")
+    expect(bodyRows()).toHaveLength(20)
+    expect(screen.getByText("Page 1 of 2")).toBeTruthy()
+    await user.click(btns("Next ▶")[0])
+    expect(bodyRows()).toHaveLength(5)
+    await user.selectOptions(screen.getByRole("combobox", { name: "Trust" }), "local")
+    expect(bodyRows().map((r) => r.querySelector("b")!.textContent)).toEqual([
       "/s00",
       "/s01",
       "/s02",
     ])
-    await w.find('select[aria-label="Installed"]').setValue("no")
-    expect(w.findAll("tbody tr").map((r: any) => r.find("b").text())).toEqual(["/s01"])
+    await user.selectOptions(screen.getByRole("combobox", { name: "Installed" }), "no")
+    expect(bodyRows().map((r) => r.querySelector("b")!.textContent)).toEqual(["/s01"])
   })
 
   it("searches the installed list", async () => {
-    const w = await mk()
-    await w.find('input[aria-label="Search the installed skills"]').setValue("review")
-    expect(w.text()).toContain("pr-review")
-    expect(w.text()).not.toContain("release-notes")
+    const { user } = await mk()
+    await user.type(
+      screen.getByRole("searchbox", { name: "Search the installed skills" }),
+      "review",
+    )
+    expect(screen.queryByText("/pr-review")).not.toBeNull()
+    expect(screen.queryByText("/release-notes")).toBeNull()
   })
 
   it("shows the verdict and the source trust in the catalog", async () => {
-    const w = await mk("/skills?tab=catalog")
-    const row = w.findAll("tr").find((r) => r.text().includes("old-one"))!
-    expect(row.find(".chip-warn").text()).toBe("caution")
-    expect(row.find(".chip-ok").text()).toBe("trusted")
-    expect(
-      w
-        .findAll("tr")
-        .find((r) => r.text().includes("repo-sync"))!
-        .find(".chip-bad")
-        .text(),
-    ).toBe("dangerous")
+    await mk("/skills?tab=catalog")
+    expect(tone(within(rowOf("old-one")).getByText("caution"))).toBe("warn")
+    expect(tone(within(rowOf("old-one")).getByText("trusted"))).toBe("ok")
+    expect(tone(within(rowOf("repo-sync")).getByText("dangerous"))).toBe("bad")
   })
 
   it("opens the terminal command instead of a dangerous install", async () => {
-    const w = await mk("/skills?tab=catalog")
+    const { user } = await mk("/skills?tab=catalog")
     vi.mocked(api).mockClear()
-    await btns(w, "Install")[1].trigger("click")
+    await user.click(btns("Install")[1])
     await flushPromises()
     expect(api).not.toHaveBeenCalledWith("POST", "/api/skills/repo-sync/install")
-    expect(w.text()).toContain("tether skills install repo-sync")
-    expect(w.text()).toContain("The terminal asks you to type the name of the skill.")
+    expect(document.body.textContent).toContain("tether skills install repo-sync")
+    expect(document.body.textContent).toContain(
+      "The terminal asks you to type the name of the skill.",
+    )
   })
 
   it("copies the terminal command of a dangerous skill", async () => {
-    const writeText = vi.fn(async () => {})
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true })
-    const w = await mk("/skills?tab=catalog")
-    await btns(w, "Install")[1].trigger("click")
+    const { user } = await mk("/skills?tab=catalog")
+    const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue()
+    await user.click(btns("Install")[1])
     await flushPromises()
-    await btns(w, "Copy command")[0].trigger("click")
+    await user.click(btns("Copy command")[0])
     await flushPromises()
     expect(writeText).toHaveBeenCalledWith("tether skills install repo-sync")
     expect(toast).toHaveBeenCalledWith("Copied.")
@@ -447,25 +463,25 @@ describe("SkillsPage", () => {
   it("shows the HTTPS note in place of Copy on a page that is not secure", async () => {
     vi.mocked(isSecure).mockReturnValue(false)
     try {
-      const w = await mk("/skills?tab=catalog")
-      await btns(w, "Install")[1].trigger("click")
+      const { user } = await mk("/skills?tab=catalog")
+      await user.click(btns("Install")[1])
       await flushPromises()
-      expect(btns(w, "Copy command")).toHaveLength(0)
-      expect(w.text()).toContain("Needs HTTPS or localhost")
+      expect(btns("Copy command")).toHaveLength(0)
+      expect(screen.getByText("Needs HTTPS or localhost")).toBeTruthy()
     } finally {
       vi.mocked(isSecure).mockReturnValue(true)
     }
   })
 
   it("shows Update, Reset, and Uninstall only where they apply", async () => {
-    const w = await mk()
+    const { user } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/skills")
-    expect(btns(w, "Update")).toHaveLength(1)
-    expect(btns(w, "Reset")).toHaveLength(1)
-    expect(btns(w, "Uninstall")).toHaveLength(2)
-    expect(w.text()).toContain("update available")
-    expect(w.text()).toContain("modified locally")
-    await btns(w, "Update")[0].trigger("click")
+    expect(btns("Update")).toHaveLength(1)
+    expect(btns("Reset")).toHaveLength(1)
+    expect(btns("Uninstall")).toHaveLength(2)
+    expect(screen.getByText("update available")).toBeTruthy()
+    expect(screen.getByText("modified locally")).toBeTruthy()
+    await user.click(btns("Update")[0])
     await flushPromises()
     expect(api).toHaveBeenCalledWith("POST", "/api/skills/release-notes/update")
     expect(toast).toHaveBeenCalledWith("Updating /release-notes…", "info")
@@ -473,27 +489,36 @@ describe("SkillsPage", () => {
 
   it("does not post when the owner declines", async () => {
     vi.mocked(confirm).mockResolvedValue(false)
-    const w = await mk()
-    await btns(w, "Reset")[0].trigger("click")
+    const { user } = await mk()
+    await user.click(btns("Reset")[0])
     await flushPromises()
     expect(api).not.toHaveBeenCalledWith("POST", "/api/skills/tether-skills/reset")
   })
 
   it("installs a catalog skill", async () => {
-    const w = await mk("/skills?tab=catalog")
+    const { user } = await mk("/skills?tab=catalog")
     expect(api).toHaveBeenCalledWith("GET", "/api/skills/catalog")
-    expect(btns(w, "Install")).toHaveLength(2)
-    expect(w.text()).toContain("installed")
-    await btns(w, "Install")[0].trigger("click")
+    expect(btns("Install")).toHaveLength(2)
+    expect(screen.getByText("installed")).toBeTruthy()
+    await user.click(btns("Install")[0])
     await flushPromises()
     expect(api).toHaveBeenCalledWith("POST", "/api/skills/changelog-check/install")
     expect(toast).toHaveBeenCalledWith("Installing /changelog-check…", "info")
   })
 
   it("filters the catalog by the search text", async () => {
-    const w = await mk("/skills?tab=catalog")
-    await w.find(".search input").setValue("fork")
-    expect(w.text()).toContain("repo-sync")
-    expect(w.text()).not.toContain("changelog-check")
+    const { user } = await mk("/skills?tab=catalog")
+    await user.type(screen.getByRole("searchbox", { name: "Search 3 skills" }), "fork")
+    expect(screen.queryByText("/repo-sync")).not.toBeNull()
+    expect(screen.queryByText("/changelog-check")).toBeNull()
+  })
+
+  it("uses no legacy class", async () => {
+    const { container } = await mk("/skills?tab=catalog")
+    expect(
+      container.querySelector(
+        ".page-h, .li, .btn, .chip, .search, .pager, .pill-note, .clamp-3, .mono, .input",
+      ),
+    ).toBeNull()
   })
 })

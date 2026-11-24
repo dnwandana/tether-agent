@@ -8,6 +8,8 @@ const h = vi.hoisted(() => ({
   after: [] as ((to: { name: string }) => void)[],
   dirty: false,
   toast: vi.fn(),
+  ui: { trayOpen: false, updateReady: false },
+  app: null as null | { component: (name: string) => unknown },
 }))
 const blank = { default: { render: () => null } }
 vi.mock("./App.vue", () => blank)
@@ -16,7 +18,18 @@ vi.mock("./components/NavRail.vue", () => blank)
 vi.mock("./components/TabBar.vue", () => blank)
 vi.mock("./components/CommandPalette.vue", () => blank)
 vi.mock("./components/ConfirmDialog.vue", () => blank)
-vi.mock("./components/ToastHost.vue", () => blank)
+vi.mock("./components/AppToaster.vue", () => blank)
+vi.mock("vue", async (importOriginal) => {
+  const vue = await importOriginal<typeof import("vue")>()
+  return {
+    ...vue,
+    createApp: (...a: Parameters<typeof vue.createApp>) => {
+      const app = vue.createApp(...a)
+      h.app = app
+      return app
+    },
+  }
+})
 vi.mock("./router", () => ({
   router: {
     install: () => {},
@@ -44,7 +57,7 @@ vi.mock("./stores/turn", () => ({ applyTurnEvents: vi.fn() }))
 vi.mock("./stores/cards", () => ({ applyCardEvents: vi.fn() }))
 vi.mock("./stores/notices", () => ({ applyNoticeEvents: vi.fn() }))
 vi.mock("./stores/status", () => ({ applyStatusEvents: vi.fn(), status: {} }))
-vi.mock("./stores/ui", () => ({ applyTheme: vi.fn(), toast: h.toast }))
+vi.mock("./stores/ui", () => ({ applyTheme: vi.fn(), toast: h.toast, ui: h.ui }))
 
 const toast = h.toast
 const hello = (build_id: string) => [{ name: "hello", data: { build_id } }]
@@ -63,19 +76,24 @@ beforeEach(() => {
   localStorage.setItem("tether.session", "h1")
   sessionStorage.clear()
   h.dirty = false
+  h.ui.updateReady = false
   vi.mocked(toast).mockClear()
 })
 afterEach(() => (document.body.innerHTML = ""))
 
 describe("main", () => {
+  it("registers the toaster and not the old toast host", async () => {
+    await start()
+    expect(h.app!.component("AppToaster")).toBeDefined()
+    expect(h.app!.component("ToastHost")).toBeUndefined()
+  })
+
   it("waits with a banner while a form is dirty", async () => {
     await start()
     h.dirty = true
     h.onEvents!(hello("b2"))
-    expect(document.querySelector(".update-banner")?.textContent).toContain(
-      "A new version is ready",
-    )
-    expect(document.querySelector(".update-banner button")?.textContent).toBe("Reload")
+    expect(h.ui.updateReady).toBe(true)
+    expect(document.querySelector(".update-banner")).toBeNull()
     expect(sessionStorage.getItem("tether.updated-from")).toBeNull()
   })
 
@@ -83,13 +101,13 @@ describe("main", () => {
     await start()
     sessionStorage.setItem("tether.draft", "half a thought")
     h.onEvents!(hello("b2"))
-    expect(document.querySelector(".update-banner")).not.toBeNull()
+    expect(h.ui.updateReady).toBe(true)
   })
 
   it("reloads at once when nothing is dirty, and keeps the old version", async () => {
     await start()
     h.onEvents!(hello("b2"))
-    expect(document.querySelector(".update-banner")).toBeNull()
+    expect(h.ui.updateReady).toBe(false)
     expect(sessionStorage.getItem("tether.updated-from")).toBe("0.25.0")
   })
 
@@ -104,5 +122,14 @@ describe("main", () => {
     sessionStorage.setItem("tether.updated-from", "0.25.0")
     await start()
     expect(toast).not.toHaveBeenCalled()
+  })
+
+  it("shows the update banner on a failed preload, and stops the Vite error", async () => {
+    await start()
+    h.dirty = true
+    const e = new Event("vite:preloadError", { cancelable: true })
+    window.dispatchEvent(e)
+    expect(e.defaultPrevented).toBe(true)
+    expect(h.ui.updateReady).toBe(true)
   })
 })

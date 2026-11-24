@@ -1,6 +1,7 @@
 import { defineComponent, h, type Component } from "vue"
 import { createRouter, createWebHistory, type RouteMeta, type RouteRecordRaw } from "vue-router"
 import { prefs } from "./stores/ui"
+import { onNewBuild } from "./lib/update"
 
 declare module "vue-router" {
   interface RouteMeta {
@@ -34,7 +35,7 @@ function hasSession(): boolean {
 const table: [string, string, string, RouteMeta?][] = [
   ["chat", "/chat", "ChatPage.vue", { ownScroll: true }],
   ["sessions", "/sessions", "SessionsPage.vue"],
-  ["transcript", "/sessions/:id", "TranscriptPage.vue"],
+  ["transcript", "/sessions/:id", "TranscriptPage.vue", { ownScroll: true }],
   ["jobs", "/jobs", "JobsPage.vue"],
   ["job", "/jobs/:id", "JobDetailPage.vue"],
   ["goals", "/goals", "GoalsPage.vue"],
@@ -133,6 +134,14 @@ export function restorePendingScroll(): void {
   pendingTop = null
 }
 
+// Matches the chunk load errors of Chrome, Firefox, Safari, and the CSS preload of Vite.
+const CHUNK_ERROR =
+  /Failed to fetch dynamically imported module|error loading dynamically imported module|Importing a module script failed|Unable to preload CSS/i
+
+function isChunkError(err: unknown): boolean {
+  return err instanceof Error && CHUNK_ERROR.test(err.message)
+}
+
 router.beforeEach((to) => {
   const box = scrollBox()
   // On a back, history.state already holds the target entry, so use the entry that we left.
@@ -149,4 +158,9 @@ router.beforeEach((to) => {
 router.afterEach((to) => {
   leftPosition = historyPosition()
   if (to.name !== "signin") prefs.lastRoute = to.fullPath
+})
+
+// The chunk names of an old page do not exist after an upgrade. Show the update banner.
+router.onError((err) => {
+  if (isChunkError(err)) onNewBuild()
 })

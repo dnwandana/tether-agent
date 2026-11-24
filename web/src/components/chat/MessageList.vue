@@ -1,9 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from "vue"
+import { computed, ref, watch } from "vue"
 import type { FileRef, MessageView, ToolView } from "../../api/types.gen"
 import { session, loadMessages } from "../../stores/session"
 import { turn } from "../../stores/turn"
 import { renderMarkdown } from "../../lib/markdown"
+import { cn } from "@/lib/utils"
+import { Attachment, AttachmentMedia, AttachmentTitle } from "@/components/ui/attachment"
+import { Badge } from "@/components/ui/badge"
+import { Bubble, BubbleContent } from "@/components/ui/bubble"
+import { Button } from "@/components/ui/button"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Marker } from "@/components/ui/marker"
+import { Message, MessageContent, MessageHeader } from "@/components/ui/message"
+import { MessageScrollerItem } from "@/components/ui/message-scroller"
+import { Spinner } from "@/components/ui/spinner"
+import { Trace } from "@/components/ui/trace"
 import StreamText from "./StreamText.vue"
 import ToolLine from "./ToolLine.vue"
 
@@ -54,42 +65,78 @@ function html(src: string): string {
 }
 
 const live = computed(() => turn.view)
+
+// The ids of the user messages that steer a running turn. The server does not mark a steer, so
+// the list marks it. The page loads the first user message of a turn at the first live event, so
+// that message arrives while the turn runs too. The first new user message of a running turn
+// starts the turn and stays an anchor. Each later new user message of the same turn is a steer.
+// A steered message is never a scroll anchor, also after the turn ends.
+// The set is not reactive: the watch below fills it before the next render reads it.
+const steered = new Set<number>()
+const seen = new Set<number>(session.messages.filter((m) => m.role === "user").map((m) => m.id))
+let newest = Math.max(0, ...seen)
+// True when the running turn already has its first user message. When the list mounts during a
+// turn, the loaded messages hold that first message. A new session has no message yet: the list
+// mounts at the start of the turn, before its first message loads.
+let opened = Boolean(turn.view?.running) && seen.size > 0
+watch(
+  () => Boolean(turn.view?.running),
+  (running) => {
+    if (running) opened = false
+  },
+)
+watch(
+  () => session.messages.filter((m) => m.role === "user").map((m) => m.id),
+  (ids) => {
+    for (const id of ids) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      // An older page has smaller ids. It is not a steer.
+      if (id <= newest || !turn.view?.running) continue
+      if (opened) steered.add(id)
+      else opened = true
+    }
+    newest = Math.max(newest, ...ids)
+  },
+)
 </script>
 
 <template>
-  <div class="transcript">
-    <button
-      v-if="canOlder"
-      type="button"
-      class="btn btn-ghost btn-sm"
-      data-act="older"
-      @click="older"
-    >
-      Load older messages
-    </button>
-    <template v-for="m in list" :key="m.id">
-      <div v-if="m.role === 'summary'" class="msg">
-        <details class="collapsed">
-          <summary>🗜 Compacted summary</summary>
-          <span>{{ m.text }}</span>
-        </details>
-      </div>
-      <div
-        v-else-if="m.role === 'user'"
-        class="msg msg-user"
-        :class="{ 'is-compacted': m.compacted }"
-      >
-        <div class="bubble-user" style="white-space: pre-wrap">{{ m.text }}</div>
-      </div>
-      <div v-else class="msg msg-assistant" :class="{ 'is-compacted': m.compacted }">
-        <div class="msg-meta">
-          <span class="avatar avatar-agent" aria-hidden="true">T</span>
+  <MessageScrollerItem v-if="canOlder" message-id="older">
+    <Button variant="ghost" size="sm" data-act="older" @click="older">Load older messages</Button>
+  </MessageScrollerItem>
+  <MessageScrollerItem
+    v-for="m in list"
+    :key="m.id"
+    :message-id="String(m.id)"
+    :scroll-anchor="m.role === 'user' && !steered.has(m.id)"
+  >
+    <Collapsible v-if="m.role === 'summary'">
+      <Marker variant="separator">
+        <CollapsibleTrigger as-child>
+          <Button variant="ghost" size="sm">🗜 Compacted summary</Button>
+        </CollapsibleTrigger>
+      </Marker>
+      <CollapsibleContent class="px-3 pt-2 text-sm whitespace-pre-wrap text-muted-foreground">{{
+        m.text
+      }}</CollapsibleContent>
+    </Collapsible>
+    <Message v-else-if="m.role === 'user'" align="end" :class="cn(m.compacted && 'opacity-60')">
+      <Bubble variant="muted" align="end">
+        <BubbleContent class="whitespace-pre-wrap">{{ m.text }}</BubbleContent>
+      </Bubble>
+    </Message>
+    <Message v-else :class="cn(m.compacted && 'opacity-60')">
+      <MessageContent>
+        <MessageHeader class="gap-2">
           <span>Tether</span>
           <span v-if="m.model">{{ m.model }}</span>
-          <span v-if="m.answered_by" class="chip chip-warn">answered by {{ m.answered_by }}</span>
-        </div>
+          <Badge v-if="m.answered_by" variant="outline" class="text-warning"
+            >answered by {{ m.answered_by }}</Badge
+          >
+        </MessageHeader>
         <slot name="reasoning" :message="m" />
-        <div v-if="m.tools.length > 0" class="tools">
+        <Trace v-if="m.tools.length > 0">
           <ToolLine
             v-for="t in m.tools"
             :key="t.call"
@@ -97,47 +144,57 @@ const live = computed(() => turn.view)
             :selected="selected === t.call"
             @select="emit('tool', t)"
           />
-        </div>
+        </Trace>
         <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
-        <div v-if="m.text !== ''" class="answer" v-html="html(m.text)" />
-        <div v-for="f in m.files" :key="f.id" class="file">
-          <img v-if="f.kind === 'image'" class="shot" :src="fileUrl(f)" :alt="f.name" />
+        <div v-if="m.text !== ''" class="typeset typeset-chat" v-html="html(m.text)" />
+        <template v-for="f in m.files" :key="f.id">
+          <Attachment v-if="f.kind === 'image'" orientation="vertical">
+            <AttachmentMedia variant="image">
+              <img :src="fileUrl(f)" :alt="f.name" />
+            </AttachmentMedia>
+          </Attachment>
           <audio v-else-if="f.kind === 'audio'" controls :src="fileUrl(f)" />
           <video v-else-if="f.kind === 'video'" controls :src="fileUrl(f)" />
-          <span v-else-if="f.kind === 'blocked'">[blocked file]</span>
-          <span v-else-if="f.kind === 'missing'">[missing file]</span>
-          <a v-else :href="fileUrl(f)" download>📎 {{ f.name }}</a>
-        </div>
+          <Attachment v-else-if="f.kind === 'blocked'" state="error">
+            <AttachmentTitle>[blocked file]</AttachmentTitle>
+          </Attachment>
+          <Attachment v-else-if="f.kind === 'missing'" state="error">
+            <AttachmentTitle>[missing file]</AttachmentTitle>
+          </Attachment>
+          <Attachment v-else>
+            <AttachmentTitle>
+              <a :href="fileUrl(f)" download>📎 {{ f.name }}</a>
+            </AttachmentTitle>
+          </Attachment>
+        </template>
         <slot name="footer" :message="m" />
-      </div>
-    </template>
-    <div v-if="live" class="msg msg-assistant">
-      <div class="msg-meta">
-        <span class="avatar avatar-agent" aria-hidden="true">T</span>
-        <span>Tether</span>
-      </div>
-      <div v-if="live.tools.length > 0" class="tools">
-        <ToolLine
-          v-for="t in live.tools"
-          :key="t.call"
-          :tool="t"
-          :selected="selected === t.call"
-          @select="emit('tool', t)"
-        />
-      </div>
-      <StreamText v-if="live.text !== ''" :text="live.text" :running="live.running" />
-      <div v-else-if="live.running && live.tools.length === 0" class="working">
-        <span class="dots"><i></i><i></i><i></i></span>
-        working
-      </div>
-      <slot name="live" />
-    </div>
+      </MessageContent>
+    </Message>
+  </MessageScrollerItem>
+  <MessageScrollerItem v-if="live || $slots.live" message-id="live">
+    <Message v-if="live">
+      <MessageContent>
+        <MessageHeader class="gap-2"><span>Tether</span></MessageHeader>
+        <Trace v-if="live.tools.length > 0">
+          <ToolLine
+            v-for="t in live.tools"
+            :key="t.call"
+            :tool="t"
+            :selected="selected === t.call"
+            @select="emit('tool', t)"
+          />
+        </Trace>
+        <StreamText v-if="live.text !== ''" :text="live.text" :running="live.running" />
+        <div
+          v-else-if="live.running && live.tools.length === 0"
+          class="flex items-center gap-2 text-muted-foreground"
+        >
+          <Spinner aria-hidden="true" />
+          working
+        </div>
+        <slot name="live" />
+      </MessageContent>
+    </Message>
     <slot v-else name="live" />
-  </div>
+  </MessageScrollerItem>
 </template>
-
-<style scoped>
-.is-compacted {
-  opacity: 0.6;
-}
-</style>

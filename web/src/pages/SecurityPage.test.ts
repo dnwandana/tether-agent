@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { defineComponent, h as hv } from "vue"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -15,7 +18,6 @@ vi.mock("../stores/ui", async (importOriginal) => ({
 import { api, runCommand } from "../api/client"
 import { confirm, ui } from "../stores/ui"
 import { emitEvents } from "../lib/bus"
-import ResultNote from "../components/ResultNote.vue"
 import SecurityPage from "./SecurityPage.vue"
 
 const view = {
@@ -123,24 +125,53 @@ const card = (kind: string) => ({
   at: "",
 })
 
-async function mk(path = "/security") {
+// Keeps the last props of the stubbed children, so the tests can check them.
+const seen: { note: any; log: any; rules: any } = { note: null, log: null, rules: null }
+const NoteStub = defineComponent({
+  name: "ResultNote",
+  props: ["note"],
+  setup(p) {
+    return () => {
+      seen.note = p.note
+      return p.note ? hv("div", p.note.text) : null
+    }
+  },
+})
+const LogStub = defineComponent({
+  name: "ApprovalLog",
+  props: ["scopes", "scopeLabels"],
+  setup(p) {
+    return () => ((seen.log = { ...p }), hv("div", "approval log"))
+  },
+})
+const RulesStub = defineComponent({
+  name: "RulesTab",
+  props: ["fixed", "processMode", "cronMode"],
+  setup(p) {
+    return () => ((seen.rules = { ...p }), hv("div", "rules tab"))
+  },
+})
+
+async function mk(path = "/security", stubs: Record<string, unknown> = {}) {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [{ path: "/security", name: "security", component: SecurityPage }],
   })
   await router.push(path)
-  const w = mount(SecurityPage, { global: { plugins: [router], stubs: { DevicesTable: true } } })
+  const r = render(SecurityPage, {
+    global: { plugins: [router], stubs: { DevicesTable: true, ResultNote: NoteStub, ...stubs } },
+  })
   await flushPromises()
-  return w
+  return { ...r, router, user: userEvent.setup() }
 }
-const tab = async (w: any, label: string) => {
-  await w
-    .findAll('[role="tab"]')
-    .find((t: any) => t.text().startsWith(label))!
-    .trigger("click")
+const tab = async (user: any, label: string) => {
+  await user.click(screen.getAllByRole("tab").find((t) => t.textContent!.startsWith(label))!)
   await flushPromises()
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
+const btn = (name: string) => screen.getByRole("button", { name })
+// The body rows of all tables: a header row has no cell.
+const bodyRows = () =>
+  screen.getAllByRole("row").filter((r) => within(r).queryAllByRole("cell").length > 0)
 const reply = (text: string, buttons: any[][] = []) => ({
   request_id: "r",
   text,
@@ -163,43 +194,52 @@ beforeEach(() => {
   vi.mocked(runCommand).mockReset().mockResolvedValue(reply("Done."))
   vi.mocked(confirm).mockReset().mockResolvedValue(true)
   ui.trayOpen = false
+  seen.note = seen.log = seen.rules = null
 })
+
+// Finds a paragraph by its text. The text can have a space at the edges.
+const line = (t: string) =>
+  screen.getByText((_, el) => el?.tagName === "P" && el.textContent?.trim() === t)
+// The rows of the grant list that the paging test made.
+const ruleRows = () => bodyRows().filter((r) => r.textContent!.includes("rule "))
 
 describe("SecurityPage", () => {
   it("shows one line for each fixed mode and links to the Rules tab", async () => {
-    const w = await mk()
-    expect(w.find(".page-stack").exists()).toBe(true)
-    const lines = w.findAll(".fixed-modes p")
-    expect(lines.slice(0, 2).map((p) => p.text())).toEqual([
-      "Process mode: smart",
-      "Cron mode: deny",
-    ])
-    await w.find(".fixed-modes button.link").trigger("click")
+    const { user } = await mk("/security", { RulesTab: RulesStub })
+    const first = line("Process mode: smart")
+    line("Cron mode: deny")
+    // The modes table and the fixed-modes card share one parent element.
+    expect(first.closest("[data-slot=card]")!.parentElement!.querySelector("table")).not.toBeNull()
+    await user.click(btn("What each mode does"))
     await flushPromises()
-    expect(w.findComponent({ name: "RulesTab" }).exists()).toBe(true)
+    expect(screen.getByRole("tab", { name: "Rules", selected: true })).toBeTruthy()
+    expect(screen.getByText("rules tab")).toBeTruthy()
   })
 
   it("isolates the scope label of a mode in bdi", async () => {
-    const w = await mk()
-    const bdi = w.findAll("bdi").find((b) => b.text() === "Telegram › Ops › topic 7")!
-    expect(bdi.attributes("title")).toBe("Telegram › Ops › topic 7")
+    await mk()
+    const bdi = screen.getByText("Telegram › Ops › topic 7")
+    expect(bdi.tagName).toBe("BDI")
+    expect(bdi.getAttribute("title")).toBe("Telegram › Ops › topic 7")
   })
 
   it("draws one row for each server and class", async () => {
-    const w = await mk("/security?tab=rules")
-    expect(w.text()).toContain("gmail")
-    expect(w.text()).toContain("slack")
-    const rows = w
-      .findAll("tr")
-      .filter((r) => /gmail|slack/.test(r.text()) && /send|read/.test(r.text()))
+    await mk("/security?tab=rules")
+    expect(document.body.textContent).toContain("gmail")
+    expect(document.body.textContent).toContain("slack")
+    const rows = bodyRows().filter(
+      (r) => /gmail|slack/.test(r.textContent!) && /send|read/.test(r.textContent!),
+    )
     expect(rows).toHaveLength(3)
   })
 
   it("sets Full through the confirm of the page and sends /mode full confirm", async () => {
-    const w = await mk()
-    expect(w.text()).toContain("View only. Send /mode in that chat.")
-    expect(w.text()).toContain("Telegram › Ops › topic 7")
-    await btn(w, "⚡ Full").trigger("click")
+    const { user } = await mk()
+    expect(document.body.textContent).toContain("View only. Send /mode in that chat.")
+    expect(document.body.textContent).toContain("Telegram › Ops › topic 7")
+    const group = screen.getByRole("group", { name: "Mode of the Dashboard" })
+    expect(within(group).getAllByRole("button")).toHaveLength(3)
+    await user.click(btn("⚡ Full"))
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -217,62 +257,61 @@ describe("SecurityPage", () => {
 
   it("sends nothing when the owner cancels the Full confirm", async () => {
     vi.mocked(confirm).mockResolvedValue(false)
-    const w = await mk()
-    await btn(w, "⚡ Full").trigger("click")
+    const { user } = await mk()
+    await user.click(btn("⚡ Full"))
     await flushPromises()
     expect(runCommand).not.toHaveBeenCalled()
+    expect(btn("⚡ Full").getAttribute("aria-pressed")).toBe("false")
   })
 
   it("removes grants with the codes of the list and shows the damaged store", async () => {
-    const w = await mk("/security?tab=grants")
-    expect(w.find(".bad-banner").text()).toBe(
+    const { user } = await mk("/security?tab=grants")
+    expect(screen.getByRole("alert").textContent!.replace(/\s+/g, " ").trim()).toBe(
       "Saved answers are off, because the answer store is damaged: bad row 7. Restart the gateway after you repair it.",
     )
-    expect(w.text()).toContain("Push to a remote")
-    await btn(w, "Remove").trigger("click")
+    expect(document.body.textContent).toContain("Push to a remote")
+    await user.click(btn("Remove"))
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/approvals remove 1 a1b2c3d4")
-    await btn(w, "Remove all…").trigger("click")
+    await user.click(btn("Remove all…"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/approvals remove all f00dbabe")
   })
 
   it("mounts the approval log with the log scopes", async () => {
-    const w = await mk("/security?tab=log")
-    const log = w.findComponent({ name: "ApprovalLog" })
-    expect(log.exists()).toBe(true)
-    expect(log.props("scopes")).toEqual(["dashboard", "telegram:-100:7"])
-    expect(log.props("scopeLabels")).toEqual({
+    await mk("/security?tab=log", { ApprovalLog: LogStub })
+    expect(screen.getByText("approval log")).toBeTruthy()
+    expect(seen.log.scopes).toEqual(["dashboard", "telegram:-100:7"])
+    expect(seen.log.scopeLabels).toEqual({
       dashboard: "Dashboard",
       "telegram:-100:7": "Telegram › Ops › topic 7",
     })
   })
 
   it("unpins one program by its path from the Secrets tab", async () => {
-    const w = await mk("/security?tab=secrets")
-    expect(w.findAll("button").filter((b) => b.text() === "Unpin")).toHaveLength(1)
-    await btn(w, "Unpin").trigger("click")
+    const { user } = await mk("/security?tab=secrets")
+    const unpin = screen.getAllByRole("button", { name: "Unpin" })
+    expect(unpin).toHaveLength(1)
+    await user.click(unpin[0])
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/secrets unpin GITHUB_TOKEN /usr/bin/gh")
     expect(api).toHaveBeenLastCalledWith("GET", "/api/security")
   })
 
   it("passes the modes and the fixed rules to the Rules tab", async () => {
-    const w = await mk("/security?tab=rules")
-    const rules = w.findComponent({ name: "RulesTab" })
-    expect(rules.props("processMode")).toBe("smart")
-    expect(rules.props("cronMode")).toBe("deny")
+    await mk("/security?tab=rules", { RulesTab: RulesStub })
+    expect(seen.rules.processMode).toBe("smart")
+    expect(seen.rules.cronMode).toBe("deny")
   })
 
   it("shows the mode reply in a result note", async () => {
     vi.mocked(runCommand).mockResolvedValueOnce(reply("🧭 **Mode of this topic: read-only**"))
-    const w = await mk()
-    await btn(w, "👁 Read-only").trigger("click")
+    const { user } = await mk()
+    await user.click(btn("👁 Read-only"))
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/mode read-only")
-    const note = w.findComponent(ResultNote).props("note")
-    expect(note.text).toBe("🧭 **Mode of this topic: read-only**")
-    expect(note.kind).toBe("info")
+    expect(seen.note.text).toBe("🧭 **Mode of this topic: read-only**")
+    expect(seen.note.kind).toBe("info")
   })
 
   it("names the tab Always answers and pages the grants", async () => {
@@ -285,16 +324,17 @@ describe("SecurityPage", () => {
       async (_m: string, p: string) =>
         (p === "/api/security" ? { ...view, grants: many } : logPage) as any,
     )
-    const w = await mk()
-    await tab(w, "Always answers")
-    expect(w.findAll("tr").filter((r) => r.text().includes("rule "))).toHaveLength(20)
-    await btn(w, "Next ▶").trigger("click")
-    expect(w.findAll("tr").filter((r) => r.text().includes("rule "))).toHaveLength(5)
+    const { user } = await mk()
+    await tab(user, "Always answers")
+    expect(ruleRows()).toHaveLength(20)
+    await user.click(btn("Next ▶"))
+    await flushPromises()
+    expect(ruleRows()).toHaveLength(5)
   })
 
   it("shows the count of the grants on the tab", async () => {
-    const w = await mk()
-    expect(w.findAll('[role="tab"]')[1].find(".badge").text()).toBe(String(view.grants.length))
+    await mk()
+    expect(within(screen.getAllByRole("tab")[1]).getByText(String(view.grants.length))).toBeTruthy()
   })
 
   it("goes back to the last page when a Remove empties the page", async () => {
@@ -311,12 +351,12 @@ describe("SecurityPage", () => {
       rows = rows.slice(0, 20)
       return reply("✅ Removed 1 Always answer.")
     })
-    const w = await mk("/security?tab=grants")
-    await btn(w, "Next ▶").trigger("click")
-    await btn(w, "Remove").trigger("click")
+    const { user } = await mk("/security?tab=grants")
+    await user.click(btn("Next ▶"))
+    await user.click(btn("Remove"))
     await flushPromises()
-    expect(w.text()).toContain("1–20 of 20")
-    expect(w.text()).not.toContain("21–20")
+    expect(document.body.textContent).toContain("1–20 of 20")
+    expect(document.body.textContent).not.toContain("21–20")
   })
 
   it("shows the empty text of the Always answers", async () => {
@@ -324,31 +364,26 @@ describe("SecurityPage", () => {
       async (_m: string, p: string) =>
         (p === "/api/security" ? { ...view, grants: [] } : logPage) as any,
     )
-    const w = await mk("/security?tab=grants")
-    expect(w.text()).toContain("An ✅ Always answer shows here.")
+    await mk("/security?tab=grants")
+    expect(screen.getByText("An ✅ Always answer shows here.")).toBeTruthy()
   })
 
   it("shows the Remove reply in a result note", async () => {
     vi.mocked(runCommand).mockResolvedValueOnce(reply("✅ Removed 1 Always answer."))
-    const w = await mk("/security?tab=grants")
-    await btn(w, "Remove").trigger("click")
+    const { user } = await mk("/security?tab=grants")
+    await user.click(btn("Remove"))
     await flushPromises()
-    expect(w.findComponent(ResultNote).props("note").text).toBe("✅ Removed 1 Always answer.")
+    expect(seen.note.text).toBe("✅ Removed 1 Always answer.")
   })
 
   it("opens the tray after Set value", async () => {
     vi.mocked(runCommand).mockResolvedValueOnce(reply("🔑 Answer the card."))
-    const w = await mk("/security?tab=secrets")
-    await w
-      .findAll("button")
-      .filter((b) => b.text() === "Set value…")[0]
-      .trigger("click")
+    const { user } = await mk("/security?tab=secrets")
+    await user.click(screen.getAllByRole("button", { name: "Set value…" })[0])
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/secrets set GITHUB_TOKEN")
     expect(ui.trayOpen).toBe(true)
-    expect(w.findComponent(ResultNote).props("note").text).toBe(
-      "Type the value in the 🔑 card in ⏳ Waiting.",
-    )
+    expect(seen.note.text).toBe("Type the value in the 🔑 card in ⏳ Waiting.")
   })
 
   it("loads again when a secret or an approval card closes", async () => {
@@ -360,5 +395,14 @@ describe("SecurityPage", () => {
     emitEvents([{ name: "card.done", data: card("secret") }])
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/security")
+  })
+
+  it("uses no legacy class", async () => {
+    const { container } = await mk("/security?tab=grants")
+    expect(
+      container.querySelector(
+        ".page-h, .page-stack, .chip, .seg, .btn, .bad-banner, .pager, .fixed-modes, .c-3, .t-12",
+      ),
+    ).toBeNull()
   })
 })

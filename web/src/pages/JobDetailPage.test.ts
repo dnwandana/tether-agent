@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { defineComponent, h, onMounted } from "vue"
+import { render, screen, within, cleanup } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -27,6 +30,17 @@ const notFound = () =>
 const hhmm = (iso: string) =>
   new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
 
+let mounts = 0
+const JobForm = defineComponent({
+  name: "JobForm",
+  props: ["job"],
+  emits: ["saved", "cancel", "dirty"],
+  setup(_, { emit }) {
+    onMounted(() => mounts++)
+    return () =>
+      h("button", { type: "button", onClick: () => emit("dirty", true) }, "Make the form dirty")
+  },
+})
 const Blank = { render: () => null }
 const run = (id: number) => ({
   id,
@@ -100,15 +114,24 @@ async function mk() {
     ],
   })
   await router.push("/jobs/j2")
-  const w = mount(JobDetailPage, {
-    global: { plugins: [router], stubs: { JobForm: true } },
-  })
+  const r = render(JobDetailPage, { global: { plugins: [router], stubs: { JobForm } } })
   await flushPromises()
-  return { w, router }
+  return { ...r, router }
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
+const alertWith = (text: string) =>
+  screen.getAllByRole("alert").find((a) => a.textContent!.includes(text))!
+const phoneMedia = () => {
+  window.matchMedia = ((q: string) => ({
+    matches: q.includes("max-width: 599px"),
+    media: q,
+    addEventListener() {},
+    removeEventListener() {},
+  })) as any
+}
+const outputName = "Output of the run at " + hhmm("2026-11-20T07:00:00Z")
 
 beforeEach(() => {
+  mounts = 0
   window.matchMedia = ((q: string) => ({
     matches: false,
     media: q,
@@ -124,46 +147,45 @@ beforeEach(() => {
   vi.mocked(confirm).mockReset()
 })
 
+const withDetail = (extra: object, runs: unknown[] = [run(1)]) =>
+  vi
+    .mocked(api)
+    .mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/jobs/j2" ? { ...detail, ...extra } : runs) as any,
+    )
+
 describe("JobDetailPage", () => {
   it("loads the job and the first page of runs", async () => {
-    const { w } = await mk()
+    const user = userEvent.setup()
+    await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2")
     expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=0&limit=10")
-    expect(w.find(".bad-banner").text()).toContain("⚠ Failing · 3 in a row.")
-    expect(w.find(".bad-banner").text()).toContain("github: HTTP 401: bad credentials")
-    expect(w.text()).toContain("4 of 7 OK · $0.0192")
-    expect(w.find(".pager").text()).toContain("1–2 of 38")
-    await btn(w, "Next ▶").trigger("click")
+    expect(alertWith("⚠ Failing · 3 in a row.").textContent).toContain(
+      "github: HTTP 401: bad credentials",
+    )
+    expect(screen.getByText(/4 of 7 OK · \$0\.0192/)).toBeTruthy()
+    expect(screen.getByText(/1–2 of\s+38/)).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Next ▶" }))
     expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=10&limit=10")
   })
 
   it("shows the fail streak with the limit and survives null lists", async () => {
-    vi.mocked(api).mockImplementation(
-      async (_m: string, p: string) =>
-        (p === "/api/jobs/j2"
-          ? { ...detail, skills: null, toolsets: null, fail_limit: 5 }
-          : [run(1)]) as any,
-    )
-    const { w } = await mk()
-    expect(w.text()).toContain("3 (pauses at 5)")
+    withDetail({ skills: null, toolsets: null, fail_limit: 5 })
+    await mk()
+    expect(screen.getByText(/3 \(pauses at 5\)/)).toBeTruthy()
   })
 
   it("shows the output of a run", async () => {
-    const { w } = await mk()
-    await w
-      .findAll("button")
-      .filter((b) => b.text() === "Output")[0]
-      .trigger("click")
-    expect(
-      w
-        .findAllComponents({ name: "SidePanel" })
-        .find((p) => p.props("open"))!
-        .props("title"),
-    ).toBe("Output of the run at " + hhmm("2026-11-20T07:00:00Z"))
-    expect(w.find(".run-output").text()).toBe("HTTP 401")
+    const user = userEvent.setup({ pointerEventsCheck: 0 })
+    await mk()
+    await user.click(screen.getAllByRole("button", { name: "Output" })[0])
+    const dlg = screen.getByRole("dialog", { name: outputName })
+    expect(dlg.querySelector("pre")!.textContent).toBe("HTTP 401")
   })
 
   it("deletes the job after the confirm of the command", async () => {
+    const user = userEvent.setup()
     vi.mocked(runCommand)
       .mockResolvedValueOnce({
         request_id: "r1",
@@ -178,12 +200,12 @@ describe("JobDetailPage", () => {
         edit: false,
       })
     vi.mocked(confirm).mockResolvedValue(true)
-    const { w, router } = await mk()
+    const { router } = await mk()
     vi.mocked(api).mockImplementation(async (_m: string, p: string) => {
       if (p === "/api/jobs/j2" && vi.mocked(runCommand).mock.calls.length >= 2) throw notFound()
       return (p === "/api/jobs/j2" ? detail : [run(1), run(2)]) as any
     })
-    await btn(w, "🗑 Delete…").trigger("click")
+    await user.click(screen.getByRole("button", { name: "🗑 Delete…" }))
     await flushPromises()
     expect(runCommand).toHaveBeenNthCalledWith(1, "/jobs delete j2")
     expect(confirm).toHaveBeenCalledWith(
@@ -209,74 +231,60 @@ describe("JobDetailPage", () => {
             }
           : []) as any,
     )
-    const { w } = await mk()
-    expect(w.find(".warn-banner").text()).toContain(
+    await mk()
+    expect(alertWith("⏸ Paused").textContent).toContain(
       "⏸ Paused: the schedule 0 9 * * 8 is not valid. Edit the schedule to resume.",
     )
-    expect(btn(w, "⚡ Run now").attributes("disabled")).toBeDefined()
-    expect(w.text()).toContain("The schedule is not valid")
-    expect(w.text()).toContain("Resume the job first.")
+    expect((screen.getByRole("button", { name: "⚡ Run now" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+    expect(screen.getByText("The schedule is not valid")).toBeTruthy()
+    expect(screen.getByText("Resume the job first.")).toBeTruthy()
   })
 
   it("shows the script of a no-agent job and the deliver label", async () => {
-    vi.mocked(api).mockImplementation(
-      async (_m: string, p: string) =>
-        (p === "/api/jobs/j2"
-          ? { ...detail, no_agent: true, script: "disk.sh", deliver_label: "Ops chat" }
-          : [run(1)]) as any,
-    )
-    const { w } = await mk()
-    const def = w.findAll(".card").find((c) => c.text().includes("Definition"))!
-    expect(def.text()).toContain("Script")
-    expect(def.text()).toContain("disk.sh")
-    expect(def.text()).not.toContain("Prompt")
-    expect(def.text()).toContain("Ops chat")
-    expect(def.text()).not.toContain("telegram:123")
+    withDetail({ no_agent: true, script: "disk.sh", deliver_label: "Ops chat" })
+    await mk()
+    const def = screen.getByText("Definition").closest('[data-slot="card"]')!
+    const text = def.textContent!
+    expect(text).toContain("Script")
+    expect(text).toContain("disk.sh")
+    expect(text).not.toContain("Prompt")
+    expect(text).toContain("Ops chat")
+    expect(text).not.toContain("telegram:123")
   })
 
   it("shows the last output, the watch limit, and the failure pause", async () => {
-    vi.mocked(api).mockImplementation(
-      async (_m: string, p: string) =>
-        (p === "/api/jobs/j2"
-          ? {
-              ...detail,
-              last_output: "3 new issues",
-              watch_limit_hit: true,
-              job: { ...detail.job, enabled: false, pause_reason: "failures" },
-            }
-          : [run(1)]) as any,
-    )
-    const { w } = await mk()
-    expect(w.text()).toContain("3 new issues")
-    expect(w.text()).toContain("The watch limit is reached.")
-    expect(w.text()).toContain("Paused after 3 failures")
+    withDetail({
+      last_output: "3 new issues",
+      watch_limit_hit: true,
+      job: { ...detail.job, enabled: false, pause_reason: "failures" },
+    })
+    await mk()
+    expect(screen.getByText("3 new issues")).toBeTruthy()
+    expect(screen.getByText("The watch limit is reached.")).toBeTruthy()
+    expect(screen.getByText("Paused after 3 failures")).toBeTruthy()
   })
 
   it("has the Finished and Delivery error columns", async () => {
-    const { w } = await mk()
-    const heads = w.findAll("th").map((t) => t.text())
+    await mk()
+    const heads = screen.getAllByRole("columnheader").map((t) => t.textContent!.trim())
     expect(heads).toEqual(expect.arrayContaining(["Finished", "Delivery error"]))
   })
 
   it("opens the output as an expanded card on a phone", async () => {
-    window.matchMedia = ((q: string) => ({
-      matches: q.includes("max-width: 599px"),
-      media: q,
-      addEventListener() {},
-      removeEventListener() {},
-    })) as any
-    const { w } = await mk()
-    await w
-      .findAll("button")
-      .filter((b) => b.text() === "Output")[0]
-      .trigger("click")
-    const card = w.find(".run-output-card")
-    expect(card.text()).toContain("Output of the run at " + hhmm("2026-11-20T07:00:00Z"))
-    await card.find("button[aria-label='Close']").trigger("click")
-    expect(w.find(".run-output-card").exists()).toBe(false)
+    const user = userEvent.setup()
+    phoneMedia()
+    await mk()
+    await user.click(screen.getAllByRole("button", { name: "Output" })[0])
+    const card = screen.getByRole("region", { name: outputName })
+    expect(card.textContent).toContain(outputName)
+    await user.click(within(card).getByRole("button", { name: "Close" }))
+    expect(screen.queryByRole("region")).toBeNull()
   })
 
   it("shows the empty runs with Run now, and the history-off text", async () => {
+    const user = userEvent.setup()
     vi.mocked(api).mockImplementation(
       async (_m: string, p: string) =>
         (p === "/api/jobs/j2"
@@ -294,23 +302,26 @@ describe("JobDetailPage", () => {
       buttons: [],
       edit: false,
     })
-    const { w } = await mk()
-    expect(w.text()).toContain(
-      "No runs yet. The first run is at " + shortTime("2026-11-24T07:00:00Z") + ".",
-    )
-    w.findAllComponents({ name: "StateBlock" })
-      .find((s) => s.props("action") === "⚡ Run now")!
-      .vm.$emit("action")
+    const first = await mk()
+    expect(
+      screen.getByText(
+        "No runs yet. The first run is at " + shortTime("2026-11-24T07:00:00Z") + ".",
+      ),
+    ).toBeTruthy()
+    const runNow = screen.getAllByRole("button", { name: "⚡ Run now" })
+    await user.click(runNow[runNow.length - 1])
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/jobs run j2")
+    first.unmount()
+    cleanup()
     vi.mocked(api).mockImplementation(
       async (_m: string, p: string) =>
         (p === "/api/jobs/j2"
           ? { ...detail, job: { ...detail.job, history_off: true } }
           : []) as any,
     )
-    const second = await mk()
-    expect(second.w.text()).toContain("Run history is off (cron.run_history is 0).")
+    await mk()
+    expect(screen.getByText("Run history is off (cron.run_history is 0).")).toBeTruthy()
   })
 
   it("loads again only on the job.run event of this job", async () => {
@@ -325,51 +336,38 @@ describe("JobDetailPage", () => {
   })
 
   it("keeps the open form mounted on a live reload and passes its dirty state", async () => {
-    const { w } = await mk()
-    await btn(w, "✎ Edit").trigger("click")
-    const form = w.findComponent({ name: "JobForm" })
-    form.vm.$emit("dirty", true)
-    await flushPromises()
-    const panel = w.findAllComponents({ name: "SidePanel" }).find((p) => p.props("open"))!
-    expect(panel.props("dirty")).toBe(true)
+    const user = userEvent.setup({ pointerEventsCheck: 0 })
+    await mk()
+    await user.click(screen.getByRole("button", { name: "✎ Edit" }))
+    await user.click(screen.getByRole("button", { name: "Make the form dirty" }))
+    const dlg = screen.getByRole("dialog", { name: "Edit gh-notify" })
+    await user.click(within(dlg).getByRole("button", { name: "Close" }))
+    expect(screen.getByText("Discard the changes?")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Keep editing" }))
     emitEvents([{ name: "job.run", data: { job_id: "j2", status: "ok" } }])
     await flushPromises()
-    expect(w.findComponent({ name: "JobForm" }).vm).toBe(form.vm)
+    expect(mounts).toBe(1)
   })
 
   it("shows the 7-day cost of the job, the state glyph, and a stopped run", async () => {
-    vi.mocked(api).mockImplementation(
-      async (_m: string, p: string) =>
-        (p === "/api/jobs/j2"
-          ? {
-              ...detail,
-              job: { ...detail.job, icon: "" },
-              last7: [{ ...run(1), status: "stopped" }, ...detail.last7.slice(1)],
-            }
-          : [run(1)]) as any,
-    )
-    const { w } = await mk()
-    expect(w.text()).toContain("4 of 7 OK · $0.0192")
-    expect(w.find("h1").text()).toContain("⚠")
-    const bars = w.findAll(".runs7 i")
-    expect(bars[bars.length - 1].classes()).toContain("stop")
-    expect(w.find(".page-stack").exists()).toBe(true)
+    withDetail({
+      job: { ...detail.job, icon: "" },
+      last7: [{ ...run(1), status: "stopped" }, ...detail.last7.slice(1)],
+    })
+    await mk()
+    expect(screen.getByText(/4 of 7 OK · \$0\.0192/)).toBeTruthy()
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("⚠")
+    const bars = document.querySelectorAll("[data-bar]")
+    expect(bars[bars.length - 1].getAttribute("data-bar")).toBe("stop")
   })
 
   it("shows a dash for a cost that is not known, and done as muted text", async () => {
-    vi.mocked(api).mockImplementation(
-      async (_m: string, p: string) =>
-        (p === "/api/jobs/j2"
-          ? {
-              ...detail,
-              job: { ...detail.job, state: "done", enabled: false, cost_7d_known: false },
-            }
-          : [run(1)]) as any,
-    )
-    const { w } = await mk()
-    expect(w.text()).toContain("4 of 7 OK · —")
-    expect(w.find(".page-h .chip").exists()).toBe(false)
-    expect(w.findAll(".page-h .c-3").some((s: any) => s.text() === "done")).toBe(true)
-    expect(w.findAll("button").some((b: any) => b.text() === "⏸ Pause")).toBe(false)
+    withDetail({ job: { ...detail.job, state: "done", enabled: false, cost_7d_known: false } })
+    await mk()
+    expect(screen.getByText(/4 of 7 OK · —/)).toBeTruthy()
+    const h1 = screen.getByRole("heading", { level: 1 })
+    expect(h1.parentElement!.querySelector('[data-slot="badge"]')).toBeNull()
+    expect(within(h1.parentElement!).getByText("done").classList).toContain("text-muted-foreground")
+    expect(screen.queryByRole("button", { name: "⏸ Pause" })).toBeNull()
   })
 })

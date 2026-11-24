@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen, within, cleanup } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 import { defineComponent, h } from "vue"
 
@@ -91,15 +93,22 @@ async function mk() {
     name: "SidePanel",
     props: ["open", "title", "dirty"],
     setup:
-      (_, { slots }) =>
+      (props, { slots }) =>
       () =>
-        h("div", slots.default?.()),
+        h(
+          "div",
+          { role: "dialog", "aria-label": props.title, "data-dirty": String(!!props.dirty) },
+          slots.default?.(),
+        ),
   })
-  const w = mount(GoalDetailPage, { global: { plugins: [router], stubs: { SidePanel } } })
+  const r = render(GoalDetailPage, { global: { plugins: [router], stubs: { SidePanel } } })
   await flushPromises()
-  return w
+  return r
 }
-const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
+const setup = () => userEvent.setup({ pointerEventsCheck: 0 })
+const btn = (t: string) => screen.getByRole("button", { name: t })
+const hasBtn = (t: string) => screen.queryByRole("button", { name: t }) !== null
+const GATE_PH = "Add a gate, for example: go vet ./..."
 
 beforeEach(() => {
   window.matchMedia = ((q: string) => ({
@@ -118,36 +127,36 @@ beforeEach(() => {
 
 describe("GoalDetailPage", () => {
   it("shows the contract, the subgoals, and the gates", async () => {
-    const w = await mk()
+    const { container } = await mk()
+    const text = container.textContent!
     expect(api).toHaveBeenCalledWith("GET", "/api/goals/s1")
-    expect(w.text()).toContain("8 / 20")
-    expect(w.text()).toContain("v0.24.0 is tagged.")
-    expect(w.text()).toContain("Tag v0.24.0")
-    expect(w.text()).toContain("1 / 2")
-    expect(w.text()).toContain("FAIL internal/gateway")
-    expect(w.text()).not.toContain("ok internal/cron")
+    expect(text).toContain("8 / 20")
+    expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("40")
+    expect(text).toContain("v0.24.0 is tagged.")
+    expect(text).toContain("Tag v0.24.0")
+    expect(text).toContain("1 / 2")
+    expect(text).toContain("FAIL internal/gateway")
+    expect(text).not.toContain("ok internal/cron")
   })
 
   it("shows the times in the short format inside a page stack", async () => {
-    const w = await mk()
-    expect(w.find(".page-stack").exists()).toBe(true)
+    await mk()
     for (const t of ["2026-11-20T09:30:00Z", "2026-11-20T09:00:00Z"])
-      expect(w.find(`[title="${fullTime(t)}"]`).text()).toBe(shortTime(t))
+      expect(screen.getByTitle(fullTime(t)).textContent).toBe(shortTime(t))
   })
 
   it("removes a subgoal and adds a gate with the commands", async () => {
-    const w = await mk()
-    await w
-      .findAll("button")
-      .filter((b) => b.text() === "Remove")[1]
-      .trigger("click")
+    const user = setup()
+    await mk()
+    await user.click(screen.getAllByRole("button", { name: "Remove" })[1])
     expect(runCommand).toHaveBeenCalledWith("/subgoal remove 2 bbbbbbbb")
-    await w.find('input[placeholder="Add a gate, for example: go vet ./..."]').setValue("make lint")
-    await btn(w, "Add gate").trigger("click")
+    await user.type(screen.getByPlaceholderText(GATE_PH), "make lint")
+    await user.click(btn("Add gate"))
     expect(runCommand).toHaveBeenLastCalledWith("/goal gate add make lint")
   })
 
   it("sends the gate confirm of the server, or its cancel", async () => {
+    const user = setup()
     vi.mocked(runCommand).mockResolvedValueOnce({
       request_id: "r",
       text: "⚠ This gate runs a dangerous command.",
@@ -160,11 +169,9 @@ describe("GoalDetailPage", () => {
       ],
     })
     vi.mocked(confirm).mockResolvedValue(false)
-    const w = await mk()
-    await w
-      .find('input[placeholder="Add a gate, for example: go vet ./..."]')
-      .setValue("rm -rf build")
-    await btn(w, "Add gate").trigger("click")
+    await mk()
+    await user.type(screen.getByPlaceholderText(GATE_PH), "rm -rf build")
+    await user.click(btn("Add gate"))
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -176,22 +183,23 @@ describe("GoalDetailPage", () => {
   })
 
   it("parks the goal on a process", async () => {
-    const w = await mk()
-    await btn(w, "Wait…").trigger("click")
-    await w.find('[data-field="pid"]').setValue("48390")
-    await w.find('[data-field="reason"]').setValue("the CI run must finish")
-    await btn(w, "Wait").trigger("click")
+    const user = setup()
+    await mk()
+    await user.click(btn("Wait…"))
+    await user.type(screen.getByLabelText("PID"), "48390")
+    await user.type(screen.getByLabelText("Reason"), "the CI run must finish")
+    await user.click(screen.getByRole("button", { name: "Wait" }))
     expect(runCommand).toHaveBeenCalledWith("/goal wait 48390 the CI run must finish")
   })
 
   it("asks before a gate remove and sends the hash", async () => {
+    const user = setup()
     vi.mocked(confirm).mockResolvedValue(true)
-    const w = await mk()
-    const gateRemove = w.findAll("tr").find((r) => r.text().includes("go test ./..."))!
-    await gateRemove
-      .findAll("button")
-      .find((b) => b.text() === "Remove")!
-      .trigger("click")
+    await mk()
+    const gateRow = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent!.includes("go test ./..."))!
+    await user.click(within(gateRow).getByRole("button", { name: "Remove" }))
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -204,35 +212,36 @@ describe("GoalDetailPage", () => {
   })
 
   it("clears all subgoals and all gates after a confirm", async () => {
+    const user = setup()
     vi.mocked(confirm).mockResolvedValue(true)
-    const w = await mk()
-    const all = w.findAll("button").filter((b) => b.text() === "Clear all")
-    await all[0].trigger("click")
+    await mk()
+    const all = screen.getAllByRole("button", { name: "Clear all" })
+    await user.click(all[0])
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/subgoal clear")
-    await all[1].trigger("click")
+    await user.click(all[1])
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal gate clear")
   })
 
   it("acts on another session with --session and shows where to resume", async () => {
+    const user = setup()
     vi.mocked(api).mockResolvedValue(other)
     vi.mocked(confirm).mockResolvedValue(true)
     session.id = "s9"
-    const w = await mk()
-    expect(w.text()).toContain("To resume, set, or wait, send /goal in that chat.")
-    expect(w.findAll("button").some((b) => b.text() === "Wait…")).toBe(false)
-    expect(w.findAll("button").some((b) => b.text() === "Add gate")).toBe(false)
-    await btn(w, "⏸ Pause").trigger("click")
+    await mk()
+    expect(screen.getByRole("alert").textContent).toContain(
+      "To resume, set, or wait, send /goal in that chat.",
+    )
+    expect(hasBtn("Wait…")).toBe(false)
+    expect(hasBtn("Add gate")).toBe(false)
+    await user.click(btn("⏸ Pause"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal pause --session s1")
-    await w
-      .findAll("button")
-      .filter((b) => b.text() === "Remove")[1]
-      .trigger("click")
+    await user.click(screen.getAllByRole("button", { name: "Remove" })[1])
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/subgoal remove 2 bbbbbbbb --session s1")
-    await btn(w, "Clear").trigger("click")
+    await user.click(btn("Clear"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal clear --session s1")
   })
@@ -242,49 +251,54 @@ describe("GoalDetailPage", () => {
       ...detail,
       row: { ...detail.row, source: "cli", can_stop: false, can_resume: false },
     })
-    const w = await mk()
-    expect(w.text()).toContain("This goal runs in tether chat. Change it there.")
-    expect(w.findAll("button").some((b) => ["⏸ Pause", "Clear", "Remove"].includes(b.text()))).toBe(
-      false,
-    )
+    const { container } = await mk()
+    expect(container.textContent).toContain("This goal runs in tether chat. Change it there.")
+    for (const t of ["⏸ Pause", "Clear", "Remove"]) expect(hasBtn(t)).toBe(false)
   })
 
   it("resumes with a new budget, unwaits a parked goal, and drafts again", async () => {
+    const user = setup()
     vi.mocked(api).mockResolvedValue({
       ...detail,
       row: { ...detail.row, waiting: true, wait_target: "pid 7" },
       waiting_reason: "the CI run must finish",
     })
-    const w = await mk()
-    expect(w.text()).toContain("the CI run must finish")
-    await btn(w, "Unwait").trigger("click")
+    const { container } = await mk()
+    expect(container.textContent).toContain("the CI run must finish")
+    await user.click(btn("Unwait"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal unwait")
-    await btn(w, "Draft again").trigger("click")
+    await user.click(btn("Draft again"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal draft Ship v0.24")
+    cleanup()
     vi.mocked(api).mockResolvedValue({ ...detail, row: { ...detail.row, status: "paused" } })
-    const p = await mk()
-    await btn(p, "▶ Resume (new budget)").trigger("click")
+    await mk()
+    await user.click(btn("▶ Resume (new budget)"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal resume")
   })
 
   it("sets a new goal text", async () => {
-    const w = await mk()
-    await w.find('input[aria-label="New goal"]').setValue("Ship v0.25")
-    await btn(w, "Set").trigger("click")
+    const user = setup()
+    await mk()
+    await user.type(screen.getByRole("textbox", { name: "New goal" }), "Ship v0.25")
+    await user.click(btn("Set"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal -- Ship v0.25")
   })
 
   it("opens the full gate output in the side panel", async () => {
-    const w = await mk()
-    await btn(w, "Show all").trigger("click")
-    expect(w.find(".gate-full").text()).toContain("ok internal/cron")
+    const user = setup()
+    await mk()
+    await user.click(btn("Show all"))
+    expect(
+      within(screen.getByRole("dialog", { name: "Gate output" })).getByText(/ok internal\/cron/),
+    ).toBeTruthy()
   })
 
   it("shows the 404 state with Back to Goals", async () => {
+    const user = setup()
     vi.mocked(api).mockRejectedValue(
       Object.assign(Object.create(ApiError.prototype), {
         status: 404,
@@ -292,9 +306,9 @@ describe("GoalDetailPage", () => {
         message: "No goal for this session.",
       }),
     )
-    const w = await mk()
-    expect(w.text()).toContain("No goal for this session.")
-    w.findComponent({ name: "StateBlock" }).vm.$emit("action")
+    await mk()
+    expect(screen.getByText("No goal for this session.")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Back to Goals" }))
     await flushPromises()
     expect(router.currentRoute.value.name).toBe("goals")
   })
@@ -311,13 +325,15 @@ describe("GoalDetailPage", () => {
   })
 
   it("marks the Wait panel dirty while it has text", async () => {
-    const w = await mk()
-    await btn(w, "Wait…").trigger("click")
-    await w.find('[data-field="pid"]').setValue("48390")
-    const panel = w
-      .findAllComponents({ name: "SidePanel" })
-      .find((p) => p.props("title") === "Wait on a background process")!
-    expect(panel.props("dirty")).toBe(true)
+    const user = setup()
+    await mk()
+    await user.click(btn("Wait…"))
+    await user.type(screen.getByLabelText("PID"), "48390")
+    expect(
+      screen
+        .getByRole("dialog", { name: "Wait on a background process" })
+        .getAttribute("data-dirty"),
+    ).toBe("true")
   })
 
   it("loads no goal when the user leaves the page", async () => {

@@ -1,4 +1,17 @@
 <script setup lang="ts">
+import { CircleAlertIcon, ListIcon } from "@lucide/vue"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "@/components/ui/empty"
+import { Skeleton } from "@/components/ui/skeleton"
+
 defineProps<{
   state: "loading" | "empty" | "error"
   title?: string
@@ -10,48 +23,34 @@ const emit = defineEmits<{ action: [] }>()
 </script>
 
 <template>
-  <div
-    v-if="state === 'loading'"
-    class="table-wrap"
-    role="status"
-    aria-busy="true"
-    aria-label="Loading"
-  >
-    <div v-for="n in 5" :key="n" class="skel-row">
-      <span class="skel" style="width: 24px" />
-      <span class="skel" style="flex: 1" />
-      <span class="skel" style="width: 15%" />
-      <span class="skel" style="width: 10%" />
+  <div v-if="state === 'loading'" role="status" aria-busy="true" aria-label="Loading">
+    <div v-for="n in 5" :key="n" data-slot="skeleton-row" class="flex items-center gap-3 py-2">
+      <Skeleton class="size-6" />
+      <Skeleton class="h-4 flex-1" />
+      <Skeleton class="h-4 w-[15%]" />
+      <Skeleton class="h-4 w-[10%]" />
     </div>
   </div>
-  <div v-else-if="state === 'empty'" class="state">
-    <span class="ico" aria-hidden="true">
-      <svg
-        viewBox="0 0 24 24"
-        width="20"
-        height="20"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.75"
-        stroke-linecap="round"
-      >
-        <path d="M4 7h16M4 12h16M4 17h10" />
-      </svg>
-    </span>
-    <p class="state-t">{{ title ?? text }}</p>
-    <p v-if="title && text">{{ text }}</p>
-    <p v-if="hint" class="state-hint">{{ hint }}</p>
-    <button v-if="action" class="btn btn-secondary" type="button" @click="emit('action')">
-      {{ action }}
-    </button>
-  </div>
-  <div v-else class="state state-error" role="alert">
-    <span class="ico">!</span>
-    <p class="state-t">{{ title ?? "Could not load" }}</p>
-    <span class="cause">{{ text }}</span>
-    <p v-if="hint" class="state-hint">{{ hint }}</p>
-    <button class="btn btn-secondary" type="button" @click="emit('action')">
-      {{ action ?? "Retry" }}
-    </button>
-  </div>
+  <Empty v-else-if="state === 'empty'">
+    <EmptyHeader>
+      <EmptyMedia variant="icon"><ListIcon /></EmptyMedia>
+      <EmptyTitle>{{ title ?? text }}</EmptyTitle>
+      <EmptyDescription v-if="title && text">{{ text }}</EmptyDescription>
+      <EmptyDescription v-if="hint" data-hint>{{ hint }}</EmptyDescription>
+    </EmptyHeader>
+    <EmptyContent v-if="action">
+      <Button variant="secondary" @click="emit('action')">{{ action }}</Button>
+    </EmptyContent>
+  </Empty>
+  <Alert v-else variant="destructive">
+    <CircleAlertIcon />
+    <AlertTitle>{{ title ?? "Could not load" }}</AlertTitle>
+    <AlertDescription>
+      <span data-cause>{{ text }}</span>
+      <span v-if="hint" data-hint>{{ hint }}</span>
+      <Button variant="secondary" size="sm" @click="emit('action')">
+        {{ action ?? "Retry" }}
+      </Button>
+    </AlertDescription>
+  </Alert>
 </template>

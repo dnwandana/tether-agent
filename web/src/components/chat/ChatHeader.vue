@@ -1,49 +1,85 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue"
+import { computed, nextTick, ref } from "vue"
 import { useRouter } from "vue-router"
+import { EllipsisIcon } from "@lucide/vue"
 import { useCommand } from "../../lib/command"
+import { guardOutside } from "@/lib/layer"
+import { cn } from "@/lib/utils"
 import { session } from "../../stores/session"
 import { toast } from "../../stores/ui"
 import { renderMarkdown } from "../../lib/markdown"
-import SidePanel from "../SidePanel.vue"
+import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
+import { Progress } from "@/components/ui/progress"
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
+import { Textarea } from "@/components/ui/textarea"
 
 const emit = defineEmits<{ "toggle-details": [] }>()
 const router = useRouter()
 
 const editing = ref(false)
 const draftTitle = ref("")
-const titleInput = ref<HTMLInputElement | null>(null)
-const pop = ref<"menu" | null>(null)
+const titleInput = ref<{ $el: HTMLInputElement } | null>(null)
+// The chip that asked for the open reply. It is null for the reply of a menu action.
+const pick = ref<"model" | "effort" | null>(null)
 const promptOpen = ref(false)
 const promptText = ref("")
-const chatH = ref<HTMLElement | null>(null)
-const popLeft = ref(16)
 
-// An action runs as a typed command. The reply popover and the confirm dialog come from useCommand.
+// An action runs as a typed command. The reply menu and the confirm dialog come from useCommand.
 const { run, reply, closeReply } = useCommand()
-// The menu closes when a reply popover opens.
-watch(reply, (r) => {
-  if (r) pop.value = null
-})
 
 const modelLabel = computed(() =>
   session.entry ? `${session.model} (${session.entry})` : session.model,
 )
+const ctxText = computed(() =>
+  session.context
+    ? `~${(session.context.tokens / 1000).toFixed(1)}k / ${Math.round(session.context.window / 1000)}k`
+    : "",
+)
+const ctxPercent = computed(() =>
+  session.context ? Math.min(100, (session.context.tokens / session.context.window) * 100) : 0,
+)
+const ctxWarn = computed(
+  () =>
+    !!session.context &&
+    session.context.tokens / session.context.window > session.context.threshold,
+)
 
 function closePop(): void {
-  pop.value = null
+  pick.value = null
   closeReply()
 }
 
-// Puts the reply popover under the chip that the user clicked. The popover stays inside
-// the header: 8 px from each side, and at most 420 px wide.
-function chipRun(e: MouseEvent, text: string): void {
-  const box = chatH.value?.getBoundingClientRect()
-  const chip = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect()
-  if (box && chip) {
-    const width = Math.min(420, box.width - 16)
-    popLeft.value = Math.max(8, Math.min(chip.left - box.left, box.width - width - 8))
+// A chip asks for its list when it opens. The menu shows when the reply arrives.
+function onChip(kind: "model" | "effort", open: boolean): void {
+  if (!open) {
+    closePop()
+    return
   }
+  pick.value = kind
+  closeReply()
+  void run("/" + kind)
+}
+
+// A menu action runs a command. Its reply opens the plain reply popover, not a chip menu.
+function act(text: string): void {
+  pick.value = null
   void run(text)
 }
 
@@ -54,34 +90,23 @@ function html(src: string): string {
 function startRename(): void {
   draftTitle.value = session.title
   editing.value = true
-  void nextTick(() => titleInput.value?.focus())
+  void nextTick(() => titleInput.value?.$el?.focus())
 }
 function commitRename(): void {
   if (!editing.value) return
   editing.value = false
   const t = draftTitle.value.trim()
-  if (t !== "" && t !== session.title) void run("/rename " + t)
+  if (t !== "" && t !== session.title) act("/rename " + t)
 }
 function cancelRename(): void {
   editing.value = false
-}
-
-function togglePop(kind: "menu"): void {
-  closeReply()
-  pop.value = pop.value === kind ? null : kind
 }
 
 function openGoal(): void {
   void router.push({ name: "goal", params: { session: session.id } })
 }
 
-function menuAct(text: string): void {
-  pop.value = null
-  void run(text)
-}
-
 function openPrompt(): void {
-  pop.value = null
   promptText.value = ""
   promptOpen.value = true
 }
@@ -120,92 +145,194 @@ async function download(path: string, name: string): Promise<void> {
   }
 }
 function exportSession(): void {
-  pop.value = null
   void download(
     "/api/sessions/" + encodeURIComponent(session.id) + "/export",
     `session-${session.id}.jsonl`,
   )
 }
-
-function onDocClick(e: MouseEvent): void {
-  if (pop.value === null && !reply.value) return
-  const t = e.target as Element | null
-  if (t?.closest?.("[data-pop]")) return
-  closePop()
-}
-function onKey(e: KeyboardEvent): void {
-  if (e.key !== "Escape" || (pop.value === null && !reply.value)) return
-  e.preventDefault()
-  closePop()
-}
-onMounted(() => {
-  document.addEventListener("click", onDocClick)
-  window.addEventListener("keydown", onKey)
-})
-onUnmounted(() => {
-  document.removeEventListener("click", onDocClick)
-  window.removeEventListener("keydown", onKey)
-})
 </script>
 
 <template>
-  <div ref="chatH" class="chat-h" style="position: relative">
-    <input
+  <div class="flex min-w-0 items-center gap-2 border-b px-4 py-2">
+    <Input
       v-if="editing"
       ref="titleInput"
       v-model="draftTitle"
-      class="input chat-title-input"
+      class="h-8 max-w-64"
       aria-label="Session title"
       @keydown.enter.prevent="commitRename"
       @keydown.esc.prevent="cancelRename"
       @blur="commitRename"
     />
-    <span v-else-if="session.id === ''" class="chat-title truncate c-3">New session</span>
-    <button
+    <span v-else-if="session.id === ''" class="truncate text-sm text-muted-foreground">
+      New session
+    </span>
+    <Button
       v-else
-      type="button"
-      class="chat-title truncate"
-      :class="{ 'c-3': !session.title }"
+      variant="ghost"
+      size="sm"
+      :class="
+        cn('min-w-0 max-w-[40%] shrink justify-start', !session.title && 'text-muted-foreground')
+      "
       title="Rename the session"
       @click="startRename"
     >
-      {{ session.title || "New session" }}
-    </button>
-    <div class="chips">
-      <button type="button" class="chip" @click="chipRun($event, '/model')">
-        model {{ modelLabel }} ▾
-      </button>
-      <button type="button" class="chip" @click="chipRun($event, '/effort')">
-        effort {{ session.effort || "default" }} ▾
-      </button>
-      <span v-if="session.context" class="ctx">
-        ~{{ (session.context.tokens / 1000).toFixed(1) }}k /
-        {{ Math.round(session.context.window / 1000) }}k
-        <span
-          class="meter"
-          :class="{
-            'meter-warn':
-              session.context.tokens / session.context.window > session.context.threshold,
-          }"
-          :style="{ '--mark': session.context.threshold * 100 + '%' }"
-        >
-          <span
-            :style="{
-              width: Math.min(100, (session.context.tokens / session.context.window) * 100) + '%',
-            }"
-          />
-        </span>
-        <button type="button" class="btn btn-ghost btn-sm hide-phone" @click="run('/compact')">
-          Compact
-        </button>
-      </span>
-      <button v-if="session.goalLine !== ''" type="button" class="chip chip-acc" @click="openGoal">
-        {{ session.goalLine }}
-      </button>
-    </div>
-    <div class="chat-h-end">
+      <span class="truncate">{{ session.title || "New session" }}</span>
+    </Button>
+
+    <Popover
+      :open="pick === null && reply !== null"
+      @update:open="
+        (o: boolean) => {
+          if (!o) closePop()
+        }
+      "
+    >
+      <PopoverAnchor as-child>
+        <div class="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+          <DropdownMenu
+            :open="pick === 'model' && reply !== null"
+            @update:open="(o: boolean) => onChip('model', o)"
+          >
+            <DropdownMenuTrigger as-child>
+              <Button variant="outline" size="sm">model {{ modelLabel }} ▾</Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              :collision-padding="8"
+              class="max-w-[min(420px,calc(100vw-16px))]"
+            >
+              <template v-if="reply">
+                <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+                <DropdownMenuLabel class="font-normal" v-html="html(reply.text)" />
+                <template v-for="(row, i) in reply.buttons" :key="i">
+                  <DropdownMenuSeparator v-if="i > 0" />
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem
+                      v-for="(b, j) in row"
+                      :key="j"
+                      :disabled="b.data === '·'"
+                      @select="run(b.data)"
+                    >
+                      {{ b.text }}
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </template>
+              </template>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          <DropdownMenu
+            :open="pick === 'effort' && reply !== null"
+            @update:open="(o: boolean) => onChip('effort', o)"
+          >
+            <DropdownMenuTrigger as-child>
+              <Button variant="outline" size="sm">
+                effort {{ session.effort || "default" }} ▾
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="start"
+              :collision-padding="8"
+              class="max-w-[min(420px,calc(100vw-16px))]"
+            >
+              <template v-if="reply">
+                <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+                <DropdownMenuLabel class="font-normal" v-html="html(reply.text)" />
+                <template v-for="(row, i) in reply.buttons" :key="i">
+                  <DropdownMenuSeparator v-if="i > 0" />
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem
+                      v-for="(b, j) in row"
+                      :key="j"
+                      :disabled="b.data === '·'"
+                      @select="run(b.data)"
+                    >
+                      {{ b.text }}
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </template>
+              </template>
+            </DropdownMenuContent>
+          </DropdownMenu>
+
+          <Popover v-if="session.context">
+            <PopoverTrigger as-child>
+              <Button variant="ghost" size="sm" :class="cn(ctxWarn && 'text-warning')">
+                {{ ctxText }}
+                <span class="relative h-1 w-10 overflow-hidden rounded-full bg-muted">
+                  <span
+                    class="absolute inset-y-0 left-0 bg-primary"
+                    :class="cn(ctxWarn && 'bg-warning')"
+                    :style="{ width: ctxPercent + '%' }"
+                  />
+                </span>
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent
+              align="start"
+              class="flex w-64 flex-col gap-3"
+              @pointer-down-outside="guardOutside"
+              @interact-outside="guardOutside"
+            >
+              <div class="flex items-center justify-between text-sm">
+                <span>Context</span>
+                <span class="text-muted-foreground">{{ ctxText }}</span>
+              </div>
+              <div class="relative">
+                <Progress :model-value="ctxPercent" aria-label="Context used" />
+                <span
+                  data-slot="context-threshold"
+                  aria-hidden="true"
+                  class="absolute inset-y-[-3px] w-px bg-warning"
+                  :style="{ left: session.context.threshold * 100 + '%' }"
+                />
+              </div>
+              <Button variant="secondary" size="sm" @click="act('/compact')">Compact</Button>
+            </PopoverContent>
+          </Popover>
+
+          <Button
+            v-if="session.goalLine !== ''"
+            variant="secondary"
+            size="sm"
+            class="max-w-full min-w-[min(7rem,100%)]"
+            :title="session.goalLine"
+            @click="openGoal"
+          >
+            <span class="min-w-0 truncate">{{ session.goalLine }}</span>
+          </Button>
+        </div>
+      </PopoverAnchor>
+      <PopoverContent
+        align="start"
+        :collision-padding="8"
+        class="flex w-auto max-w-[min(420px,calc(100vw-16px))] flex-col gap-2"
+        @pointer-down-outside="guardOutside"
+        @interact-outside="guardOutside"
+      >
+        <template v-if="reply">
+          <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+          <div class="text-sm" v-html="html(reply.text)" />
+          <div v-for="(row, i) in reply.buttons" :key="i" class="flex flex-wrap gap-1.5">
+            <Button
+              v-for="(b, j) in row"
+              :key="j"
+              variant="secondary"
+              size="sm"
+              :disabled="b.data === '·'"
+              @click="run(b.data)"
+            >
+              {{ b.text }}
+            </Button>
+          </div>
+        </template>
+      </PopoverContent>
+    </Popover>
+
+    <div class="ml-auto flex shrink-0 items-center gap-1">
       <a
-        class="help-link"
+        class="px-2 text-sm text-muted-foreground hover:text-foreground"
         href="https://github.com/dnwandana/tether-agent/wiki/Dashboard#pages"
         target="_blank"
         rel="noreferrer"
@@ -213,114 +340,70 @@ onUnmounted(() => {
         aria-label="Help for the pages: docs/wiki/Dashboard.md#pages"
         >?</a
       >
-      <button
-        type="button"
-        class="btn btn-ghost btn-icon"
-        aria-label="Session menu"
-        data-pop
-        @click="togglePop('menu')"
-      >
-        ⋯
-      </button>
-      <button
-        type="button"
-        class="btn btn-ghost btn-sm aside-toggle hide-phone"
-        @click="emit('toggle-details')"
-      >
+      <DropdownMenu>
+        <DropdownMenuTrigger as-child>
+          <Button variant="ghost" size="icon" aria-label="Session menu">
+            <EllipsisIcon />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuGroup>
+            <template v-if="session.id !== ''">
+              <DropdownMenuItem class="max-tab:min-h-11" @select="act('/fork')">
+                Fork
+              </DropdownMenuItem>
+              <DropdownMenuItem class="max-tab:min-h-11" @select="act('/archive')">
+                Archive
+              </DropdownMenuItem>
+              <DropdownMenuItem class="max-tab:min-h-11" @select="exportSession">
+                Export JSONL
+              </DropdownMenuItem>
+            </template>
+            <DropdownMenuItem class="max-tab:min-h-11" @select="openPrompt">
+              Custom prompt…
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              v-if="session.context"
+              class="tab:hidden max-tab:min-h-11"
+              @select="act('/compact')"
+            >
+              Compact
+            </DropdownMenuItem>
+          </DropdownMenuGroup>
+          <template v-if="session.id !== ''">
+            <DropdownMenuSeparator />
+            <DropdownMenuGroup>
+              <DropdownMenuItem
+                variant="destructive"
+                class="max-tab:min-h-11"
+                @select="act('/delete ' + session.id)"
+              >
+                Delete…
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
+          </template>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Button variant="ghost" size="sm" class="max-tab:hidden" @click="emit('toggle-details')">
         Details
-      </button>
+      </Button>
     </div>
 
-    <div
-      v-if="pop === 'menu'"
-      class="menu"
-      data-pop
-      style="position: absolute; right: 16px; top: 100%; z-index: 55"
-    >
-      <template v-if="session.id !== ''">
-        <button type="button" class="menu-item" @click="menuAct('/fork')">Fork</button>
-        <button type="button" class="menu-item" @click="menuAct('/archive')">Archive</button>
-        <button type="button" class="menu-item" @click="exportSession">Export JSONL</button>
-      </template>
-      <button type="button" class="menu-item" @click="openPrompt">Custom prompt…</button>
-      <button
-        v-if="session.context"
-        type="button"
-        class="menu-item only-phone"
-        @click="menuAct('/compact')"
+    <Dialog :open="promptOpen" @update:open="promptOpen = $event">
+      <DialogContent
+        :aria-describedby="undefined"
+        @pointer-down-outside="guardOutside"
+        @interact-outside="guardOutside"
       >
-        Compact
-      </button>
-      <template v-if="session.id !== ''">
-        <div class="menu-sep" />
-        <button type="button" class="menu-item danger" @click="menuAct('/delete ' + session.id)">
-          Delete…
-        </button>
-      </template>
-    </div>
-    <div
-      v-if="reply"
-      class="popover"
-      data-pop
-      :style="{ left: popLeft + 'px' }"
-      style="
-        position: absolute;
-        top: 100%;
-        z-index: 55;
-        max-width: min(420px, calc(100% - 16px));
-        padding: 12px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      "
-    >
-      <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
-      <div class="answer" v-html="html(reply.text)" />
-      <div
-        v-for="(row, i) in reply.buttons"
-        :key="i"
-        style="display: flex; flex-wrap: wrap; gap: 6px"
-      >
-        <button
-          v-for="(b, j) in row"
-          :key="j"
-          type="button"
-          class="btn btn-secondary btn-sm"
-          :disabled="b.data === '·'"
-          @click="run(b.data)"
-        >
-          {{ b.text }}
-        </button>
-      </div>
-    </div>
-
-    <SidePanel :open="promptOpen" title="Custom prompt of this session" @close="promptOpen = false">
-      <div style="display: flex; flex-direction: column; gap: 12px">
-        <textarea v-model="promptText" class="input" rows="8" aria-label="Custom prompt" />
-        <div style="display: flex; gap: 8px; flex-wrap: wrap">
-          <button type="button" class="btn btn-secondary btn-sm" @click="clearPrompt">
-            🧹 Use the base prompt
-          </button>
-          <span class="grow" />
-          <button type="button" class="btn btn-primary btn-sm" @click="savePrompt">Save</button>
-        </div>
-      </div>
-    </SidePanel>
+        <DialogHeader>
+          <DialogTitle>Custom prompt of this session</DialogTitle>
+        </DialogHeader>
+        <Textarea v-model="promptText" rows="8" aria-label="Custom prompt" />
+        <DialogFooter>
+          <Button variant="secondary" @click="clearPrompt">🧹 Use the base prompt</Button>
+          <Button @click="savePrompt">Save</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   </div>
 </template>
-
-<style scoped>
-.ctx .meter {
-  position: relative;
-  overflow: visible;
-}
-.ctx .meter::after {
-  content: "";
-  position: absolute;
-  left: var(--mark, 50%);
-  top: -3px;
-  bottom: -3px;
-  width: 1px;
-  background: var(--warning);
-}
-</style>

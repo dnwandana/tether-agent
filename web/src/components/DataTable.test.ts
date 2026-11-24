@@ -1,4 +1,5 @@
-import { mount } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import DataTable from "./DataTable.vue"
 
@@ -12,36 +13,44 @@ const rows = [
   { id: "j1", name: "nightly-backup", next: "02:00", cost: "$0.0120" },
   { id: "j2", name: "gh-digest", next: "07:00", cost: "$0.0031" },
 ]
+// The body rows, without the header row.
+const bodyRows = () => within(screen.getAllByRole("rowgroup")[1]).getAllByRole("row")
+const cellsOf = (row: HTMLElement) => within(row).getAllByRole("cell")
+const text = (el: HTMLElement) => el.textContent?.trim() ?? ""
 
 afterEach(() => vi.unstubAllGlobals())
 
 describe("DataTable", () => {
   it("renders the headers, the cells, and the card labels", () => {
-    const w = mount(DataTable, { props: { columns, rows, rowKey: "id" } })
-    expect(w.findAll("th").map((t) => t.text())).toEqual(["Job", "Next run", "Cost", ""])
-    const cells = w.findAll("tbody tr")[0].findAll("td")
-    expect(cells.map((c) => c.text())).toEqual(["nightly-backup", "02:00", "$0.0120", ""])
-    expect(cells[0].classes()).toContain("first")
-    expect(cells[0].attributes("data-l")).toBe("")
-    expect(cells[1].attributes("data-l")).toBe("Next run")
-    expect(cells[2].classes()).toContain("num")
-    expect(cells[3].classes()).toContain("act")
-    expect(w.find("table").classes()).not.toContain("rt-cards")
+    render(DataTable, { props: { columns, rows, rowKey: "id" } })
+    expect(screen.getAllByRole("columnheader").map(text)).toEqual(["Job", "Next run", "Cost", ""])
+    const cells = cellsOf(bodyRows()[0])
+    expect(cells.map(text)).toEqual(["nightly-backup", "02:00", "$0.0120", ""])
+    expect(cells[0].hasAttribute("data-first")).toBe(true)
+    expect(cells[0].getAttribute("data-l")).toBe("")
+    expect(cells[1].getAttribute("data-l")).toBe("Next run")
+    expect(cells[2].className).toContain("text-right")
+    expect(screen.getAllByRole("columnheader")[2].className).toContain("text-right")
+    expect(cells[3].hasAttribute("data-act-col")).toBe(true)
+    expect(cells[3].getAttribute("data-l")).toBe("")
+    expect(screen.getByRole("table").closest("[data-layout]")?.getAttribute("data-layout")).toBe(
+      "table",
+    )
   })
 
   it("uses the cell slot", () => {
-    const w = mount(DataTable, {
+    render(DataTable, {
       props: { columns, rows, rowKey: "id" },
       slots: {
         "cell-name":
-          '<template #cell-name="{ row, value }"><b class="nm">{{ value }} ({{ row.id }})</b></template>',
+          '<template #cell-name="{ row, value }"><b>{{ value }} ({{ row.id }})</b></template>',
       },
     })
-    expect(w.find(".nm").text()).toBe("nightly-backup (j1)")
+    expect(screen.getByText("nightly-backup (j1)").tagName).toBe("B")
   })
 
   it("prints nothing when a cell slot renders only comments", () => {
-    const w = mount(DataTable, {
+    render(DataTable, {
       props: {
         columns: [
           { key: "name", label: "Skill" },
@@ -56,12 +65,11 @@ describe("DataTable", () => {
         "cell-n": '<template #cell-n><button v-if="false">Reset</button></template>',
       },
     })
-    const cells = w.findAll("tbody tr")[0].findAll("td")
-    expect(cells.map((c) => c.text())).toEqual(["deploy", "", ""])
+    expect(cellsOf(bodyRows()[0]).map(text)).toEqual(["deploy", "", ""])
   })
 
   it("prints only a string or a number when the column has no slot", () => {
-    const w = mount(DataTable, {
+    render(DataTable, {
       props: {
         columns: [
           { key: "s", label: "S" },
@@ -75,14 +83,20 @@ describe("DataTable", () => {
         rowKey: "id",
       },
     })
-    const cells = w.findAll("tbody tr")[0].findAll("td")
-    expect(cells.map((c) => c.text())).toEqual(["text", "0", "", "", "", ""])
+    expect(cellsOf(bodyRows()[0]).map(text)).toEqual(["text", "0", "", "", "", ""])
   })
 
   it("emits row-click with the row", async () => {
-    const w = mount(DataTable, { props: { columns, rows, rowKey: "id" } })
-    await w.findAll("tbody tr")[1].trigger("click")
-    expect(w.emitted("row-click")).toEqual([[rows[1]]])
+    const user = userEvent.setup()
+    const { emitted } = render(DataTable, { props: { columns, rows, rowKey: "id" } })
+    await user.click(screen.getByText("gh-digest"))
+    expect(emitted()["row-click"]).toEqual([[rows[1]]])
+  })
+
+  it("shows Nothing to show. with no rows", () => {
+    render(DataTable, { props: { columns, rows: [], rowKey: "id" } })
+    const cell = screen.getByText("Nothing to show.")
+    expect(cell.getAttribute("colspan")).toBe("4")
   })
 
   it("becomes a card list below cardsBelow", () => {
@@ -91,8 +105,12 @@ describe("DataTable", () => {
       asked.push(q)
       return { matches: true, media: q, addEventListener: () => {}, removeEventListener: () => {} }
     })
-    const w = mount(DataTable, { props: { columns, rows, rowKey: "id", cardsBelow: 1024 } })
+    render(DataTable, { props: { columns, rows, rowKey: "id", cardsBelow: 1024 } })
     expect(asked).toContain("(max-width: 1023px)")
-    expect(w.find("table").classes()).toContain("rt-cards")
+    expect(screen.getByRole("table").closest("[data-layout]")?.getAttribute("data-layout")).toBe(
+      "cards",
+    )
+    const cell = cellsOf(bodyRows()[0])[1]
+    expect(cell.className).toContain("before:content-[attr(data-l)]")
   })
 })

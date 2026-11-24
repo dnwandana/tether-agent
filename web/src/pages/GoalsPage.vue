@@ -11,6 +11,10 @@ import { confirm } from "../stores/ui"
 import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import { cn } from "@/lib/utils"
 
 type Filter = "all" | "active" | "parked" | "paused" | "finished"
 
@@ -41,12 +45,12 @@ function sourceLabel(s: string): string {
 function chipState(g: GoalRowView): string {
   return g.status === "active" && g.waiting ? "parked" : g.status
 }
-const CHIP: Record<string, string> = {
-  active: "chip-acc",
-  parked: "chip-info",
-  paused: "chip-warn",
-  done: "chip-ok",
-  cleared: "chip-plain",
+const BADGE: Record<string, { variant: "default" | "secondary" | "outline"; cls: string }> = {
+  active: { variant: "default", cls: "" },
+  parked: { variant: "outline", cls: "text-info" },
+  paused: { variant: "outline", cls: "text-warning" },
+  done: { variant: "outline", cls: "text-success" },
+  cleared: { variant: "secondary", cls: "" },
 }
 
 function line(g: GoalRowView): string {
@@ -118,28 +122,32 @@ async function pick(f: Filter): Promise<void> {
   await refresh()
 }
 
+// Handles a change of the filter group. An empty value comes from a tap on the pressed item.
+function onFilter(v: unknown): void {
+  if (typeof v === "string" && FILTERS.some((f) => f.key === v)) void pick(v as Filter)
+}
+
 const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"] })
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Goals</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-2">
+      <h1 class="text-xl font-semibold tracking-tight">Goals</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
     </div>
-    <div class="seg">
-      <button
-        v-for="f in FILTERS"
-        :key="f.key"
-        type="button"
-        :class="{ 'is-on': filter === f.key }"
-        :aria-pressed="filter === f.key"
-        @click="pick(f.key)"
-      >
+    <ToggleGroup
+      type="single"
+      variant="outline"
+      class="max-w-full flex-wrap"
+      :model-value="filter"
+      @update:model-value="onFilter"
+    >
+      <ToggleGroupItem v-for="f in FILTERS" :key="f.key" :value="f.key">
         {{ f.label }}
-      </button>
-    </div>
-    <p v-if="finished" class="pill-note">Last goal of each session</p>
+      </ToggleGroupItem>
+    </ToggleGroup>
+    <p v-if="finished" class="text-sm text-muted-foreground">Last goal of each session</p>
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock v-else-if="state === 'error'" state="error" :text="errText" @action="refresh" />
     <StateBlock
@@ -162,31 +170,34 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
       action="Show all"
       @action="pick('all')"
     />
-    <div v-else class="page-stack" :aria-busy="stale || undefined">
+    <div v-else class="flex flex-col gap-6" :aria-busy="stale || undefined">
       <DataTable
         :columns="columns"
         :rows="shown as unknown as Record<string, unknown>[]"
         row-key="session_id"
       >
-        <template #cell-state="{ row }"
-          ><span class="chip" :class="CHIP[chipState(row as unknown as GoalRowView)]">{{
-            chipState(row as unknown as GoalRowView)
-          }}</span></template
-        >
-        <template #cell-goal="{ row }"
-          ><b
-            ><router-link
-              :to="{
-                name: 'goal',
-                params: { session: (row as unknown as GoalRowView).session_id },
-              }"
-              >{{ (row as unknown as GoalRowView).goal }}</router-link
-            ></b
-          ></template
-        >
-        <template #cell-session="{ row }"
-          ><span class="t-12 c-3">{{ line(row as unknown as GoalRowView) }}</span></template
-        >
+        <template #cell-state="{ row }">
+          <Badge
+            :variant="BADGE[chipState(row as unknown as GoalRowView)].variant"
+            :class="cn(BADGE[chipState(row as unknown as GoalRowView)].cls)"
+            >{{ chipState(row as unknown as GoalRowView) }}</Badge
+          >
+        </template>
+        <template #cell-goal="{ row }">
+          <RouterLink
+            class="font-semibold"
+            :to="{
+              name: 'goal',
+              params: { session: (row as unknown as GoalRowView).session_id },
+            }"
+            >{{ (row as unknown as GoalRowView).goal }}</RouterLink
+          >
+        </template>
+        <template #cell-session="{ row }">
+          <span class="text-xs text-muted-foreground">{{
+            line(row as unknown as GoalRowView)
+          }}</span>
+        </template>
         <template #cell-turns="{ row }"
           >{{ (row as unknown as GoalRowView).turns_used }}/{{
             (row as unknown as GoalRowView).max_turns
@@ -195,60 +206,64 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
         <template #cell-last_verdict="{ row }">{{
           (row as unknown as GoalRowView).last_verdict || "—"
         }}</template>
-        <template #cell-last_turn="{ row }"
-          ><span
-            style="white-space: nowrap"
+        <template #cell-last_turn="{ row }">
+          <span
+            class="whitespace-nowrap"
             :title="fullTime((row as unknown as GoalRowView).last_turn_at)"
             >{{ when((row as unknown as GoalRowView).last_turn_at) }}</span
-          ></template
-        >
+          >
+        </template>
         <template #cell-actions="{ row }">
           <template v-for="g in [row as unknown as GoalRowView]" :key="g.session_id">
-            <button
+            <Button
               v-if="g.can_resume && g.status === 'paused'"
-              class="btn btn-secondary btn-sm"
-              type="button"
+              variant="secondary"
+              size="sm"
+              class="max-tab:min-h-11"
               @click="command('/goal resume')"
             >
               ▶ Resume
-            </button>
-            <button
+            </Button>
+            <Button
               v-if="g.can_resume && chipState(g) === 'parked'"
-              class="btn btn-secondary btn-sm"
-              type="button"
+              variant="secondary"
+              size="sm"
+              class="max-tab:min-h-11"
               @click="command('/goal unwait')"
             >
               Unwait
-            </button>
-            <button
+            </Button>
+            <Button
               v-if="g.can_stop && g.status === 'active'"
-              class="btn btn-secondary btn-sm"
-              type="button"
+              variant="secondary"
+              size="sm"
+              class="max-tab:min-h-11"
               @click="command(goalCmd(g, 'pause'))"
             >
               ⏸ Pause
-            </button>
-            <button
+            </Button>
+            <Button
               v-if="g.can_stop"
-              class="btn btn-danger-soft btn-sm"
-              type="button"
+              variant="destructive"
+              size="sm"
+              class="max-tab:min-h-11"
               @click="clearGoal(g)"
             >
               Clear
-            </button>
+            </Button>
             <template v-if="!g.can_stop && !g.can_resume">
-              <span class="c-3">view only</span>
-              <router-link
-                class="btn btn-secondary btn-sm"
-                :to="{ name: 'transcript', params: { id: g.session_id } }"
-                >Open session</router-link
-              >
+              <span class="text-muted-foreground">view only</span>
+              <Button as-child variant="secondary" size="sm" class="max-tab:min-h-11">
+                <RouterLink :to="{ name: 'transcript', params: { id: g.session_id } }"
+                  >Open session</RouterLink
+                >
+              </Button>
             </template>
           </template>
         </template>
       </DataTable>
     </div>
-    <p class="pill-note">
+    <p class="text-sm text-muted-foreground">
       Pause and Clear work for dashboard and Telegram goals. Resume and Unwait work only for the
       goal of this dashboard session. CLI goals are view only.
     </p>

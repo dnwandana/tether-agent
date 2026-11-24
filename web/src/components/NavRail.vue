@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { useRoute } from "vue-router"
-import { ICON } from "../lib/icons"
+import { ICONS, type IconName } from "@/lib/icons"
+import { cn } from "@/lib/utils"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Kbd } from "@/components/ui/kbd"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { cards } from "../stores/cards"
 import BrandMark from "./BrandMark.vue"
 
@@ -14,7 +19,7 @@ const PARENT: Record<string, string> = {
   ops: "system",
 }
 
-const PAGES: { name: string; label: string }[] = [
+const PAGES: { name: IconName; label: string }[] = [
   { name: "chat", label: "Chat" },
   { name: "sessions", label: "Sessions" },
   { name: "jobs", label: "Jobs" },
@@ -34,7 +39,7 @@ const section = computed(() => {
   return PARENT[n] ?? n
 })
 
-// The tablet CSS hides .truncate, so the name moves to the .sr class there.
+// On a tablet the name is hidden text, so the name uses sr-only there.
 const media = globalThis.matchMedia?.("(max-width: 1023px)")
 const tablet = ref(media?.matches ?? false)
 function onMedia(e: MediaQueryListEvent): void {
@@ -50,77 +55,65 @@ function openPalette(): void {
 </script>
 
 <template>
-  <nav class="rail" aria-label="Pages">
-    <div class="rail-brand">
-      <BrandMark />
-      <span class="bt">Tether</span>
-    </div>
-    <button
-      type="button"
-      class="rail-search"
-      :title="tablet ? 'Search (Ctrl K)' : undefined"
-      @click="openPalette"
+  <TooltipProvider :delay-duration="0">
+    <nav
+      class="bg-card text-card-foreground flex h-full w-full flex-col gap-1 p-2"
+      aria-label="Pages"
     >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.75"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path :d="ICON.search" />
-      </svg>
-      <span :class="tablet ? 'sr' : 'grow'">Search</span>
-      <span class="kbd">Ctrl K</span>
-    </button>
-    <RouterLink
-      v-for="p in PAGES"
-      :key="p.name"
-      :to="{ name: p.name }"
-      class="rail-item"
-      :title="tablet ? p.label : undefined"
-      :class="{ 'is-on': section === p.name }"
-      :aria-current="section === p.name ? 'page' : undefined"
-    >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.75"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path :d="ICON[p.name]" />
-      </svg>
-      <span :class="tablet ? 'sr' : 'truncate'">{{ p.label }}</span>
-      <span v-if="p.name === 'security' && cards.open.length" class="badge badge-bad">{{
-        cards.open.length
-      }}</span>
-    </RouterLink>
-    <div class="rail-foot">
-      <RouterLink
-        :to="{ name: 'start' }"
-        class="rail-item"
-        :title="tablet ? 'Getting started' : undefined"
-        :class="{ 'is-on': section === 'start' }"
-        :aria-current="section === 'start' ? 'page' : undefined"
-      >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.75"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path :d="ICON.start" />
-        </svg>
-        <span :class="tablet ? 'sr' : 'truncate'">Getting started</span>
-      </RouterLink>
-    </div>
-  </nav>
+      <div class="flex items-center gap-2 px-2 py-2">
+        <BrandMark />
+        <span class="font-semibold tracking-tight max-lg:hidden">Tether</span>
+      </div>
+      <Tooltip :disabled="!tablet">
+        <TooltipTrigger as-child>
+          <Button variant="outline" class="justify-start gap-2" @click="openPalette">
+            <component :is="ICONS.search" />
+            <span :class="tablet ? 'sr-only' : 'grow text-left'">Search</span>
+            <Kbd class="max-lg:hidden">Ctrl K</Kbd>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="right">Search (Ctrl K)</TooltipContent>
+      </Tooltip>
+      <Tooltip v-for="p in PAGES" :key="p.name" :disabled="!tablet">
+        <TooltipTrigger as-child>
+          <RouterLink
+            :to="{ name: p.name }"
+            :class="
+              cn(
+                'hover:bg-accent hover:text-accent-foreground flex items-center gap-2 rounded-md px-3 py-2 text-sm',
+                section === p.name && 'bg-accent text-accent-foreground',
+              )
+            "
+            :aria-current="section === p.name ? 'page' : undefined"
+          >
+            <component :is="ICONS[p.name]" />
+            <span :class="tablet ? 'sr-only' : 'truncate'">{{ p.label }}</span>
+            <Badge v-if="p.name === 'security' && cards.open.length" variant="destructive">{{
+              cards.open.length
+            }}</Badge>
+          </RouterLink>
+        </TooltipTrigger>
+        <TooltipContent side="right">{{ p.label }}</TooltipContent>
+      </Tooltip>
+      <div class="mt-auto"></div>
+      <Tooltip :disabled="!tablet">
+        <TooltipTrigger as-child>
+          <RouterLink
+            :to="{ name: 'start' }"
+            :class="
+              cn(
+                'hover:bg-accent hover:text-accent-foreground flex items-center gap-2 rounded-md px-3 py-2 text-sm',
+                section === 'start' && 'bg-accent text-accent-foreground',
+              )
+            "
+            :aria-current="section === 'start' ? 'page' : undefined"
+          >
+            <component :is="ICONS.start" />
+            <span :class="tablet ? 'sr-only' : 'truncate'">Getting started</span>
+          </RouterLink>
+        </TooltipTrigger>
+        <TooltipContent side="right">Getting started</TooltipContent>
+      </Tooltip>
+    </nav>
+  </TooltipProvider>
 </template>

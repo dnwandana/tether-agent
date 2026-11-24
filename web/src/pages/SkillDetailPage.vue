@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue"
 import { useRoute, useRouter } from "vue-router"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { api, ApiError } from "../api/client"
 import type { SkillDetailView, TaskView } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
@@ -58,10 +61,24 @@ const findingRows = computed(() =>
   })),
 )
 
-function verdictClass(v: string): string {
-  if (v === "safe") return "chip-ok"
-  if (v === "dangerous") return "chip-bad"
-  return "chip-warn"
+type Tone = "ok" | "warn" | "bad" | "info" | "plain"
+// The status token of each tone. "plain" keeps the outline badge as it comes.
+const TONE: Record<Tone, string> = {
+  ok: "border-success/40 text-success",
+  warn: "border-warning/40 text-warning",
+  bad: "border-destructive/40 text-destructive",
+  info: "border-info/40 text-info",
+  plain: "",
+}
+
+function verdictTone(v: string): Tone {
+  if (v === "safe") return "ok"
+  if (v === "dangerous") return "bad"
+  return "warn"
+}
+
+function severityTone(s: string): Tone {
+  return s === "high" || s === "critical" ? "bad" : "warn"
 }
 
 function when(s: string): string {
@@ -228,8 +245,12 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
 </script>
 
 <template>
-  <div class="page">
-    <router-link class="back" :to="{ name: 'skills' }">‹ Skills</router-link>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <router-link
+      class="text-sm text-muted-foreground hover:text-foreground"
+      :to="{ name: 'skills' }"
+      >‹ Skills</router-link
+    >
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
       v-else-if="state === 'error'"
@@ -239,115 +260,122 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
       @action="load"
     />
     <template v-else-if="view">
-      <div class="page-h">
-        <h1 class="t-20">/{{ view.skill.name }}</h1>
-        <span class="chip chip-plain">{{ view.skill.trust }}</span>
-        <span v-if="view.override" class="chip chip-warn">Owner override</span>
-        <span v-if="busy" class="chip chip-info">Running…</span>
+      <div class="flex flex-wrap items-center gap-3">
+        <h1 class="text-xl font-semibold tracking-tight">/{{ view.skill.name }}</h1>
+        <Badge variant="outline" :class="TONE.plain" data-tone="plain">{{
+          view.skill.trust
+        }}</Badge>
+        <Badge v-if="view.override" variant="outline" :class="TONE.warn" data-tone="warn"
+          >Owner override</Badge
+        >
+        <Badge v-if="busy" variant="outline" :class="TONE.info" data-tone="info">Running…</Badge>
         <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-        <button
+        <Button
           v-if="view.skill.actions.includes('update') && !view.skill.pinned"
-          class="btn btn-secondary"
-          type="button"
+          variant="outline"
           :disabled="busy"
           @click="skillAction('update')"
         >
           Update
-        </button>
-        <button
+        </Button>
+        <Button
           v-if="view.skill.actions.includes('reset')"
-          class="btn btn-secondary"
-          type="button"
+          variant="outline"
           :disabled="busy"
           @click="skillAction('reset')"
         >
           Reset
-        </button>
-        <button
+        </Button>
+        <Button
           v-if="view.skill.actions.includes('uninstall')"
-          class="btn btn-danger-soft"
-          type="button"
+          variant="destructive"
           :disabled="busy"
           @click="skillAction('uninstall')"
         >
           Uninstall
-        </button>
+        </Button>
       </div>
-      <p class="c-2">{{ view.skill.description }}</p>
-      <p v-if="view.skill.required_env.length" class="t-12 c-3">
+      <p class="text-muted-foreground">{{ view.skill.description }}</p>
+      <p v-if="view.skill.required_env.length" class="text-xs text-muted-foreground">
         Needs: {{ view.skill.required_env.join(", ") }}
       </p>
-      <p class="t-12">
-        Run it in chat: <code>/{{ view.skill.name }}</code>
+      <p class="text-xs">
+        Run it in chat: <code class="font-mono">/{{ view.skill.name }}</code>
       </p>
       <ResultNote :note="note" @close="note = null" />
-      <div v-if="forceOffer" class="li">
-        <button class="btn btn-secondary" type="button" :disabled="busy" @click="updateAnyway">
-          Update anyway…
-        </button>
+      <div v-if="forceOffer" class="flex items-center gap-2">
+        <Button variant="outline" :disabled="busy" @click="updateAnyway">Update anyway…</Button>
       </div>
-      <div v-if="running?.waiting" class="li">
-        <span class="grow">Answer the card in ⏳ Waiting.</span>
-        <button class="btn btn-secondary btn-sm" type="button" @click="ui.trayOpen = true">
-          Open Waiting
-        </button>
+      <div v-if="running?.waiting" class="flex items-center gap-2">
+        <span class="flex-1">Answer the card in ⏳ Waiting.</span>
+        <Button variant="outline" size="sm" @click="ui.trayOpen = true">Open Waiting</Button>
       </div>
 
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-h"><h3>SKILL.md</h3></div>
-          <div class="card-b">
-            <div class="md" v-html="html" />
+      <div class="grid gap-4 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>SKILL.md</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div class="typeset typeset-chat" v-html="html" />
             <template v-if="view.files.length">
-              <h4 class="t-12 c-3">Files</h4>
+              <h4 class="text-xs text-muted-foreground">Files</h4>
               <div v-for="p in view.files" :key="p">
-                <button class="link mono" type="button" @click="openFile(p, null)">{{ p }}</button>
+                <Button variant="link" class="h-auto p-0 font-mono" @click="openFile(p, null)">{{
+                  p
+                }}</Button>
               </div>
             </template>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-h"><h3>Lockfile</h3></div>
-          <div class="card-b">
-            <dl v-if="hasLock" class="kv">
-              <dt>Source</dt>
-              <dd class="mono">{{ view.skill.source || "—" }}</dd>
-              <dt>Ref</dt>
-              <dd class="mono">{{ view.ref || "—" }}</dd>
-              <dt>Commit</dt>
-              <dd class="mono">{{ view.skill.commit || "—" }}</dd>
-              <dt>Installed</dt>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>Lockfile</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <dl v-if="hasLock" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+              <dt class="text-muted-foreground">Source</dt>
+              <dd class="font-mono">{{ view.skill.source || "—" }}</dd>
+              <dt class="text-muted-foreground">Ref</dt>
+              <dd class="font-mono">{{ view.ref || "—" }}</dd>
+              <dt class="text-muted-foreground">Commit</dt>
+              <dd class="font-mono">{{ view.skill.commit || "—" }}</dd>
+              <dt class="text-muted-foreground">Installed</dt>
               <dd data-test="installed-at">
-                <span style="white-space: nowrap" :title="fullTime(view.installed_at)">{{
+                <span class="whitespace-nowrap" :title="fullTime(view.installed_at)">{{
                   when(view.installed_at)
                 }}</span>
               </dd>
-              <dt>Updated</dt>
+              <dt class="text-muted-foreground">Updated</dt>
               <dd data-test="updated-at">
-                <span style="white-space: nowrap" :title="fullTime(view.updated_at)">{{
+                <span class="whitespace-nowrap" :title="fullTime(view.updated_at)">{{
                   when(view.updated_at)
                 }}</span>
               </dd>
-              <dt>Content hash</dt>
-              <dd class="mono">{{ view.content_hash || "—" }}</dd>
+              <dt class="text-muted-foreground">Content hash</dt>
+              <dd class="font-mono">{{ view.content_hash || "—" }}</dd>
             </dl>
-            <p v-else class="c-3">Not installed from a source.</p>
-          </div>
-        </div>
+            <p v-else class="text-muted-foreground">Not installed from a source.</p>
+          </CardContent>
+        </Card>
       </div>
 
       <template v-if="scanned">
-        <div class="section-h">
-          <h2>Guard scan</h2>
-          <span v-if="view.skill.verdict" class="chip" :class="verdictClass(view.skill.verdict)">{{
-            view.skill.verdict
-          }}</span>
-          <span class="c-3 t-12"
+        <div class="flex flex-wrap items-center gap-2">
+          <h2 class="text-lg font-semibold">Guard scan</h2>
+          <Badge
+            v-if="view.skill.verdict"
+            variant="outline"
+            :class="TONE[verdictTone(view.skill.verdict)]"
+            :data-tone="verdictTone(view.skill.verdict)"
+            >{{ view.skill.verdict }}</Badge
+          >
+          <span class="text-xs text-muted-foreground"
             >{{ view.findings.length }} {{ view.findings.length === 1 ? "finding" : "findings" }} ·
             {{ view.unscanned.length }} not scanned</span
           >
         </div>
-        <p v-if="view.unscanned.length" class="t-12 c-3">
+        <p v-if="view.unscanned.length" class="text-xs text-muted-foreground">
           Not scanned: {{ view.unscanned.join(", ") }}
         </p>
         <StateBlock v-if="view.findings.length === 0" state="empty" text="No findings" />
@@ -358,32 +386,29 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
           row-key="key"
         >
           <template #cell-pattern="{ row }"
-            ><span class="mono">{{ f(row).pattern }}</span></template
+            ><span class="font-mono text-xs">{{ f(row).pattern }}</span></template
           >
           <template #cell-where="{ row }">
-            <button
+            <Button
               v-if="canOpen(f(row).file)"
-              class="link mono"
-              type="button"
+              variant="link"
+              class="h-auto p-0 font-mono"
               @click="openFile(f(row).file, f(row).line)"
             >
               {{ f(row).file }}:{{ f(row).line }}
-            </button>
-            <span v-else class="mono">{{ f(row).file }}:{{ f(row).line }}</span>
+            </Button>
+            <span v-else class="font-mono text-xs">{{ f(row).file }}:{{ f(row).line }}</span>
           </template>
           <template #cell-severity="{ row }"
-            ><span
-              class="chip"
-              :class="
-                f(row).severity === 'high' || f(row).severity === 'critical'
-                  ? 'chip-bad'
-                  : 'chip-warn'
-              "
-              >{{ f(row).severity }}</span
+            ><Badge
+              variant="outline"
+              :class="TONE[severityTone(f(row).severity)]"
+              :data-tone="severityTone(f(row).severity)"
+              >{{ f(row).severity }}</Badge
             ></template
           >
           <template #cell-match="{ row }"
-            ><code>{{ f(row).match }}</code></template
+            ><code class="font-mono text-xs">{{ f(row).match }}</code></template
           >
         </DataTable>
       </template>
@@ -393,18 +418,23 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
       </SidePanel>
       <SidePanel :open="manual !== null" title="Update from the terminal" @close="manual = null">
         <template v-if="manual">
-          <div class="code-block">tether skills update {{ view.skill.name }}</div>
+          <pre
+            class="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
+          >
+tether skills update {{ view.skill.name }}</pre>
           <p>The terminal asks you to type the name of the skill.</p>
-          <button
+          <Button
             v-if="isSecure()"
-            class="btn btn-secondary"
-            type="button"
+            variant="outline"
             @click="copy(`tether skills update ${view.skill.name}`)"
           >
             Copy command
-          </button>
-          <p v-else class="c-3">Needs HTTPS or localhost</p>
-          <div v-if="manual.findings" class="code-block">{{ manual.findings }}</div>
+          </Button>
+          <p v-else class="text-sm text-muted-foreground">Needs HTTPS or localhost</p>
+          <pre
+            v-if="manual.findings"
+            class="overflow-x-auto rounded-md bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
+            >{{ manual.findings }}</pre>
         </template>
       </SidePanel>
     </template>

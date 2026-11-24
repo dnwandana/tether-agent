@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 
 const h = vi.hoisted(() => ({ on: new Map<string, (d: unknown) => void>() }))
 vi.mock("../api/client", () => ({
@@ -54,6 +56,7 @@ const phone = (on: boolean) => {
 }
 const line = (level: string, msg: string) => ({ time: local(14, 6, 0), level, msg, attrs: "" })
 
+let user: ReturnType<typeof userEvent.setup>
 beforeEach(() => {
   h.on.clear()
   phone(false)
@@ -63,52 +66,69 @@ beforeEach(() => {
   vi.setSystemTime(new Date(2026, 10, 20, 15, 0, 0))
   vi.mocked(api).mockReset().mockResolvedValue(logs)
   vi.mocked(setFollowLogs).mockReset()
+  user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
 })
 afterEach(() => vi.useRealTimers())
 
+const box = () => screen.getByRole("region", { name: "Log lines" })
+const rows = () => Array.from(box().querySelectorAll("[data-line]"))
+const levels = () => screen.getByRole("group", { name: "Level" })
+const level = (name: string) => within(levels()).getByRole("button", { name })
+const follow = () => screen.getByRole("checkbox", { name: "Follow" })
+const wrap = () => screen.getByRole("checkbox", { name: "Wrap lines" })
+async function mk() {
+  const r = render(LogViewer)
+  await flushPromises()
+  return r
+}
+
 describe("LogViewer", () => {
   it("loads the last 500 lines and shows them as text", async () => {
-    const w = mount(LogViewer)
-    await flushPromises()
+    await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/logs?level=&q=&limit=500")
-    const text = w.find(".log").text()
+    const text = box().textContent!
     expect(text).toContain("13:59:58")
     expect(text).toContain("ERROR")
     expect(text).toContain("cron: run failed")
-    expect(w.find(".log .lv-err").exists()).toBe(true)
-    w.unmount()
+    expect(box().querySelector('[data-level="error"]')).not.toBeNull()
   })
 
-  it("maps the levels of Go to the CSS classes", async () => {
+  it("maps the levels of Go to four tones", async () => {
     vi.mocked(api).mockResolvedValue({
-      lines: ["INFO", "WARN", "ERROR", "DEBUG"].map((level) => ({
+      lines: ["INFO", "WARN", "ERROR", "DEBUG"].map((lv) => ({
         time: local(1, 2, 3),
-        level,
+        level: lv,
         msg: "m",
         attrs: "",
       })),
     })
-    const w = mount(LogViewer)
-    await flushPromises()
-    for (const c of ["lv-info", "lv-warn", "lv-err", "lv-dbg"])
-      expect(w.find(".log ." + c).exists()).toBe(true)
-    w.unmount()
+    await mk()
+    const tone: Record<string, string> = {
+      info: "text-info",
+      warn: "text-warning",
+      error: "text-destructive",
+      debug: "text-muted-foreground",
+    }
+    for (const [k, cls] of Object.entries(tone)) {
+      const el = box().querySelector(`[data-level="${k}"]`)
+      expect(el).not.toBeNull()
+      expect(el!.classList.contains(cls)).toBe(true)
+    }
   })
 
-  it("marks the active level button with is-on", async () => {
-    const w = mount(LogViewer)
-    await flushPromises()
-    await w
-      .findAll(".seg button")
-      .find((b) => b.text() === "Warn+")!
-      .trigger("click")
-    expect(
-      w
-        .findAll(".seg button")
-        .find((b) => b.text() === "Warn+")!
-        .classes(),
-    ).toContain("is-on")
-    w.unmount()
+  it("marks the active level button as pressed", async () => {
+    await mk()
+    expect(level("All").getAttribute("aria-pressed")).toBe("true")
+    await user.click(level("Warn+"))
+    expect(level("Warn+").getAttribute("aria-pressed")).toBe("true")
+    expect(level("All").getAttribute("aria-pressed")).toBe("false")
+  })
+
+  it("keeps the level when the pressed button is tapped again", async () => {
+    await mk()
+    await user.click(level("All"))
+    expect(level("All").getAttribute("aria-pressed")).toBe("true")
+    expect(api).toHaveBeenCalledTimes(1)
   })
 
   it("drops a slow reply for an old level", async () => {
@@ -119,151 +139,124 @@ describe("LogViewer", () => {
     vi.mocked(api)
       .mockImplementationOnce(() => new Promise((r) => (first = r)))
       .mockResolvedValueOnce(fresh)
-    const w = mount(LogViewer)
-    await w
-      .findAll(".seg button")
-      .find((b) => b.text() === "Warn+")!
-      .trigger("click")
+    const r = render(LogViewer)
+    await user.click(level("Warn+"))
     await flushPromises()
-    expect(w.text()).toContain("new level")
+    expect(r.container.textContent).toContain("new level")
     first(slow)
     await flushPromises()
-    expect(w.text()).toContain("new level")
-    expect(w.text()).not.toContain("old level")
-    w.unmount()
+    expect(r.container.textContent).toContain("new level")
+    expect(r.container.textContent).not.toContain("old level")
   })
 
   it("filters by level and by text", async () => {
-    const w = mount(LogViewer)
-    await flushPromises()
-    await w
-      .findAll(".seg button")
-      .find((b) => b.text() === "Warn+")!
-      .trigger("click")
+    await mk()
+    await user.click(level("Warn+"))
     expect(api).toHaveBeenLastCalledWith("GET", "/api/logs?level=warn&q=&limit=500")
-    await w.find(".search input").setValue("401")
+    await user.type(screen.getByRole("searchbox", { name: "Filter" }), "401")
     expect(api).toHaveBeenCalledTimes(2)
     vi.advanceTimersByTime(250)
     expect(api).toHaveBeenLastCalledWith("GET", "/api/logs?level=warn&q=401&limit=500")
-    w.unmount()
   })
 
   it("follows the log by the log event until Follow is off", async () => {
-    const w = mount(LogViewer)
-    await flushPromises()
-    await w.findAll("label.check input")[0].setValue(true)
+    await mk()
+    await user.click(follow())
+    expect(follow().getAttribute("aria-checked")).toBe("true")
     expect(setFollowLogs).toHaveBeenLastCalledWith(true)
     h.on.get("log")!({ lines: [line("info", "new line")] })
     await flushPromises()
-    expect(w.find(".log").text()).toContain("new line")
+    expect(box().textContent).toContain("new line")
     vi.advanceTimersByTime(6000)
     expect(api).toHaveBeenCalledTimes(1)
-    await w.findAll("label.check input")[0].setValue(false)
+    await user.click(follow())
     expect(setFollowLogs).toHaveBeenLastCalledWith(false)
     expect(h.on.has("log")).toBe(false)
-    w.unmount()
   })
 
   it("stops the follow of the stream when it unmounts", async () => {
-    const w = mount(LogViewer)
-    await flushPromises()
-    await w.findAll("label.check input")[0].setValue(true)
-    w.unmount()
+    const r = await mk()
+    await user.click(follow())
+    r.unmount()
     expect(setFollowLogs).toHaveBeenLastCalledWith(false)
   })
 
   it("filters the followed lines by level and by text on the page", async () => {
-    const w = mount(LogViewer)
+    await mk()
+    await user.click(level("Warn+"))
     await flushPromises()
-    await w
-      .findAll(".seg button")
-      .find((b) => b.text() === "Warn+")!
-      .trigger("click")
-    await flushPromises()
-    await w.findAll("label.check input")[0].setValue(true)
+    await user.click(follow())
     h.on.get("log")!({
       lines: [line("info", "quiet"), line("WARN", "disk low"), line("error", "other fail")],
     })
     await flushPromises()
-    const text = w.find(".log").text()
+    const text = box().textContent!
     expect(text).not.toContain("quiet")
     expect(text).toContain("disk low")
     expect(text).toContain("other fail")
-    w.unmount()
   })
 
   it("keeps at most 2,000 lines", async () => {
-    const w = mount(LogViewer)
-    await flushPromises()
-    await w.findAll("label.check input")[0].setValue(true)
+    await mk()
+    await user.click(follow())
     h.on.get("log")!({ lines: Array.from({ length: 2100 }, (_, i) => line("info", `l${i}`)) })
     await flushPromises()
-    const rows = w.findAll(".log > div")
-    expect(rows).toHaveLength(2000)
-    expect(rows[rows.length - 1].text()).toContain("l2099")
-    w.unmount()
+    expect(rows()).toHaveLength(2000)
+    expect(rows()[1999].textContent).toContain("l2099")
   })
 
   it("scrolls to the end only when the box was at the bottom", async () => {
-    const w = mount(LogViewer, { attachTo: document.body })
-    await flushPromises()
-    await w.findAll("label.check input")[0].setValue(true)
-    const box = w.find(".log").element as HTMLElement
-    Object.defineProperty(box, "scrollHeight", { configurable: true, value: 1000 })
-    Object.defineProperty(box, "clientHeight", { configurable: true, value: 200 })
-    box.scrollTop = 800
+    await mk()
+    await user.click(follow())
+    const el = box()
+    Object.defineProperty(el, "scrollHeight", { configurable: true, value: 1000 })
+    Object.defineProperty(el, "clientHeight", { configurable: true, value: 200 })
+    el.scrollTop = 800
     h.on.get("log")!({ lines: [line("info", "a")] })
     await flushPromises()
-    expect(box.scrollTop).toBe(1000)
-    box.scrollTop = 100
+    expect(el.scrollTop).toBe(1000)
+    el.scrollTop = 100
     h.on.get("log")!({ lines: [line("info", "b")] })
     await flushPromises()
-    expect(box.scrollTop).toBe(100)
-    w.unmount()
+    expect(el.scrollTop).toBe(100)
   })
 
-  it("shows the level labels, the styled filter, and the note", async () => {
-    const w = mount(LogViewer)
-    await flushPromises()
-    expect(w.findAll(".seg button").map((b) => b.text())).toEqual([
-      "All",
-      "Debug+",
-      "Info+",
-      "Warn+",
-      "Error",
-    ])
-    expect(w.find(".search input").classes()).toContain("input")
-    expect(w.text()).toContain("The log shows the lines since the gateway started.")
-    expect(w.find(".log").classes()).toContain("log-view")
-    w.unmount()
+  it("shows the level labels, the filter input, and the note", async () => {
+    await mk()
+    expect(levels().getAttribute("data-slot")).toBe("toggle-group")
+    expect(
+      within(levels())
+        .getAllByRole("button")
+        .map((b) => b.textContent!.trim()),
+    ).toEqual(["All", "Debug+", "Info+", "Warn+", "Error"])
+    expect(screen.getByRole("searchbox", { name: "Filter" }).getAttribute("data-slot")).toBe(
+      "input",
+    )
+    expect(screen.getByText("The log shows the lines since the gateway started.")).toBeTruthy()
+    expect(follow().getAttribute("data-slot")).toBe("checkbox")
   })
 
   it("shows the date of a line that is not from today", async () => {
     vi.mocked(api).mockResolvedValue({
       lines: [{ time: local(13, 59, 58, 19), level: "info", msg: "old", attrs: "" }],
     })
-    const w = mount(LogViewer)
-    await flushPromises()
-    expect(w.find(".log").text()).toContain("2026-11-19 13:59:58")
-    w.unmount()
+    await mk()
+    expect(box().textContent).toContain("2026-11-19 13:59:58")
   })
 
   it("wraps the lines by default on a phone", async () => {
     phone(true)
-    const w = mount(LogViewer)
-    await flushPromises()
-    expect(w.find(".log").classes()).toContain("is-wrap")
-    const wrap = w.findAll("label.check").find((l) => l.text() === "Wrap lines")!
-    await wrap.find("input").setValue(false)
-    expect(w.find(".log").classes()).not.toContain("is-wrap")
-    w.unmount()
+    await mk()
+    expect(box().getAttribute("data-wrap")).toBe("true")
+    expect(wrap().getAttribute("aria-checked")).toBe("true")
+    await user.click(wrap())
+    expect(box().getAttribute("data-wrap")).toBeNull()
   })
 
   it("shows a message when no line matches", async () => {
     vi.mocked(api).mockResolvedValue({ lines: [] })
-    const w = mount(LogViewer)
-    await flushPromises()
-    expect(w.find(".log").text()).toBe("No lines match.")
-    w.unmount()
+    await mk()
+    expect(box().textContent!.trim()).toBe("No lines match.")
+    expect(rows()).toHaveLength(0)
   })
 })

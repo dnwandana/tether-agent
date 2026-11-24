@@ -1,19 +1,25 @@
 <template>
-  <div v-if="on" class="restart" role="status" aria-live="polite">
-    <b>♻️ The gateway restarts.</b>
-    <span class="c-2">{{ progress }}</span>
-    <template v-if="late">
-      <span>
-        The gateway did not come back. Reload the page, or check
-        <code>systemctl --user status tether</code>.
-      </span>
-      <button class="btn btn-secondary btn-sm" type="button" @click="reload">Reload</button>
-    </template>
-  </div>
+  <Alert v-if="on" role="status" aria-live="polite" class="rounded-none border-x-0 border-t-0">
+    <RefreshCwIcon />
+    <AlertTitle>♻️ The gateway restarts.</AlertTitle>
+    <AlertDescription>
+      <span class="text-muted-foreground">{{ progress }}</span>
+      <template v-if="late">
+        <span>
+          The gateway did not come back. Reload the page, or check
+          <code>systemctl --user status tether</code>.
+        </span>
+        <Button variant="secondary" size="sm" type="button" @click="reload">Reload</Button>
+      </template>
+    </AlertDescription>
+  </Alert>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { RefreshCwIcon } from "@lucide/vue"
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Button } from "@/components/ui/button"
 import { api } from "../api/client"
 import type { BootstrapView } from "../api/types.gen"
 import { onEvent } from "../lib/bus"

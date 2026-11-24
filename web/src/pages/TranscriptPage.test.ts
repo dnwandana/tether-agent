@@ -1,5 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+import { flushPromises } from "@vue/test-utils"
+import { cleanup, render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { defineComponent, h } from "vue"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -15,6 +18,17 @@ vi.mock("../stores/ui", async (importOriginal) => ({
 import { api, runCommand } from "../api/client"
 import TranscriptPage from "./TranscriptPage.vue"
 import { fullTime, shortTime } from "../lib/time"
+
+const scrollToMessage = vi.fn(() => true)
+vi.mock("@/components/ui/message-scroller", async (orig) => ({
+  ...(await orig<object>()),
+  useMessageScroller: () => ({ scrollToMessage, scrollToEnd: vi.fn(), scrollToStart: vi.fn() }),
+}))
+// A stub that shows only the call id of the tool.
+const ToolResult = defineComponent({
+  props: ["tool"],
+  setup: (p) => () => h("div", { "data-testid": "tool-result" }, p.tool.call),
+})
 
 const Blank = { render: () => null }
 const info = {
@@ -104,9 +118,6 @@ const pg = (
     has_newer: o.newer ?? false,
   }
 }
-const olderButton = (w: Awaited<ReturnType<typeof mk>>["w"]) =>
-  w.findAll("button").find((b) => b.text() === "Load older")
-
 async function mk(path = "/sessions/s2") {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -117,10 +128,12 @@ async function mk(path = "/sessions/s2") {
     ],
   })
   await router.push(path)
-  const w = mount(TranscriptPage, { global: { plugins: [router] } })
+  const r = render(TranscriptPage, { global: { plugins: [router], stubs: { ToolResult } } })
   await flushPromises()
-  return { w, router }
+  return { ...r, router, c: r.container as HTMLElement }
 }
+const item = (c: Element, id: number) => c.querySelector(`[data-message-id="${id}"]`) as HTMLElement
+const btn = (name: string) => screen.queryByRole("button", { name })
 
 beforeEach(() => {
   vi.mocked(api)
@@ -133,17 +146,21 @@ beforeEach(() => {
     .mockResolvedValue({ request_id: "r", text: "Forked.", buttons: [], edit: false })
 })
 
+afterEach(() => {
+  cleanup()
+  scrollToMessage.mockClear()
+})
+
 describe("TranscriptPage", () => {
   it("loads the session and the last page of messages", async () => {
-    const { w } = await mk()
+    const { c } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2")
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/messages?limit=50")
-    expect(w.findAll("details.card")).toHaveLength(1)
-    expect(w.find("details.card summary").text()).toContain("🗜 Compacted")
-    expect(w.find("#msg-10 .bubble-user").text()).toBe("An old question.")
-    expect(w.find("#msg-11 .bubble-user").text()).toBe("Find the flaky test.")
-    expect(w.find("details.reasoning summary").text()).toBe("▸ Reasoning · 812 tokens")
-    const foot = w.find(".cost-foot").text()
+    expect(screen.getAllByRole("button", { name: /🗜 Compacted/ })).toHaveLength(1)
+    expect(within(item(c, 10)).getByText("An old question.")).toBeTruthy()
+    expect(within(item(c, 11)).getByText("Find the flaky test.")).toBeTruthy()
+    expect(screen.getByRole("button", { name: /Reasoning\s*812 tokens/ })).toBeTruthy()
+    const foot = item(c, 12).textContent ?? ""
     for (const s of [
       "deepseek-chat · answered by backup",
       "40.3k in (0 cached)",
@@ -172,29 +189,29 @@ describe("TranscriptPage", () => {
                 { older: true },
               )) as any,
     )
-    const { w } = await mk()
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "Load older")!
-      .trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    await user.click(btn("Load older")!)
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/messages?before=21&limit=50")
   })
 
   it("shows the read-only banner and forks into the dashboard", async () => {
-    const { w } = await mk()
-    expect(w.find(".ro-banner").text()).toContain(
-      "👁 Read-only. This session belongs to Telegram › DM.",
-    )
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "Fork into dashboard")!
-      .trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    expect(screen.getByText("👁 Read-only. This session belongs to Telegram › DM.")).toBeTruthy()
+    await user.click(btn("Fork into dashboard")!)
     expect(runCommand).toHaveBeenCalledWith("/fork from s2")
   })
 
   it("opens the messages around a search hit", async () => {
     await mk("/sessions/s2?message=11")
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/messages?around=11&limit=25")
+    expect(scrollToMessage).toHaveBeenCalledWith("11", { align: "center" })
+  })
+
+  it("does not jump when the route has no search hit", async () => {
+    await mk()
+    expect(scrollToMessage).not.toHaveBeenCalled()
   })
 
   it("shows Load older from has_older when tool results make the page short", async () => {
@@ -211,13 +228,14 @@ describe("TranscriptPage", () => {
             ? older
             : pg(views, { first: 30, last: 80, older: true })) as any,
     )
-    const { w } = await mk()
-    expect(olderButton(w)).toBeDefined()
-    await olderButton(w)!.trigger("click")
+    const user = userEvent.setup()
+    const { c } = await mk()
+    expect(btn("Load older")).not.toBeNull()
+    await user.click(btn("Load older")!)
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/messages?before=30&limit=50")
-    expect(w.find("#msg-29 .bubble-user").text()).toBe("first question")
-    expect(olderButton(w)).toBeUndefined()
+    expect(within(item(c, 29)).getByText("first question")).toBeTruthy()
+    expect(btn("Load older")).toBeNull()
   })
 
   it("hides Load older when the page has no older messages", async () => {
@@ -225,8 +243,8 @@ describe("TranscriptPage", () => {
     vi.mocked(api).mockImplementation(
       async (_m: string, p: string) => (p === "/api/sessions/s2" ? info : pg(full)) as any,
     )
-    const { w } = await mk()
-    expect(olderButton(w)).toBeUndefined()
+    await mk()
+    expect(btn("Load older")).toBeNull()
   })
 
   it("does not add a row that shows already", async () => {
@@ -238,11 +256,12 @@ describe("TranscriptPage", () => {
             ? pg([msg({ id: 9, text: "older" }), msg({ id: 10, text: "again" })])
             : pg([msg({ id: 10, text: "An old question." })], { older: true })) as any,
     )
-    const { w } = await mk()
-    await olderButton(w)!.trigger("click")
+    const user = userEvent.setup()
+    const { c } = await mk()
+    await user.click(btn("Load older")!)
     await flushPromises()
-    expect(w.findAll("#msg-10")).toHaveLength(1)
-    expect(w.find("#msg-9 .bubble-user").text()).toBe("older")
+    expect(c.querySelectorAll('[data-message-id="10"]')).toHaveLength(1)
+    expect(within(item(c, 9)).getByText("older")).toBeTruthy()
   })
 
   it("loads newer messages after the last id", async () => {
@@ -254,15 +273,13 @@ describe("TranscriptPage", () => {
             ? pg([msg({ id: 90, text: "a newer question" })])
             : pg(msgs, { last: 80, newer: true })) as any,
     )
-    const { w } = await mk()
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "Load newer")!
-      .trigger("click")
+    const user = userEvent.setup()
+    const { c } = await mk()
+    await user.click(btn("Load newer")!)
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/messages?after=80&limit=50")
-    expect(w.find("#msg-90 .bubble-user").text()).toBe("a newer question")
-    expect(w.findAll("button").some((b) => b.text() === "Load newer")).toBe(false)
+    expect(within(item(c, 90)).getByText("a newer question")).toBeTruthy()
+    expect(btn("Load newer")).toBeNull()
   })
 
   it("drops a newer page that arrives after a route change", async () => {
@@ -276,36 +293,32 @@ describe("TranscriptPage", () => {
         return pg([msg({ id: 5, text: "other session" })]) as any
       return pg(msgs, { last: 80, newer: true }) as any
     })
-    const { w, router } = await mk()
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "Load newer")!
-      .trigger("click")
+    const user = userEvent.setup()
+    const { c, router } = await mk()
+    await user.click(btn("Load newer")!)
     await router.push("/sessions/s3")
     await flushPromises()
     release(pg([msg({ id: 90, text: "a newer question" })]))
     await flushPromises()
-    expect(w.text()).toContain("other session")
-    expect(w.text()).not.toContain("a newer question")
+    expect(c.textContent).toContain("other session")
+    expect(c.textContent).not.toContain("a newer question")
   })
 
   it("marks the hit and jumps to the latest messages", async () => {
-    const { w, router } = await mk("/sessions/s2?message=11")
-    const hitMsg = w.find("#msg-11")
-    expect(hitMsg.classes()).toContain("is-hit")
-    expect(hitMsg.text()).toContain("Search hit")
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "Jump to latest")!
-      .trigger("click")
+    const user = userEvent.setup()
+    const { c, router } = await mk("/sessions/s2?message=11")
+    expect(item(c, 11).dataset.hit).toBe("true")
+    expect(item(c, 11).textContent).toContain("Search hit")
+    expect(item(c, 10).dataset.hit).toBeUndefined()
+    await user.click(btn("Jump to latest")!)
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({})
     expect(api).toHaveBeenLastCalledWith("GET", "/api/sessions/s2/messages?limit=50")
   })
 
   it("shows the time of each message", async () => {
-    const { w } = await mk()
-    expect(w.find("#msg-11 time").attributes("datetime")).toBe("2026-11-20T09:05:00Z")
+    const { c } = await mk()
+    expect(item(c, 11).querySelector("time")!.getAttribute("datetime")).toBe("2026-11-20T09:05:00Z")
   })
 
   it("links the children and the parent", async () => {
@@ -318,11 +331,14 @@ describe("TranscriptPage", () => {
             ? { ...info, id: "p1", title: "Release notes" }
             : pg(msgs)) as any,
     )
-    const { w } = await mk()
+    await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/p1")
-    expect(w.find("a[href='/sessions/c1']").text()).toBe("subagent run")
-    const parent = w.find("a[href='/sessions/p1']")
-    expect(parent.text()).toBe("↳ child of Release notes")
+    expect(screen.getByRole("link", { name: "subagent run" }).getAttribute("href")).toBe(
+      "/sessions/c1",
+    )
+    expect(
+      screen.getByRole("link", { name: "↳ child of Release notes" }).getAttribute("href"),
+    ).toBe("/sessions/p1")
   })
 
   it("opens the arguments and the result of a tool call", async () => {
@@ -344,30 +360,38 @@ describe("TranscriptPage", () => {
               }
             : pg(msgs)) as any,
     )
-    const { w } = await mk()
-    await w.find("button.toolline").trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    expect(document.querySelector("pre")).toBeNull()
+    await user.click(screen.getByRole("button", { name: /patch/ }))
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/tools/c1")
-    expect(w.find(".tool-args").text()).toContain('"path": "internal/cron/jobs.go"')
-    expect(w.find(".tool-result").exists()).toBe(true)
+    expect(document.querySelector("pre")!.textContent).toContain('"path": "internal/cron/jobs.go"')
+    expect(screen.getByTestId("tool-result")).toBeTruthy()
+    // A second click closes the tool line.
+    await user.click(screen.getByRole("button", { name: /patch/ }))
+    await flushPromises()
+    expect(document.querySelector("pre")).toBeNull()
   })
 
   it("shows the empty text for a session with no messages", async () => {
     vi.mocked(api).mockImplementation(
       async (_m: string, p: string) => (p === "/api/sessions/s2" ? info : pg([])) as any,
     )
-    const { w } = await mk()
-    expect(w.text()).toContain("No messages yet.")
+    await mk()
+    expect(screen.getByText("No messages yet.")).toBeTruthy()
+    expect(document.querySelector('[data-slot="empty"]')).not.toBeNull()
+    expect(screen.queryByRole("region", { name: "Messages" })).toBeNull()
+    expect(document.querySelector('[data-slot="message-scroller"]')).toBeNull()
   })
 
   it("loads again from the action of the error state", async () => {
     vi.mocked(api).mockRejectedValueOnce(new Error("HTTP 500"))
-    const { w } = await mk()
-    const block = w.findComponent({ name: "StateBlock" })
-    expect(block.props("state")).toBe("error")
-    block.vm.$emit("action")
+    const user = userEvent.setup()
+    const { c } = await mk()
+    await user.click(screen.getByRole("button", { name: "Retry" }))
     await flushPromises()
-    expect(w.text()).toContain("Photos")
+    expect(c.textContent).toContain("Photos")
   })
 
   it("goes to Chat only when the fork reply is ok", async () => {
@@ -377,11 +401,9 @@ describe("TranscriptPage", () => {
       buttons: [[{ text: "⏹ Stop the task", data: "/stop" }]],
       edit: false,
     })
-    const { w, router } = await mk()
-    await w
-      .findAll("button")
-      .find((b) => b.text() === "Fork into dashboard")!
-      .trigger("click")
+    const user = userEvent.setup()
+    const { router } = await mk()
+    await user.click(btn("Fork into dashboard")!)
     await flushPromises()
     expect(router.currentRoute.value.name).toBe("transcript")
   })
@@ -398,11 +420,9 @@ describe("TranscriptPage", () => {
         "fetch",
         vi.fn(async () => ({ ok: true, blob: async () => new Blob(["x"]) })),
       )
-      const { w } = await mk()
-      await w
-        .findAll("button")
-        .find((b) => b.text() === "Export JSONL")!
-        .trigger("click")
+      const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+      await mk()
+      await user.click(btn("Export JSONL")!)
       await flushPromises()
       expect(revoke).not.toHaveBeenCalled()
       vi.advanceTimersByTime(30_000)
@@ -418,15 +438,13 @@ describe("TranscriptPage", () => {
   })
 
   it("shows message and start times in the shared format", async () => {
-    const { w } = await mk()
-    const t = w.find("#msg-11 time")
-    expect(t.text()).toBe(shortTime("2026-11-20T09:05:00Z"))
-    expect(t.attributes("title")).toBe(fullTime("2026-11-20T09:05:00Z"))
-    expect(t.attributes("datetime")).toBe("2026-11-20T09:05:00Z")
-    expect(w.text()).toContain(shortTime("2026-11-19T09:00:00Z"))
-    const started = w.find('[data-test="started"]')
-    expect(started.text()).toBe(shortTime("2026-11-19T09:00:00Z"))
-    expect(started.attributes("title")).toBe(fullTime("2026-11-19T09:00:00Z"))
-    expect(started.attributes("style")).toContain("white-space: nowrap")
+    const { c } = await mk()
+    const t = item(c, 11).querySelector("time")!
+    expect(t.textContent?.trim()).toBe(shortTime("2026-11-20T09:05:00Z"))
+    expect(t.getAttribute("title")).toBe(fullTime("2026-11-20T09:05:00Z"))
+    expect(t.getAttribute("datetime")).toBe("2026-11-20T09:05:00Z")
+    const started = screen.getByText(shortTime("2026-11-19T09:00:00Z"))
+    expect(started.getAttribute("title")).toBe(fullTime("2026-11-19T09:00:00Z"))
+    expect(started.classList.contains("whitespace-nowrap")).toBe(true)
   })
 })

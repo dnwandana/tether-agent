@@ -1,6 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue"
 import { useRouter } from "vue-router"
+import { Button } from "@/components/ui/button"
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Spinner } from "@/components/ui/spinner"
+import { cn } from "@/lib/utils"
 import { api } from "../api/client"
 import type { DoctorView, McpRow, RuntimeView, Status } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
@@ -51,6 +64,14 @@ const mcpColumns = [
   { key: "settings", label: "Settings" },
   { key: "last", label: "Last error" },
 ]
+
+// The dot color of each MCP server state.
+const DOT: Readonly<Record<string, string>> = {
+  ok: "bg-success",
+  bad: "bg-destructive",
+  idle: "bg-muted-foreground",
+  off: "bg-border",
+}
 
 const marks: Record<string, string> = { ok: "✓", warn: "⚠", fail: "✗" }
 
@@ -310,9 +331,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">System</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight">System</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
     </div>
     <Tabs
@@ -323,66 +344,77 @@ onBeforeUnmount(() => {
       ]"
     />
 
-    <div class="card doctor-card">
-      <div class="card-h">
-        <h3>Doctor</h3>
-        <span v-if="hm(doctor?.ran_at ?? '')" class="c-3 t-12">{{
+    <Card>
+      <CardHeader>
+        <CardTitle>Doctor</CardTitle>
+        <CardDescription v-if="hm(doctor?.ran_at ?? '')">{{
           `ran ${hm(doctor?.ran_at ?? "")} · ${counts().ok} ✓ · ${counts().warn} ⚠ · ${counts().fail} ✗`
-        }}</span>
-        <button
-          v-if="(doctor?.checks ?? []).length || doctorRunning"
-          class="btn btn-secondary"
-          type="button"
-          :disabled="doctorRunning"
-          @click="runDoctor"
+        }}</CardDescription>
+        <CardAction v-if="(doctor?.checks ?? []).length || doctorRunning">
+          <Button variant="outline" :disabled="doctorRunning" @click="runDoctor">
+            <Spinner v-if="doctorRunning" aria-hidden="true" />
+            {{ doctorRunning ? "Running…" : "Run again" }}
+          </Button>
+        </CardAction>
+      </CardHeader>
+      <CardContent class="flex flex-col gap-3">
+        <ResultNote :note="doctorNote" @close="doctorNote = null" />
+        <StateBlock v-if="doctorState === 'loading'" state="loading" />
+        <StateBlock
+          v-else-if="doctorState === 'error'"
+          state="error"
+          :text="doctorError"
+          action="Retry"
+          @action="loadDoctor"
+        />
+        <StateBlock
+          v-else-if="!(doctor?.checks ?? []).length && !doctorRunning"
+          state="empty"
+          text="The doctor has not run yet."
+          action="Run doctor"
+          @action="runDoctor"
+        />
+        <ul
+          v-else
+          aria-label="Doctor checks"
+          :aria-busy="doctorRunning"
+          :class="cn('flex flex-col gap-2', doctorRunning && 'opacity-60')"
         >
-          {{ doctorRunning ? "Running…" : "Run again" }}
-        </button>
-      </div>
-      <ResultNote :note="doctorNote" @close="doctorNote = null" />
-      <StateBlock v-if="doctorState === 'loading'" state="loading" />
-      <StateBlock
-        v-else-if="doctorState === 'error'"
-        state="error"
-        :text="doctorError"
-        action="Retry"
-        @action="loadDoctor"
-      />
-      <StateBlock
-        v-else-if="!(doctor?.checks ?? []).length && !doctorRunning"
-        state="empty"
-        text="The doctor has not run yet."
-        action="Run doctor"
-        @action="runDoctor"
-      />
-      <template v-else>
-        <div class="checks" :class="{ 'is-stale': doctorRunning }">
-          <div v-for="(c, i) in doctor?.checks ?? []" :key="i" class="li top">
-            <span class="lead">{{ marks[c.status] ?? "•" }}</span>
-            <span class="grow">
-              <b class="mono">{{ c.name }}</b> <span class="c-2">{{ c.detail }}</span>
-              <div v-if="c.next" class="c-3 t-12">
+          <li
+            v-for="(c, i) in doctor?.checks ?? []"
+            :key="i"
+            class="flex items-start gap-3 text-sm"
+          >
+            <span>{{ marks[c.status] ?? "•" }}</span>
+            <span class="flex-1">
+              <b class="font-mono font-medium">{{ c.name }}</b>
+              <span class="text-muted-foreground">{{ c.detail }}</span>
+              <div v-if="c.next" class="text-xs text-muted-foreground">
                 next:
                 <template v-for="(p, j) in pageLinks(c.next)" :key="j"
-                  ><router-link v-if="p.to" :to="{ name: p.to }">{{ p.text }}</router-link
+                  ><router-link v-if="p.to" :to="{ name: p.to }" class="underline">{{
+                    p.text
+                  }}</router-link
                   ><template v-else>{{ p.text }}</template></template
                 >
               </div>
             </span>
-          </div>
-        </div>
-        <div class="li c-3 t-12">
+          </li>
+        </ul>
+      </CardContent>
+      <CardFooter
+        v-if="doctorState === 'ready' && ((doctor?.checks ?? []).length || doctorRunning)"
+      >
+        <p class="text-xs text-muted-foreground">
           “Run again” makes test calls to each provider. It runs once a minute at most.
-        </div>
-      </template>
-    </div>
+        </p>
+      </CardFooter>
+    </Card>
 
-    <section class="mcp-section">
-      <div class="section-h">
-        <h2>MCP servers</h2>
-        <button class="btn btn-secondary" type="button" :disabled="mcpBusy" @click="reloadMcp">
-          Reload MCP
-        </button>
+    <section aria-labelledby="mcp-h" class="flex flex-col gap-3">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h2 id="mcp-h" class="text-base font-semibold">MCP servers</h2>
+        <Button variant="outline" :disabled="mcpBusy" @click="reloadMcp">Reload MCP</Button>
       </div>
       <ResultNote :note="mcpNote" @close="mcpNote = null" />
       <StateBlock v-if="mcpState === 'loading'" state="loading" />
@@ -401,20 +433,32 @@ onBeforeUnmount(() => {
       />
       <DataTable v-else :columns="mcpColumns" :rows="mcpRows" row-key="name">
         <template #cell-status="{ row }">
-          <span class="status"><span :class="'dot dot-' + row.state" />{{ row.label }}</span>
+          <span class="inline-flex items-center gap-1.5"
+            ><span
+              aria-hidden="true"
+              :data-tone="row.state"
+              :class="cn('size-2 rounded-full', DOT[row.state as string])"
+            />{{ row.label }}</span
+          >
         </template>
         <template #cell-tools="{ row }">
-          <details v-if="(row.names as string[]).length">
-            <summary>{{ count((row.names as string[]).length, "tool", "tools") }}</summary>
-            <span v-for="n in row.names as string[]" :key="n" class="mono">{{ n }} </span>
-          </details>
+          <Collapsible v-if="(row.names as string[]).length">
+            <CollapsibleTrigger as-child>
+              <Button variant="link" size="sm">{{
+                count((row.names as string[]).length, "tool", "tools")
+              }}</Button>
+            </CollapsibleTrigger>
+            <CollapsibleContent class="flex flex-wrap gap-x-2 text-left font-mono text-xs">
+              <span v-for="n in row.names as string[]" :key="n">{{ n }}</span>
+            </CollapsibleContent>
+          </Collapsible>
           <template v-else>{{ count(row.tools as number, "tool", "tools") }}</template>
         </template>
         <template #cell-settings="{ row }">{{ (row.settings as string[]).join(" · ") }}</template>
       </DataTable>
     </section>
 
-    <div class="section-h"><h2>Running work</h2></div>
+    <h2 class="text-base font-semibold">Running work</h2>
     <StateBlock v-if="runtimeState === 'loading'" state="loading" />
     <StateBlock
       v-else-if="runtimeState === 'error'"
@@ -423,90 +467,101 @@ onBeforeUnmount(() => {
       action="Retry"
       @action="loadRuntime"
     />
-    <div v-else class="grid-2">
-      <div class="card">
-        <div class="card-h"><h3>🔀 Delegation batches</h3></div>
-        <div v-for="b in runtime?.batches ?? []" :key="b.id" class="li top">
-          <span class="grow">
-            <b class="mono">{{ b.id }}</b
-            >{{ " "
-            }}<span class="c-2">{{ b.status }} · {{ count(b.tasks.length, "task", "tasks") }}</span>
-            <div v-for="(_t, i) in b.tasks" :key="i" class="li">{{ taskLine(b, i) }}</div>
+    <div v-else class="grid gap-4 tab:grid-cols-2">
+      <Card>
+        <CardHeader><CardTitle>🔀 Delegation batches</CardTitle></CardHeader>
+        <CardContent class="flex flex-col gap-3 text-sm">
+          <div v-for="b in runtime?.batches ?? []" :key="b.id" class="flex flex-col gap-1">
+            <div>
+              <b class="font-mono">{{ b.id }}</b
+              >{{ " "
+              }}<span class="text-muted-foreground"
+                >{{ b.status }} · {{ count(b.tasks.length, "task", "tasks") }}</span
+              >
+            </div>
+            <div v-for="(_t, i) in b.tasks" :key="i">{{ taskLine(b, i) }}</div>
             <div
               v-for="(r, i) in b.results ?? []"
               v-show="r.error"
               :key="'e' + i"
-              class="t-12 c-bad"
+              class="text-xs text-destructive"
             >
               {{ r.error }}
             </div>
             <template v-if="batchSummary(b)">
               <div
-                class="batch-summary md c-3 t-12"
-                :class="{ 'clamp-3': !openSummary.has(b.id) }"
+                :class="
+                  cn(
+                    'typeset typeset-chat text-xs text-muted-foreground',
+                    !openSummary.has(b.id) && 'line-clamp-3',
+                  )
+                "
                 v-html="renderMarkdown(batchSummary(b))"
               />
-              <button
-                v-if="!openSummary.has(b.id)"
-                class="btn btn-ghost btn-sm"
-                type="button"
-                @click="toggleSummary(b.id)"
-              >
-                Show all
-              </button>
+              <div v-if="!openSummary.has(b.id)">
+                <Button variant="ghost" size="sm" @click="toggleSummary(b.id)">Show all</Button>
+              </div>
             </template>
-          </span>
-        </div>
-        <div v-if="!(runtime?.batches ?? []).length" class="li c-3">Nothing runs.</div>
-      </div>
-      <div class="card">
-        <div class="card-h"><h3>🤖 ACP sessions</h3></div>
-        <div v-for="a in acps" :key="a.session_id" class="li">
-          <span class="grow"
-            ><b>{{ a.agent }}</b> <span class="c-2">{{ a.busy ? "busy" : "idle" }}</span></span
-          >
-          <span class="c-3 t-12 mono">{{ a.cwd }}</span>
-        </div>
-        <div v-if="!(runtime?.acp ?? []).length" class="li c-3">Nothing runs.</div>
-        <button
-          v-if="!showAllAcp && (runtime?.acp ?? []).length > LIST_CAP"
-          class="btn btn-ghost btn-sm"
-          type="button"
-          @click="showAllAcp = true"
-        >
-          Show all {{ runtime?.acp.length }}
-        </button>
-      </div>
-      <div class="card">
-        <div class="card-h"><h3>💻 Background processes</h3></div>
-        <div v-for="p in procs" :key="p.pid" class="li top proc-row">
-          <span class="grow">
-            <b class="mono">{{ p.pid }}</b> <code>{{ p.command }}</code>
-            <div class="c-3 t-12">
-              started
-              <span style="white-space: nowrap" :title="fullTime(p.started)">{{
-                date(p.started)
-              }}</span
-              ><template v-if="p.exited"> · exit code {{ p.exit_code }}</template>
-            </div>
-            <div v-if="p.tail" class="log">{{ p.tail }}</div>
-          </span>
-        </div>
-        <div v-if="!(runtime?.processes ?? []).length" class="li c-3">Nothing runs.</div>
-        <button
-          v-if="!showAllProcs && (runtime?.processes ?? []).length > LIST_CAP"
-          class="btn btn-ghost btn-sm"
-          type="button"
-          @click="showAllProcs = true"
-        >
-          Show all {{ runtime?.processes.length }}
-        </button>
-      </div>
-      <div class="card">
-        <div class="card-h"><h3>🌐 Browser</h3></div>
-        <div v-if="runtime?.browser" class="li">running</div>
-        <div v-else class="li c-3">closed</div>
-      </div>
+          </div>
+          <p v-if="!(runtime?.batches ?? []).length" class="text-sm text-muted-foreground">
+            Nothing runs.
+          </p>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>🤖 ACP sessions</CardTitle></CardHeader>
+        <CardContent class="flex flex-col gap-3 text-sm">
+          <div v-for="a in acps" :key="a.session_id" class="flex flex-col gap-0.5">
+            <span
+              ><b>{{ a.agent }}</b>
+              <span class="text-muted-foreground">{{ a.busy ? "busy" : "idle" }}</span></span
+            >
+            <span class="font-mono text-xs text-muted-foreground">{{ a.cwd }}</span>
+          </div>
+          <p v-if="!(runtime?.acp ?? []).length" class="text-sm text-muted-foreground">
+            Nothing runs.
+          </p>
+          <div v-if="!showAllAcp && (runtime?.acp ?? []).length > LIST_CAP">
+            <Button variant="ghost" size="sm" @click="showAllAcp = true">
+              Show all {{ runtime?.acp.length }}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>💻 Background processes</CardTitle></CardHeader>
+        <CardContent class="flex flex-col gap-3 text-sm">
+          <ul v-if="procs.length" aria-label="Background processes" class="flex flex-col gap-3">
+            <li v-for="p in procs" :key="p.pid">
+              <b class="font-mono">{{ p.pid }}</b> <code>{{ p.command }}</code>
+              <div class="text-xs text-muted-foreground">
+                started
+                <span class="whitespace-nowrap" :title="fullTime(p.started)">{{
+                  date(p.started)
+                }}</span
+                ><template v-if="p.exited"> · exit code {{ p.exit_code }}</template>
+              </div>
+              <pre
+                v-if="p.tail"
+                class="max-h-40 overflow-auto rounded-md bg-muted p-2 font-mono text-xs"
+                >{{ p.tail }}</pre>
+            </li>
+          </ul>
+          <p v-else class="text-sm text-muted-foreground">Nothing runs.</p>
+          <div v-if="!showAllProcs && (runtime?.processes ?? []).length > LIST_CAP">
+            <Button variant="ghost" size="sm" @click="showAllProcs = true">
+              Show all {{ runtime?.processes.length }}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle>🌐 Browser</CardTitle></CardHeader>
+        <CardContent class="text-sm">
+          <span v-if="runtime?.browser">running</span>
+          <span v-else class="text-muted-foreground">closed</span>
+        </CardContent>
+      </Card>
     </div>
   </div>
 </template>

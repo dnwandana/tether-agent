@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue"
+import { computed, onMounted, ref } from "vue"
 import type { ToolView } from "../api/types.gen"
 import { session, loadMessages } from "../stores/session"
 import { turn } from "../stores/turn"
@@ -19,6 +19,19 @@ import ApprovalCard from "../components/cards/ApprovalCard.vue"
 import ClarifyCard from "../components/cards/ClarifyCard.vue"
 import SecretCard from "../components/cards/SecretCard.vue"
 import RecordLine from "../components/cards/RecordLine.vue"
+import {
+  MessageScrollerProvider,
+  MessageScroller,
+  MessageScrollerViewport,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerButton,
+} from "@/components/ui/message-scroller"
+import { Message } from "@/components/ui/message"
+import { Bubble, BubbleContent } from "@/components/ui/bubble"
+import { Marker, MarkerContent } from "@/components/ui/marker"
+import { Button } from "@/components/ui/button"
+import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 
 const MODES: Record<string, string> = {
   "read-only": "👁 Read-only",
@@ -100,131 +113,147 @@ function toggleDetails(): void {
 
 // Runs a suggested command as a typed command. A reply with buttons shows as a popover.
 const { run, reply, closeReply } = useCommand()
-function onDocClick(e: MouseEvent): void {
-  if (!reply.value) return
-  if ((e.target as Element | null)?.closest?.("[data-pop]")) return
-  closeReply()
+// The popover closes itself on Esc and on an outside click. This clears the reply.
+function onReplyOpen(open: boolean): void {
+  if (!open) closeReply()
 }
 
 onMounted(() => {
-  document.addEventListener("click", onDocClick)
   if (session.messages.length === 0)
     loadMessages().catch((e) => console.warn("messages load failed", e))
 })
-onUnmounted(() => document.removeEventListener("click", onDocClick))
 </script>
 
 <template>
-  <div class="chat-wrap">
-    <div class="chat-col">
-      <h1 class="sr">Chat</h1>
+  <div class="flex min-h-0 min-w-0 flex-1">
+    <div class="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <h1 class="sr-only">Chat</h1>
       <ChatHeader @toggle-details="toggleDetails" />
-      <div class="chat-scroll">
-        <div v-if="empty" class="empty-chat">
-          <h2>New session</h2>
-          <p class="t-13 c-3">
-            {{ modeLabel }} · Dashboard · {{ session.model }}. Ask anything, or try one of these.
-          </p>
-          <div class="sugg">
-            <button
-              v-for="c in SUGGESTED"
-              :key="c"
-              type="button"
-              class="chip chip-touch"
-              data-pop
-              @click="run(c)"
+      <MessageScrollerProvider auto-scroll>
+        <MessageScroller class="min-h-0 flex-1">
+          <MessageScrollerViewport>
+            <MessageScrollerContent
+              class="mx-auto w-full max-w-[760px] px-4 pt-6 pb-[calc(var(--dock-h,96px)+24px)]"
             >
-              {{ c }}
-            </button>
-          </div>
-          <div v-if="reply" class="popover reply-pop" data-pop>
-            <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown escapes raw HTML -->
-            <div class="answer" v-html="renderMarkdown(reply.text)" />
-            <div v-for="(row, i) in reply.buttons" :key="i" class="reply-row">
-              <button
-                v-for="(b, j) in row"
-                :key="j"
-                type="button"
-                class="btn btn-secondary btn-sm"
-                :disabled="b.data === '·'"
-                @click="run(b.data)"
+              <MessageScrollerItem v-if="empty" message-id="empty">
+                <div class="flex flex-col items-center gap-3 py-10 text-center">
+                  <h2 class="text-xl font-semibold tracking-tight">New session</h2>
+                  <p class="text-sm text-muted-foreground">
+                    {{ modeLabel }} · Dashboard · {{ session.model }}. Ask anything, or try one of
+                    these.
+                  </p>
+                  <Popover :open="reply !== null" @update:open="onReplyOpen">
+                    <PopoverAnchor as-child>
+                      <div
+                        class="flex scroll-fade-x scrollbar-none max-w-full gap-2 overflow-x-auto overscroll-x-contain"
+                      >
+                        <Button
+                          v-for="c in SUGGESTED"
+                          :key="c"
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          class="shrink-0"
+                          @click="run(c)"
+                        >
+                          {{ c }}
+                        </Button>
+                      </div>
+                    </PopoverAnchor>
+                    <PopoverContent class="flex w-[min(420px,calc(100vw-32px))] flex-col gap-2">
+                      <template v-if="reply">
+                        <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown escapes raw HTML -->
+                        <div class="typeset typeset-chat" v-html="renderMarkdown(reply.text)" />
+                        <div
+                          v-for="(row, i) in reply.buttons"
+                          :key="i"
+                          class="flex flex-wrap gap-1.5"
+                        >
+                          <Button
+                            v-for="(b, j) in row"
+                            :key="j"
+                            type="button"
+                            variant="secondary"
+                            size="sm"
+                            :disabled="b.data === '·'"
+                            @click="run(b.data)"
+                          >
+                            {{ b.text }}
+                          </Button>
+                        </div>
+                      </template>
+                    </PopoverContent>
+                  </Popover>
+                </div>
+              </MessageScrollerItem>
+              <MessageList v-else :selected="selected?.call" @tool="onToolSelect">
+                <template #reasoning="{ message }">
+                  <ReasoningBlock
+                    v-if="message.reasoning"
+                    :text="message.reasoning"
+                    :tokens="message.reasoning_tokens"
+                  />
+                </template>
+                <template #footer="{ message }">
+                  <CostFooter
+                    v-if="turn.done && message.id === lastAnswerId && !turn.view?.running"
+                    :cost="turn.done.cost"
+                  />
+                </template>
+              </MessageList>
+              <MessageScrollerItem
+                v-for="(n, i) in notices.list"
+                :key="'notice-' + i"
+                :message-id="'notice-' + i"
               >
-                {{ b.text }}
-              </button>
-            </div>
-          </div>
-        </div>
-        <MessageList v-else :selected="selected?.call" @tool="onToolSelect">
-          <template #reasoning="{ message }">
-            <ReasoningBlock
-              v-if="message.reasoning"
-              :text="message.reasoning"
-              :tokens="message.reasoning_tokens"
-            />
-          </template>
-          <template #footer="{ message }">
-            <CostFooter
-              v-if="turn.done && message.id === lastAnswerId && !turn.view?.running"
-              :cost="turn.done.cost"
-            />
-          </template>
-        </MessageList>
-        <div v-if="notices.list.length > 0 || shownPending.length > 0" class="transcript tail">
-          <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown escapes raw HTML -->
-          <div v-for="(n, i) in notices.list" :key="'n' + i" class="notice">
-            <span class="n md-inline" v-html="renderMarkdown(n.text)" />
-          </div>
-          <div v-for="p in shownPending" :key="p.key" class="msg msg-user is-pending">
-            <div class="bubble-user" style="white-space: pre-wrap">{{ p.text }}</div>
-          </div>
-        </div>
-        <div
-          v-if="
-            !empty &&
-            ((turn.view?.plan.length ?? 0) > 0 || chatCards.length > 0 || chatRecords.length > 0)
-          "
-          class="transcript tail"
-        >
-          <PlanCard v-if="turn.view && turn.view.plan.length > 0" :items="turn.view.plan" />
-          <RecordLine v-for="r in chatRecords" :key="'r' + r.id" :record="r" />
-          <template v-for="c in chatCards" :key="c.id">
-            <ApprovalCard v-if="c.kind === 'approval' || c.kind === 'pin'" :card="c" />
-            <ClarifyCard v-else-if="c.kind === 'clarify'" :card="c" />
-            <SecretCard v-else-if="c.kind === 'secret'" :card="c" />
-          </template>
-        </div>
-      </div>
+                <Marker>
+                  <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown escapes raw HTML -->
+                  <MarkerContent class="[&_p]:m-0" v-html="renderMarkdown(n.text)" />
+                </Marker>
+              </MessageScrollerItem>
+              <MessageScrollerItem
+                v-for="p in shownPending"
+                :key="'pending-' + p.key"
+                :message-id="'pending-' + p.key"
+                scroll-anchor
+              >
+                <Message align="end" class="opacity-60">
+                  <Bubble variant="muted" align="end">
+                    <BubbleContent class="whitespace-pre-wrap">{{ p.text }}</BubbleContent>
+                  </Bubble>
+                </Message>
+              </MessageScrollerItem>
+              <MessageScrollerItem
+                v-if="!empty && turn.view && turn.view.plan.length > 0"
+                message-id="plan"
+              >
+                <PlanCard :items="turn.view.plan" />
+              </MessageScrollerItem>
+              <template v-if="!empty">
+                <MessageScrollerItem
+                  v-for="r in chatRecords"
+                  :key="'rec-' + r.id"
+                  :message-id="'rec-' + r.id"
+                >
+                  <RecordLine :record="r" />
+                </MessageScrollerItem>
+                <MessageScrollerItem
+                  v-for="c in chatCards"
+                  :key="'card-' + c.id"
+                  :message-id="'card-' + c.id"
+                >
+                  <ApprovalCard v-if="c.kind === 'approval' || c.kind === 'pin'" :card="c" />
+                  <ClarifyCard v-else-if="c.kind === 'clarify'" :card="c" />
+                  <SecretCard v-else-if="c.kind === 'secret'" :card="c" />
+                </MessageScrollerItem>
+              </template>
+            </MessageScrollerContent>
+          </MessageScrollerViewport>
+          <MessageScrollerButton class="bottom-[calc(var(--dock-h,96px)+16px)]" />
+        </MessageScroller>
+      </MessageScrollerProvider>
       <Composer @sent="onSent" @failed="onFailed" />
     </div>
     <TurnDrawer :open="drawerOpen" :tool="drawerTool" @close="closeDrawer" />
   </div>
 </template>
-
-<style scoped>
-.chat-scroll > .transcript:has(+ .tail) {
-  padding-bottom: 0;
-}
-.chat-scroll > .tail {
-  flex: none;
-  padding-top: var(--sp-5);
-}
-.is-pending {
-  opacity: 0.6;
-}
-.reply-pop {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px;
-  max-width: min(420px, 100%);
-  margin: 12px auto 0;
-}
-.reply-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.md-inline :deep(p) {
-  margin: 0;
-}
-</style>

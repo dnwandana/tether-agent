@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ToolView } from "../../api/types.gen"
+import { TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace"
 
 const props = defineProps<{ tool: ToolView; selected?: boolean }>()
 const emit = defineEmits<{ select: [] }>()
@@ -25,23 +26,31 @@ function stateText(t: ToolView): string {
   <button
     v-if="props.tool.name !== 'todo_list'"
     type="button"
-    class="toolline"
-    :class="['is-' + props.tool.state, { 'is-selected': props.selected }]"
+    class="rounded-md px-1 data-[selected=true]:bg-muted"
     :aria-expanded="!!props.selected"
+    :data-selected="props.selected || undefined"
     @click="emit('select')"
   >
-    <span class="em">{{ props.tool.emoji || "🛠" }}</span>
-    <span class="name">{{ props.tool.name }}</span>
-    <span v-if="props.tool.preview !== ''" class="args">"{{ props.tool.preview }}"</span>
-    <span v-if="props.tool.state !== 'running'" class="times">{{
-      seconds(props.tool.duration_ms)
-    }}</span>
-    <span class="st">
-      <i v-if="props.tool.state === 'running'" class="spin" aria-hidden="true"></i>
-      {{ stateText(props.tool) }}
-    </span>
-    <span v-if="props.tool.text !== ''" class="chev" aria-hidden="true">{{
-      props.selected ? "▾" : "▸"
-    }}</span>
+    <TraceLine
+      :status="
+        props.tool.state === 'running'
+          ? 'running'
+          : props.tool.state === 'error'
+            ? 'error'
+            : undefined
+      "
+    >
+      <TraceIcon>{{ props.tool.emoji || "🛠" }}</TraceIcon>
+      <TraceTitle>
+        {{ props.tool.name }}
+        <template v-if="props.tool.preview !== ''"> "{{ props.tool.preview }}"</template>
+      </TraceTitle>
+      <TraceDescription>{{
+        props.tool.state === "running"
+          ? stateText(props.tool)
+          : seconds(props.tool.duration_ms) + " · " + stateText(props.tool)
+      }}</TraceDescription>
+      <TraceIcon v-if="props.tool.text !== ''">{{ props.selected ? "▾" : "▸" }}</TraceIcon>
+    </TraceLine>
   </button>
 </template>

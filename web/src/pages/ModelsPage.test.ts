@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { flushPromises } from "@vue/test-utils"
+import { render, screen, within } from "@testing-library/vue"
 
 const h = vi.hoisted(() => ({
   live: null as null | {
@@ -37,10 +38,14 @@ import { status } from "../stores/status"
 import ModelsPage from "./ModelsPage.vue"
 
 const mk = async () => {
-  const w = mount(ModelsPage, { global: { stubs: { LiveHeader: true } } })
+  const r = render(ModelsPage, { global: { stubs: { LiveHeader: true } } })
   await flushPromises()
-  return w
+  return r
 }
+const entries = () => screen.getAllByRole("table")[0]
+const bodyRows = (t: HTMLElement) => within(t).getAllByRole("row").slice(1)
+const cells = (row: HTMLElement) => within(row).getAllByRole("cell")
+const tone = (el: Element | null) => el?.querySelector("[data-tone]")?.getAttribute("data-tone")
 
 const local = (hr: number, m: number, s = 0) => new Date(2026, 10, 20, hr, m, s).toISOString()
 const zero = "0001-01-01T00:00:00Z"
@@ -102,54 +107,49 @@ afterEach(() => vi.useRealTimers())
 
 describe("ModelsPage", () => {
   it("shows the status of each entry from the Health snapshot", async () => {
-    const w = mount(ModelsPage, { global: { stubs: { LiveHeader: true } } })
-    await flushPromises()
+    const { unmount } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/models")
-    const st = w.findAll(".status")
-    expect(st.map((s) => s.text())).toEqual([
+    const rows = bodyRows(entries())
+    expect(rows.map((r) => cells(r)[7].textContent?.trim())).toEqual([
       "⚠ skipped for 42 s · HTTP 503 at 14:02",
       "✓ answers now",
       "✗ not usable: no key",
     ])
-    expect(st.map((s) => s.classes().find((c) => c.startsWith("c-")))).toEqual([
-      "c-warn",
-      "c-ok",
-      "c-bad",
-    ])
+    expect(rows.map((r) => tone(cells(r)[7]))).toEqual(["warn", "ok", "bad"])
     vi.advanceTimersByTime(1000)
     await flushPromises()
-    expect(w.find(".status").text()).toBe("⚠ skipped for 41 s · HTTP 503 at 14:02")
-    w.unmount()
+    expect(cells(bodyRows(entries())[0])[7].textContent?.trim()).toBe(
+      "⚠ skipped for 41 s · HTTP 503 at 14:02",
+    )
+    unmount()
   })
 
   it("shows the fallback banner and the roles", async () => {
-    const w = mount(ModelsPage, { global: { stubs: { LiveHeader: true } } })
-    await flushPromises()
-    expect(w.find(".warn-banner").text()).toBe(
+    const { unmount } = await mk()
+    expect(screen.getByRole("alert").textContent?.trim()).toBe(
       "⚠ Fallback active. backup (deepseek-chat) answers. primary failed at 14:02: HTTP 503.",
     )
-    expect(w.text()).toContain("goals.judge_provider")
-    expect(w.text()).toContain("128k")
-    w.unmount()
+    expect(screen.getByText("goals.judge_provider")).toBeTruthy()
+    expect(screen.getByText("128k")).toBeTruthy()
+    unmount()
   })
 
   it("keeps the data and shows a toast when a live reload fails", async () => {
-    const w = await mk()
-    expect(w.find(".warn-banner").exists()).toBe(true)
+    const { unmount } = await mk()
+    expect(screen.getByRole("alert")).toBeTruthy()
     vi.mocked(api).mockRejectedValue(new Error("boom"))
     await h.live!.load()
     await flushPromises()
-    expect(w.find(".warn-banner").exists()).toBe(true)
+    expect(screen.getByRole("alert")).toBeTruthy()
     expect(toast).toHaveBeenCalledWith("boom", "error")
-    w.unmount()
+    unmount()
   })
 
   it("shows no banner when the primary answers", async () => {
     vi.mocked(api).mockResolvedValue({ ...view, fallback: { ...view.fallback, active: false } })
-    const w = mount(ModelsPage, { global: { stubs: { LiveHeader: true } } })
-    await flushPromises()
-    expect(w.find(".warn-banner").exists()).toBe(false)
-    w.unmount()
+    const { unmount } = await mk()
+    expect(screen.queryByRole("alert")).toBeNull()
+    unmount()
   })
 
   it("shows the chain with step-state and no name that repeats the role", async () => {
@@ -165,24 +165,30 @@ describe("ModelsPage", () => {
         },
       ],
     })
-    const w = await mk()
-    const steps = w.findAll(".chain .chain-step")
-    expect(steps.map((s) => [s.find(".role").text(), s.find(".step-state").text()])).toEqual([
-      ["Primary", "⚠ skipped"],
-      ["Fallback 1", "✓ answers"],
+    const { unmount } = await mk()
+    const steps = within(screen.getByRole("list", { name: "Fallback chain" })).getAllByRole(
+      "listitem",
+    )
+    expect(steps).toHaveLength(2)
+    expect(within(steps[0]).getByText("Primary")).toBeTruthy()
+    expect(within(steps[1]).getByText("Fallback 1")).toBeTruthy()
+    expect(steps.map((s) => s.querySelector("[data-tone]")?.textContent?.trim())).toEqual([
+      "⚠ skipped",
+      "✓ answers",
     ])
-    expect(steps[0].find(".name").exists()).toBe(false)
-    expect(steps[0].text().match(/primary/gi)).toHaveLength(1)
-    expect(steps[1].find(".name").text()).toBe("backup")
-    expect(steps[0].find(".state").exists()).toBe(false)
-    expect(steps[0].find(".step-state").classes()).toContain("c-warn")
-    w.unmount()
+    expect(steps[0].textContent?.match(/primary/gi)).toHaveLength(1)
+    expect(within(steps[1]).getByText("backup")).toBeTruthy()
+    expect(tone(steps[0])).toBe("warn")
+    unmount()
   })
 
   it("merges preset and format and wraps the model and the base URL", async () => {
-    const w = await mk()
-    const table = w.findAll("table")[0]
-    expect(table.findAll("th").map((t) => t.text())).toEqual([
+    const { unmount } = await mk()
+    expect(
+      within(entries())
+        .getAllByRole("columnheader")
+        .map((c) => c.textContent?.trim()),
+    ).toEqual([
       "Entry",
       "Preset · format",
       "Model",
@@ -192,25 +198,25 @@ describe("ModelsPage", () => {
       "Effort",
       "Status",
     ])
-    const tds = table.findAll("tbody tr")[0].findAll("td")
-    expect(tds[1].text()).toBe("zai · openai")
-    expect(tds[2].find(".mono.wrap-any").text()).toBe("glm-4.6")
-    expect(tds[3].find(".mono.wrap-any").text()).toBe("https://api.z.ai/api/paas/v4")
-    w.unmount()
+    const tds = cells(bodyRows(entries())[0])
+    expect(tds[1].textContent?.trim()).toBe("zai · openai")
+    expect(tds[2].querySelector(".font-mono.wrap-anywhere")?.textContent?.trim()).toBe("glm-4.6")
+    expect(tds[3].querySelector(".font-mono.wrap-anywhere")?.textContent?.trim()).toBe(
+      "https://api.z.ai/api/paas/v4",
+    )
+    unmount()
   })
 
   it("marks an entry that no chain step and no role uses", async () => {
-    const w = await mk()
-    const trs = w.findAll("table")[0].findAll("tbody tr")
-    const chips = trs.map((tr) =>
-      tr
-        .findAll("td")[0]
-        .findAll(".chip")
-        .map((c) => c.text()),
-    )
-    expect(chips).toEqual([[], [], ["not used"]])
-    expect(trs[2].findAll("td")[0].text()).toBe("cheap not used")
-    w.unmount()
+    const { unmount } = await mk()
+    const rows = bodyRows(entries())
+    expect(rows.map((r) => within(cells(r)[0]).queryByText("not used") !== null)).toEqual([
+      false,
+      false,
+      true,
+    ])
+    expect(cells(rows[2])[0].textContent?.replace(/\s+/g, " ").trim()).toBe("cheap not used")
+    unmount()
   })
 
   it("shows each context window in k or M", async () => {
@@ -222,13 +228,13 @@ describe("ModelsPage", () => {
         entry({ name: "big", context_window: 1048576 }),
       ],
     })
-    const w = await mk()
-    const ctx = w
-      .findAll("table")[0]
-      .findAll("tbody tr")
-      .map((tr) => tr.findAll("td")[5].text())
-    expect(ctx).toEqual(["200k", "128k", "1M"])
-    w.unmount()
+    const { unmount } = await mk()
+    expect(bodyRows(entries()).map((r) => cells(r)[5].textContent?.trim())).toEqual([
+      "200k",
+      "128k",
+      "1M",
+    ])
+    unmount()
   })
 
   it("shows the last failure of a failed entry", async () => {
@@ -238,10 +244,11 @@ describe("ModelsPage", () => {
         entry({ name: "backup", status: "failed", cause: "HTTP 500", failed_at: local(13, 58) }),
       ],
     })
-    const w = await mk()
-    expect(w.find(".status").text()).toBe("⚠ last failed 13:58 · HTTP 500")
-    expect(w.find(".status").classes()).toContain("c-warn")
-    w.unmount()
+    const { unmount } = await mk()
+    const c = cells(bodyRows(entries())[0])[7]
+    expect(c.textContent?.trim()).toBe("⚠ last failed 13:58 · HTTP 500")
+    expect(tone(c)).toBe("warn")
+    unmount()
   })
 
   it("shows the base URL of each entry and an unusable role entry", async () => {
@@ -251,38 +258,38 @@ describe("ModelsPage", () => {
         { role: "goal_judge", key: "goals.judge_provider", value: "cheap", entry_usable: false },
       ],
     })
-    const w = await mk()
-    expect(w.text()).toContain("https://api.z.ai/api/paas/v4")
-    expect(w.text()).toContain("⚠️ entry unusable")
-    w.unmount()
+    const { unmount } = await mk()
+    expect(screen.getByText("https://api.z.ai/api/paas/v4")).toBeTruthy()
+    expect(screen.getByText("⚠️ entry unusable").getAttribute("data-tone")).toBe("warn")
+    unmount()
   })
 
   it("loads again when the skip time ends", async () => {
-    const w = await mk()
+    const { unmount } = await mk()
     expect(api).toHaveBeenCalledTimes(1)
     vi.advanceTimersByTime(43000)
     await flushPromises()
     expect(api).toHaveBeenCalledTimes(2)
-    w.unmount()
+    unmount()
   })
 
   it("reloads on a status event only when the fallback or the entry changes", async () => {
     status.fallback = false
     status.entry = "primary"
-    const w = await mk()
+    const { unmount } = await mk()
     expect(h.live!.opts!.events).toEqual(["status"])
     const f = h.live!.opts!.filter!
     expect(f("status", { spend24h: 1.5 })).toBe(false)
     expect(f("status", { fallback: true })).toBe(true)
     expect(f("status", { fallback: true })).toBe(false)
     expect(f("status", { entry: "backup" })).toBe(true)
-    w.unmount()
+    unmount()
   })
 
   it("shows the empty text with the setup command", async () => {
     vi.mocked(api).mockResolvedValue({ ...view, entries: [] })
-    const w = await mk()
-    expect(w.text()).toContain("No model entries. Run `tether setup` on the host.")
-    w.unmount()
+    const { unmount } = await mk()
+    expect(screen.getByText("No model entries. Run `tether setup` on the host.")).toBeTruthy()
+    unmount()
   })
 })

@@ -1,13 +1,25 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue"
-import { useOverlay } from "../lib/overlay"
+import { computed, nextTick, ref, watch } from "vue"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import { buttonVariants } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
+import { guardOutside, useReturnFocus } from "../lib/layer"
 import { renderMarkdown } from "../lib/markdown"
 import { pendingConfirm } from "../stores/ui"
 
-const dialogEl = ref<HTMLElement | null>(null)
-const cancelBtn = ref<HTMLButtonElement | null>(null)
-const okBtn = ref<HTMLButtonElement | null>(null)
+const cancelBtn = ref<{ $el: HTMLElement } | null>(null)
+const okBtn = ref<{ $el: HTMLElement } | null>(null)
 const open = computed(() => pendingConfirm.opts !== null)
+const { onCloseAutoFocus } = useReturnFocus(open)
 
 // Answers the open confirm.
 function answer(ok: boolean): void {
@@ -18,94 +30,82 @@ function answer(ok: boolean): void {
 const inline = (s: string) => renderMarkdown(s).replace(/^<p>([\s\S]*)<\/p>\s*$/, "$1")
 
 // The focus follows the focus option. The default is Cancel for a danger confirm and the confirm
-// button for the others. This watcher runs before useOverlay, so the helper keeps this focus.
+// button for the others. Reka focuses Cancel one tick after the open event, so wait two ticks.
+async function focusFirst(): Promise<void> {
+  await nextTick()
+  await nextTick()
+  const opts = pendingConfirm.opts
+  if (!opts) return
+  const first = opts.focus ?? (opts.danger ? "cancel" : "ok")
+  const target = (first === "cancel" ? cancelBtn : okBtn).value?.$el
+  target?.focus()
+}
+
+function onOpenAutoFocus(e: Event): void {
+  e.preventDefault()
+  void focusFirst()
+}
+
+// A second confirm() while the dialog is open changes opts with no new open event.
 watch(
   () => pendingConfirm.opts,
   (opts) => {
-    if (!opts) return
-    const first = opts.focus ?? (opts.danger ? "cancel" : "ok")
-    ;(first === "cancel" ? cancelBtn.value : okBtn.value)?.focus()
+    if (opts) void focusFirst()
   },
-  { flush: "post" },
 )
-
-useOverlay(open, dialogEl, { onClose: () => answer(false), modal: true })
 </script>
 
 <template>
-  <div v-if="pendingConfirm.opts" class="ov scrim is-open" @click.self="answer(false)">
-    <div
-      ref="dialogEl"
-      class="dialog"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="confirm-t"
-      :aria-describedby="
-        pendingConfirm.opts.body || pendingConfirm.opts.items?.length ? 'confirm-b' : undefined
-      "
+  <AlertDialog :open="open">
+    <AlertDialogContent
+      v-if="pendingConfirm.opts"
+      @open-auto-focus="onOpenAutoFocus"
+      @close-auto-focus="onCloseAutoFocus"
+      @escape-key-down="answer(false)"
+      @pointer-down-outside="guardOutside"
+      @interact-outside="guardOutside"
     >
-      <div class="grabber" aria-hidden="true" />
-      <div class="dialog-b">
-        <h3
+      <AlertDialogHeader>
+        <AlertDialogTitle
           v-if="pendingConfirm.opts.markdown"
-          id="confirm-t"
           v-html="inline(pendingConfirm.opts.title)"
         />
-        <h3 v-else id="confirm-t">{{ pendingConfirm.opts.title }}</h3>
-        <div id="confirm-b">
+        <AlertDialogTitle v-else>{{ pendingConfirm.opts.title }}</AlertDialogTitle>
+        <AlertDialogDescription as="div" class="flex flex-col gap-2">
           <template v-if="pendingConfirm.opts.body">
             <div
               v-if="pendingConfirm.opts.markdown"
-              class="confirm-body md"
+              class="typeset typeset-chat"
               v-html="renderMarkdown(pendingConfirm.opts.body)"
             />
-            <p v-else class="confirm-body">{{ pendingConfirm.opts.body }}</p>
+            <p v-else class="whitespace-pre-line [overflow-wrap:anywhere]">
+              {{ pendingConfirm.opts.body }}
+            </p>
           </template>
-          <ul v-if="pendingConfirm.opts.items?.length" class="confirm-items">
-            <li v-for="(it, i) in pendingConfirm.opts.items" :key="i" class="mono">{{ it }}</li>
+          <ul
+            v-if="pendingConfirm.opts.items?.length"
+            class="flex max-h-[40vh] flex-col gap-1 overflow-y-auto"
+          >
+            <li
+              v-for="(it, i) in pendingConfirm.opts.items"
+              :key="i"
+              class="rounded-sm bg-muted px-2 py-1 font-mono text-xs whitespace-pre-wrap [overflow-wrap:anywhere]"
+            >
+              {{ it }}
+            </li>
           </ul>
-        </div>
-      </div>
-      <div class="dialog-f">
-        <button ref="cancelBtn" type="button" class="btn btn-secondary" @click="answer(false)">
-          Cancel
-        </button>
-        <button
+        </AlertDialogDescription>
+      </AlertDialogHeader>
+      <AlertDialogFooter>
+        <AlertDialogCancel ref="cancelBtn" @click="answer(false)">Cancel</AlertDialogCancel>
+        <AlertDialogAction
           ref="okBtn"
-          type="button"
-          class="btn"
-          :class="pendingConfirm.opts.danger ? 'btn-danger' : 'btn-primary'"
+          :class="cn(pendingConfirm.opts.danger && buttonVariants({ variant: 'destructive' }))"
           @click="answer(true)"
         >
           {{ pendingConfirm.opts.confirmLabel }}
-        </button>
-      </div>
-    </div>
-  </div>
+        </AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>
 </template>
-
-<style scoped>
-.confirm-body {
-  white-space: pre-line;
-  overflow-wrap: anywhere;
-}
-.confirm-items {
-  margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-  max-height: 40vh;
-  overflow-y: auto;
-}
-.confirm-items li {
-  padding: 4px 8px;
-  border-radius: var(--r-sm);
-  background: var(--surface-inset);
-  font-family: var(--font-mono);
-  font-size: var(--fs-12);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.confirm-items li + li {
-  margin-top: 4px;
-}
-</style>

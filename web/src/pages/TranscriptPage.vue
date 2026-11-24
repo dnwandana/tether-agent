@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue"
+import { computed, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api } from "../api/client"
 import type { CostView, MessagePage, MessageView, SessionRow, ToolView } from "../api/types.gen"
 import CostFooter from "../components/chat/CostFooter.vue"
 import ReasoningBlock from "../components/chat/ReasoningBlock.vue"
+import ScrollToMessage from "../components/chat/ScrollToMessage.vue"
 import ToolLine from "../components/chat/ToolLine.vue"
 import ToolResult from "../components/chat/ToolResult.vue"
 import LiveHeader from "../components/LiveHeader.vue"
@@ -16,6 +17,24 @@ import { renderMarkdown } from "../lib/markdown"
 import { fullTime, shortTime } from "../lib/time"
 import { session } from "../stores/session"
 import { toast } from "../stores/ui"
+import { cn } from "@/lib/utils"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Bubble, BubbleContent } from "@/components/ui/bubble"
+import { Button } from "@/components/ui/button"
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
+import { Marker } from "@/components/ui/marker"
+import { Message, MessageContent, MessageHeader } from "@/components/ui/message"
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+} from "@/components/ui/message-scroller"
+import { Trace, TraceCollapsible, TraceCollapsibleContent } from "@/components/ui/trace"
 
 const route = useRoute()
 const router = useRouter()
@@ -33,6 +52,8 @@ const lastId = ref(0)
 const more = ref(false)
 const newer = ref(false)
 const openTool = ref<ToolView | null>(null)
+// The id of the message to scroll to. It is empty when the route has no search hit.
+const jumpTo = ref("")
 
 function usd(n: number, unpriced: boolean): string {
   return "$" + n.toFixed(4) + (unpriced ? "+" : "")
@@ -77,6 +98,7 @@ let gen = 0
 
 async function load(): Promise<void> {
   const my = ++gen
+  jumpTo.value = ""
   state.value = "loading"
   openTool.value = null
   try {
@@ -110,10 +132,7 @@ async function load(): Promise<void> {
     more.value = page.has_older
     newer.value = page.has_newer
     state.value = "ready"
-    if (hitId.value > 0) {
-      await nextTick()
-      document.getElementById("msg-" + hitId.value)?.scrollIntoView?.({ block: "center" })
-    }
+    jumpTo.value = hitId.value > 0 ? String(hitId.value) : ""
   } catch (e) {
     if (my !== gen) return
     errorText.value = friendlyError(e)
@@ -243,188 +262,233 @@ watch(
 </script>
 
 <template>
-  <div class="page">
-    <router-link class="back" :to="{ name: 'sessions' }">‹ Sessions</router-link>
-
-    <StateBlock v-if="state === 'loading'" state="loading" />
-    <StateBlock
-      v-else-if="state === 'error'"
-      state="error"
-      :text="errorText"
-      action="Retry"
-      @action="load"
-    />
-    <template v-else-if="info">
-      <div class="page-h">
-        <h1 class="t-20">{{ info.title }}</h1>
-        <span class="chip">{{ info.source_label }}</span>
-        <span class="chip">{{ info.kind }}</span>
-        <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-      </div>
+  <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div class="flex shrink-0 flex-col gap-3 px-4 pt-4 tab:px-6">
       <router-link
-        v-if="parentTitle"
-        class="link"
-        :to="{ name: 'transcript', params: { id: info.parent_id } }"
-        >↳ child of {{ parentTitle }}</router-link
+        class="text-sm text-muted-foreground underline-offset-4 hover:underline"
+        :to="{ name: 'sessions' }"
+        >‹ Sessions</router-link
       >
-      <div v-if="(info.children ?? []).length > 0" class="t-12 c-3">
-        Children:
+
+      <StateBlock v-if="state === 'loading'" state="loading" />
+      <StateBlock
+        v-else-if="state === 'error'"
+        state="error"
+        :text="errorText"
+        action="Retry"
+        @action="load"
+      />
+      <template v-else-if="info">
+        <div class="flex flex-wrap items-center gap-2">
+          <h1 class="text-xl font-semibold tracking-tight">{{ info.title }}</h1>
+          <Badge variant="secondary">{{ info.source_label }}</Badge>
+          <Badge variant="secondary">{{ info.kind }}</Badge>
+          <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
+        </div>
         <router-link
-          v-for="c in info.children"
-          :key="c.id"
-          class="link"
-          :to="{ name: 'transcript', params: { id: c.id } }"
-          >{{ c.title }}</router-link
+          v-if="parentTitle"
+          class="text-sm text-muted-foreground underline underline-offset-4"
+          :to="{ name: 'transcript', params: { id: info.parent_id } }"
+          >↳ child of {{ parentTitle }}</router-link
         >
-      </div>
-      <div class="grid-4">
-        <div class="card">
-          <div class="c-3 t-12">Messages</div>
-          <b>{{ info.messages }}</b>
-        </div>
-        <div class="card">
-          <div class="c-3 t-12">Cost</div>
-          <b>{{ usd(info.cost_usd, false) }}</b>
-        </div>
-        <div class="card">
-          <div class="c-3 t-12">Started</div>
-          <b
-            ><span
-              data-test="started"
-              style="white-space: nowrap"
-              :title="fullTime(info.started)"
-              >{{ when(info.started) }}</span
-            ></b
-          >
-        </div>
-        <div class="card">
-          <div class="c-3 t-12">Children</div>
-          <b>{{ (info.children ?? []).length }}</b>
-        </div>
-      </div>
-
-      <div v-if="info.read_only" class="ro-banner">
-        <span class="grow">👁 Read-only. This session belongs to {{ info.source_label }}.</span>
-        <button v-if="info.kind === 'chat'" class="btn btn-secondary" type="button" @click="fork">
-          Fork into dashboard
-        </button>
-        <button
-          class="btn btn-ghost"
-          type="button"
-          @click="download(`/api/sessions/${info.id}/export`, `session-${info.id}.jsonl`)"
-        >
-          Export JSONL
-        </button>
-      </div>
-      <div v-else class="ro-banner">
-        <span class="grow" />
-        <button
-          v-if="info.id === session.id"
-          class="btn btn-secondary"
-          type="button"
-          @click="router.push({ name: 'chat' })"
-        >
-          Open in Chat
-        </button>
-        <button v-else class="btn btn-secondary" type="button" @click="resume">Resume</button>
-        <button
-          class="btn btn-ghost"
-          type="button"
-          @click="download(`/api/sessions/${info.id}/export`, `session-${info.id}.jsonl`)"
-        >
-          Export JSONL
-        </button>
-      </div>
-
-      <button v-if="more" class="btn btn-ghost" type="button" @click="loadOlder">Load older</button>
-      <button v-if="hitId > 0" class="btn btn-ghost" type="button" @click="jumpLatest">
-        Jump to latest
-      </button>
-      <StateBlock v-if="shown.length === 0" state="empty" text="No messages yet." />
-
-      <template v-for="m in shown" :key="m.id">
-        <details
-          v-if="m.role === 'summary'"
-          :id="'msg-' + m.id"
-          class="card"
-          :class="{ 'is-hit': m.id === hitId }"
-        >
-          <summary>🗜 Compacted · summary</summary>
-          <div>{{ m.text }}</div>
-        </details>
         <div
-          v-else-if="m.role === 'user'"
-          :id="'msg-' + m.id"
-          class="msg msg-user"
-          :class="{ 'is-hit': m.id === hitId }"
-          :style="m.compacted ? 'opacity: 0.7' : undefined"
+          v-if="(info.children ?? []).length > 0"
+          class="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"
         >
-          <div class="msg-meta">
-            <b>You</b>
-            <time :datetime="m.created" :title="fullTime(m.created)" style="white-space: nowrap">{{
-              when(m.created)
-            }}</time>
-            <span v-if="m.id === hitId" class="chip chip-acc">Search hit</span>
-          </div>
-          <!-- eslint-disable-next-line vue/no-v-html -->
-          <div class="bubble-user" v-html="renderMarkdown(m.text)" />
-          <button
-            v-for="f in m.files"
-            :key="f.id"
-            class="att"
-            type="button"
-            @click="download(`/api/files/${f.id}`, f.name)"
+          Children:
+          <router-link
+            v-for="c in info.children"
+            :key="c.id"
+            class="underline underline-offset-4"
+            :to="{ name: 'transcript', params: { id: c.id } }"
+            >{{ c.title }}</router-link
           >
-            {{ f.name }}
-          </button>
         </div>
-        <div
-          v-else-if="m.role === 'assistant'"
-          :id="'msg-' + m.id"
-          class="msg"
-          :class="{ 'is-hit': m.id === hitId }"
-          :style="m.compacted ? 'opacity: 0.7' : undefined"
-        >
-          <div class="msg-meta">
-            <b>Tether</b>
-            <time :datetime="m.created" :title="fullTime(m.created)" style="white-space: nowrap">{{
-              when(m.created)
-            }}</time>
-            <span v-if="m.id === hitId" class="chip chip-acc">Search hit</span>
-          </div>
-          <ReasoningBlock :text="m.reasoning" :tokens="m.reasoning_tokens" />
-          <template v-for="t in m.tools" :key="t.call">
-            <ToolLine :tool="t" :selected="openTool?.call === t.call" @select="selectTool(t)" />
-            <template v-if="openTool?.call === t.call">
-              <pre class="code-block tool-args">{{ argsText(openTool.args) }}</pre>
-              <ToolResult :tool="openTool" />
-            </template>
-          </template>
-          <!-- eslint-disable-next-line vue/no-v-html -->
-          <div class="answer" v-html="renderMarkdown(m.text)" />
-          <button
-            v-for="f in m.files"
-            :key="f.id"
-            class="att"
-            type="button"
-            @click="download(`/api/files/${f.id}`, f.name)"
+        <div class="grid grid-cols-2 gap-3 tab:grid-cols-4">
+          <Card>
+            <CardHeader>
+              <CardDescription>Messages</CardDescription>
+              <CardTitle>{{ info.messages }}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardDescription>Cost</CardDescription>
+              <CardTitle>{{ usd(info.cost_usd, false) }}</CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardDescription>Started</CardDescription>
+              <CardTitle>
+                <span class="whitespace-nowrap" :title="fullTime(info.started)">{{
+                  when(info.started)
+                }}</span>
+              </CardTitle>
+            </CardHeader>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardDescription>Children</CardDescription>
+              <CardTitle>{{ (info.children ?? []).length }}</CardTitle>
+            </CardHeader>
+          </Card>
+        </div>
+
+        <Alert v-if="info.read_only">
+          <AlertDescription class="flex flex-wrap items-center gap-2">
+            <span class="flex-1"
+              >👁 Read-only. This session belongs to {{ info.source_label }}.</span
+            >
+            <Button v-if="info.kind === 'chat'" variant="secondary" @click="fork">
+              Fork into dashboard
+            </Button>
+            <Button
+              variant="ghost"
+              @click="download(`/api/sessions/${info.id}/export`, `session-${info.id}.jsonl`)"
+            >
+              Export JSONL
+            </Button>
+          </AlertDescription>
+        </Alert>
+        <div v-else class="flex justify-end gap-2">
+          <Button
+            v-if="info.id === session.id"
+            variant="secondary"
+            @click="router.push({ name: 'chat' })"
           >
-            {{ f.name }}
-          </button>
-          <CostFooter :cost="costOf(m)" />
+            Open in Chat
+          </Button>
+          <Button v-else variant="secondary" @click="resume">Resume</Button>
+          <Button
+            variant="ghost"
+            @click="download(`/api/sessions/${info.id}/export`, `session-${info.id}.jsonl`)"
+          >
+            Export JSONL
+          </Button>
         </div>
+
+        <Button v-if="hitId > 0" class="self-start" variant="ghost" size="sm" @click="jumpLatest">
+          Jump to latest
+        </Button>
       </template>
-      <button v-if="newer" class="btn btn-ghost" type="button" @click="loadNewer">
-        Load newer
-      </button>
+    </div>
+
+    <template v-if="state === 'ready' && info">
+      <div v-if="shown.length === 0" class="px-4 tab:px-6">
+        <StateBlock state="empty" text="No messages yet." />
+      </div>
+      <MessageScrollerProvider v-else default-scroll-position="end">
+        <MessageScroller class="min-h-0 flex-1">
+          <MessageScrollerViewport :preserve-scroll-on-prepend="true">
+            <MessageScrollerContent class="mx-auto w-full max-w-[760px] px-4 py-6">
+              <MessageScrollerItem v-if="more" message-id="older">
+                <Button variant="ghost" size="sm" @click="loadOlder">Load older</Button>
+              </MessageScrollerItem>
+              <MessageScrollerItem
+                v-for="m in shown"
+                :key="m.id"
+                :message-id="String(m.id)"
+                :data-hit="m.id === hitId ? 'true' : undefined"
+                :class="
+                  cn(
+                    m.compacted && 'opacity-70',
+                    m.id === hitId && 'rounded-lg ring-2 ring-ring ring-offset-4',
+                  )
+                "
+              >
+                <Collapsible v-if="m.role === 'summary'">
+                  <Marker variant="separator">
+                    <CollapsibleTrigger as-child>
+                      <Button variant="ghost" size="sm">🗜 Compacted · summary</Button>
+                    </CollapsibleTrigger>
+                  </Marker>
+                  <CollapsibleContent
+                    class="px-3 pt-2 text-sm whitespace-pre-wrap text-muted-foreground"
+                    >{{ m.text }}</CollapsibleContent
+                  >
+                </Collapsible>
+                <Message v-else-if="m.role === 'user'" align="end">
+                  <MessageHeader class="gap-2">
+                    <span>You</span>
+                    <time
+                      class="whitespace-nowrap"
+                      :datetime="m.created"
+                      :title="fullTime(m.created)"
+                      >{{ when(m.created) }}</time
+                    >
+                    <Badge v-if="m.id === hitId" variant="secondary">Search hit</Badge>
+                  </MessageHeader>
+                  <Bubble variant="muted" align="end">
+                    <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+                    <BubbleContent class="typeset typeset-chat" v-html="renderMarkdown(m.text)" />
+                  </Bubble>
+                  <Button
+                    v-for="f in m.files"
+                    :key="f.id"
+                    variant="outline"
+                    size="sm"
+                    @click="download(`/api/files/${f.id}`, f.name)"
+                  >
+                    {{ f.name }}
+                  </Button>
+                </Message>
+                <Message v-else-if="m.role === 'assistant'">
+                  <MessageHeader class="gap-2">
+                    <span>Tether</span>
+                    <time
+                      class="whitespace-nowrap"
+                      :datetime="m.created"
+                      :title="fullTime(m.created)"
+                      >{{ when(m.created) }}</time
+                    >
+                    <Badge v-if="m.id === hitId" variant="secondary">Search hit</Badge>
+                  </MessageHeader>
+                  <ReasoningBlock :text="m.reasoning" :tokens="m.reasoning_tokens" />
+                  <Trace v-if="m.tools.length > 0">
+                    <TraceCollapsible
+                      v-for="t in m.tools"
+                      :key="t.call"
+                      :open="openTool?.call === t.call"
+                    >
+                      <ToolLine
+                        :tool="t"
+                        :selected="openTool?.call === t.call"
+                        @select="selectTool(t)"
+                      />
+                      <TraceCollapsibleContent>
+                        <template v-if="openTool?.call === t.call">
+                          <pre
+                            class="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
+                            >{{ argsText(openTool.args) }}</pre>
+                          <ToolResult :tool="openTool" />
+                        </template>
+                      </TraceCollapsibleContent>
+                    </TraceCollapsible>
+                  </Trace>
+                  <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+                  <MessageContent class="typeset typeset-chat" v-html="renderMarkdown(m.text)" />
+                  <Button
+                    v-for="f in m.files"
+                    :key="f.id"
+                    variant="outline"
+                    size="sm"
+                    @click="download(`/api/files/${f.id}`, f.name)"
+                  >
+                    {{ f.name }}
+                  </Button>
+                  <CostFooter :cost="costOf(m)" />
+                </Message>
+              </MessageScrollerItem>
+              <MessageScrollerItem v-if="newer" message-id="newer">
+                <Button variant="ghost" size="sm" @click="loadNewer">Load newer</Button>
+              </MessageScrollerItem>
+            </MessageScrollerContent>
+          </MessageScrollerViewport>
+          <MessageScrollerButton />
+          <ScrollToMessage :message-id="jumpTo" />
+        </MessageScroller>
+      </MessageScrollerProvider>
     </template>
   </div>
 </template>
-
-<style scoped>
-.is-hit {
-  outline: 2px solid var(--accent-tint);
-  outline-offset: 4px;
-  border-radius: 8px;
-}
-</style>

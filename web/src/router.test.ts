@@ -21,6 +21,9 @@ const names = [
   "signin",
 ]
 
+const h = vi.hoisted(() => ({ onNewBuild: vi.fn() }))
+vi.mock("./lib/update", () => ({ onNewBuild: h.onNewBuild }))
+
 afterEach(() => {
   document.body.innerHTML = ""
   vi.unstubAllGlobals()
@@ -29,6 +32,7 @@ afterEach(() => {
 beforeEach(() => {
   localStorage.clear()
   vi.resetModules()
+  h.onNewBuild.mockClear()
 })
 
 async function load() {
@@ -36,6 +40,44 @@ async function load() {
 }
 
 describe("router", () => {
+  it("shows the update banner when a page chunk does not load", async () => {
+    localStorage.setItem("tether.session", "h1")
+    const r = await load()
+    r.addRoute({
+      name: "old-chunk",
+      path: "/old-chunk",
+      component: () =>
+        Promise.reject(
+          new TypeError("Failed to fetch dynamically imported module: /assets/JobsPage-1a2b.js"),
+        ),
+    })
+    await expect(r.replace("/old-chunk")).rejects.toThrow("dynamically imported module")
+    expect(h.onNewBuild).toHaveBeenCalledTimes(1)
+  })
+
+  it("knows the chunk errors of Firefox, Safari, and the CSS preload", async () => {
+    localStorage.setItem("tether.session", "h1")
+    const r = await load()
+    const texts = [
+      "error loading dynamically imported module: /assets/A.js",
+      "Importing a module script failed.",
+      "Unable to preload CSS for /assets/A.css",
+    ]
+    texts.forEach((t, i) =>
+      r.addRoute({ name: "c" + i, path: "/c" + i, component: () => Promise.reject(new Error(t)) }),
+    )
+    for (let i = 0; i < texts.length; i++) await r.replace("/c" + i).catch(() => {})
+    expect(h.onNewBuild).toHaveBeenCalledTimes(3)
+  })
+
+  it("does not show the banner for another error", async () => {
+    localStorage.setItem("tether.session", "h1")
+    const r = await load()
+    r.addRoute({ name: "bad", path: "/bad", component: () => Promise.reject(new Error("boom")) })
+    await r.replace("/bad").catch(() => {})
+    expect(h.onNewBuild).not.toHaveBeenCalled()
+  })
+
   it("has each route name", async () => {
     const r = await load()
     expect(
@@ -96,10 +138,11 @@ describe("router", () => {
     await r.push("/models")
     expect(r.currentRoute.value.matched[0].components?.default).toBeTruthy()
   })
-  it("gives only the chat its own scroll", async () => {
+  it("gives only the chat and the transcript their own scroll", async () => {
     const r = await load()
     expect(r.resolve({ name: "chat" }).meta.ownScroll).toBe(true)
-    for (const n of names.filter((x) => x !== "chat")) {
+    expect(r.resolve({ name: "transcript", params: { id: "x" } }).meta.ownScroll).toBe(true)
+    for (const n of names.filter((x) => x !== "chat" && x !== "transcript")) {
       expect(
         r.resolve({ name: n, params: { id: "x", session: "x", name: "x" } }).meta.ownScroll,
         n,

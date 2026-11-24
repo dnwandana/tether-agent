@@ -1,27 +1,75 @@
-// SVG path data of the icons. Each component draws a path in a 24 x 24 box.
-export const ICON: Record<string, string> = {
-  chat: "M4 5h16v11H9l-5 4z",
-  sessions: "M4 6h16M4 12h16M4 18h10",
-  jobs: "M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18zM12 7v5l3 2",
-  goals: "M5 21V4M5 4h11l-2 4 2 4H5",
-  security: "M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6zM9 12l2 2 4-4",
-  skills: "M13 3L5 14h6l-1 7 8-11h-6z",
-  memory:
-    "M12 4c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3zM4 7v10c0 1.7 3.6 3 8 3s8-1.3 8-3V7M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3",
-  usage: "M5 20V11M11 20V5M17 20v-6M3 20h18",
-  models: "M12 3l9 5-9 5-9-5zM3 13l9 5 9-5",
-  system: "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
-  access: "M15 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0zM5 20c0-3.3 3.1-6 7-6s7 2.7 7 6",
-  more: "M4 7h16M4 12h16M4 17h16",
-  search: "M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14zM20 20l-4-4",
-  sun: "M12 4V2M12 22v-2M4 12H2M22 12h-2M5.6 5.6 4.2 4.2M19.8 19.8l-1.4-1.4M5.6 18.4l-1.4 1.4M19.8 4.2l-1.4 1.4M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z",
-  moon: "M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z",
-  mark: "M6.24 7.2H17.76M12 7.2v6.72c0 3.84 3.84 4.56 5.28 1.92",
-  start: "M5 12l5 5 9-10",
-  ops: "M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z",
-  waiting: "M7 3h10M7 21h10M8 3c0 4 8 6 8 9s-8 5-8 9M16 3c0 4-8 6-8 9s8 5 8 9",
-  theme:
-    "M12 3a9 9 0 1 0 0 18c1.1 0 1.5-.8 1.5-1.5 0-.9-.7-1.3-.7-2.2 0-.8.7-1.3 1.5-1.3H17a4 4 0 0 0 4-4c0-5-4-9-9-9zM7.5 12h.01M9.5 8h.01M14.5 8h.01",
-  bell: "M6 16v-5a6 6 0 0 1 12 0v5l2 2H4zM10 21h4",
-  monitor: "M3 4h18v12H3zM8 20h8M12 16v4",
-}
+// ICONS holds the Lucide icons of the pages and the shell.
+// BRAND_PATH is the path of the brand mark, which stays a custom SVG.
+import {
+  BellIcon,
+  BrainIcon,
+  CalendarClockIcon,
+  ChartColumnIcon,
+  CpuIcon,
+  HistoryIcon,
+  HourglassIcon,
+  KeyRoundIcon,
+  MenuIcon,
+  MessageSquareIcon,
+  MonitorIcon,
+  MoonIcon,
+  PaletteIcon,
+  RocketIcon,
+  SearchIcon,
+  ServerIcon,
+  ShieldCheckIcon,
+  SparklesIcon,
+  SunIcon,
+  TargetIcon,
+  WrenchIcon,
+} from "@lucide/vue"
+import type { Component } from "vue"
+
+export type IconName =
+  | "chat"
+  | "sessions"
+  | "jobs"
+  | "goals"
+  | "security"
+  | "skills"
+  | "memory"
+  | "usage"
+  | "models"
+  | "system"
+  | "access"
+  | "more"
+  | "search"
+  | "sun"
+  | "moon"
+  | "start"
+  | "ops"
+  | "waiting"
+  | "theme"
+  | "bell"
+  | "monitor"
+
+export const ICONS: Readonly<Record<IconName, Component>> = Object.freeze({
+  chat: MessageSquareIcon,
+  sessions: HistoryIcon,
+  jobs: CalendarClockIcon,
+  goals: TargetIcon,
+  security: ShieldCheckIcon,
+  skills: SparklesIcon,
+  memory: BrainIcon,
+  usage: ChartColumnIcon,
+  models: CpuIcon,
+  system: ServerIcon,
+  access: KeyRoundIcon,
+  more: MenuIcon,
+  search: SearchIcon,
+  sun: SunIcon,
+  moon: MoonIcon,
+  start: RocketIcon,
+  ops: WrenchIcon,
+  waiting: HourglassIcon,
+  theme: PaletteIcon,
+  bell: BellIcon,
+  monitor: MonitorIcon,
+})
+
+export const BRAND_PATH = "M6.24 7.2H17.76M12 7.2v6.72c0 3.84 3.84 4.56 5.28 1.92"

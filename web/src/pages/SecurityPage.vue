@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { api } from "../api/client"
 import type { SecurityView } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
@@ -83,6 +88,11 @@ async function setMode(m: "read-only" | "guarded" | "full"): Promise<void> {
   if (ok) await command("/mode full confirm", "modes", "Mode")
 }
 
+// Sets the mode from the toggle group. A tap on the pressed item gives no value.
+function onMode(v: unknown): void {
+  if (v === "read-only" || v === "guarded" || v === "full") void setMode(v)
+}
+
 function setTab(t: Tab): void {
   void router.replace({ query: { ...route.query, tab: t } })
 }
@@ -145,9 +155,9 @@ const tabModel = computed({
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Approvals and security</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight">Approvals and security</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
     </div>
     <Tabs v-model="tabModel" :tabs="tabs">
@@ -157,14 +167,14 @@ const tabModel = computed({
         <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @action="refresh" />
         <template v-else-if="view">
           <!-- Modes -->
-          <div v-if="tab === 'modes'" class="page-stack">
+          <div v-if="tab === 'modes'" class="flex flex-col gap-4">
             <DataTable :columns="modeCols" :rows="modeRows" row-key="scope">
               <template #cell-scope="{ row }">
-                <bdi class="cell-title" :title="String(row.scope_label || row.scope)">{{
+                <bdi class="truncate" :title="String(row.scope_label || row.scope)">{{
                   row.scope_label || row.scope
                 }}</bdi
                 >{{ " " }}
-                <span v-if="row.dashboard" class="chip chip-acc">this dashboard</span>
+                <Badge v-if="row.dashboard" variant="secondary">this dashboard</Badge>
               </template>
               <template #cell-mode="{ row }">
                 {{ MODE_LABEL[row.mode as string] ?? row.mode
@@ -173,73 +183,63 @@ const tabModel = computed({
                 >
               </template>
               <template #cell-actions="{ row }">
-                <div
+                <ToggleGroup
                   v-if="row.dashboard"
-                  class="seg seg-touch"
-                  role="group"
+                  type="single"
+                  variant="outline"
                   aria-label="Mode of the Dashboard"
+                  :model-value="row.mode as string"
+                  @update:model-value="onMode"
                 >
-                  <button
-                    type="button"
-                    :class="{ 'is-on': row.mode === 'read-only' }"
-                    :aria-pressed="row.mode === 'read-only'"
-                    @click="setMode('read-only')"
-                  >
+                  <ToggleGroupItem value="read-only" class="max-tab:h-11">
                     👁 Read-only
-                  </button>
-                  <button
-                    type="button"
-                    :class="{ 'is-on': row.mode === 'guarded' }"
-                    :aria-pressed="row.mode === 'guarded'"
-                    @click="setMode('guarded')"
-                  >
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="guarded" class="max-tab:h-11">
                     🛡 Guarded
-                  </button>
-                  <button
-                    type="button"
-                    :class="{ 'is-on': row.mode === 'full' }"
-                    :aria-pressed="row.mode === 'full'"
-                    @click="setMode('full')"
-                  >
-                    ⚡ Full
-                  </button>
-                </div>
-                <span v-else class="c-3">View only. Send /mode in that chat.</span>
+                  </ToggleGroupItem>
+                  <ToggleGroupItem value="full" class="max-tab:h-11"> ⚡ Full </ToggleGroupItem>
+                </ToggleGroup>
+                <span v-else class="text-muted-foreground"
+                  >View only. Send /mode in that chat.</span
+                >
               </template>
             </DataTable>
             <ResultNote :note="modesNote" @close="modesNote = null" />
-            <div class="card card-pad fixed-modes">
-              <p>
-                Process mode: <code>{{ view.process_mode }}</code>
-              </p>
-              <p>
-                Cron mode: <code>{{ view.cron_mode }}</code>
-              </p>
-              <p class="t-12 c-3">
-                Set in config.yaml.
-                <button type="button" class="link" @click="setTab('rules')">
-                  What each mode does
-                </button>
-              </p>
-            </div>
+            <Card>
+              <CardContent class="flex flex-col gap-1">
+                <p>
+                  Process mode: <code>{{ view.process_mode }}</code>
+                </p>
+                <p>
+                  Cron mode: <code>{{ view.cron_mode }}</code>
+                </p>
+                <p class="text-xs text-muted-foreground">
+                  Set in config.yaml.
+                  <Button variant="link" class="h-auto p-0" @click="setTab('rules')">
+                    What each mode does
+                  </Button>
+                </p>
+              </CardContent>
+            </Card>
           </div>
 
           <!-- Always answers -->
-          <div v-else-if="tab === 'grants'">
-            <div v-if="view.grants_off" class="bad-banner">
-              Saved answers are off, because the answer store is damaged:
-              {{ view.grants_off_cause }}. Restart the gateway after you repair it.
-            </div>
-            <div class="page-h">
+          <div v-else-if="tab === 'grants'" class="flex flex-col gap-4">
+            <Alert v-if="view.grants_off" variant="destructive">
+              <AlertDescription>
+                Saved answers are off, because the answer store is damaged:
+                {{ view.grants_off_cause }}. Restart the gateway after you repair it.
+              </AlertDescription>
+            </Alert>
+            <div class="flex flex-wrap items-center gap-3">
               <span>“✅ Always” answers. Session answers live in memory and are not listed.</span>
-              <button
-                class="btn btn-danger-soft"
-                type="button"
+              <Button
+                variant="destructive"
                 :disabled="view.grants.length === 0"
                 @click="command(view.remove_all, 'grants', 'Remove all')"
               >
                 Remove all…
-              </button>
+              </Button>
             </div>
             <ResultNote :note="grantsNote" @close="grantsNote = null" />
             <StateBlock
@@ -250,11 +250,11 @@ const tabModel = computed({
             <template v-else>
               <DataTable :columns="grantCols" :rows="grantPage" row-key="idx">
                 <template #cell-rule="{ row }">
-                  <b>{{ row.rule }}</b>
-                  <div class="t-12 c-3">{{ row.description }}</div>
+                  <b class="font-medium">{{ row.rule }}</b>
+                  <div class="text-xs text-muted-foreground">{{ row.description }}</div>
                 </template>
                 <template #cell-preview="{ row }"
-                  ><code>{{ row.preview }}</code></template
+                  ><code class="font-mono text-xs">{{ row.preview }}</code></template
                 >
                 <template #cell-programs="{ row }">{{
                   (row.programs as string[]).join(", ")
@@ -263,41 +263,41 @@ const tabModel = computed({
                   [row.server, row.tool_name].filter(Boolean).join(" · ")
                 }}</template>
                 <template #cell-created="{ row }"
-                  ><span style="white-space: nowrap" :title="fullTime(row.created as string)">{{
+                  ><span class="whitespace-nowrap" :title="fullTime(row.created as string)">{{
                     shortTime(row.created as string)
                   }}</span></template
                 >
                 <template #cell-actions="{ row }">
-                  <button
-                    class="btn btn-danger-soft btn-sm"
-                    type="button"
+                  <Button
+                    variant="destructive"
+                    size="sm"
                     @click="command(row.remove as string, 'grants', 'Remove')"
                   >
                     Remove
-                  </button>
+                  </Button>
                 </template>
               </DataTable>
-              <div class="pager">
-                <span class="grow"
+              <div class="flex items-center gap-2">
+                <span class="flex-1 text-sm text-muted-foreground"
                   >{{ grantOffset + 1 }}–{{ grantOffset + grantPage.length }} of
                   {{ grantRows.length }}</span
                 >
-                <button
-                  class="btn btn-secondary btn-sm"
-                  type="button"
+                <Button
+                  variant="outline"
+                  size="sm"
                   :disabled="grantOffset === 0"
                   @click="grantOffset = Math.max(0, grantOffset - PAGE)"
                 >
                   ◀ Prev
-                </button>
-                <button
-                  class="btn btn-secondary btn-sm"
-                  type="button"
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
                   :disabled="grantOffset + PAGE >= grantRows.length"
                   @click="grantOffset += PAGE"
                 >
                   Next ▶
-                </button>
+                </Button>
               </div>
             </template>
           </div>

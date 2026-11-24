@@ -1,5 +1,18 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  Table,
+  TableBody,
+  TableCaption,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { api } from "../api/client"
 import type { CronUsageView, DailyView, UsageModelRow, UsageView } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
@@ -195,6 +208,16 @@ const top = computed(() => {
   return niceMax(Math.max(0, ...sums.values()))
 })
 
+// The fill of each chart series. The order is the order of the legacy chart colors.
+const SERIES: Record<string, string> = {
+  s1: "bg-primary",
+  s2: "bg-info",
+  s3: "bg-warning",
+  s4: "bg-success",
+  s5: "bg-destructive",
+  s6: "bg-muted-foreground",
+}
+
 // Groups the daily rows by bar key, oldest first. An empty bucket stays in the list. The 5 largest models get s1 to s5. Each other
 // model joins the series Other (s6).
 const bars = computed(() => {
@@ -315,7 +338,7 @@ function openTip(i: number, bar: HTMLElement): void {
 // Keeps the tooltip on the bar under a finger that moves over the bars.
 function follow(e: PointerEvent): void {
   if (tipIndex.value < 0) return
-  const bar = document.elementFromPoint?.(e.clientX, e.clientY)?.closest<HTMLElement>(".sbar")
+  const bar = document.elementFromPoint?.(e.clientX, e.clientY)?.closest<HTMLElement>("[data-i]")
   if (bar?.dataset.i !== undefined) openTip(Number(bar.dataset.i), bar)
 }
 
@@ -346,21 +369,21 @@ const legend = computed(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-h">
-      <h1 class="t-20">Usage</h1>
+  <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
+    <div class="flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight">Usage</h1>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-      <div class="seg">
-        <button
-          v-for="r in ranges"
-          :key="r.id"
-          type="button"
-          :class="{ 'is-on': range === r.id }"
-          @click="pick(r.id)"
-        >
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        aria-label="Range"
+        :model-value="range"
+        @update:model-value="(v) => v && pick(v as Range)"
+      >
+        <ToggleGroupItem v-for="r in ranges" :key="r.id" :value="r.id">
           {{ r.label }}
-        </button>
-      </div>
+        </ToggleGroupItem>
+      </ToggleGroup>
     </div>
 
     <StateBlock v-if="state === 'loading'" state="loading" />
@@ -373,148 +396,189 @@ const legend = computed(() => {
       @action="pick('30d')"
     />
     <template v-else>
-      <div class="grid-4">
-        <div class="tile">
-          <span class="eyebrow">Spend</span>
-          <span class="v mono">{{ usd(usage!.total_usd, 2) }}{{ usage!.unpriced ? "+" : "" }}</span>
-          <span v-if="unpricedCalls > 0" class="t-12 c-3"
-            >{{ unpricedCalls }} calls have no price</span
+      <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <Card>
+          <CardHeader>
+            <CardDescription>Spend</CardDescription>
+            <CardTitle class="font-mono text-2xl tabular-nums"
+              >{{ usd(usage!.total_usd, 2) }}{{ usage!.unpriced ? "+" : "" }}</CardTitle
+            >
+          </CardHeader>
+          <CardContent v-if="unpricedCalls > 0" class="text-xs text-muted-foreground"
+            >{{ unpricedCalls }} calls have no price</CardContent
           >
-        </div>
-        <div class="tile">
-          <span class="eyebrow">Calls</span>
-          <span class="v">{{ totalCalls }}</span>
-          <span class="t-12 c-3">across {{ rows.length }} models</span>
-        </div>
-        <div class="tile">
-          <span class="eyebrow">Tokens in · out</span>
-          <span class="v mono">{{ millions(totalIn) }} · {{ millions(totalOut) }}</span>
-        </div>
-        <div class="tile">
-          <span class="eyebrow">Cache hit</span>
-          <span class="v">{{ hit }}</span>
-          <span class="t-12 c-3">{{ usage!.compactions }} compactions</span>
-        </div>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardDescription>Calls</CardDescription>
+            <CardTitle class="text-2xl tabular-nums">{{ totalCalls }}</CardTitle>
+          </CardHeader>
+          <CardContent class="text-xs text-muted-foreground"
+            >across {{ rows.length }} models</CardContent
+          >
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardDescription>Tokens in · out</CardDescription>
+            <CardTitle class="font-mono text-2xl tabular-nums"
+              >{{ millions(totalIn) }} · {{ millions(totalOut) }}</CardTitle
+            >
+          </CardHeader>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardDescription>Cache hit</CardDescription>
+            <CardTitle class="text-2xl tabular-nums">{{ hit }}</CardTitle>
+          </CardHeader>
+          <CardContent class="text-xs text-muted-foreground"
+            >{{ usage!.compactions }} compactions</CardContent
+          >
+        </Card>
       </div>
 
-      <p v-if="range === 'session'" class="c-2">
+      <p v-if="range === 'session'" class="text-muted-foreground">
         This session: {{ session.title || "New session" }}
       </p>
 
-      <div v-else ref="chartCard" class="card" style="position: relative">
-        <div class="card-h">
-          <h3>Spend per day</h3>
-          <span v-for="l in legend" :key="l.model" class="lg"
-            ><i :class="l.cls" />{{ l.model }}</span
+      <Card v-else :ref="(c) => (chartCard = (c as any)?.$el ?? null)" class="relative">
+        <CardHeader class="flex flex-row flex-wrap items-center gap-3">
+          <CardTitle>Spend per day</CardTitle>
+          <span
+            v-for="l in legend"
+            :key="l.model"
+            data-legend
+            class="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
+            ><i :data-series="l.cls" :class="cn('size-2.5 rounded-sm', SERIES[l.cls])" />{{
+              l.model
+            }}</span
           >
-          <button type="button" class="btn btn-ghost btn-sm" @click="table = !table">
+          <Button variant="ghost" size="sm" @click="table = !table">
             {{ table ? "View as chart" : "View as table" }}
-          </button>
-        </div>
-        <div class="card-b">
-          <div v-if="table" class="table-wrap">
-            <table class="days">
-              <thead>
-                <tr>
-                  <th>Day</th>
-                  <th>Total</th>
-                  <th>Tokens in · out</th>
-                  <th>Top model</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="b in bars" :key="b.key">
-                  <td>{{ b.label }}</td>
-                  <td>{{ usd(b.total, 2) }}</td>
-                  <td>{{ b.inTok }} · {{ b.outTok }}</td>
-                  <td>{{ b.top }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <Table v-if="table">
+            <TableCaption class="sr-only">Spend per day</TableCaption>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Day</TableHead>
+                <TableHead>Total</TableHead>
+                <TableHead>Tokens in · out</TableHead>
+                <TableHead>Top model</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow v-for="b in bars" :key="b.key">
+                <TableCell>{{ b.label }}</TableCell>
+                <TableCell>{{ usd(b.total, 2) }}</TableCell>
+                <TableCell>{{ b.inTok }} · {{ b.outTok }}</TableCell>
+                <TableCell>{{ b.top }}</TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
           <template v-else>
-            <div ref="sbarsEl" class="sbars" @pointermove="follow">
-              <div class="axis-y">
+            <div
+              ref="sbarsEl"
+              data-chart="bars"
+              class="relative flex h-[170px] items-end gap-1 pl-11 max-tab:gap-0.5 max-tab:pl-8.5"
+              @pointermove="follow"
+            >
+              <div
+                data-axis="y"
+                class="absolute inset-y-0 left-0 flex w-10 flex-col justify-between text-right font-mono text-[11px] text-muted-foreground max-tab:w-7.5"
+              >
                 <span v-for="t in ticks" :key="t">{{ t }}</span>
               </div>
               <button
                 v-for="(b, i) in bars"
                 :key="b.key"
                 type="button"
-                class="sbar"
+                class="relative flex h-full min-w-1 flex-1 flex-col-reverse rounded-none p-0 hover:brightness-110 focus-visible:outline-2 focus-visible:outline-ring"
                 :data-i="i"
                 :aria-label="`${b.label}: ${usd(b.total, 2)}`"
                 @pointerenter="openTip(i, $event.currentTarget as HTMLElement)"
                 @click="openTip(i, $event.currentTarget as HTMLElement)"
               >
-                <span v-if="b.spike" class="spike" aria-hidden="true">💸</span>
+                <span
+                  v-if="b.spike"
+                  data-spike
+                  aria-hidden="true"
+                  class="absolute -top-[18px] left-1/2 -translate-x-1/2 text-xs"
+                  >💸</span
+                >
                 <i
                   v-for="p in b.parts"
                   :key="p.model"
-                  :class="p.cls"
+                  :data-series="p.cls"
+                  :class="cn('block w-full last:rounded-t-[3px]', SERIES[p.cls])"
                   :style="{ height: `${p.pct}%` }"
                 />
               </button>
             </div>
-            <div class="axis-x">
-              <span v-for="(b, i) in bars" :key="b.key">{{ showLabel(i) ? b.label : "" }}</span>
+            <div
+              data-axis="x"
+              class="flex gap-1 pl-11 font-mono text-xs text-muted-foreground max-tab:gap-0.5 max-tab:pl-8.5"
+            >
+              <span
+                v-for="(b, i) in bars"
+                :key="b.key"
+                class="flex min-w-1 flex-1 justify-center whitespace-nowrap first:justify-start last:justify-end"
+                >{{ showLabel(i) ? b.label : "" }}</span
+              >
             </div>
           </template>
-        </div>
+        </CardContent>
         <div
           v-if="tipIndex >= 0 && bars[tipIndex]"
           ref="tipEl"
-          class="popover usage-tip"
           role="tooltip"
-          :style="{
-            position: 'absolute',
-            left: tipLeft + 'px',
-            top: '48px',
-            zIndex: 5,
-            padding: '8px 10px',
-            minWidth: '160px',
-          }"
+          class="absolute top-12 z-10 min-w-40 rounded-md border bg-popover px-2.5 py-2 text-popover-foreground shadow-md"
+          :style="{ left: tipLeft + 'px' }"
         >
           <b>{{ bars[tipIndex].label }}</b>
-          <div v-for="p in bars[tipIndex].parts" :key="p.model" class="t-12">
+          <div v-for="p in bars[tipIndex].parts" :key="p.model" class="text-xs">
             {{ p.model }} {{ usd(p.usd) }}
           </div>
-          <div class="t-12">
+          <div class="text-xs">
             <b>Total {{ usd(bars[tipIndex].total) }}{{ bars[tipIndex].unpriced ? "+" : "" }}</b>
           </div>
         </div>
-      </div>
+      </Card>
 
       <DataTable :columns="columns" :rows="tableRows" row-key="key">
         <template #cell-model="{ value }"
-          ><span class="mono">{{ value }}</span></template
+          ><span class="font-mono">{{ value }}</span></template
         >
       </DataTable>
 
       <template v-if="range !== 'session'">
-        <div class="section-h"><h2>Cron cost by job</h2></div>
-        <DataTable class="cron-cost" :columns="cronColumns" :rows="cronRows" row-key="job_id">
-          <template #cell-name="{ row }">
-            <b v-if="row.total">{{ row.name }}</b>
-            <span v-else-if="row.deleted" class="c-3">Deleted job</span>
-            <router-link v-else :to="{ name: 'job', params: { id: String(row.job_id) } }">{{
-              row.name
-            }}</router-link>
-          </template>
-        </DataTable>
+        <section aria-labelledby="usage-cron" class="flex flex-col gap-2">
+          <h2 id="usage-cron" class="text-lg font-semibold">Cron cost by job</h2>
+          <DataTable :columns="cronColumns" :rows="cronRows" row-key="job_id">
+            <template #cell-name="{ row }">
+              <b v-if="row.total">{{ row.name }}</b>
+              <span v-else-if="row.deleted" class="text-muted-foreground">Deleted job</span>
+              <router-link v-else :to="{ name: 'job', params: { id: String(row.job_id) } }">{{
+                row.name
+              }}</router-link>
+            </template>
+          </DataTable>
+        </section>
 
-        <div v-if="cron.flagged.length > 0" class="card flagged">
-          <div class="card-h"><h3>Flagged runs</h3></div>
-          <div class="li" v-for="(f, i) in cron.flagged" :key="i">
-            <router-link v-if="f.job_name" :to="{ name: 'job', params: { id: f.job_id } }">{{
-              f.job_name
-            }}</router-link>
-            <span v-else class="c-3">Deleted job</span>
-            <span class="grow c-2"
-              >{{ f.at.slice(0, 10) }} · {{ usd(f.usd) }} · median {{ usd(f.median) }}</span
-            >
-          </div>
-        </div>
+        <Card v-if="cron.flagged.length > 0" role="region" aria-labelledby="usage-flagged">
+          <CardHeader><CardTitle id="usage-flagged">Flagged runs</CardTitle></CardHeader>
+          <CardContent class="flex flex-col gap-2">
+            <div v-for="(f, i) in cron.flagged" :key="i" class="flex items-center gap-2">
+              <router-link v-if="f.job_name" :to="{ name: 'job', params: { id: f.job_id } }">{{
+                f.job_name
+              }}</router-link>
+              <span v-else class="text-muted-foreground">Deleted job</span>
+              <span class="flex-1 text-muted-foreground"
+                >{{ f.at.slice(0, 10) }} · {{ usd(f.usd) }} · median {{ usd(f.median) }}</span
+              >
+            </div>
+          </CardContent>
+        </Card>
       </template>
     </template>
   </div>

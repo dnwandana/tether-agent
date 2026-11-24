@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { mount, flushPromises } from "@vue/test-utils"
+import { defineComponent, h, onMounted } from "vue"
+import { render, screen, within } from "@testing-library/vue"
+import userEvent from "@testing-library/user-event"
+import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
 vi.mock("../api/client", async (importOriginal) => ({
@@ -128,6 +131,18 @@ const fresh = (): Record<string, unknown> => ({
   ],
 })
 
+let mounts = 0
+const JobForm = defineComponent({
+  name: "JobForm",
+  props: ["job"],
+  emits: ["saved", "cancel", "dirty"],
+  setup(_, { emit }) {
+    onMounted(() => mounts++)
+    return () =>
+      h("button", { type: "button", onClick: () => emit("dirty", true) }, "Make the form dirty")
+  },
+})
+
 async function mk() {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -139,14 +154,18 @@ async function mk() {
     ],
   })
   await router.push("/jobs")
-  const w = mount(JobsPage, { global: { plugins: [router], stubs: { JobForm: true } } })
+  const r = render(JobsPage, { global: { plugins: [router], stubs: { JobForm } } })
   await flushPromises()
-  return w
+  return r
 }
-const btns = (w: any, t: string) => w.findAll("button").filter((b: any) => b.text() === t)
+const rowOf = (text: string) =>
+  screen.getAllByRole("row").find((r) => r.textContent!.includes(text))!
+const bars = (el: Element) =>
+  Array.from(el.querySelectorAll<HTMLElement>("[data-bar]")).map((b) => b.dataset.bar)
 
 beforeEach(() => {
   data = fresh()
+  mounts = 0
   vi.mocked(confirm).mockReset().mockResolvedValue(true)
   window.matchMedia = ((q: string) => ({
     matches: false,
@@ -174,61 +193,70 @@ describe("JobsPage", () => {
     setHost("UTC", 0)
     vi.spyOn(Date.prototype, "getTimezoneOffset").mockReturnValue(-420)
     data["/api/jobs"] = [job({ id: "j1", name: "nightly", schedule: "0 1 * * *" })]
-    const w = await mk()
-    const cell = w.find('[title="0 1 * * * · host time UTC"]')
-    expect(cell.text()).toBe("daily 08:00")
+    await mk()
+    expect(screen.getByTitle("0 1 * * * · host time UTC").textContent).toBe("daily 08:00")
   })
 
   it("loads the brief, the jobs, and the held sends", async () => {
-    const w = await mk()
+    const { container } = await mk()
     for (const p of ["/api/brief", "/api/jobs", "/api/held"])
       expect(api).toHaveBeenCalledWith("GET", p)
-    expect(w.text()).toContain("Jobs: 41 of 44 runs OK in 24 h")
-    expect(w.text()).toContain("$0.7310")
-    expect(w.text()).toContain("2/4 ok")
-    const bars = w.findAll(".runs7")[1].findAll("i")
-    expect(
-      bars.map((b) => b.classes().find((c) => c === "bad" || c === "stop" || c === "none") ?? "ok"),
-    ).toEqual(["none", "none", "none", "ok", "bad", "ok", "stop"])
+    expect(screen.getByText("Jobs: 41 of 44 runs OK in 24 h")).toBeTruthy()
+    expect(container.textContent).toContain("$0.7310")
+    expect(container.textContent).toContain("2/4 ok")
+    expect(bars(container.querySelectorAll("[data-runs7]")[1])).toEqual([
+      "none",
+      "none",
+      "none",
+      "ok",
+      "bad",
+      "ok",
+      "stop",
+    ])
   })
 
   it("pauses a job with the command and disables Run now on a paused job", async () => {
-    const w = await mk()
-    await btns(w, "⏸ Pause")[0].trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getAllByRole("button", { name: "⏸ Pause" })[0])
     expect(runCommand).toHaveBeenCalledWith("/jobs pause j1")
-    const run = btns(w, "⚡ Run now")
-    expect(run[0].attributes("disabled")).toBeUndefined()
-    expect(run[1].attributes("disabled")).toBeDefined()
+    const run = screen.getAllByRole("button", { name: "⚡ Run now" }) as HTMLButtonElement[]
+    expect(run[0].disabled).toBe(false)
+    expect(run[1].disabled).toBe(true)
   })
 
   it("shows the buttons of each held kind and drops a hold", async () => {
-    const w = await mk()
-    expect(btns(w, '✅ Send to "Ops chat"')).toHaveLength(1)
-    expect(btns(w, "✅ Post the full text there")).toHaveLength(1)
-    expect(btns(w, "❌ Drop")).toHaveLength(1)
-    await btns(w, "❌ Drop")[0].trigger("click")
+    const user = userEvent.setup()
+    await mk()
+    expect(screen.getAllByRole("button", { name: '✅ Send to "Ops chat"' })).toHaveLength(1)
+    expect(screen.getAllByRole("button", { name: "✅ Post the full text there" })).toHaveLength(1)
+    expect(screen.getAllByRole("button", { name: "❌ Drop" })).toHaveLength(1)
+    await user.click(screen.getByRole("button", { name: "❌ Drop" }))
+    await flushPromises()
     expect(api).toHaveBeenCalledWith("POST", "/api/held/h1", { action: "drop" })
   })
 
   it("links the brief lines to the job and the goal", async () => {
-    const w = await mk()
-    const links = w.findAll("a.li").map((a) => a.attributes("href"))
-    expect(links).toEqual(["/jobs/j2", "/goals/s9"])
+    await mk()
+    expect(screen.getByRole("link", { name: /gh-notify/ }).getAttribute("href")).toBe("/jobs/j2")
+    expect(screen.getByRole("link", { name: /ship it/ }).getAttribute("href")).toBe("/goals/s9")
   })
 
   it("opens the job form in a side panel", async () => {
-    const w = await mk()
-    await btns(w, "+ New job")[0].trigger("click")
-    expect(w.findComponent({ name: "SidePanel" }).props()).toMatchObject({
-      open: true,
-      title: "New job",
-    })
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "+ New job" }))
+    const dlg = screen
+      .getByRole("button", { name: "Make the form dirty" })
+      .closest('[role="dialog"]')
+    expect(dlg?.getAttribute("aria-label")).toBe("New job")
   })
 
   it("asks before it drops a held send", async () => {
+    const user = userEvent.setup()
     vi.mocked(confirm).mockResolvedValueOnce(false)
-    const w = await mk()
-    await btns(w, "❌ Drop")[0].trigger("click")
+    await mk()
+    await user.click(screen.getByRole("button", { name: "❌ Drop" }))
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Drop this held send?",
@@ -254,11 +282,12 @@ describe("JobsPage", () => {
         ],
       }),
     ]
-    const w = await mk()
-    expect(btns(w, '✅ Send to "Ops chat"')[0].attributes("disabled")).toBeDefined()
-    expect(w.text()).toContain("Telegram is off.")
-    expect(w.text()).toContain("web_fetch, browser_read")
-    expect(w.text()).toContain("hold")
+    const { container } = await mk()
+    const post = screen.getByRole("button", { name: '✅ Send to "Ops chat"' }) as HTMLButtonElement
+    expect(post.disabled).toBe(true)
+    expect(container.textContent).toContain("Telegram is off.")
+    expect(container.textContent).toContain("web_fetch, browser_read")
+    expect(container.textContent).toContain("hold")
   })
 
   it("shows the counts, the costs, and the bad schedule icon in the Brief", async () => {
@@ -279,20 +308,20 @@ describe("JobsPage", () => {
       ],
       spend_unpriced: true,
     }
-    const w = await mk()
-    const line = w.find("a.li")
-    expect(line.text()).toContain("⚠️")
-    expect(line.text()).toContain("×3")
-    expect(line.text()).toContain("$0.1200")
-    expect(w.text()).toContain("unpriced")
+    const { container } = await mk()
+    const line = screen.getByRole("link", { name: /bad schedule/ })
+    expect(line.textContent).toContain("⚠️")
+    expect(line.textContent).toContain("×3")
+    expect(line.textContent).toContain("$0.1200")
+    expect(container.textContent).toContain("unpriced")
   })
 
   it("says that nothing needs attention, and that run history is off", async () => {
     data["/api/brief"] = { ...(data["/api/brief"] as object), lines: [], history_off: true }
-    const w = await mk()
-    expect(w.text()).toContain("Nothing needs your attention.")
-    expect(w.text()).toContain("Run history is off.")
-    expect(w.text()).not.toContain("runs OK in 24 h")
+    const { container } = await mk()
+    expect(screen.getByText("Nothing needs your attention.")).toBeTruthy()
+    expect(screen.getByText("Run history is off.")).toBeTruthy()
+    expect(container.textContent).not.toContain("runs OK in 24 h")
   })
 
   it("loads again on the job.run and held events", async () => {
@@ -308,27 +337,24 @@ describe("JobsPage", () => {
   })
 
   it("shows the empty text with + New job", async () => {
+    const user = userEvent.setup()
     data["/api/jobs"] = []
-    const w = await mk()
-    expect(w.text()).toContain("No jobs yet.")
-    w.findAllComponents({ name: "StateBlock" })
-      .find((s) => s.props("action") === "+ New job")!
-      .vm.$emit("action")
+    await mk()
+    expect(screen.getByText("No jobs yet.")).toBeTruthy()
+    await user.click(screen.getAllByRole("button", { name: "+ New job" })[1])
     await flushPromises()
-    expect(w.findComponent({ name: "SidePanel" }).props("open")).toBe(true)
+    expect(screen.getByRole("button", { name: "Make the form dirty" })).toBeTruthy()
+    expect(mounts).toBe(1)
   })
 
   it("passes the dirty state of the new-job form to the panel", async () => {
-    const w = await mk()
-    await btns(w, "+ New job")[0].trigger("click")
-    w.findComponent({ name: "JobForm" }).vm.$emit("dirty", true)
-    await flushPromises()
-    expect(
-      w
-        .findAllComponents({ name: "SidePanel" })
-        .find((p) => p.props("open"))!
-        .props("dirty"),
-    ).toBe(true)
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "+ New job" }))
+    await user.click(screen.getByRole("button", { name: "Make the form dirty" }))
+    const dlg = screen.getByRole("dialog", { name: "New job" })
+    await user.click(within(dlg).getByRole("button", { name: "Close" }))
+    expect(await screen.findByText("Discard the changes?")).toBeTruthy()
   })
 
   it("shows No runs, the state glyph, done as muted text, and the 7-day cost", async () => {
@@ -338,31 +364,30 @@ describe("JobsPage", () => {
       job({ id: "j7", name: "cheap", icon: "", state: "failing", cost_7d_unpriced: true }),
       job({ id: "j8", name: "script", icon: "", cost_7d_known: false, cost_7d_usd: 0 }),
     ]
-    const w = await mk()
-    const row = (t: string) => w.findAll("tr").find((r: any) => r.text().includes(t))!
-    expect(w.findAll("th").map((t: any) => t.text())).toContain("Cost · 7 d")
-    expect(row("fresh").text()).toContain("No runs")
-    expect(row("fresh").find(".runs7").exists()).toBe(false)
-    expect(row("fresh").text()).toContain("⏳")
-    expect(row("gone").find(".chip").exists()).toBe(false)
-    expect(row("gone").find(".c-3").text()).toBe("done")
-    expect(row("gone").findAll("button")).toHaveLength(0)
-    expect(row("cheap").text()).toContain("⚠")
-    expect(row("cheap").text()).toContain("$0.0102+")
-    expect(row("script").text()).toContain("—")
+    await mk()
+    expect(screen.getAllByRole("columnheader").map((t) => t.textContent)).toContain("Cost · 7 d")
+    expect(rowOf("fresh").textContent).toContain("No runs")
+    expect(rowOf("fresh").textContent).toContain("⏳")
+    expect(rowOf("fresh").querySelector("[data-runs7]")).toBeNull()
+    expect(rowOf("gone").querySelector('[data-slot="badge"]')).toBeNull()
+    expect(within(rowOf("gone")).getByText("done").className).toContain("text-muted-foreground")
+    expect(within(rowOf("gone")).queryAllByRole("button")).toHaveLength(0)
+    expect(rowOf("cheap").textContent).toContain("⚠")
+    expect(rowOf("cheap").textContent).toContain("$0.0102+")
+    expect(rowOf("script").textContent).toContain("—")
   })
 
   it("shows the next run in the short format with the full time in the title", async () => {
-    const w = await mk()
-    const cell = w.find('[title="' + fullTime("2026-11-21T06:00:00Z") + '"]')
-    expect(cell.text()).toBe(shortTime("2026-11-21T06:00:00Z"))
-    expect(w.find(".page-stack").exists()).toBe(true)
+    await mk()
+    expect(screen.getAllByTitle(fullTime("2026-11-21T06:00:00Z"))[0].textContent).toBe(
+      shortTime("2026-11-21T06:00:00Z"),
+    )
   })
 
   it("puts a space between the job icon, the name, and the watch chip", async () => {
     data["/api/jobs"] = [job({ id: "j9", name: "daily-digest", watch: true })]
-    const w = await mk()
-    const row = w.findAll("tr").find((r) => r.text().includes("daily-digest"))!
-    expect(row.find("td").text().replace(/\s+/g, " ")).toBe("✅ daily-digest watch")
+    await mk()
+    const cell = within(rowOf("daily-digest")).getAllByRole("cell")[0]
+    expect(cell.textContent!.replace(/\s+/g, " ").trim()).toBe("✅ daily-digest watch")
   })
 })
