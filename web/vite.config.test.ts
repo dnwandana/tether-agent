@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import config from "./vite.config"
 
@@ -20,5 +22,21 @@ describe("vite config", () => {
       "/api": "http://127.0.0.1:8787",
       "/auth": "http://127.0.0.1:8787",
     })
+  })
+
+  it("maps @ to the src folder", () => {
+    const alias = config.resolve?.alias as Record<string, string>
+    expect(alias["@"]).toMatch(/\/src$/)
+  })
+
+  it("resolves an @ import in the tests", async () => {
+    const m = await import("@/lib/time")
+    expect(Object.keys(m).length).toBeGreaterThan(0)
+  })
+
+  it("gives TypeScript the same @ path", () => {
+    const ts = JSON.parse(readFileSync(join(import.meta.dirname, "tsconfig.json"), "utf8"))
+    expect(ts.compilerOptions.baseUrl).toBe(".")
+    expect(ts.compilerOptions.paths).toEqual({ "@/*": ["./src/*"] })
   })
 })

@@ -1,12 +1,20 @@
+import { resolve } from "node:path"
 import type { UserConfig } from "vitest/config"
 
 // Vitest loads this file again inside the jsdom test, where esbuild stops with a realm error.
 // Only Vite needs the Vue plugin, so the plugin loads only when no DOM exists.
+// The Tailwind plugin also runs only in Vite.
 const plugins =
-  typeof document === "undefined" ? [(await import("@vitejs/plugin-vue")).default()] : []
+  typeof document === "undefined"
+    ? [
+        (await import("@vitejs/plugin-vue")).default(),
+        (await import("@tailwindcss/vite")).default(),
+      ]
+    : []
 
 const config = {
   plugins,
+  resolve: { alias: { "@": resolve(import.meta.dirname, "src") } },
   base: "/",
   build: {
     outDir: "../internal/dashboard/dist",
