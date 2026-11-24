@@ -18,6 +18,7 @@ import { emitEvents } from "../lib/bus"
 import { api } from "../api/client"
 import { confirm, toast } from "../stores/ui"
 import AccessPage from "./AccessPage.vue"
+import { fullTime, shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
 const view = {
@@ -86,6 +87,32 @@ beforeEach(() => {
 })
 
 describe("AccessPage", () => {
+  it("shows the approved date in the shared short format, with the full time as a tooltip", async () => {
+    const w = await mk()
+    const cell = w.find('[data-test="since"]')
+    expect(cell.text()).toBe(shortTime("2026-11-20T09:56:00Z"))
+    expect(cell.attributes("title")).toBe(fullTime("2026-11-20T09:56:00Z"))
+    expect(cell.attributes("style")).toContain("white-space: nowrap")
+  })
+
+  it("shows a short title and a normal text when no request waits", async () => {
+    vi.mocked(api).mockImplementation(
+      async (m: string) => (m === "GET" ? { ...view, pending: [] } : {}) as any,
+    )
+    const w = await mk()
+    const st = w.find(".state")
+    expect(st.find(".state-t").text()).toBe("No pairing requests.")
+    expect(st.text()).toContain(
+      "A person who sends /start to the bot gets a code. They tell you the code, and you approve it here.",
+    )
+  })
+
+  it("shows the Pending count next to its heading", async () => {
+    const w = await mk()
+    const h2 = w.findAll(".section-h h2").find((x: any) => x.text().startsWith("Pending"))!
+    expect(h2.find(".badge").text()).toBe("1")
+  })
+
   it("shows the tries left from the view", async () => {
     vi.mocked(api).mockImplementation(
       async (m: string) => (m === "GET" ? { ...view, tries_left: 2 } : {}) as any,
@@ -158,11 +185,7 @@ describe("AccessPage", () => {
           : {}) as any,
     )
     const w = await mk()
-    const hhmm = new Date("2099-11-20T11:00:00Z").toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    })
+    const hhmm = shortTime("2099-11-20T11:00:00Z")
     expect(w.text()).toContain(`Pairing is locked until ${hhmm} after too many wrong codes.`)
     expect(btn(w, "Approve").attributes("disabled")).toBeDefined()
   })

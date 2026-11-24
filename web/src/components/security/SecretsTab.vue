@@ -5,12 +5,11 @@ import DataTable from "../DataTable.vue"
 import ResultNote from "../ResultNote.vue"
 import StateBlock from "../StateBlock.vue"
 import { useCommand, type ResultNoteData } from "../../lib/command"
+import { fullTime, shortTime } from "../../lib/time"
 import { ui } from "../../stores/ui"
 
 defineProps<{ secrets: SecretView[] }>()
 const emit = defineEmits<{ changed: [] }>()
-
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 const { run } = useCommand()
 const note = ref<ResultNoteData | null>(null)
@@ -22,18 +21,6 @@ const cols = [
   { key: "pins", label: "Allowed programs" },
   { key: "actions", label: "", align: "right" as const },
 ]
-
-function pad2(n: number): string {
-  return String(n).padStart(2, "0")
-}
-
-// Formats a time as "Nov 20 09:12". A zero time gives an empty text.
-function stamp(iso: string | undefined): string {
-  if (!iso) return ""
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime()) || d.getFullYear() < 1971) return ""
-  return `${MONTHS[d.getMonth()]} ${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-}
 
 // Removes one allowed program of a name. The path is the rest of the line.
 async function unpin(s: SecretView, p: PinView): Promise<void> {
@@ -75,8 +62,11 @@ async function setValue(s: SecretView): Promise<void> {
     >
       <template #cell-state="{ row }">
         <span v-if="row.state === 'set'" class="chip chip-ok">✓ set</span>
-        <span v-else-if="row.state === 'check'" class="chip chip-warn"
-          >✓ set · auth failed {{ stamp(row.failed_at as string) }}</span
+        <span
+          v-else-if="row.state === 'check'"
+          class="chip chip-warn"
+          :title="fullTime(row.failed_at as string)"
+          >✓ set · auth failed {{ shortTime(row.failed_at as string) }}</span
         >
         <span v-else class="chip chip-warn">not set</span>
       </template>

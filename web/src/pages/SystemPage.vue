@@ -11,6 +11,8 @@ import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
 import { useCommand, type ResultNoteData } from "../lib/command"
 import { followTask, useLiveData } from "../lib/live"
+import { renderMarkdown } from "../lib/markdown"
+import { duration, fullTime, shortTime } from "../lib/time"
 import { confirm, toast } from "../stores/ui"
 
 type Load = "loading" | "ready" | "error"
@@ -109,8 +111,12 @@ function valid(s: string): Date | null {
 }
 
 function date(s: string): string {
-  const d = valid(s)
-  return d ? d.toLocaleString() : "—"
+  return shortTime(s) || "—"
+}
+
+// Returns a count with the singular or the plural word.
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`
 }
 
 const pad = (n: number): string => String(n).padStart(2, "0")
@@ -119,11 +125,6 @@ const pad = (n: number): string => String(n).padStart(2, "0")
 function hm(s: string): string {
   const d = valid(s)
   return d ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : ""
-}
-
-function clock(s: string): string {
-  const d = valid(s)
-  return d ? d.toLocaleTimeString() : "—"
 }
 
 // Returns the number of checks of each status.
@@ -152,14 +153,14 @@ function taskLine(b: RuntimeView["batches"][number], i: number): string {
   const r = b.results?.[i]
   const name = b.tasks[i]?.name ?? ""
   if (!r) return `${name} · waiting`
-  return `${name} · ${r.status} · ${r.tool_calls} tool calls · ${r.duration_s} s`
+  return `${name} · ${r.status} · ${r.tool_calls} tool calls · ${duration(r.duration_s)}`
 }
 
 function batchSummary(b: RuntimeView["batches"][number]): string {
   return (b.results ?? [])
     .map((r) => r.summary)
     .filter(Boolean)
-    .join("\n")
+    .join("\n\n")
 }
 
 function toggleSummary(id: string): void {
@@ -395,18 +396,19 @@ onBeforeUnmount(() => {
       <StateBlock
         v-else-if="mcpRows.length === 0"
         state="empty"
-        text="No MCP servers. Add one under `mcp` in config.yaml, then tap Reload MCP."
+        title="No MCP servers."
+        text="Add one under `mcp` in config.yaml, then tap Reload MCP."
       />
       <DataTable v-else :columns="mcpColumns" :rows="mcpRows" row-key="name">
         <template #cell-status="{ row }">
           <span class="status"><span :class="'dot dot-' + row.state" />{{ row.label }}</span>
         </template>
         <template #cell-tools="{ row }">
-          {{ row.tools }}
           <details v-if="(row.names as string[]).length">
-            <summary>{{ (row.names as string[]).length }} tools</summary>
+            <summary>{{ count((row.names as string[]).length, "tool", "tools") }}</summary>
             <span v-for="n in row.names as string[]" :key="n" class="mono">{{ n }} </span>
           </details>
+          <template v-else>{{ count(row.tools as number, "tool", "tools") }}</template>
         </template>
         <template #cell-settings="{ row }">{{ (row.settings as string[]).join(" · ") }}</template>
       </DataTable>
@@ -426,8 +428,9 @@ onBeforeUnmount(() => {
         <div class="card-h"><h3>🔀 Delegation batches</h3></div>
         <div v-for="b in runtime?.batches ?? []" :key="b.id" class="li top">
           <span class="grow">
-            <b class="mono">{{ b.id }}</b>
-            <span class="c-2">{{ b.status }} · {{ b.tasks.length }} tasks</span>
+            <b class="mono">{{ b.id }}</b
+            >{{ " "
+            }}<span class="c-2">{{ b.status }} · {{ count(b.tasks.length, "task", "tasks") }}</span>
             <div v-for="(_t, i) in b.tasks" :key="i" class="li">{{ taskLine(b, i) }}</div>
             <div
               v-for="(r, i) in b.results ?? []"
@@ -438,9 +441,11 @@ onBeforeUnmount(() => {
               {{ r.error }}
             </div>
             <template v-if="batchSummary(b)">
-              <div class="batch-summary c-3 t-12" :class="{ 'clamp-3': !openSummary.has(b.id) }">
-                {{ batchSummary(b) }}
-              </div>
+              <div
+                class="batch-summary md c-3 t-12"
+                :class="{ 'clamp-3': !openSummary.has(b.id) }"
+                v-html="renderMarkdown(batchSummary(b))"
+              />
               <button
                 v-if="!openSummary.has(b.id)"
                 class="btn btn-ghost btn-sm"
@@ -478,8 +483,11 @@ onBeforeUnmount(() => {
           <span class="grow">
             <b class="mono">{{ p.pid }}</b> <code>{{ p.command }}</code>
             <div class="c-3 t-12">
-              started {{ clock(p.started)
-              }}<template v-if="p.exited"> · exit code {{ p.exit_code }}</template>
+              started
+              <span style="white-space: nowrap" :title="fullTime(p.started)">{{
+                date(p.started)
+              }}</span
+              ><template v-if="p.exited"> · exit code {{ p.exit_code }}</template>
             </div>
             <div v-if="p.tail" class="log">{{ p.tail }}</div>
           </span>

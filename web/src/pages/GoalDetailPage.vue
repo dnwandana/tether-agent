@@ -6,6 +6,7 @@ import type { GoalDetail } from "../api/types.gen"
 import { useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
 import { useLiveData } from "../lib/live"
+import { fullTime, shortTime } from "../lib/time"
 import { confirm, toast } from "../stores/ui"
 import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
@@ -42,9 +43,7 @@ function scoped(cmd: string): string {
 
 // Returns the time text, or a dash when there is no time.
 function when(s: string | null | undefined): string {
-  if (!s || s.startsWith("0001-")) return "—"
-  const t = new Date(s)
-  return Number.isNaN(t.getTime()) ? "—" : t.toLocaleString()
+  return shortTime(s) || "—"
 }
 
 const parked = computed(() => !!d.value && d.value.row.status === "active" && d.value.row.waiting)
@@ -248,7 +247,7 @@ watch(
       :text="errText"
       @action="refresh"
     />
-    <div v-else :aria-busy="stale || undefined">
+    <div v-else class="page-stack" :aria-busy="stale || undefined">
       <div class="page-h">
         <h1 class="t-20">{{ d.row.goal }}</h1>
         <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
@@ -336,18 +335,34 @@ watch(
           <div class="card-h"><h3>Times</h3></div>
           <dl class="kv">
             <dt>Last turn</dt>
-            <dd>{{ when(d.row.last_turn_at) }}</dd>
+            <dd>
+              <span style="white-space: nowrap" :title="fullTime(d.row.last_turn_at)">{{
+                when(d.row.last_turn_at)
+              }}</span>
+            </dd>
             <dt>Changed</dt>
-            <dd>{{ when(d.row.updated_at) }}</dd>
+            <dd>
+              <span style="white-space: nowrap" :title="fullTime(d.row.updated_at)">{{
+                when(d.row.updated_at)
+              }}</span>
+            </dd>
             <template v-if="parked">
               <dt>Waits on</dt>
               <dd>{{ d.row.wait_target }}</dd>
               <dt>Reason</dt>
               <dd>{{ d.waiting_reason || "—" }}</dd>
               <dt>Since</dt>
-              <dd>{{ when(d.waiting_since) }}</dd>
+              <dd>
+                <span style="white-space: nowrap" :title="fullTime(d.waiting_since)">{{
+                  when(d.waiting_since)
+                }}</span>
+              </dd>
               <dt>Ends at the latest</dt>
-              <dd>{{ when(d.waiting_until) }}</dd>
+              <dd>
+                <span style="white-space: nowrap" :title="fullTime(d.waiting_until)">{{
+                  when(d.waiting_until)
+                }}</span>
+              </dd>
             </template>
           </dl>
         </div>

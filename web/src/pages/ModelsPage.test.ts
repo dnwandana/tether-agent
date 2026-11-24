@@ -152,7 +152,7 @@ describe("ModelsPage", () => {
     w.unmount()
   })
 
-  it("shows the fallback chain as an ordered strip with the state of each entry", async () => {
+  it("shows the chain with step-state and no name that repeats the role", async () => {
     vi.mocked(api).mockResolvedValue({
       ...view,
       health: [
@@ -167,13 +167,67 @@ describe("ModelsPage", () => {
     })
     const w = await mk()
     const steps = w.findAll(".chain .chain-step")
-    expect(
-      steps.map((s) => [s.find(".role").text(), s.find(".name").text(), s.find(".state").text()]),
-    ).toEqual([
-      ["Primary", "primary", "⚠ skipped"],
-      ["Fallback 1", "backup", "✓ answers"],
+    expect(steps.map((s) => [s.find(".role").text(), s.find(".step-state").text()])).toEqual([
+      ["Primary", "⚠ skipped"],
+      ["Fallback 1", "✓ answers"],
     ])
-    expect(steps[0].find(".state").classes()).toContain("c-warn")
+    expect(steps[0].find(".name").exists()).toBe(false)
+    expect(steps[0].text().match(/primary/gi)).toHaveLength(1)
+    expect(steps[1].find(".name").text()).toBe("backup")
+    expect(steps[0].find(".state").exists()).toBe(false)
+    expect(steps[0].find(".step-state").classes()).toContain("c-warn")
+    w.unmount()
+  })
+
+  it("merges preset and format and wraps the model and the base URL", async () => {
+    const w = await mk()
+    const table = w.findAll("table")[0]
+    expect(table.findAll("th").map((t) => t.text())).toEqual([
+      "Entry",
+      "Preset · format",
+      "Model",
+      "Base URL",
+      "Vision",
+      "Context",
+      "Effort",
+      "Status",
+    ])
+    const tds = table.findAll("tbody tr")[0].findAll("td")
+    expect(tds[1].text()).toBe("zai · openai")
+    expect(tds[2].find(".mono.wrap-any").text()).toBe("glm-4.6")
+    expect(tds[3].find(".mono.wrap-any").text()).toBe("https://api.z.ai/api/paas/v4")
+    w.unmount()
+  })
+
+  it("marks an entry that no chain step and no role uses", async () => {
+    const w = await mk()
+    const trs = w.findAll("table")[0].findAll("tbody tr")
+    const chips = trs.map((tr) =>
+      tr
+        .findAll("td")[0]
+        .findAll(".chip")
+        .map((c) => c.text()),
+    )
+    expect(chips).toEqual([[], [], ["not used"]])
+    expect(trs[2].findAll("td")[0].text()).toBe("cheap not used")
+    w.unmount()
+  })
+
+  it("shows each context window in k or M", async () => {
+    vi.mocked(api).mockResolvedValue({
+      ...view,
+      entries: [
+        entry({ name: "primary" }),
+        entry({ name: "backup", context_window: 128000 }),
+        entry({ name: "big", context_window: 1048576 }),
+      ],
+    })
+    const w = await mk()
+    const ctx = w
+      .findAll("table")[0]
+      .findAll("tbody tr")
+      .map((tr) => tr.findAll("td")[5].text())
+    expect(ctx).toEqual(["200k", "128k", "1M"])
     w.unmount()
   })
 

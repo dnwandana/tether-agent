@@ -10,9 +10,17 @@ import SidePanel from "../components/SidePanel.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
-import { lastSeven } from "../lib/jobbars"
+import { costText, lastSeven, stateGlyph } from "../lib/jobbars"
 import { useLiveData } from "../lib/live"
+import { readableSchedule } from "../lib/schedule"
+import { fullTime, shortTime } from "../lib/time"
+import { host } from "../stores/host"
 import { toast } from "../stores/ui"
+
+// Returns the schedule text in the browser zone, with the raw text in the title.
+function sched(raw: string): { text: string; title: string } {
+  return readableSchedule(raw, host.zone, host.offsetMin, -new Date().getTimezoneOffset())
+}
 
 const PAGE = 10
 const route = useRoute()
@@ -42,7 +50,7 @@ const columns = [
 ]
 
 const j = computed(() => detail.value?.job)
-const done = computed(() => j.value?.icon === "✔")
+const done = computed(() => j.value?.state === "done")
 const bars = computed(() => (detail.value ? lastSeven(detail.value.last7 ?? []) : []))
 const pauseText = computed(() =>
   j.value?.pause_reason === "failures"
@@ -58,19 +66,20 @@ function usd(n: number): string {
 
 // Returns a short local time, or a dash for a zero or missing time.
 function when(s: string | undefined): string {
-  const d = new Date(s ?? "")
-  if (!s || Number.isNaN(d.getTime()) || d.getFullYear() < 2000) return "—"
-  return d.toLocaleString()
+  return shortTime(s) || "—"
 }
 
 function hhmm(s: string): string {
-  return new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+  return new Date(s).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  })
 }
 
 const firstRunText = computed(() => {
-  const d = new Date(j.value?.next_run ?? "")
-  if (Number.isNaN(d.getTime()) || d.getFullYear() < 2000) return "No runs yet."
-  return "No runs yet. The first run is at " + hhmm(j.value!.next_run) + "."
+  const t = shortTime(j.value?.next_run)
+  return t ? `No runs yet. The first run is at ${t}.` : "No runs yet."
 })
 
 const outputTitle = computed(() =>
@@ -152,11 +161,11 @@ function closeForm(): void {
       action="Retry"
       @action="refresh"
     />
-    <div v-else-if="detail && j" :aria-busy="stale || undefined">
+    <div v-else-if="detail && j" class="page-stack" :aria-busy="stale || undefined">
       <div class="page-h">
-        <h1 class="t-20">{{ j.icon }} {{ j.name }}</h1>
+        <h1 class="t-20">{{ stateGlyph[j.state] }} {{ j.name }}</h1>
         <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
-        <span v-if="done" class="chip chip-plain">done</span>
+        <span v-if="done" class="c-3">done</span>
         <template v-else>
           <button
             v-if="j.enabled"
@@ -201,7 +210,7 @@ function closeForm(): void {
           <div class="card-h"><h3>Definition</h3></div>
           <dl class="kv card-b">
             <dt>Schedule</dt>
-            <dd class="mono">{{ j.schedule }}</dd>
+            <dd :title="sched(j.schedule).title">{{ sched(j.schedule).text }}</dd>
             <template v-if="detail.no_agent">
               <dt>Script</dt>
               <dd class="mono">{{ detail.script }}</dd>
@@ -245,9 +254,18 @@ function closeForm(): void {
           <div class="card-h"><h3>Health</h3></div>
           <dl class="kv card-b">
             <dt>Last run</dt>
-            <dd>{{ when(j.last_run) }}{{ j.last_status ? ` · ${j.last_status}` : "" }}</dd>
+            <dd>
+              <span style="white-space: nowrap" :title="fullTime(j.last_run)">{{
+                when(j.last_run)
+              }}</span
+              >{{ j.last_status ? ` · ${j.last_status}` : "" }}
+            </dd>
             <dt>Next run</dt>
-            <dd>{{ when(j.next_run) }}</dd>
+            <dd>
+              <span style="white-space: nowrap" :title="fullTime(j.next_run)">{{
+                when(j.next_run)
+              }}</span>
+            </dd>
             <dt>Last 7</dt>
             <dd>
               <span class="runs7"
@@ -255,9 +273,7 @@ function closeForm(): void {
               /></span>
             </dd>
             <dt>This week</dt>
-            <dd>
-              {{ detail.week_ok }} of {{ detail.week_total }} OK · {{ usd(detail.week_cost_usd) }}
-            </dd>
+            <dd>{{ detail.week_ok }} of {{ detail.week_total }} OK · {{ costText(j) }}</dd>
             <dt>Fail streak</dt>
             <dd>
               {{ j.fail_streak

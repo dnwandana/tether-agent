@@ -44,6 +44,7 @@ import { confirm, toast, ui } from "../stores/ui"
 import FileViewer from "../components/FileViewer.vue"
 import ResultNote from "../components/ResultNote.vue"
 import SkillDetailPage from "./SkillDetailPage.vue"
+import { fullTime, shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
 const row = (o: object) => ({
@@ -344,5 +345,22 @@ describe("SkillDetailPage", () => {
     expect(w.text()).not.toContain("Guard scan")
     expect(w.text()).toContain("Not installed from a source.")
     expect(w.findAll(".page-h button").map((b) => b.text())).toEqual(["Reset"])
+  })
+
+  it("shows the install date in the shared short format", async () => {
+    const w = await mk()
+    const dd = w.find('[data-test="installed-at"]')
+    expect(dd.text()).toBe(shortTime("2026-11-02T10:00:00Z"))
+    const span = dd.find("span")
+    expect(span.attributes("title")).toBe(fullTime("2026-11-02T10:00:00Z"))
+    expect(span.attributes("style")).toContain("white-space: nowrap")
+    const upd = w.find('[data-test="updated-at"] span')
+    expect(upd.attributes("style")).toContain("white-space: nowrap")
+  })
+
+  it("shows a dash for an empty install date", async () => {
+    vi.mocked(api).mockResolvedValue(view({ installed_at: "", updated_at: "" }) as any)
+    const w = await mk()
+    expect(w.find('[data-test="installed-at"]').text()).toBe("—")
   })
 })

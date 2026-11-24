@@ -13,6 +13,7 @@ vi.mock("../stores/ui", async (importOriginal) => ({
 }))
 import { api, runCommand, ApiError } from "../api/client"
 import { toast } from "../stores/ui"
+import { shortTime } from "../lib/time"
 import JobForm from "./JobForm.vue"
 
 const field = (w: any, name: string) => w.find(`[data-field="${name}"]`)
@@ -252,7 +253,7 @@ describe("JobForm", () => {
     expect(vi.mocked(toast).mock.calls.some((x) => x[1] === "warn")).toBe(true)
   })
 
-  it("fills the pickers and the deliver placeholder", async () => {
+  it("fills the pickers, the placeholders, and the deliver hint", async () => {
     const w = mount(JobForm, { props: { job: null } })
     await flushPromises()
     expect(w.findAll("datalist option").map((o) => o.attributes("value"))).toEqual([
@@ -260,7 +261,48 @@ describe("JobForm", () => {
     ])
     expect(field(w, "skill-notes").exists()).toBe(true)
     expect(field(w, "toolset-terminal").exists()).toBe(true)
-    expect(field(w, "deliver").attributes("placeholder")).toBe("telegram:555")
+    expect(field(w, "name").attributes("placeholder")).toBe("e.g. morning-digest")
+    expect(field(w, "model").attributes("placeholder")).toBe("e.g. default")
+    expect(field(w, "deliver").attributes("placeholder")).toBeUndefined()
+    expect(w.text()).toContain("Empty sends to telegram:555.")
+  })
+
+  it("filters the skills with the search box and shows the selected skills as chips", async () => {
+    const w = mount(JobForm, { props: { job: job() } })
+    await flushPromises()
+    expect(w.findAll(".skill-chips button").map((b) => b.text())).toEqual(["github ✕"])
+    await field(w, "skill-search").setValue("NOT")
+    expect(field(w, "skill-notes").exists()).toBe(true)
+    expect(field(w, "skill-github").exists()).toBe(false)
+    await field(w, "skill-search").setValue("zzz")
+    expect(w.text()).toContain("No skill matches.")
+    await field(w, "skill-search").trigger("keydown", { key: "Enter" })
+    await flushPromises()
+    expect(posts()).toHaveLength(0)
+    await w.find(".skill-chips button").trigger("click")
+    expect(w.find(".skill-chips").exists()).toBe(false)
+    await save(w)
+    expect(api).toHaveBeenCalledWith("POST", "/api/jobs", {
+      action: "update",
+      job_id: "j2",
+      skills: [],
+    })
+  })
+
+  it("shows the next run in the short format", async () => {
+    const w = mount(JobForm, { props: { job: job() } })
+    await flushPromises()
+    expect(w.text()).toContain("Next run: " + shortTime("2026-11-24T07:00:00Z"))
+  })
+
+  it("does not show the deliver hint when the default is not known", async () => {
+    vi.mocked(api).mockImplementation(async (m: string, p: string) => {
+      if (p === "/api/brief") throw new Error("down")
+      return (m === "GET" ? gets[p] : {}) as any
+    })
+    const w = mount(JobForm, { props: { job: null } })
+    await flushPromises()
+    expect(w.text()).not.toContain("Empty sends to")
   })
 
   it("shows the tool error and stays open", async () => {

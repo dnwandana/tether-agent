@@ -52,6 +52,7 @@ import { api } from "../api/client"
 import { confirm, isSecure, toast } from "../stores/ui"
 import ResultNote from "../components/ResultNote.vue"
 import OpsPage from "./OpsPage.vue"
+import { fullTime, shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
 const local = (hh: number, mm: number) => new Date(2026, 10, 20, hh, mm).toISOString()
@@ -144,6 +145,15 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe("OpsPage", () => {
+  it("shows the backup date in the short format, on one line, with the full time in the title", async () => {
+    const w = await mk()
+    const cell = w.find(".backups tbody tr td:nth-child(3) span")
+    expect(cell.text()).toBe(shortTime(oldFile.modified))
+    expect(cell.text()).toContain("09:00")
+    expect(cell.attributes("title")).toBe(fullTime(oldFile.modified))
+    expect(cell.attributes("style")).toContain("white-space: nowrap")
+  })
+
   it("shows the masked config and filters it by a top-level key", async () => {
     const w = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/config")

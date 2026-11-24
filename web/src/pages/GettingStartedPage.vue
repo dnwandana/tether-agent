@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue"
+import { computed, ref } from "vue"
 import { useRouter } from "vue-router"
 import { api } from "../api/client"
 import type { SetupStep } from "../api/types.gen"
@@ -14,6 +14,7 @@ const router = useRouter()
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const steps = ref<SetupStep[]>([])
+const unknownCount = computed(() => steps.value.filter((s) => s.state === "unknown").length)
 const helpOpen = ref(false)
 const host = location.hostname
 
@@ -88,48 +89,50 @@ async function copy(text: string): Promise<void> {
       @action="load"
     />
     <StateBlock v-else-if="steps.length === 0" state="empty" text="No setup steps" />
-    <div v-else class="card list">
-      <div v-for="(s, i) in steps" :key="s.name" class="li top">
-        <span class="lead step" :class="mark(s, i).cls"
-          ><span class="n">{{ mark(s, i).text }}</span></span
+    <template v-else>
+      <div v-if="unknownCount > 0" class="toolbar">
+        <span class="c-2"
+          >{{ unknownCount }} {{ unknownCount === 1 ? "step has" : "steps have" }} no doctor
+          result.</span
         >
-        <span class="grow">
-          <b>{{ s.name }}</b> <span class="c-2">{{ s.detail }}</span>
-          <template v-if="s.state === 'open'">
-            <br />
-            <button v-if="s.name === 'HTTPS'" class="link" type="button" @click="helpOpen = true">
-              How to turn on HTTPS
-            </button>
-          </template>
-        </span>
-        <button
-          v-if="s.state === 'unknown'"
-          class="btn btn-secondary"
-          type="button"
-          :disabled="busy"
-          @click="runDoctor"
-        >
+        <button class="btn btn-secondary" type="button" :disabled="busy" @click="runDoctor">
           Run doctor
         </button>
-        <template v-else-if="s.state === 'open' && s.command">
-          <code>{{ s.command }}</code>
-          <button
-            v-if="isSecure()"
-            class="btn btn-secondary"
-            type="button"
-            @click="copy(s.command)"
-          >
-            Copy
-          </button>
-          <p v-else class="t-12 c-3">
-            Copy needs HTTPS or localhost.
-            <button class="link" type="button" @click="helpOpen = true">
-              How to turn on HTTPS
-            </button>
-          </p>
-        </template>
       </div>
-    </div>
+      <div class="card list">
+        <div v-for="(s, i) in steps" :key="s.name" class="li top">
+          <span class="lead step" :class="mark(s, i).cls"
+            ><span class="n">{{ mark(s, i).text }}</span></span
+          >
+          <span class="grow">
+            <b>{{ s.name }}</b> <span class="c-2">{{ s.detail }}</span>
+            <template v-if="s.state === 'open'">
+              <br />
+              <button v-if="s.name === 'HTTPS'" class="link" type="button" @click="helpOpen = true">
+                How to turn on HTTPS
+              </button>
+            </template>
+          </span>
+          <template v-if="s.state === 'open' && s.command">
+            <code>{{ s.command }}</code>
+            <button
+              v-if="isSecure()"
+              class="btn btn-secondary"
+              type="button"
+              @click="copy(s.command)"
+            >
+              Copy
+            </button>
+            <p v-else-if="s.name !== 'HTTPS'" class="t-12 c-3">
+              Copy needs HTTPS or localhost.
+              <button class="link" type="button" @click="helpOpen = true">
+                How to turn on HTTPS
+              </button>
+            </p>
+          </template>
+        </div>
+      </div>
+    </template>
 
     <SidePanel :open="helpOpen" title="Turn on HTTPS" @close="helpOpen = false">
       <p>

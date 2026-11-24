@@ -12,6 +12,7 @@ vi.mock("../stores/ui", () => ({ toast: vi.fn(), confirm: vi.fn() }))
 import { api, setSessionHeader } from "../api/client"
 import { confirm, toast } from "../stores/ui"
 import DevicesTable from "./DevicesTable.vue"
+import { fullTime, shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
 const devices = [
@@ -81,7 +82,9 @@ describe("DevicesTable", () => {
   it("revokes another device after a confirm", async () => {
     const { w } = await mk()
     await btns(w, "Sign out")[1].trigger("click")
-    await flushPromises()
+    // The revoke waits for the confirm and then for the API call. Wait for the last step, so
+    // the test does not depend on the number of microtask turns.
+    await vi.waitFor(() => expect(toast).toHaveBeenCalledWith("Signed out Pixel 8."))
     expect(confirm).toHaveBeenCalledWith({
       title: "Sign out Pixel 8?",
       body: "Chrome on Android at 10.8.0.5 must ask for access again.",
@@ -89,7 +92,6 @@ describe("DevicesTable", () => {
       danger: true,
     })
     expect(api).toHaveBeenCalledWith("POST", "/api/devices/d2/revoke")
-    expect(toast).toHaveBeenCalledWith("Signed out Pixel 8.")
   })
 
   it("signs this device out and goes to the sign-in page", async () => {
@@ -137,5 +139,30 @@ describe("DevicesTable", () => {
     e.w.findComponent({ name: "StateBlock" }).vm.$emit("action")
     await flushPromises()
     expect(e.w.text()).toContain("10.8.0.5")
+  })
+
+  it("shows the user agent in the Device cell, a spaced chip, and no Browser column", async () => {
+    const { w } = await mk()
+    expect(w.findAll("th").map((t) => t.text())).not.toContain("Browser")
+    const first = w.findAll("tbody tr")[0].findAll("td")
+    expect(first[0].text()).toContain("Laptop This device")
+    expect(first[0].find("details summary").text()).toBe("Firefox on Linux")
+    expect(first[0].find("details").text()).toContain("Firefox/133.0")
+  })
+
+  it("shows a dash for a sign-in time that is not known", async () => {
+    vi.mocked(api).mockImplementation(
+      async (m: string) =>
+        (m === "GET" ? [{ ...devices[0], created: "0001-01-01T00:00:00Z" }] : {}) as any,
+    )
+    const { w } = await mk()
+    expect(w.findAll("tbody tr")[0].findAll("td")[2].find("span").text()).toBe("—")
+  })
+
+  it("shows the sign-in time in the short form with the full time in the tooltip", async () => {
+    const { w } = await mk()
+    const cell = w.findAll("tbody tr")[0].findAll("td")[2].find("span")
+    expect(cell.text()).toBe(shortTime("2026-11-20T09:12:00Z"))
+    expect(cell.attributes("title")).toBe(fullTime("2026-11-20T09:12:00Z"))
   })
 })

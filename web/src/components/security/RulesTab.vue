@@ -41,14 +41,14 @@ const mcpCols = [
 </script>
 
 <template>
-  <div>
+  <div class="page-stack">
     <div class="card card-pad">
       <h3 class="h">Process mode</h3>
       <p class="t-12 c-3">Set in <code>approvals.mode</code>.</p>
       <ul class="list">
         <li v-for="[k, text] in PROCESS" :key="k">
           <code>{{ k }}</code>
-          <span v-if="k === processMode" class="chip chip-acc">now</span>
+          {{ " " }}<span v-if="k === processMode" class="chip chip-acc">now</span>
           {{ text }}
         </li>
       </ul>
@@ -59,16 +59,20 @@ const mcpCols = [
       <ul class="list">
         <li v-for="[k, text] in CRON" :key="k">
           <code>{{ k }}</code>
-          <span v-if="k === cronMode" class="chip chip-acc">now</span>
+          {{ " " }}<span v-if="k === cronMode" class="chip chip-acc">now</span>
           {{ text }}
         </li>
       </ul>
     </div>
     <div class="card card-pad">
       <h3 class="h">Protected paths</h3>
-      <div v-if="fixed.protected_paths.length" class="code-block">
-        {{ fixed.protected_paths.join("\n") }}
-      </div>
+      <details v-if="fixed.protected_paths.length">
+        <summary>
+          {{ fixed.protected_paths.length }}
+          {{ fixed.protected_paths.length === 1 ? "path" : "paths" }}
+        </summary>
+        <div class="code-block">{{ fixed.protected_paths.join("\n") }}</div>
+      </details>
       <p v-else class="c-3">None.</p>
     </div>
     <div class="card card-pad">

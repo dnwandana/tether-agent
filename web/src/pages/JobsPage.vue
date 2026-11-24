@@ -10,8 +10,11 @@ import SidePanel from "../components/SidePanel.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { replyKind, useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
-import { lastSeven } from "../lib/jobbars"
+import { costText, lastSeven, stateGlyph, type Bar } from "../lib/jobbars"
 import { useLiveData } from "../lib/live"
+import { readableSchedule } from "../lib/schedule"
+import { fullTime, shortTime } from "../lib/time"
+import { host } from "../stores/host"
 import { confirm, toast } from "../stores/ui"
 
 const router = useRouter()
@@ -28,7 +31,7 @@ const columns = [
   { key: "schedule", label: "Schedule" },
   { key: "next_run", label: "Next run" },
   { key: "runs7", label: "Last 7" },
-  { key: "last_cost", label: "Last cost", align: "right" as const },
+  { key: "cost_7d", label: "Cost · 7 d", align: "right" as const },
   { key: "actions", label: "" },
 ]
 
@@ -41,15 +44,18 @@ const kindIcon: Record<string, string> = {
   cost: "💸",
 }
 
+// Returns the schedule text in the browser zone, with the raw text in the title.
+function sched(raw: string): { text: string; title: string } {
+  return readableSchedule(raw, host.zone, host.offsetMin, -new Date().getTimezoneOffset())
+}
+
 function usd(n: number): string {
   return "$" + n.toFixed(4)
 }
 
 // Returns a short local time, or a dash for a zero or missing time.
 function when(s: string): string {
-  const d = new Date(s)
-  if (!s || Number.isNaN(d.getTime()) || d.getFullYear() < 2000) return "—"
-  return d.toLocaleString()
+  return shortTime(s) || "—"
 }
 
 function age(sec: number): string {
@@ -65,11 +71,12 @@ function heldAge(s: string): string {
 }
 
 // Returns one bar class for each of the newest 7 runs. JobRow.last7 is oldest first.
-function barsOf(j: JobRow): ("ok" | "bad" | "none")[] {
+function barsOf(j: JobRow): Bar[] {
   return lastSeven([...(j.last7 ?? [])].reverse().map((status) => ({ status }) as RunRow))
 }
 
-function okCount(j: JobRow): number {
+// Returns the count of runs with the status "ok" in the newest 7 runs.
+function okOf(j: JobRow): number {
   return (j.last7 ?? []).slice(-7).filter((st) => st === "ok").length
 }
 
@@ -150,7 +157,7 @@ async function saved(): Promise<void> {
       action="Retry"
       @action="refresh"
     />
-    <div v-else :aria-busy="stale || undefined">
+    <div v-else class="page-stack" :aria-busy="stale || undefined">
       <div v-if="brief" class="card">
         <div class="card-h">
           <h3>Brief</h3>
@@ -198,20 +205,30 @@ async function saved(): Promise<void> {
         row-key="id"
       >
         <template #cell-name="{ row }">
-          <span aria-hidden="true">{{ (row as unknown as JobRow).icon }}</span>
-          <router-link :to="{ name: 'job', params: { id: (row as unknown as JobRow).id } }">{{
+          <span aria-hidden="true">{{ stateGlyph[(row as unknown as JobRow).state] }}</span>
+          {{ " "
+          }}<router-link :to="{ name: 'job', params: { id: (row as unknown as JobRow).id } }">{{
             (row as unknown as JobRow).name
           }}</router-link>
-          <span v-if="(row as unknown as JobRow).watch" class="chip chip-info">watch</span>
+          {{ " " }}<span v-if="(row as unknown as JobRow).watch" class="chip chip-info">watch</span>
         </template>
         <template #cell-schedule="{ row }"
-          ><span class="mono">{{ (row as unknown as JobRow).schedule }}</span></template
+          ><span :title="sched((row as unknown as JobRow).schedule).title">{{
+            sched((row as unknown as JobRow).schedule).text
+          }}</span></template
         >
-        <template #cell-next_run="{ row }">{{
-          when((row as unknown as JobRow).next_run)
-        }}</template>
+        <template #cell-next_run="{ row }"
+          ><span
+            style="white-space: nowrap"
+            :title="fullTime((row as unknown as JobRow).next_run)"
+            >{{ when((row as unknown as JobRow).next_run) }}</span
+          ></template
+        >
         <template #cell-runs7="{ row }">
           <span v-if="(row as unknown as JobRow).history_off" class="c-3">—</span>
+          <span v-else-if="((row as unknown as JobRow).last7 ?? []).length === 0" class="c-3 t-12"
+            >No runs</span
+          >
           <template v-else>
             <span class="runs7"
               ><i
@@ -219,18 +236,20 @@ async function saved(): Promise<void> {
                 :key="n"
                 :class="b === 'ok' ? '' : b"
             /></span>
-            {{ " " }}<span class="c-2 t-12">{{ okCount(row as unknown as JobRow) }}/7 ok</span>
+            {{ " "
+            }}<span class="c-2 t-12"
+              >{{ okOf(row as unknown as JobRow) }}/{{
+                ((row as unknown as JobRow).last7 ?? []).length
+              }}
+              ok</span
+            >
           </template>
         </template>
-        <template #cell-last_cost="{ row }">
-          {{
-            (row as unknown as JobRow).last_cost_known
-              ? usd((row as unknown as JobRow).last_cost_usd)
-              : "—"
-          }}
+        <template #cell-cost_7d="{ row }">
+          {{ costText(row as unknown as JobRow) }}
         </template>
         <template #cell-actions="{ row }">
-          <span v-if="(row as unknown as JobRow).icon === '✔'" class="chip chip-plain">done</span>
+          <span v-if="(row as unknown as JobRow).state === 'done'" class="c-3">done</span>
           <template v-else>
             <button
               v-if="(row as unknown as JobRow).enabled"

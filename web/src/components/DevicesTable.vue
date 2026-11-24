@@ -5,6 +5,7 @@ import { useRouter } from "vue-router"
 import { api, setSessionHeader } from "../api/client"
 import type { DeviceRow } from "../api/types.gen"
 import { friendlyError } from "../lib/errors"
+import { fullTime, shortTime } from "../lib/time"
 import { confirm, toast } from "../stores/ui"
 import DataTable from "./DataTable.vue"
 import StateBlock from "./StateBlock.vue"
@@ -17,7 +18,6 @@ const now = ref(Date.now())
 
 const columns = [
   { key: "label", label: "Device" },
-  { key: "browser", label: "Browser" },
   { key: "ip", label: "IP" },
   { key: "created", label: "Signed in" },
   { key: "last_seen", label: "Last seen" },
@@ -27,20 +27,6 @@ const columns = [
 
 const others = computed(() => devices.value.filter((d) => !d.this_device).length)
 const rows = computed(() => devices.value as unknown as Record<string, unknown>[])
-
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-// Pads a number to two digits.
-function pad2(n: number): string {
-  return String(n).padStart(2, "0")
-}
-
-// Formats a time as "Nov 20 09:12" in the local zone.
-function stamp(iso: string): string {
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ""
-  return `${MONTHS[d.getMonth()]} ${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-}
 
 // Formats a past time as "now", "12 min ago", or "9 h ago".
 function ago(iso: string, at: number): string {
@@ -156,23 +142,26 @@ onMounted(load)
           <rect x="3" y="5" width="18" height="12" rx="2" />
           <path d="M8 21h8M12 17v4" />
         </svg>
-        <b>{{ (row as unknown as DeviceRow).label }}</b>
-        <span v-if="(row as unknown as DeviceRow).this_device" class="chip chip-acc"
+        <b>{{ (row as unknown as DeviceRow).label }}</b
+        >{{ " "
+        }}<span v-if="(row as unknown as DeviceRow).this_device" class="chip chip-acc"
           >This device</span
         >
-      </template>
-      <template #cell-browser="{ row }"
-        ><details>
+        <details>
           <summary>{{ deviceLabel((row as unknown as DeviceRow).browser) }}</summary>
           <span class="mono t-12">{{ (row as unknown as DeviceRow).browser }}</span>
-        </details></template
-      >
+        </details>
+      </template>
       <template #cell-ip="{ row }"
         ><span class="mono">{{ (row as unknown as DeviceRow).ip }}</span></template
       >
-      <template #cell-created="{ row }">{{
-        stamp((row as unknown as DeviceRow).created)
-      }}</template>
+      <template #cell-created="{ row }"
+        ><span
+          style="white-space: nowrap"
+          :title="fullTime((row as unknown as DeviceRow).created)"
+          >{{ shortTime((row as unknown as DeviceRow).created) || "—" }}</span
+        ></template
+      >
       <template #cell-last_seen="{ row }">{{
         ago((row as unknown as DeviceRow).last_seen, now)
       }}</template>

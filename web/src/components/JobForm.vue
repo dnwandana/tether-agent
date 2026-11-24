@@ -5,6 +5,7 @@ import type { JobDetail } from "../api/types.gen"
 import { replyKind } from "../lib/command"
 import { friendlyError } from "../lib/errors"
 import { useDirty } from "../lib/dirty"
+import { shortTime } from "../lib/time"
 import { toast } from "../stores/ui"
 
 const props = defineProps<{ job: JobDetail | null }>()
@@ -64,6 +65,18 @@ const models = ref<string[]>([])
 const skillNames = ref<string[]>([])
 const toolsetNames = ref<string[]>([])
 const defaultDeliver = ref("")
+const skillQuery = ref("")
+
+// Returns the skills whose name holds the search text, in any letter case.
+const shownSkills = computed(() => {
+  const q = skillQuery.value.trim().toLowerCase()
+  return q ? skillNames.value.filter((s) => s.toLowerCase().includes(q)) : skillNames.value
+})
+
+// Removes one skill from the selected skills.
+function removeSkill(s: string): void {
+  f.skills = f.skills.filter((x) => x !== s)
+}
 
 const efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 
@@ -126,12 +139,9 @@ function nextRunOf(text: string): string {
   return m && m[1] !== "none" ? m[1] : ""
 }
 
-// Returns a local time text, or a dash for a zero or bad time.
+// Returns the short local time, or a dash for a zero or bad time.
 function when(iso: string | undefined): string {
-  if (!iso) return "—"
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime()) || d.getFullYear() < 1971) return "—"
-  return d.toLocaleString()
+  return shortTime(iso) || "—"
 }
 
 async function save(): Promise<void> {
@@ -223,7 +233,7 @@ onMounted(async () => {
         v-model="f.name"
         class="input"
         data-field="name"
-        placeholder="morning-digest"
+        placeholder="e.g. morning-digest"
       />
       <span v-if="errors.name" class="t-12 c-bad">{{ errors.name }}</span>
     </div>
@@ -278,13 +288,8 @@ onMounted(async () => {
     </div>
     <div class="field">
       <label for="jf-deliver">Deliver to</label>
-      <input
-        id="jf-deliver"
-        v-model="f.deliver"
-        class="input"
-        data-field="deliver"
-        :placeholder="defaultDeliver || 'origin'"
-      />
+      <input id="jf-deliver" v-model="f.deliver" class="input" data-field="deliver" />
+      <span v-if="defaultDeliver" class="t-12 c-3">Empty sends to {{ defaultDeliver }}.</span>
     </div>
     <div class="field">
       <label for="jf-model">Model</label>
@@ -294,7 +299,7 @@ onMounted(async () => {
         class="input"
         data-field="model"
         list="jf-models"
-        placeholder="default"
+        placeholder="e.g. default"
       />
       <datalist id="jf-models">
         <option v-for="m in models" :key="m" :value="m" />
@@ -325,10 +330,39 @@ onMounted(async () => {
     >
     <fieldset class="field" style="border: 0; padding: 0; margin: 0">
       <legend>Skills</legend>
-      <label v-for="s in skillNames" :key="s" class="check"
+      <div
+        v-if="f.skills.length"
+        class="skill-chips"
+        style="display: flex; flex-wrap: wrap; gap: 6px"
+      >
+        <button
+          v-for="s in f.skills"
+          :key="s"
+          type="button"
+          class="chip chip-plain"
+          :aria-label="`Remove ${s}`"
+          @click="removeSkill(s)"
+        >
+          {{ s }} ✕
+        </button>
+      </div>
+      <input
+        v-if="skillNames.length > 0"
+        v-model="skillQuery"
+        class="input"
+        type="search"
+        data-field="skill-search"
+        placeholder="Search skills"
+        aria-label="Search skills"
+        @keydown.enter.prevent
+      />
+      <label v-for="s in shownSkills" :key="s" class="check"
         ><input v-model="f.skills" type="checkbox" :value="s" :data-field="'skill-' + s" />{{
           s
         }}</label
+      >
+      <span v-if="skillNames.length > 0 && shownSkills.length === 0" class="t-12 c-3"
+        >No skill matches.</span
       >
       <span v-if="skillNames.length === 0" class="t-12 c-3">No skills installed.</span>
     </fieldset>

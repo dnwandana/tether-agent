@@ -9,6 +9,7 @@ vi.mock("../../api/client", async (importOriginal) => ({
 }))
 import { api } from "../../api/client"
 import ApprovalLog from "./ApprovalLog.vue"
+import { fullTime, shortTime } from "../../lib/time"
 
 const Blank = { render: () => null }
 const entry = (o: object) => ({
@@ -20,7 +21,8 @@ const entry = (o: object) => ({
   tool: "terminal",
   server: "",
   tool_name: "",
-  rule: "recursive delete",
+  rule: "rm_recursive",
+  rule_description: "recursive delete",
   class: "",
   decision: "allowed",
   source: "owner",
@@ -59,7 +61,10 @@ async function mk(path = "/security?tab=log") {
   })
   await router.push(path)
   const w = mount(ApprovalLog, {
-    props: { scopes: ["dashboard", "telegram:-100:7"] },
+    props: {
+      scopes: ["dashboard", "telegram:-100:7"],
+      scopeLabels: { dashboard: "Dashboard", "telegram:-100:7": "Telegram › Ops › topic 7" },
+    },
     global: { plugins: [router], stubs: { teleport: true } },
   })
   await flushPromises()
@@ -143,11 +148,72 @@ describe("ApprovalLog", () => {
     ])
   })
 
-  it("shows the scope label, the session link, and the MCP column", async () => {
+  it("shows the scope labels in the select and keeps the keys as the values", async () => {
+    const w = await mk("/security?tab=log&scope=cli")
+    const opts = w.find("select[aria-label='Scope']").findAll("option")
+    expect(opts.map((o) => o.text())).toEqual([
+      "All scopes",
+      "cli",
+      "Dashboard",
+      "Telegram › Ops › topic 7",
+    ])
+    expect(opts.map((o) => o.attributes("value"))).toEqual([
+      "",
+      "cli",
+      "dashboard",
+      "telegram:-100:7",
+    ])
+  })
+
+  it("shows the main columns and moves the session and the MCP tool to the details", async () => {
     const w = await mk()
-    expect(w.text()).toContain("Telegram › Ops › topic 7")
-    expect(w.find("a[href='/sessions/0123456789abcdef012']").exists()).toBe(true)
-    expect(w.text()).toContain("gmail · send_message")
+    expect(w.findAll("th").map((t) => t.text())).toEqual([
+      "Time",
+      "Scope",
+      "Tool",
+      "Rule",
+      "Decision",
+      "Answer",
+      "Preview",
+    ])
+    expect(w.find("table a[href='/sessions/0123456789abcdef012']").exists()).toBe(false)
+    await w.findAll("tbody tr")[0].trigger("click")
+    expect(w.find(".log-detail a[href='/sessions/0123456789abcdef012']").exists()).toBe(true)
+    await w.findAll("tbody tr")[1].trigger("click")
+    expect(w.find(".log-detail").text()).toContain("gmail")
+    expect(w.find(".log-detail").text()).toContain("send_message")
+  })
+
+  it("shows the rule description with the rule id in the tooltip", async () => {
+    const w = await mk()
+    const rule = w.findAll("tbody tr")[0].findAll("td")[3].find("span")
+    expect(rule.text()).toBe("recursive delete")
+    expect(rule.attributes("title")).toBe("rm_recursive")
+  })
+
+  it("shows a short time on one line and the scope label in bdi", async () => {
+    const w = await mk()
+    const tds = w.findAll("tbody tr")[1].findAll("td")
+    const at = tds[0].find("span")
+    expect(at.text()).toBe(shortTime("2026-11-20T14:05:00Z"))
+    expect(at.attributes("title")).toBe(fullTime("2026-11-20T14:05:00Z"))
+    expect(at.attributes("style")).toContain("white-space: nowrap")
+    const bdi = tds[1].find("bdi")
+    expect(bdi.text()).toBe("Telegram › Ops › topic 7")
+    expect(bdi.attributes("title")).toBe("Telegram › Ops › topic 7")
+  })
+
+  it("shows a dash for a time that is not known", async () => {
+    vi.mocked(api).mockResolvedValue({ ...logPage, rows: [entry({ at: "" })] })
+    const w = await mk()
+    expect(w.findAll("tbody tr")[0].findAll("td")[0].find("span").text()).toBe("—")
+  })
+
+  it("lets the search box grow in the toolbar", async () => {
+    const w = await mk()
+    const q = w.find("input[type='search']")
+    expect(q.classes()).toEqual(expect.arrayContaining(["input", "grow-search"]))
+    expect(q.element.parentElement!.classList.contains("toolbar")).toBe(true)
   })
 
   it("opens the detail of a row", async () => {

@@ -16,6 +16,7 @@ import { emitEvents } from "../lib/bus"
 import { api, runCommand } from "../api/client"
 import { confirm } from "../stores/ui"
 import { session } from "../stores/session"
+import { fullTime, shortTime } from "../lib/time"
 import GoalsPage from "./GoalsPage.vue"
 
 const Blank = { render: () => null }
@@ -126,12 +127,43 @@ describe("GoalsPage", () => {
     expect(runCommand).not.toHaveBeenCalled()
   })
 
-  it("shows the finished goals with the label", async () => {
+  it("shows one control for the open filters and the finished goals", async () => {
     const { w } = await mk()
-    await btn(w, "Finished · 30 days")!.trigger("click")
+    expect(w.findAll(".seg")).toHaveLength(1)
+    expect(w.findAll(".seg button").map((b: any) => b.text())).toEqual([
+      "All open",
+      "Active",
+      "Parked",
+      "Paused",
+      "Finished (30 d)",
+    ])
+    await btn(w, "Finished (30 d)")!.trigger("click")
     await flushPromises()
     expect(api).toHaveBeenLastCalledWith("GET", "/api/goals?finished=1")
+    expect(btn(w, "Finished (30 d)")!.attributes("aria-pressed")).toBe("true")
     expect(w.text()).toContain("Last goal of each session")
+    await btn(w, "Parked")!.trigger("click")
+    await flushPromises()
+    expect(api).toHaveBeenLastCalledWith("GET", "/api/goals")
+    expect(w.text()).not.toContain("Last goal of each session")
+    expect(w.text()).toContain("Migrate photos")
+    expect(w.text()).not.toContain("Ship v0.24")
+  })
+
+  it("does not load again for a filter of the open goals", async () => {
+    const { w } = await mk()
+    vi.mocked(api).mockClear()
+    await btn(w, "Active")!.trigger("click")
+    await flushPromises()
+    expect(api).not.toHaveBeenCalled()
+  })
+
+  it("shows the last turn in the short format inside a page stack", async () => {
+    const { w } = await mk()
+    expect(w.find(".page-stack").exists()).toBe(true)
+    const cell = rowOf(w, "Ship v0.24").find(`[title="${fullTime("2026-11-20T09:30:00Z")}"]`)
+    expect(cell.text()).toBe(shortTime("2026-11-20T09:30:00Z"))
+    expect(rowOf(w, "Migrate photos").text()).toContain("—")
   })
 
   it("shows the Last verdict and Last turn columns", async () => {

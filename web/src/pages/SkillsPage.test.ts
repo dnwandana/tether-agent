@@ -156,6 +156,42 @@ beforeEach(() => {
 })
 
 describe("SkillsPage", () => {
+  it("shows the trust agent-created as local and clamps a long description", async () => {
+    const long = "Writes the release notes of the repository. ".repeat(12).trim()
+    rowsOf = [
+      skill({
+        name: "my-notes",
+        trust: "agent-created",
+        description: long,
+        actions: ["uninstall"],
+      }),
+    ]
+    const w = await mk()
+    const row = w.findAll("tr").find((r) => r.text().includes("my-notes"))!
+    expect(row.find(".chip-info").text()).toBe("local")
+    expect(row.text()).not.toContain("agent-created")
+    expect(row.find(".clamp-3").attributes("title")).toBe(long)
+  })
+
+  it("shows a catalog source trust agent-created as local and clamps the description", async () => {
+    const long = "Syncs the forks of the owner. ".repeat(12).trim()
+    catalogOf = [
+      {
+        name: "own-sync",
+        description: long,
+        url: "github.com/a/own-sync",
+        installed: false,
+        verdict: "",
+        source_trust: "agent-created",
+      },
+    ]
+    const w = await mk("/skills?tab=catalog")
+    const row = w.findAll("tr").find((r) => r.text().includes("own-sync"))!
+    expect(row.find(".chip-info").text()).toBe("local")
+    expect(row.text()).not.toContain("agent-created")
+    expect(row.find(".clamp-3").attributes("title")).toBe(long)
+  })
+
   it("shows the error text of a failed task in a result note", async () => {
     const w = await mk("/skills?tab=catalog")
     await btns(w, "Install")[0].trigger("click")

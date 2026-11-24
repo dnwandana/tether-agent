@@ -13,6 +13,7 @@ import ResultNote from "../components/ResultNote.vue"
 import StateBlock from "../components/StateBlock.vue"
 import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
+import { fullTime, shortTime } from "../lib/time"
 import { useCommand, type ResultNoteData } from "../lib/command"
 import { useLiveData } from "../lib/live"
 import { confirm } from "../stores/ui"
@@ -39,21 +40,6 @@ const MODE_LABEL: Record<string, string> = {
   guarded: "🛡 Guarded",
   full: "⚡ Full",
 }
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-
-// Pads a number to two digits.
-function pad2(n: number): string {
-  return String(n).padStart(2, "0")
-}
-
-// Formats a time as "Nov 20 09:12". A zero time gives an empty text.
-function stamp(iso: string | undefined): string {
-  if (!iso) return ""
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime()) || d.getFullYear() < 1971) return ""
-  return `${MONTHS[d.getMonth()]} ${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-}
-
 async function load(): Promise<void> {
   try {
     view.value = await api<SecurityView>("GET", "/api/security")
@@ -171,16 +157,19 @@ const tabModel = computed({
         <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @action="refresh" />
         <template v-else-if="view">
           <!-- Modes -->
-          <div v-if="tab === 'modes'">
+          <div v-if="tab === 'modes'" class="page-stack">
             <DataTable :columns="modeCols" :rows="modeRows" row-key="scope">
               <template #cell-scope="{ row }">
-                {{ row.scope_label || row.scope }}
+                <bdi class="cell-title" :title="String(row.scope_label || row.scope)">{{
+                  row.scope_label || row.scope
+                }}</bdi
+                >{{ " " }}
                 <span v-if="row.dashboard" class="chip chip-acc">this dashboard</span>
               </template>
               <template #cell-mode="{ row }">
                 {{ MODE_LABEL[row.mode as string] ?? row.mode
-                }}<template v-if="stamp(row.set_at as string)">
-                  · since {{ stamp(row.set_at as string) }}</template
+                }}<template v-if="shortTime(row.set_at as string)">
+                  · since {{ shortTime(row.set_at as string) }}</template
                 >
               </template>
               <template #cell-actions="{ row }">
@@ -219,13 +208,19 @@ const tabModel = computed({
               </template>
             </DataTable>
             <ResultNote :note="modesNote" @close="modesNote = null" />
-            <div class="card card-pad">
-              <b>Process mode</b> <span class="chip chip-plain">{{ view.process_mode }}</span>
-              <div>Set in <code>approvals.mode</code>.</div>
-            </div>
-            <div class="card card-pad">
-              <b>Cron mode</b> <span class="chip chip-plain">{{ view.cron_mode }}</span>
-              <div>Set in <code>approvals.cron_mode</code>.</div>
+            <div class="card card-pad fixed-modes">
+              <p>
+                Process mode: <code>{{ view.process_mode }}</code>
+              </p>
+              <p>
+                Cron mode: <code>{{ view.cron_mode }}</code>
+              </p>
+              <p class="t-12 c-3">
+                Set in config.yaml.
+                <button type="button" class="link" @click="setTab('rules')">
+                  What each mode does
+                </button>
+              </p>
             </div>
           </div>
 
@@ -267,7 +262,11 @@ const tabModel = computed({
                 <template #cell-mcp="{ row }">{{
                   [row.server, row.tool_name].filter(Boolean).join(" · ")
                 }}</template>
-                <template #cell-created="{ row }">{{ stamp(row.created as string) }}</template>
+                <template #cell-created="{ row }"
+                  ><span style="white-space: nowrap" :title="fullTime(row.created as string)">{{
+                    shortTime(row.created as string)
+                  }}</span></template
+                >
                 <template #cell-actions="{ row }">
                   <button
                     class="btn btn-danger-soft btn-sm"
@@ -304,7 +303,11 @@ const tabModel = computed({
           </div>
 
           <!-- Approval log -->
-          <ApprovalLog v-else-if="tab === 'log'" :scopes="view.log_scopes ?? []" />
+          <ApprovalLog
+            v-else-if="tab === 'log'"
+            :scopes="view.log_scopes ?? []"
+            :scope-labels="view.log_scope_labels ?? {}"
+          />
 
           <SecretsTab v-else-if="tab === 'secrets'" :secrets="view.secrets" @changed="refresh" />
 

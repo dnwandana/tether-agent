@@ -67,6 +67,8 @@ const usage = {
 }
 const daily = {
   range: "30d",
+  from: "2026-11-19",
+  to: "2026-11-20",
   days: [
     { day: "2026-11-19", model: "glm-4.6", usd: 0.5, unpriced: false, in: 1, out: 1 },
     { day: "2026-11-19", model: "deepseek-chat", usd: 0.25, unpriced: true, in: 1, out: 1 },
@@ -75,7 +77,7 @@ const daily = {
 }
 const cron = {
   range: "30d",
-  jobs: [{ job_id: "j1", job_name: "nightly-backup", usd: 0.312 }],
+  jobs: [{ job_id: "j1", job_name: "nightly-backup", usd: 0.312, unpriced: false }],
   flagged: [
     { job_id: "j1", job_name: "nightly-backup", at: "2026-11-19T01:00:00Z", usd: 0.9, median: 0.3 },
   ],
@@ -111,6 +113,16 @@ const dayRow = (model: string, usd: number) => ({
   out: 1,
 })
 const d = (day: string) => ({ day, model: "m", usd: 1, unpriced: false, in: 1, out: 1 })
+const labels = (w: any) => w.findAll(".axis-x span").map((s: any) => s.text())
+const ticks = (w: any) => w.findAll(".axis-y span").map((s: any) => s.text())
+const shown = (w: any) => w.findAll(".axis-x span").filter((s: any) => s.text() !== "")
+const one = (usd: number) => ({
+  range: "30d",
+  from: "2026-11-19",
+  to: "2026-11-19",
+  days: [{ ...dayRow("m", usd) }],
+})
+let cb: (e: { contentRect: { width: number } }[]) => void = () => {}
 const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
 
 beforeEach(() => {
@@ -180,7 +192,6 @@ describe("UsagePage", () => {
     const w = await mk()
     const bars = w.findAll(".sbar")
     expect(bars).toHaveLength(2)
-    expect(bars[0].attributes("title")).toBe("2026-11-19: $0.7500 (+ unpriced calls)")
     expect(bars[0].findAll("i").map((i) => i.attributes("style"))).toEqual([
       "height: 50%;",
       "height: 25%;",
@@ -203,7 +214,7 @@ describe("UsagePage", () => {
     vi.mocked(api).mockImplementation(
       async (_m: string, p: string) =>
         (p.startsWith("/api/usage/daily")
-          ? { range: "today", days: [] }
+          ? { range: "today", from: "", to: "", days: [] }
           : p.startsWith("/api/usage/cron")
             ? { range: "today", jobs: [], flagged: [] }
             : { ...usage, rows: [] }) as any,
@@ -218,6 +229,8 @@ describe("UsagePage", () => {
   it("groups the models after the 5th as Other with six series classes", async () => {
     reply({
       range: "30d",
+      from: "2026-11-19",
+      to: "2026-11-19",
       days: ["a", "b", "c", "d", "e", "f", "g"].map((m, i) => dayRow(m, 7 - i)),
     })
     const w = await mk()
@@ -232,12 +245,12 @@ describe("UsagePage", () => {
     expect(w.find(".sbar").findAll("i.s6")).toHaveLength(1)
   })
 
-  it("puts the dates on the x-axis and makes each bar focusable", async () => {
+  it("puts the dates on the x-axis and makes each bar a button", async () => {
     const w = await mk()
     expect(w.findAll(".axis-x span").map((s: any) => s.text())).toEqual(["Nov 19", "Nov 20"])
     const bar = w.find(".sbar")
-    expect(bar.attributes("tabindex")).toBe("0")
-    expect(bar.attributes("role")).toBe("img")
+    expect(bar.element.tagName).toBe("BUTTON")
+    expect(bar.attributes("type")).toBe("button")
     expect(bar.attributes("aria-label")).toBe("Nov 19: $0.75")
   })
 
@@ -268,16 +281,43 @@ describe("UsagePage", () => {
   })
 
   it("groups the range All by week above 60 days and by month above 365 days", async () => {
-    reply({ range: "all", days: [d("2026-09-01"), d("2026-09-02"), d("2026-11-09")] })
+    reply({
+      range: "all",
+      from: "2026-09-01",
+      to: "2026-11-09",
+      days: [d("2026-09-01"), d("2026-09-02"), d("2026-11-09")],
+    })
     const w = await mk()
     await btn(w, "All").trigger("click")
     await flushPromises()
-    expect(w.findAll(".axis-x span").map((s: any) => s.text())).toEqual(["Aug 31", "Nov 9"])
-    reply({ range: "all", days: [d("2025-01-05"), d("2025-01-20"), d("2026-02-01")] })
+    expect(labels(w)).toHaveLength(11)
+    expect(labels(w).filter(Boolean)).toEqual([
+      "Aug 31",
+      "Sep 14",
+      "Sep 28",
+      "Oct 12",
+      "Oct 26",
+      "Nov 9",
+    ])
+    reply({
+      range: "all",
+      from: "2025-01-05",
+      to: "2026-02-01",
+      days: [d("2025-01-05"), d("2025-01-20"), d("2026-02-01")],
+    })
     await btn(w, "7 days").trigger("click")
     await btn(w, "All").trigger("click")
     await flushPromises()
-    expect(w.findAll(".axis-x span").map((s: any) => s.text())).toEqual(["Jan 2025", "Feb 2026"])
+    expect(labels(w)).toHaveLength(14)
+    expect(labels(w).filter(Boolean)).toEqual([
+      "Jan 2025",
+      "Mar 2025",
+      "May 2025",
+      "Jul 2025",
+      "Sep 2025",
+      "Nov 2025",
+      "Feb 2026",
+    ])
   })
 
   it("hides the chart and the cron card for This session and shows the title", async () => {
@@ -300,10 +340,140 @@ describe("UsagePage", () => {
   })
 
   it("shows a deleted job as text", async () => {
-    reply(daily, { ...cron, jobs: [{ job_id: "j9", job_name: "", usd: 0.1 }], flagged: [] })
+    reply(daily, {
+      ...cron,
+      jobs: [{ job_id: "j9", job_name: "", usd: 0.1, unpriced: false }],
+      flagged: [],
+    })
     const w = await mk()
     expect(w.find('a[href="/jobs/j9"]').exists()).toBe(false)
     expect(w.find(".cron-cost").text()).toContain("Deleted job")
+  })
+
+  it("fills each day from from to to, and shows one bar for Today", async () => {
+    reply({ ...daily, from: "2026-11-17", to: "2026-11-21" })
+    const w = await mk()
+    expect(w.findAll(".sbar").map((b: any) => b.attributes("aria-label"))).toEqual([
+      "Nov 17: $0.00",
+      "Nov 18: $0.00",
+      "Nov 19: $0.75",
+      "Nov 20: $1.00",
+      "Nov 21: $0.00",
+    ])
+    await btn(w, "View as table").trigger("click")
+    expect(w.findAll("table.days tbody tr")).toHaveLength(5)
+    reply({ range: "today", from: "2026-11-20", to: "2026-11-20", days: [d("2026-11-20")] })
+    await btn(w, "View as chart").trigger("click")
+    await btn(w, "Today").trigger("click")
+    await flushPromises()
+    expect(w.findAll(".sbar")).toHaveLength(1)
+  })
+
+  it("spaces the labels by the width of the bar area, not the card", async () => {
+    reply({ ...daily, from: "2026-10-21", to: "2026-11-20" })
+    ;(globalThis as any).ResizeObserver = class {
+      constructor(f: typeof cb) {
+        cb = f
+      }
+      observe() {}
+      disconnect() {}
+    }
+    const spy = vi.spyOn(Element.prototype, "clientWidth", "get").mockImplementation(function (
+      this: Element,
+    ) {
+      return this.classList.contains("sbars") ? 300 : 0
+    })
+    try {
+      const w = await mk()
+      cb([{ contentRect: { width: 600 } }])
+      await flushPromises()
+      expect(shown(w)).toHaveLength(4) // 300 px of bars: step 6, not step 3
+    } finally {
+      spy.mockRestore()
+      delete (globalThis as any).ResizeObserver
+    }
+  })
+
+  it("shows round ticks for a normal, a small, and a zero max", async () => {
+    expect(ticks(await mk())).toEqual(["$1", "$0.50", "$0"])
+    reply(one(0.0013))
+    expect(ticks(await mk())).toEqual(["$0.002", "$0.001", "$0"])
+    reply(one(0))
+    expect(ticks(await mk())).toEqual(["$1", "$0.50", "$0"])
+  })
+
+  it("spaces the labels by the measured width and keeps two ticks on a short chart", async () => {
+    expect("ResizeObserver" in globalThis).toBe(false)
+    reply({ ...daily, from: "2026-10-21", to: "2026-11-20" })
+    // 31 bars at the default 600 px: step 3. A middle label keeps 1.5 steps from each end,
+    // because the first and the last label grow inward by their full width.
+    const first = await mk()
+    expect(shown(first)).toHaveLength(9)
+    const at = first
+      .findAll(".axis-x span")
+      .map((s: any, i: number) => (s.text() ? i : -1))
+      .filter((i: number) => i >= 0)
+    expect(at).toEqual([0, 6, 9, 12, 15, 18, 21, 24, 30])
+    ;(globalThis as any).ResizeObserver = class {
+      constructor(f: typeof cb) {
+        cb = f
+      }
+      observe() {}
+      disconnect() {}
+    }
+    const spy = vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (
+      this: Element,
+    ) {
+      return this.classList.contains("sbars") ? 120 : 0
+    })
+    try {
+      const w = await mk()
+      cb([{ contentRect: { width: 300 } }])
+      await flushPromises()
+      expect(shown(w)).toHaveLength(4) // step 6
+      cb([{ contentRect: { width: 0 } }])
+      await flushPromises()
+      expect(shown(w)).toHaveLength(4) // a width of 0 keeps the last width
+      expect(w.findAll(".axis-y span").map((s: any) => s.text())).toEqual(["$1", "$0"])
+    } finally {
+      spy.mockRestore()
+      delete (globalThis as any).ResizeObserver
+    }
+  })
+
+  it("opens the tooltip on hover and click, and closes it on Esc and an outside tap", async () => {
+    const w = await mk()
+    const bars = w.findAll(".sbar")
+    await bars[0].trigger("pointerenter")
+    const tip = () => w.find(".usage-tip")
+    for (const s of [
+      "Nov 19",
+      "glm-4.6",
+      "$0.5000",
+      "deepseek-chat",
+      "$0.2500",
+      "Total",
+      "$0.7500+",
+    ])
+      expect(tip().text()).toContain(s)
+    await bars[1].trigger("click")
+    await bars[1].trigger("click")
+    expect(tip().text()).toContain("Nov 20")
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }))
+    await flushPromises()
+    expect(tip().exists()).toBe(false)
+    await bars[1].trigger("click")
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }))
+    await flushPromises()
+    expect(tip().exists()).toBe(false)
+  })
+
+  it("marks an unpriced job cost in the cron table", async () => {
+    reply(daily, { ...cron, jobs: [{ ...cron.jobs[0], unpriced: true }] })
+    const w = await mk()
+    const rows = w.findAll(".cron-cost tbody tr")
+    expect(rows[0].text()).toContain("$0.3120+")
+    expect(rows[rows.length - 1].text()).toContain("$0.3120+")
   })
 
   it("reloads only on a focus and a reconnect", async () => {

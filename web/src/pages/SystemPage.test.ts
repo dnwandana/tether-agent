@@ -58,6 +58,7 @@ import { api, ApiError } from "../api/client"
 import { confirm, toast } from "../stores/ui"
 import ResultNote from "../components/ResultNote.vue"
 import SystemPage from "./SystemPage.vue"
+import { shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
 const local = (hh: number, mm: number) => new Date(2026, 10, 20, hh, mm).toISOString()
@@ -234,12 +235,49 @@ describe("SystemPage", () => {
       expect(text).toContain(s)
   })
 
-  it("shows the MCP empty text", async () => {
+  it("shows the MCP empty state with a short title", async () => {
     data["/api/mcp"] = []
     const w = await mk()
-    expect(w.text()).toContain(
-      "No MCP servers. Add one under `mcp` in config.yaml, then tap Reload MCP.",
+    const s = w
+      .findAllComponents({ name: "StateBlock" })
+      .find((b: any) => b.props("title") === "No MCP servers.")!
+    expect(s.props("text")).toBe("Add one under `mcp` in config.yaml, then tap Reload MCP.")
+  })
+
+  it("shows only N tools in the Tools cell, with 1 tool for one", async () => {
+    ;(data["/api/mcp"] as any[]).push(
+      mcpRow({ name: "search", connected: true, tools: 1, tool_names: ["find"] }),
     )
+    const w = await mk()
+    const cell = (name: string) =>
+      w
+        .findAll(".mcp-section tbody tr")
+        .find((r: any) => r.text().includes(name))!
+        .findAll("td")[3]
+    expect(cell("github").text().startsWith("2 tools")).toBe(true)
+    expect(cell("search").find("summary").text()).toBe("1 tool")
+    expect(cell("linear").text()).toBe("0 tools")
+  })
+
+  it("shows the batch id apart from its state, the duration, and the Markdown summary", async () => {
+    const b = (data["/api/runtime"] as any).batches[0]
+    b.results[0].duration_s = 125.4
+    b.results[0].summary = "**Done.**\n\n- one\n- two\n- three\n- four"
+    const w = await mk()
+    expect(w.text()).toContain("b1 running · 1 task")
+    expect(w.findAll("span.c-2").some((s: any) => s.text() === "running · 1 task")).toBe(true)
+    expect(w.text()).toContain("scan · failed · 4 tool calls · 2 m 5 s")
+    expect(w.text()).not.toContain("125.4")
+    const sum = w.find(".batch-summary")
+    expect(sum.classes()).toEqual(expect.arrayContaining(["md", "clamp-3"]))
+    expect(sum.find("strong").text()).toBe("Done.")
+    expect(sum.findAll("li")).toHaveLength(4)
+  })
+
+  it("shows the MCP error time and the process start in the short format", async () => {
+    const w = await mk()
+    expect(w.text()).toContain(`npx: not found (${shortTime(local(13, 40))})`)
+    expect(w.text()).toContain(`started ${shortTime(local(14, 2))}`)
   })
 
   it("asks before Reload MCP and shows the report in a result note", async () => {

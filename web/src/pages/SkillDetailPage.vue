@@ -12,6 +12,7 @@ import StateBlock from "../components/StateBlock.vue"
 import { friendlyError } from "../lib/errors"
 import { followTask, useLiveData } from "../lib/live"
 import { renderMarkdown } from "../lib/markdown"
+import { fullTime, shortTime } from "../lib/time"
 import type { ResultNoteData } from "../lib/command"
 import { confirm, isSecure, toast, ui } from "../stores/ui"
 
@@ -64,9 +65,7 @@ function verdictClass(v: string): string {
 }
 
 function when(s: string): string {
-  const d = new Date(s)
-  if (!s || Number.isNaN(d.getTime()) || d.getFullYear() < 2000) return "—"
-  return d.toLocaleString()
+  return shortTime(s) || "—"
 }
 
 // Returns true when the route can open the file. Other paths are refused by the server.
@@ -318,9 +317,17 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
               <dt>Commit</dt>
               <dd class="mono">{{ view.skill.commit || "—" }}</dd>
               <dt>Installed</dt>
-              <dd>{{ when(view.installed_at) }}</dd>
+              <dd data-test="installed-at">
+                <span style="white-space: nowrap" :title="fullTime(view.installed_at)">{{
+                  when(view.installed_at)
+                }}</span>
+              </dd>
               <dt>Updated</dt>
-              <dd>{{ when(view.updated_at) }}</dd>
+              <dd data-test="updated-at">
+                <span style="white-space: nowrap" :title="fullTime(view.updated_at)">{{
+                  when(view.updated_at)
+                }}</span>
+              </dd>
               <dt>Content hash</dt>
               <dd class="mono">{{ view.content_hash || "—" }}</dd>
             </dl>

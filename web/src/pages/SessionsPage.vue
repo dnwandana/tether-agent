@@ -10,10 +10,11 @@ import StateBlock from "../components/StateBlock.vue"
 import { friendlyError } from "../lib/errors"
 import { useCommand } from "../lib/command"
 import { useLiveData } from "../lib/live"
+import { fullTime, shortTime } from "../lib/time"
 import { session } from "../stores/session"
 import { toast, type ToastKind } from "../stores/ui"
 
-type TableRow = SessionRow & { child?: boolean; actions?: string }
+type TableRow = SessionRow & { child?: boolean; actions?: string; toggle?: boolean; count?: number }
 
 const router = useRouter()
 const route = useRoute()
@@ -38,7 +39,7 @@ const archivedTotal = ref(0)
 const renaming = ref("")
 const renameText = ref("")
 
-const columns = [
+const allColumns = [
   { key: "title", label: "Session" },
   { key: "kind", label: "Kind" },
   { key: "source_label", label: "Source" },
@@ -49,13 +50,13 @@ const columns = [
   { key: "actions", label: "" },
 ]
 
+// The Kind column says nothing while the filter shows only chats.
+const columns = computed(() =>
+  kind.value === "chat" ? allColumns.filter((c) => c.key !== "kind") : allColumns,
+)
+
 function usd(n: number): string {
   return "$" + n.toFixed(4)
-}
-
-function when(s: string): string {
-  const d = new Date(s)
-  return Number.isNaN(d.getTime()) || d.getFullYear() < 2000 ? "—" : d.toLocaleString()
 }
 
 // Builds the list query with the six keys in a fixed order.
@@ -259,10 +260,37 @@ const tableRows = computed<TableRow[]>(() => {
   const out: TableRow[] = []
   for (const r of rows.value) {
     out.push(r)
-    for (const c of r.children ?? []) out.push({ ...c, read_only: true, child: true })
+    const kids = r.children ?? []
+    if (kids.length === 0) continue
+    out.push({
+      id: r.id + "#kids",
+      parent_id: r.id,
+      toggle: true,
+      count: kids.length,
+    } as unknown as TableRow)
+    if (openKids.value.has(r.id))
+      for (const c of kids) out.push({ ...c, read_only: true, child: true })
   }
   return out
 })
+
+// Holds the ids of the parents whose child rows show. A live reload keeps it.
+const openKids = ref(new Set<string>())
+
+function toggleKids(parent: string): void {
+  const next = new Set(openKids.value)
+  if (next.has(parent)) next.delete(parent)
+  else next.add(parent)
+  openKids.value = next
+}
+
+// Returns the chip and the name of a child row. A child whose title equals its kind
+// shows its name once.
+function childLabel(r: TableRow): { chip: string; text: string } {
+  if (r.title === r.kind)
+    return { chip: "", text: r.kind === "review" ? "Background review" : r.title }
+  return { chip: r.kind, text: r.title || "New session" }
+}
 
 const pageText = computed(
   () => `Page ${Math.floor(offset.value / 50) + 1} of ${Math.max(1, Math.ceil(total.value / 50))}`,
@@ -319,6 +347,11 @@ function menuItems(r: SessionRow): { label: string; act: string; danger?: boolea
   items.push({ label: "Delete…", act: "delete", danger: true })
   return items
 }
+
+const readOnlyItems = [
+  { label: "Fork into dashboard", act: "fork" },
+  { label: "Export", act: "export" },
+]
 
 function onMenu(r: SessionRow, act: string): void {
   if (act === "rename") startRename(r)
@@ -389,14 +422,14 @@ onBeforeUnmount(() => clearTimeout(timer))
         />
       </div>
       <label class="check"><input v-model="fullText" type="checkbox" /> Full text</label>
-      <select v-model="source" class="select" aria-label="Source">
+      <select v-model="source" class="input" aria-label="Source">
         <option value="">All sources</option>
         <option value="dashboard">Dashboard</option>
         <option value="cli">CLI</option>
         <option value="telegram">Telegram</option>
         <option value="cron">Cron</option>
       </select>
-      <select v-model="kind" class="select" aria-label="Kind">
+      <select v-model="kind" class="input" aria-label="Kind">
         <option value="chat">Chats</option>
         <option value="">Chats and cron runs</option>
       </select>
@@ -437,8 +470,9 @@ onBeforeUnmount(() => clearTimeout(timer))
             }"
           >
             <span class="grow"
-              ><b>{{ h.title }}</b>
-              <span class="c-2"
+              ><b>{{ h.title }}</b
+              >{{ " "
+              }}<span class="c-2"
                 ><template v-for="(p, i) in markParts(h.snippet)" :key="i"
                   ><mark v-if="p.mark">{{ p.text }}</mark
                   ><template v-else>{{ p.text }}</template></template
@@ -447,7 +481,9 @@ onBeforeUnmount(() => clearTimeout(timer))
             >
             <span class="chip">{{ h.source }}</span>
             <span class="chip">{{ h.kind }}</span>
-            <span class="c-3 t-12">{{ when(h.date) }}</span>
+            <span class="c-3 t-12" style="white-space: nowrap" :title="fullTime(h.date)">{{
+              shortTime(h.date) || "—"
+            }}</span>
           </router-link>
           <button v-if="hitsMore" class="btn btn-secondary" type="button" @click="loadMoreHits">
             Load more
@@ -471,10 +507,25 @@ onBeforeUnmount(() => clearTimeout(timer))
               row-key="id"
             >
               <template #cell-title="{ row }">
-                <span v-if="(row as unknown as TableRow).child" class="cellrow is-child">
+                <button
+                  v-if="(row as unknown as TableRow).toggle"
+                  class="link kids-toggle"
+                  type="button"
+                  :aria-expanded="openKids.has((row as unknown as TableRow).parent_id)"
+                  @click="toggleKids((row as unknown as TableRow).parent_id)"
+                >
+                  {{ openKids.has((row as unknown as TableRow).parent_id) ? "▾" : "▸" }}
+                  {{ (row as unknown as TableRow).count }}
+                  {{
+                    (row as unknown as TableRow).count === 1 ? "child session" : "child sessions"
+                  }}
+                </button>
+                <span v-else-if="(row as unknown as TableRow).child" class="cellrow is-child">
                   <span aria-hidden="true">↳</span>
-                  <span class="chip">{{ (row as unknown as TableRow).kind }}</span>
-                  <span>{{ (row as unknown as TableRow).title }}</span>
+                  <span v-if="childLabel(row as unknown as TableRow).chip" class="chip">{{
+                    childLabel(row as unknown as TableRow).chip
+                  }}</span>
+                  <span class="kid-label">{{ childLabel(row as unknown as TableRow).text }}</span>
                 </span>
                 <input
                   v-else-if="renaming === (row as unknown as TableRow).id"
@@ -489,8 +540,11 @@ onBeforeUnmount(() => clearTimeout(timer))
                 />
                 <span v-else class="cellrow">
                   <router-link
+                    class="cell-title"
+                    :class="{ 'c-3': !(row as unknown as TableRow).title }"
                     :to="{ name: 'transcript', params: { id: (row as unknown as TableRow).id } }"
-                    ><b>{{ (row as unknown as TableRow).title }}</b></router-link
+                    :title="(row as unknown as TableRow).title"
+                    ><b>{{ (row as unknown as TableRow).title || "New session" }}</b></router-link
                   >
                   <span v-if="(row as unknown as TableRow).id === session.id" class="chip chip-acc"
                     >active</span
@@ -515,58 +569,74 @@ onBeforeUnmount(() => clearTimeout(timer))
                   </button>
                 </template>
               </template>
-              <template #cell-started="{ row }">{{
-                when((row as unknown as TableRow).started)
-              }}</template>
-              <template #cell-last_active="{ row }">{{
-                when((row as unknown as TableRow).last_active)
-              }}</template>
-              <template #cell-cost_usd="{ row }">{{
-                usd((row as unknown as TableRow).cost_usd)
-              }}</template>
+              <template #cell-source_label="{ row }"
+                ><template v-if="!(row as unknown as TableRow).toggle"
+                  ><bdi class="cell-title" :title="(row as unknown as TableRow).source_label">{{
+                    (row as unknown as TableRow).source_label
+                  }}</bdi></template
+                ></template
+              >
+              <template #cell-started="{ row }"
+                ><template v-if="!(row as unknown as TableRow).toggle"
+                  ><span
+                    style="white-space: nowrap"
+                    :title="fullTime((row as unknown as TableRow).started)"
+                    >{{ shortTime((row as unknown as TableRow).started) || "—" }}</span
+                  ></template
+                ></template
+              >
+              <template #cell-last_active="{ row }"
+                ><template v-if="!(row as unknown as TableRow).toggle"
+                  ><span
+                    style="white-space: nowrap"
+                    :title="fullTime((row as unknown as TableRow).last_active)"
+                    >{{ shortTime((row as unknown as TableRow).last_active) || "—" }}</span
+                  ></template
+                ></template
+              >
+              <template #cell-cost_usd="{ row }"
+                ><template v-if="!(row as unknown as TableRow).toggle">{{
+                  usd((row as unknown as TableRow).cost_usd)
+                }}</template></template
+              >
               <template #cell-actions="{ row }">
                 <template v-for="r in [row as unknown as TableRow]" :key="r.id">
-                  <button v-if="r.child" class="btn btn-ghost" type="button" @click="view(r.id)">
-                    View
-                  </button>
-                  <template v-else-if="r.read_only">
-                    <button class="btn btn-ghost" type="button" @click="view(r.id)">View</button>
-                    <button class="btn btn-secondary" type="button" @click="fork(r.id)">
-                      Fork into dashboard
+                  <template v-if="!r.toggle">
+                    <button v-if="r.child" class="btn btn-ghost" type="button" @click="view(r.id)">
+                      View
                     </button>
-                    <button
-                      class="btn btn-ghost"
-                      type="button"
-                      @click="download(`/api/sessions/${r.id}/export`, `session-${r.id}.jsonl`)"
-                    >
-                      Export
-                    </button>
-                  </template>
-                  <template v-else>
-                    <template v-if="r.archived">
+                    <template v-else-if="r.read_only">
+                      <button class="btn btn-secondary" type="button" @click="view(r.id)">
+                        View
+                      </button>
+                      <RowMenu :items="readOnlyItems" @select="(a) => onMenu(r, a)" />
+                    </template>
+                    <template v-else>
+                      <template v-if="r.archived">
+                        <button
+                          class="btn btn-secondary"
+                          type="button"
+                          @click="command('/unarchive ' + r.id)"
+                        >
+                          Unarchive
+                        </button>
+                        <button class="btn btn-ghost" type="button" @click="resume(r.id)">
+                          Resume
+                        </button>
+                      </template>
                       <button
+                        v-else-if="r.id === session.id"
                         class="btn btn-secondary"
                         type="button"
-                        @click="command('/unarchive ' + r.id)"
+                        @click="router.push({ name: 'chat' })"
                       >
-                        Unarchive
+                        Open
                       </button>
-                      <button class="btn btn-ghost" type="button" @click="resume(r.id)">
+                      <button v-else class="btn btn-secondary" type="button" @click="resume(r.id)">
                         Resume
                       </button>
+                      <RowMenu :items="menuItems(r)" @select="(a) => onMenu(r, a)" />
                     </template>
-                    <button
-                      v-else-if="r.id === session.id"
-                      class="btn btn-secondary"
-                      type="button"
-                      @click="router.push({ name: 'chat' })"
-                    >
-                      Open
-                    </button>
-                    <button v-else class="btn btn-secondary" type="button" @click="resume(r.id)">
-                      Resume
-                    </button>
-                    <RowMenu :items="menuItems(r)" @select="(a) => onMenu(r, a)" />
                   </template>
                 </template>
               </template>

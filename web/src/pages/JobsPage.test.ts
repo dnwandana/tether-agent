@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { mount, flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
@@ -14,7 +14,9 @@ vi.mock("../stores/ui", async (importOriginal) => ({
 }))
 import { api, runCommand } from "../api/client"
 import { confirm } from "../stores/ui"
+import { setHost } from "../stores/host"
 import { emitEvents } from "../lib/bus"
+import { fullTime, shortTime } from "../lib/time"
 import JobsPage from "./JobsPage.vue"
 
 const Blank = { render: () => null }
@@ -28,14 +30,16 @@ const job = (o: object) => ({
   last_status: "ok",
   fail_streak: 0,
   ok: 7,
-  last_cost_usd: 0.0102,
-  last_cost_known: true,
   enabled: true,
   watch: false,
   draft_only: false,
   pause_reason: "",
   history_off: false,
   last7: Array(7).fill("ok"),
+  state: "ok",
+  cost_7d_usd: 0.0102,
+  cost_7d_known: true,
+  cost_7d_unpriced: false,
   ...o,
 })
 const held = (o: object) => ({
@@ -92,6 +96,7 @@ const fresh = (): Record<string, unknown> => ({
     job({
       id: "j4",
       icon: "⏸",
+      state: "paused",
       name: "report-weekly",
       enabled: false,
       ok: 2,
@@ -162,24 +167,29 @@ beforeEach(() => {
   })
 })
 
+afterEach(() => vi.restoreAllMocks())
+
 describe("JobsPage", () => {
+  it("shows the schedule in the browser zone with the raw text in the title", async () => {
+    setHost("UTC", 0)
+    vi.spyOn(Date.prototype, "getTimezoneOffset").mockReturnValue(-420)
+    data["/api/jobs"] = [job({ id: "j1", name: "nightly", schedule: "0 1 * * *" })]
+    const w = await mk()
+    const cell = w.find('[title="0 1 * * * · host time UTC"]')
+    expect(cell.text()).toBe("daily 08:00")
+  })
+
   it("loads the brief, the jobs, and the held sends", async () => {
     const w = await mk()
     for (const p of ["/api/brief", "/api/jobs", "/api/held"])
       expect(api).toHaveBeenCalledWith("GET", p)
     expect(w.text()).toContain("Jobs: 41 of 44 runs OK in 24 h")
     expect(w.text()).toContain("$0.7310")
-    expect(w.text()).toContain("2/7 ok")
+    expect(w.text()).toContain("2/4 ok")
     const bars = w.findAll(".runs7")[1].findAll("i")
-    expect(bars.map((b) => b.classes().find((c) => c === "bad" || c === "none") ?? "ok")).toEqual([
-      "none",
-      "none",
-      "none",
-      "ok",
-      "bad",
-      "ok",
-      "bad",
-    ])
+    expect(
+      bars.map((b) => b.classes().find((c) => c === "bad" || c === "stop" || c === "none") ?? "ok"),
+    ).toEqual(["none", "none", "none", "ok", "bad", "ok", "stop"])
   })
 
   it("pauses a job with the command and disables Run now on a paused job", async () => {
@@ -319,5 +329,40 @@ describe("JobsPage", () => {
         .find((p) => p.props("open"))!
         .props("dirty"),
     ).toBe(true)
+  })
+
+  it("shows No runs, the state glyph, done as muted text, and the 7-day cost", async () => {
+    data["/api/jobs"] = [
+      job({ id: "j5", name: "fresh", icon: "", state: "pending", last7: [] }),
+      job({ id: "j6", name: "gone", icon: "", state: "done", enabled: false }),
+      job({ id: "j7", name: "cheap", icon: "", state: "failing", cost_7d_unpriced: true }),
+      job({ id: "j8", name: "script", icon: "", cost_7d_known: false, cost_7d_usd: 0 }),
+    ]
+    const w = await mk()
+    const row = (t: string) => w.findAll("tr").find((r: any) => r.text().includes(t))!
+    expect(w.findAll("th").map((t: any) => t.text())).toContain("Cost · 7 d")
+    expect(row("fresh").text()).toContain("No runs")
+    expect(row("fresh").find(".runs7").exists()).toBe(false)
+    expect(row("fresh").text()).toContain("⏳")
+    expect(row("gone").find(".chip").exists()).toBe(false)
+    expect(row("gone").find(".c-3").text()).toBe("done")
+    expect(row("gone").findAll("button")).toHaveLength(0)
+    expect(row("cheap").text()).toContain("⚠")
+    expect(row("cheap").text()).toContain("$0.0102+")
+    expect(row("script").text()).toContain("—")
+  })
+
+  it("shows the next run in the short format with the full time in the title", async () => {
+    const w = await mk()
+    const cell = w.find('[title="' + fullTime("2026-11-21T06:00:00Z") + '"]')
+    expect(cell.text()).toBe(shortTime("2026-11-21T06:00:00Z"))
+    expect(w.find(".page-stack").exists()).toBe(true)
+  })
+
+  it("puts a space between the job icon, the name, and the watch chip", async () => {
+    data["/api/jobs"] = [job({ id: "j9", name: "daily-digest", watch: true })]
+    const w = await mk()
+    const row = w.findAll("tr").find((r) => r.text().includes("daily-digest"))!
+    expect(row.find("td").text().replace(/\s+/g, " ")).toBe("✅ daily-digest watch")
   })
 })

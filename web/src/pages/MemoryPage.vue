@@ -18,6 +18,7 @@ import type { ResultNoteData } from "../lib/command"
 import { useDirty } from "../lib/dirty"
 import { friendlyError } from "../lib/errors"
 import { useLiveData } from "../lib/live"
+import { fullTime, shortTime } from "../lib/time"
 import { confirm, toast } from "../stores/ui"
 
 type Target = "memory" | "user"
@@ -96,8 +97,7 @@ useDirty(dirty)
 const num = (n: number) => n.toLocaleString("en-US")
 
 function when(s: string): string {
-  const d = new Date(s)
-  return Number.isNaN(d.getTime()) || d.getFullYear() < 2000 ? "—" : d.toLocaleString()
+  return shortTime(s) || "—"
 }
 
 async function load(): Promise<void> {
@@ -388,11 +388,6 @@ onBeforeUnmount(() => {
         <div v-for="fl in files" :key="fl.target" class="card">
           <div class="card-h">
             <h3>{{ fl.title }}</h3>
-            <span class="grow" />
-            <span class="c-3 t-12"
-              >{{ num(used(fl.target)) }} / {{ num(limit(fl.target)) }} chars ·
-              {{ Math.round(pct(fl.target)) }}% of the limit</span
-            >
           </div>
           <div class="card-b">
             <div
@@ -405,6 +400,10 @@ onBeforeUnmount(() => {
               :aria-label="fl.title + ' size'"
             >
               <span :style="{ width: Math.min(100, pct(fl.target)) + '%' }" />
+            </div>
+            <div class="t-12 c-3">
+              {{ num(used(fl.target)) }} / {{ num(limit(fl.target)) }} chars ·
+              {{ Math.round(pct(fl.target)) }}% of the limit
             </div>
             <div v-if="pct(fl.target) >= 100" class="t-12 c-bad">
               The next add goes to the inbox.
@@ -427,8 +426,8 @@ onBeforeUnmount(() => {
           >
             <template v-if="e.blocked">
               <span class="grow"
-                ><b>[BLOCKED {{ e.id }}]</b>
-                <span class="c-3">the memory scan blocked this entry</span></span
+                ><b>[BLOCKED {{ e.id }}]</b> {{ " "
+                }}<span class="c-3">the memory scan blocked this entry</span></span
               >
               <button
                 class="btn btn-danger-soft btn-sm"
@@ -543,12 +542,19 @@ onBeforeUnmount(() => {
         row-key="name"
       >
         <template #cell-name="{ row }"
-          ><span class="mono">{{ t(row).name }}</span>
-          <span v-if="t(row).name.startsWith('inbox-')" class="chip chip-warn"
+          ><span class="mono">{{ t(row).name }}</span> {{ " "
+          }}<span v-if="t(row).name.startsWith('inbox-')" class="chip chip-warn"
             >inbox</span
           ></template
         >
-        <template #cell-modified="{ row }">{{ when(t(row).modified) }}</template>
+        <template #cell-modified="{ row }"
+          ><span
+            data-test="modified"
+            style="white-space: nowrap"
+            :title="fullTime(t(row).modified)"
+            >{{ when(t(row).modified) }}</span
+          ></template
+        >
         <template #cell-actions="{ row }">
           <button
             class="btn btn-secondary btn-sm"

@@ -35,6 +35,7 @@ const view = {
     },
   ],
   log_scopes: ["dashboard", "telegram:-100:7"],
+  log_scope_labels: { dashboard: "Dashboard", "telegram:-100:7": "Telegram › Ops › topic 7" },
   grants: [
     {
       rule: "git push",
@@ -165,15 +166,23 @@ beforeEach(() => {
 })
 
 describe("SecurityPage", () => {
-  it("shows the process mode and the cron mode with the config keys", async () => {
+  it("shows one line for each fixed mode and links to the Rules tab", async () => {
     const w = await mk()
-    const cards = w.findAll(".card-pad")
-    const proc = cards.find((c) => c.text().includes("Process mode"))!
-    const cron = cards.find((c) => c.text().includes("Cron mode"))!
-    expect(proc.text()).toContain("smart")
-    expect(proc.text()).toContain("approvals.mode")
-    expect(cron.text()).toContain("deny")
-    expect(cron.text()).toContain("approvals.cron_mode")
+    expect(w.find(".page-stack").exists()).toBe(true)
+    const lines = w.findAll(".fixed-modes p")
+    expect(lines.slice(0, 2).map((p) => p.text())).toEqual([
+      "Process mode: smart",
+      "Cron mode: deny",
+    ])
+    await w.find(".fixed-modes button.link").trigger("click")
+    await flushPromises()
+    expect(w.findComponent({ name: "RulesTab" }).exists()).toBe(true)
+  })
+
+  it("isolates the scope label of a mode in bdi", async () => {
+    const w = await mk()
+    const bdi = w.findAll("bdi").find((b) => b.text() === "Telegram › Ops › topic 7")!
+    expect(bdi.attributes("title")).toBe("Telegram › Ops › topic 7")
   })
 
   it("draws one row for each server and class", async () => {
@@ -233,6 +242,10 @@ describe("SecurityPage", () => {
     const log = w.findComponent({ name: "ApprovalLog" })
     expect(log.exists()).toBe(true)
     expect(log.props("scopes")).toEqual(["dashboard", "telegram:-100:7"])
+    expect(log.props("scopeLabels")).toEqual({
+      dashboard: "Dashboard",
+      "telegram:-100:7": "Telegram › Ops › topic 7",
+    })
   })
 
   it("unpins one program by its path from the Secrets tab", async () => {

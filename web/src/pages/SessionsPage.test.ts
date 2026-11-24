@@ -17,6 +17,8 @@ import { api, runCommand } from "../api/client"
 import { session } from "../stores/session"
 import SessionsPage from "./SessionsPage.vue"
 import StateBlock from "../components/StateBlock.vue"
+import LiveHeader from "../components/LiveHeader.vue"
+import { fullTime, shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
 const row = (o: object) => ({
@@ -121,11 +123,63 @@ describe("SessionsPage", () => {
     expect(w.find(".pager").text()).toContain("1–4 of 4")
   })
 
-  it("shows children under the parent as read-only rows", async () => {
+  it("folds the child rows behind a toggle that stays open across a reload", async () => {
     const { w } = await mk()
+    expect(w.find(".cellrow.is-child").exists()).toBe(false)
+    const t = w.find("button.kids-toggle")
+    expect(t.text()).toBe("▸ 1 child session")
+    expect(t.attributes("aria-expanded")).toBe("false")
+    await t.trigger("click")
     const child = w.find(".cellrow.is-child")
     expect(child.text()).toContain("↳")
-    expect(child.text()).toContain("subagent run")
+    expect(child.find(".kid-label").text()).toBe("subagent run")
+    expect(child.find(".chip").text()).toBe("subagent")
+    expect(w.find("button.kids-toggle").text()).toBe("▾ 1 child session")
+    expect(w.find("button.kids-toggle").attributes("aria-expanded")).toBe("true")
+    w.findComponent(LiveHeader).vm.$emit("refresh")
+    await flushPromises()
+    expect(w.find(".cellrow.is-child").exists()).toBe(true)
+    await w.find("button.kids-toggle").trigger("click")
+    expect(w.find(".cellrow.is-child").exists()).toBe(false)
+  })
+
+  it("shows New session in the muted color for an untitled row", async () => {
+    vi.mocked(api).mockResolvedValue({ total: 1, rows: [row({ id: "s9", title: "" })] })
+    const { w } = await mk()
+    const a = w.find("a[href='/sessions/s9']")
+    expect(a.text()).toBe("New session")
+    expect(a.classes()).toContain("c-3")
+  })
+
+  it("names a child once when its title equals its kind", async () => {
+    vi.mocked(api).mockResolvedValue({
+      total: 1,
+      rows: [
+        row({
+          id: "p1",
+          title: "Plan",
+          children: [
+            row({ id: "r1", title: "review", kind: "review", read_only: true }),
+            row({ id: "k1", title: "subagent", kind: "subagent", read_only: true }),
+          ],
+        }),
+      ],
+    })
+    const { w } = await mk()
+    expect(w.find("button.kids-toggle").text()).toBe("▸ 2 child sessions")
+    await w.find("button.kids-toggle").trigger("click")
+    const kids = w.findAll(".cellrow.is-child")
+    expect(kids.map((k) => k.find(".kid-label").text())).toEqual(["Background review", "subagent"])
+    expect(kids.map((k) => k.find(".chip").exists())).toEqual([false, false])
+  })
+
+  it("gives the toggle row no dates, no cost, and no buttons", async () => {
+    const { w } = await mk()
+    const tr = w.find("button.kids-toggle").element.closest("tr")!
+    const buttons = Array.from(tr.querySelectorAll("button")).map((b) => b.textContent?.trim())
+    expect(buttons).toEqual(["▸ 1 child session"])
+    expect(tr.textContent).not.toContain("—")
+    expect(tr.textContent).not.toContain("$")
   })
 
   it("opens the active session and resumes another one", async () => {
@@ -139,7 +193,7 @@ describe("SessionsPage", () => {
 
   it("forks a read-only session into the dashboard", async () => {
     const { w } = await mk()
-    await btn(w, "Fork into dashboard")[0].trigger("click")
+    await menu(w, "Photos", "Fork into dashboard")
     expect(runCommand).toHaveBeenCalledWith("/fork from s2")
   })
 
@@ -235,7 +289,7 @@ describe("SessionsPage", () => {
       edit: false,
     })
     const { w, router } = await mk()
-    await btn(w, "Fork into dashboard")[0].trigger("click")
+    await menu(w, "Photos", "Fork into dashboard")
     await flushPromises()
     expect(router.currentRoute.value.name).toBe("chat")
   })
@@ -264,13 +318,63 @@ describe("SessionsPage", () => {
     expect(active.find(".chip").text()).toBe("active")
   })
 
-  it("shows the Kind and Started columns, the counts, and the page number", async () => {
+  it("hides the Kind column for Chats, shows it for all kinds, and shows the counts", async () => {
     const { w } = await mk()
-    const heads = w.findAll("th").map((t) => t.text())
-    expect(heads).toEqual(expect.arrayContaining(["Kind", "Started"]))
+    expect(w.findAll("th").map((t) => t.text())).toEqual([
+      "Session",
+      "Source",
+      "Started",
+      "Last active",
+      "Messages",
+      "Cost",
+      "",
+    ])
     expect(w.find(".seg").text()).toContain("Active · 4")
     expect(w.find(".seg").text()).toContain("Archived · 4")
     expect(w.find(".pager").text()).toContain("Page 1 of 1")
+    const { w: all } = await mk("/sessions?kind=")
+    expect(all.findAll("th").map((t) => t.text())).toContain("Kind")
+  })
+
+  it("gives a read-only row one View button and the fork and export in the menu", async () => {
+    const { w } = await mk()
+    const tr = w.findAll("tr").find((r) => r.text().includes("Photos"))!
+    const plain = tr.findAll("button").filter((b) => b.attributes("aria-label") !== "More actions")
+    expect(plain.map((b) => b.text())).toEqual(["View"])
+    await tr.find("button[aria-label='More actions']").trigger("click")
+    expect(tr.findAll(".menu-item").map((b) => b.text())).toEqual(["Fork into dashboard", "Export"])
+  })
+
+  it("cuts a long title with the full title in the tooltip", async () => {
+    const { w } = await mk()
+    const a = w.find("a[href='/sessions/s1']")
+    expect(a.classes()).toContain("cell-title")
+    expect(a.attributes("title")).toBe("Release notes")
+  })
+
+  it("styles the filter selects as inputs", async () => {
+    const { w } = await mk()
+    expect(w.find("select[aria-label='Source']").classes()).toContain("input")
+    expect(w.find("select[aria-label='Kind']").classes()).toContain("input")
+  })
+
+  it("shows short dates on one line with the full date in the tooltip", async () => {
+    const { w } = await mk()
+    const tds = w.findAll("tbody tr")[0].findAll("td")
+    const started = tds[2].find("span")
+    expect(started.text()).toBe(shortTime("2026-11-19T09:00:00Z"))
+    expect(started.attributes("title")).toBe(fullTime("2026-11-19T09:00:00Z"))
+    expect(started.attributes("style")).toContain("white-space: nowrap")
+    expect(tds[3].find("span").text()).toBe(shortTime("2026-11-20T09:00:00Z"))
+  })
+
+  it("isolates the source label and keeps its full text in the tooltip", async () => {
+    const { w } = await mk()
+    const tr = w.findAll("tr").find((r) => r.text().includes("Photos"))!
+    const bdi = tr.find("bdi")
+    expect(bdi.text()).toBe("Telegram › DM")
+    expect(bdi.attributes("title")).toBe("Telegram › DM")
+    expect(bdi.classes()).toContain("cell-title")
   })
 
   it("asks the confirm of /delete before it deletes", async () => {
@@ -302,7 +406,12 @@ describe("SessionsPage", () => {
       )
       const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {})
       const { w } = await mk()
-      await btn(w, "Export")[0].trigger("click")
+      const tr = w.findAll("tr").find((r: any) => r.text().includes("Photos"))!
+      await tr.find("button[aria-label='More actions']").trigger("click")
+      await tr
+        .findAll(".menu-item")
+        .find((b: any) => b.text() === "Export")!
+        .trigger("click")
       await vi.advanceTimersByTimeAsync(0)
       expect(click).toHaveBeenCalled()
       expect(revoke).not.toHaveBeenCalled()
@@ -365,6 +474,18 @@ describe("SessionsPage", () => {
     expect(marks).toEqual(["flaky"])
     // The snippet is text, so a tag in it shows as typed.
     expect(w.find(".hits").text()).toContain("<b>x</b>")
+  })
+
+  it("puts a space between the title and the snippet of a hit", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) => (p.startsWith("/api/search") ? [hit({})] : page) as any,
+    )
+    const { w } = await mk("/sessions?q=flaky")
+    await w.find("input[type='checkbox']").setValue(true)
+    await flushPromises()
+    expect(w.find(".hits .li .grow").text().replace(/\s+/g, " ")).toBe(
+      "Release notes the flaky test in cron",
+    )
   })
 
   it("shows a search error under the box and keeps the list", async () => {

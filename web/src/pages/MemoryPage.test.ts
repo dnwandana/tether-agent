@@ -40,6 +40,7 @@ import { api, ApiError } from "../api/client"
 import { confirm, toast } from "../stores/ui"
 import ResultNote from "../components/ResultNote.vue"
 import MemoryPage from "./MemoryPage.vue"
+import { fullTime, shortTime } from "../lib/time"
 
 const view = {
   memory: [
@@ -99,6 +100,39 @@ afterEach(() => {
 })
 
 describe("MemoryPage", () => {
+  it("shows the modified date in the shared short format, and a dash for a zero time", async () => {
+    vi.mocked(api).mockImplementation(
+      async (m: string) =>
+        (m === "GET"
+          ? {
+              ...view,
+              topics: [
+                ...view.topics,
+                { name: "old", type: "memory", modified: "0001-01-01T00:00:00Z", entries: 1 },
+              ],
+            }
+          : view) as any,
+    )
+    const w = await mk()
+    const cells = w.findAll('[data-test="modified"]')
+    expect(cells[0]!.text()).toBe(shortTime("2026-11-18T10:00:00Z"))
+    expect(cells[0]!.attributes("title")).toBe(fullTime("2026-11-18T10:00:00Z"))
+    expect(cells[0]!.attributes("style")).toContain("white-space: nowrap")
+    expect(cells[2]!.text()).toBe("—")
+  })
+
+  it("shows the size text under the meter, not in the card head", async () => {
+    const w = await mk()
+    expect(w.find(".page-h > .search").exists()).toBe(true)
+    const card = w.findAll(".grid-2 > .card")[0]
+    expect(card.find(".card-h").text()).toBe("Agent memory · memory.md")
+    const body = card.find(".card-b").element.children
+    expect(body[0].getAttribute("role")).toBe("meter")
+    expect(body[1].textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "2,000 / 2,200 chars · 91% of the limit",
+    )
+  })
+
   it("disables Edit on an entry with a masked secret and keeps Remove", async () => {
     const w = await mk()
     const li = w.findAll(".li").find((l: any) => l.text().includes("«GH_TOKEN»"))!
@@ -490,5 +524,19 @@ describe("MemoryPage", () => {
       old_text: "second entry",
       id: "",
     })
+  })
+
+  it("puts a space between the blocked id and its note", async () => {
+    const w = await mk()
+    const li = w.findAll(".li").find((l) => l.text().includes("[BLOCKED m-4c1e]"))!
+    expect(li.text().replace(/\s+/g, " ")).toContain(
+      "[BLOCKED m-4c1e] the memory scan blocked this entry",
+    )
+  })
+
+  it("puts a space between the note name and the inbox chip", async () => {
+    const w = await mk()
+    const row = w.findAll("tr").find((r) => r.text().includes("inbox-memory"))!
+    expect(row.find("td").text().replace(/\s+/g, " ")).toBe("inbox-memory inbox")
   })
 })

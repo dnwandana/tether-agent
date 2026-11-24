@@ -15,6 +15,7 @@ import { runCommand } from "../../api/client"
 import { ui } from "../../stores/ui"
 import ResultNote from "../ResultNote.vue"
 import SecretsTab from "./SecretsTab.vue"
+import { fullTime } from "../../lib/time"
 
 const sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 const secrets = [
@@ -54,6 +55,16 @@ beforeEach(() => {
 })
 
 describe("SecretsTab", () => {
+  it("shows the time of a failed check in the short format, with the full time in the title", () => {
+    const at = new Date(new Date().getFullYear(), 10, 20, 9, 12).toISOString()
+    const w = mount(SecretsTab, {
+      props: { secrets: [{ ...secrets[0], state: "check", failed_at: at }] },
+    })
+    const chip = w.find(".chip-warn")
+    expect(chip.text()).toBe("✓ set · auth failed Nov 20 09:12")
+    expect(chip.attributes("title")).toBe(fullTime(at))
+  })
+
   it("shows each pin with its path and a short hash", async () => {
     const w = mount(SecretsTab, { props: { secrets } })
     expect(w.text()).toContain("/usr/bin/gh")

@@ -13,6 +13,7 @@ import { friendlyError } from "../lib/errors"
 import { useCommand } from "../lib/command"
 import { useLiveData } from "../lib/live"
 import { renderMarkdown } from "../lib/markdown"
+import { fullTime, shortTime } from "../lib/time"
 import { session } from "../stores/session"
 import { toast } from "../stores/ui"
 
@@ -38,8 +39,7 @@ function usd(n: number, unpriced: boolean): string {
 }
 
 function when(s: string): string {
-  const d = new Date(s)
-  return Number.isNaN(d.getTime()) || d.getFullYear() < 2000 ? "—" : d.toLocaleString()
+  return shortTime(s) || "—"
 }
 
 function costOf(m: MessageView): CostView {
@@ -288,7 +288,14 @@ watch(
         </div>
         <div class="card">
           <div class="c-3 t-12">Started</div>
-          <b>{{ when(info.started) }}</b>
+          <b
+            ><span
+              data-test="started"
+              style="white-space: nowrap"
+              :title="fullTime(info.started)"
+              >{{ when(info.started) }}</span
+            ></b
+          >
         </div>
         <div class="card">
           <div class="c-3 t-12">Children</div>
@@ -354,7 +361,9 @@ watch(
         >
           <div class="msg-meta">
             <b>You</b>
-            <time :datetime="m.created">{{ when(m.created) }}</time>
+            <time :datetime="m.created" :title="fullTime(m.created)" style="white-space: nowrap">{{
+              when(m.created)
+            }}</time>
             <span v-if="m.id === hitId" class="chip chip-acc">Search hit</span>
           </div>
           <!-- eslint-disable-next-line vue/no-v-html -->
@@ -378,7 +387,9 @@ watch(
         >
           <div class="msg-meta">
             <b>Tether</b>
-            <time :datetime="m.created">{{ when(m.created) }}</time>
+            <time :datetime="m.created" :title="fullTime(m.created)" style="white-space: nowrap">{{
+              when(m.created)
+            }}</time>
             <span v-if="m.id === hitId" class="chip chip-acc">Search hit</span>
           </div>
           <ReasoningBlock :text="m.reasoning" :tokens="m.reasoning_tokens" />

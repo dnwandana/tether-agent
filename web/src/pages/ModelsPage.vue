@@ -97,11 +97,10 @@ function stepState(name: string, at: number): { text: string; cls: "c-ok" | "c-w
 }
 
 const chain = computed(() =>
-  (view.value?.chain ?? []).map((name, i) => ({
-    role: i === 0 ? "Primary" : `Fallback ${i}`,
-    name,
-    state: stepState(name, now.value),
-  })),
+  (view.value?.chain ?? []).map((name, i) => {
+    const role = i === 0 ? "Primary" : `Fallback ${i}`
+    return { role, name, same: name === role.toLowerCase(), state: stepState(name, now.value) }
+  }),
 )
 
 const last = { fallback: status.fallback, entry: status.entry }
@@ -127,10 +126,22 @@ const banner = computed(() => {
   return `⚠ Fallback active. ${f.fallback_name} (${f.fallback_model}) answers. ${f.first_name} failed at ${at}: ${f.cause}.`
 })
 
+// Tells whether a chain step or a role uses the entry.
+function used(name: string): boolean {
+  const v = view.value
+  return (v?.chain ?? []).includes(name) || (v?.roles ?? []).some((r) => r.value === name)
+}
+
+// Formats a context window as "200k", or as "1M" from one million tokens.
+function ctxLabel(n: number): string {
+  if (n >= 1_000_000) return `${+(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1000) return `${Math.round(n / 1000)}k`
+  return String(n)
+}
+
 const columns = [
   { key: "name", label: "Entry" },
-  { key: "preset", label: "Preset" },
-  { key: "format", label: "Format" },
+  { key: "preset", label: "Preset · format" },
   { key: "model", label: "Model" },
   { key: "base_url", label: "Base URL" },
   { key: "vision", label: "Vision" },
@@ -141,15 +152,12 @@ const columns = [
 const rows = computed(() =>
   (view.value?.entries ?? []).map((e) => ({
     name: e.name,
-    preset: e.preset,
-    format: e.format,
+    preset: `${e.preset} · ${e.format}`,
+    unused: !used(e.name),
     model: e.model,
     base_url: e.base_url || "—",
     vision: e.vision ? "yes" : "—",
-    context:
-      e.context_window >= 1000
-        ? `${Math.round(e.context_window / 1000)}k`
-        : String(e.context_window),
+    context: ctxLabel(e.context_window),
     effort: e.effort || "—",
     status: entryStatus(e, now.value),
   })),
@@ -170,6 +178,11 @@ const roleRows = computed(() =>
 // Tells whether the entry of a role row is usable.
 function usable(row: unknown): boolean {
   return (row as { usable: boolean }).usable
+}
+
+// Tells whether no chain step and no role uses the entry of a row.
+function isUnused(row: unknown): boolean {
+  return (row as { unused: boolean }).unused
 }
 
 // Narrows the cell value of the status column.
@@ -205,17 +218,20 @@ onBeforeUnmount(stopTimer)
           <li v-if="i > 0" aria-hidden="true">→</li>
           <li class="chain-step">
             <span class="role">{{ c.role }}</span>
-            <span class="name">{{ c.name }}</span>
-            <span class="state" :class="c.state.cls">{{ c.state.text }}</span>
+            <span v-if="!c.same" class="name">{{ c.name }}</span>
+            <span class="step-state" :class="c.state.cls">{{ c.state.text }}</span>
           </li>
         </template>
       </ol>
       <DataTable :columns="columns" :rows="rows" row-key="name">
-        <template #cell-name="{ value }"
-          ><b>{{ value }}</b></template
+        <template #cell-name="{ value, row }"
+          ><b>{{ value }}</b
+          ><template v-if="isUnused(row)"
+            >{{ " " }}<span class="chip">not used</span></template
+          ></template
         >
         <template #cell-model="{ value }"
-          ><span class="mono">{{ value }}</span></template
+          ><span class="mono wrap-any">{{ value }}</span></template
         >
         <template #cell-base_url="{ value }"
           ><span class="mono wrap-any">{{ value }}</span></template

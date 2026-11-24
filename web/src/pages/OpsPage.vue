@@ -12,6 +12,7 @@ import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
 import { type ResultNoteData, useCommand } from "../lib/command"
 import { followTask, useLiveData } from "../lib/live"
+import { fullTime, shortTime } from "../lib/time"
 import { confirm, isSecure, toast } from "../stores/ui"
 
 const router = useRouter()
@@ -282,7 +283,7 @@ const rows = computed(() =>
   (backups.value?.files ?? []).map((f) => ({
     name: f.name,
     size: `${mb(f.size)} MB`,
-    modified: new Date(f.modified).toLocaleString(),
+    modified: f.modified,
   })),
 )
 const cols = [
@@ -406,6 +407,11 @@ onBeforeUnmount(() => {
         </div>
         <ResultNote :note="backupNote" @close="backupNote = null" />
         <DataTable v-if="rows.length" class="backups" :columns="cols" :rows="rows" row-key="name">
+          <template #cell-modified="{ row }"
+            ><span style="white-space: nowrap" :title="fullTime(String(row.modified))">{{
+              shortTime(String(row.modified)) || "—"
+            }}</span></template
+          >
           <template #cell-actions="{ row }">
             <button
               class="btn btn-secondary btn-sm"

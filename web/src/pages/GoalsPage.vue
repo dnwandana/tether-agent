@@ -6,17 +6,18 @@ import type { GoalRowView } from "../api/types.gen"
 import { useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
 import { useLiveData } from "../lib/live"
+import { fullTime, shortTime } from "../lib/time"
 import { confirm } from "../stores/ui"
 import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
 
-type Filter = "all" | "active" | "paused" | "parked"
+type Filter = "all" | "active" | "parked" | "paused" | "finished"
 
 const router = useRouter()
 const { run } = useCommand()
-const finished = ref(false)
 const filter = ref<Filter>("all")
+const finished = computed(() => filter.value === "finished")
 const rows = ref<GoalRowView[]>([])
 const state = ref<"loading" | "error" | "ready">("loading")
 const errText = ref("")
@@ -57,9 +58,7 @@ function line(g: GoalRowView): string {
 
 // Returns the time text, or a dash when there is no time.
 function when(s: string | null): string {
-  if (!s) return "—"
-  const d = new Date(s)
-  return Number.isNaN(d.getTime()) || d.getFullYear() < 2000 ? "—" : d.toLocaleString()
+  return shortTime(s) || "—"
 }
 
 // Returns the goal command for the row. The active dashboard session uses the plain form.
@@ -84,13 +83,16 @@ async function clearGoal(g: GoalRowView): Promise<void> {
 }
 
 const shown = computed(() =>
-  rows.value.filter((g) => filter.value === "all" || chipState(g) === filter.value),
+  rows.value.filter(
+    (g) => finished.value || filter.value === "all" || chipState(g) === filter.value,
+  ),
 )
 const FILTERS: { key: Filter; label: string }[] = [
-  { key: "all", label: "All" },
+  { key: "all", label: "All open" },
   { key: "active", label: "Active" },
-  { key: "paused", label: "Paused" },
   { key: "parked", label: "Parked" },
+  { key: "paused", label: "Paused" },
+  { key: "finished", label: "Finished (30 d)" },
 ]
 
 async function load(): Promise<void> {
@@ -106,8 +108,12 @@ async function load(): Promise<void> {
   }
 }
 
-async function pick(f: boolean): Promise<void> {
-  finished.value = f
+// Sets the filter. Only a change to or from Finished loads again, because only Finished uses
+// another route.
+async function pick(f: Filter): Promise<void> {
+  const changed = finished.value !== (f === "finished")
+  filter.value = f
+  if (!changed) return
   state.value = "loading"
   await refresh()
 }
@@ -119,24 +125,16 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
   <div class="page">
     <div class="page-h">
       <h1 class="t-20">Goals</h1>
-      <div class="seg">
-        <button type="button" :class="{ 'is-on': !finished }" @click="pick(false)">
-          Active · parked · paused
-        </button>
-        <button type="button" :class="{ 'is-on': finished }" @click="pick(true)">
-          Finished · 30 days
-        </button>
-      </div>
       <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
     </div>
-    <div v-if="!finished" class="seg">
+    <div class="seg">
       <button
         v-for="f in FILTERS"
         :key="f.key"
         type="button"
         :class="{ 'is-on': filter === f.key }"
         :aria-pressed="filter === f.key"
-        @click="filter = f.key"
+        @click="pick(f.key)"
       >
         {{ f.label }}
       </button>
@@ -162,9 +160,9 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
       state="empty"
       text="No goals match the filter."
       action="Show all"
-      @action="filter = 'all'"
+      @action="pick('all')"
     />
-    <div v-else :aria-busy="stale || undefined">
+    <div v-else class="page-stack" :aria-busy="stale || undefined">
       <DataTable
         :columns="columns"
         :rows="shown as unknown as Record<string, unknown>[]"
@@ -197,9 +195,13 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
         <template #cell-last_verdict="{ row }">{{
           (row as unknown as GoalRowView).last_verdict || "—"
         }}</template>
-        <template #cell-last_turn="{ row }">{{
-          when((row as unknown as GoalRowView).last_turn_at)
-        }}</template>
+        <template #cell-last_turn="{ row }"
+          ><span
+            style="white-space: nowrap"
+            :title="fullTime((row as unknown as GoalRowView).last_turn_at)"
+            >{{ when((row as unknown as GoalRowView).last_turn_at) }}</span
+          ></template
+        >
         <template #cell-actions="{ row }">
           <template v-for="g in [row as unknown as GoalRowView]" :key="g.session_id">
             <button

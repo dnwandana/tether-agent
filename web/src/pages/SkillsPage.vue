@@ -116,6 +116,12 @@ function trustClass(t: string): string {
   return "chip-plain"
 }
 
+// Returns the trust label that the page shows. The loader cannot tell an agent write from a
+// copy by hand, so "agent-created" shows as "local", like the catalog filter.
+function trustLabel(t: string): string {
+  return t === "agent-created" ? "local" : t
+}
+
 // Returns the status chips of one skill as { text, cls } pairs.
 function chips(r: SkillRow): { text: string; cls: string }[] {
   const out: { text: string; cls: string }[] = []
@@ -431,11 +437,11 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
             <router-link :to="{ name: 'skill', params: { name: s(row).name } }"
               >/{{ s(row).name }}</router-link
             >
-            <div class="c-2 t-12">{{ s(row).description }}</div>
+            <div class="c-2 t-12 clamp-3" :title="s(row).description">{{ s(row).description }}</div>
           </template>
           <template #cell-trust="{ row }"
             ><span class="chip" :class="trustClass(s(row).trust)">{{
-              s(row).trust
+              trustLabel(s(row).trust)
             }}</span></template
           >
           <template #cell-source="{ row }"
@@ -529,7 +535,7 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
         >
           <template #cell-name="{ row }">
             <b>/{{ c(row).name }}</b>
-            <div class="c-2 t-12">{{ c(row).description }}</div>
+            <div class="c-2 t-12 clamp-3" :title="c(row).description">{{ c(row).description }}</div>
           </template>
           <template #cell-url="{ row }"
             ><span class="mono">{{ c(row).url }}</span></template
@@ -542,7 +548,7 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
               v-if="c(row).source_trust"
               class="chip"
               :class="trustClass(c(row).source_trust)"
-              >{{ c(row).source_trust }}</span
+              >{{ trustLabel(c(row).source_trust) }}</span
             >
             <span v-if="!c(row).verdict && !c(row).source_trust" class="c-3">—</span>
           </template>

@@ -7,6 +7,7 @@ import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { friendlyError } from "../lib/errors"
 import { useLiveData } from "../lib/live"
+import { fullTime, shortTime } from "../lib/time"
 import { confirm, toast } from "../stores/ui"
 
 const state = ref<"loading" | "ready" | "error">("loading")
@@ -59,10 +60,9 @@ watch(lockedUntil, (v) => {
   )
 })
 
-// Returns the local time as HH:MM.
+// Returns the local time of the lock in the shared format.
 function hhmm(s: string | null): string {
-  if (!s) return ""
-  return new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+  return shortTime(s)
 }
 
 const pendingColumns = [
@@ -89,9 +89,7 @@ const asRows = (r: PairingRow[]): Record<string, unknown>[] =>
 
 // Returns a short local time, or a dash for a zero or missing time.
 function when(s: string): string {
-  const d = new Date(s)
-  if (!s || Number.isNaN(d.getTime()) || d.getFullYear() < 2000) return "—"
-  return d.toLocaleString()
+  return shortTime(s) || "—"
 }
 
 function inMinutes(s: string): string {
@@ -205,8 +203,9 @@ async function denyRow(row: PairingRow): Promise<void> {
     </div>
     <template v-else>
       <div class="section-h">
-        <h2>Pending</h2>
-        <span class="badge">{{ pending.length }}</span>
+        <h2>
+          Pending <span class="badge">{{ pending.length }}</span>
+        </h2>
       </div>
       <div v-if="locked" class="bad-banner" role="status">
         Pairing is locked until {{ hhmm(lockedUntil) }} after too many wrong codes.
@@ -214,14 +213,22 @@ async function denyRow(row: PairingRow): Promise<void> {
       <StateBlock
         v-if="pending.length === 0"
         state="empty"
-        text="No pairing requests. A person who sends /start to the bot gets a code. They tell you the code, and you approve it here."
+        title="No pairing requests."
+        text="A person who sends /start to the bot gets a code. They tell you the code, and you approve it here."
       />
       <DataTable v-else :columns="pendingColumns" :rows="asRows(pending)" row-key="key">
         <template #cell-name="{ row }">
           <b>{{ asRow(row).name }}</b>
           <div class="mono c-3 t-12">{{ asRow(row).platform }} · {{ asRow(row).user_id }}</div>
         </template>
-        <template #cell-since="{ row }">{{ when(asRow(row).since) }}</template>
+        <template #cell-since="{ row }"
+          ><span
+            data-test="since"
+            style="white-space: nowrap"
+            :title="fullTime(asRow(row).since)"
+            >{{ when(asRow(row).since) }}</span
+          ></template
+        >
         <template #cell-expires="{ row }">{{ inMinutes(asRow(row).expires) }}</template>
         <template #cell-code="{ row }">
           <label class="sr" :for="'code-' + rowKey(asRow(row))"
@@ -277,7 +284,14 @@ async function denyRow(row: PairingRow): Promise<void> {
           <div class="mono c-3 t-12">{{ asRow(row).platform }} · {{ asRow(row).user_id }}</div>
         </template>
         <template #cell-role><span class="chip">owner</span></template>
-        <template #cell-since="{ row }">{{ when(asRow(row).since) }}</template>
+        <template #cell-since="{ row }"
+          ><span
+            data-test="since"
+            style="white-space: nowrap"
+            :title="fullTime(asRow(row).since)"
+            >{{ when(asRow(row).since) }}</span
+          ></template
+        >
         <template #cell-actions="{ row }">
           <button class="btn btn-danger-soft" type="button" @click="revoke(asRow(row))">
             Revoke
@@ -294,7 +308,14 @@ async function denyRow(row: PairingRow): Promise<void> {
             <b>{{ asRow(row).name }}</b>
             <div class="mono c-3 t-12">{{ asRow(row).platform }} · {{ asRow(row).user_id }}</div>
           </template>
-          <template #cell-since="{ row }">{{ when(asRow(row).since) }}</template>
+          <template #cell-since="{ row }"
+            ><span
+              data-test="since"
+              style="white-space: nowrap"
+              :title="fullTime(asRow(row).since)"
+              >{{ when(asRow(row).since) }}</span
+            ></template
+          >
         </DataTable>
       </section>
     </template>

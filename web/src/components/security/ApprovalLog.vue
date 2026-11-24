@@ -5,15 +5,15 @@ import { api } from "../../api/client"
 import type { LogEntry, LogPage } from "../../api/types.gen"
 import { friendlyError } from "../../lib/errors"
 import { useLiveData } from "../../lib/live"
+import { fullTime, shortTime } from "../../lib/time"
 import DataTable from "../DataTable.vue"
 import SidePanel from "../SidePanel.vue"
 import StateBlock from "../StateBlock.vue"
 
-const props = defineProps<{ scopes: string[] }>()
+const props = defineProps<{ scopes: string[]; scopeLabels: Record<string, string> }>()
 
 const route = useRoute()
 const PAGE = 20
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 const DECISION: Record<string, string> = {
   allowed: "chip-ok",
   denied: "chip-bad",
@@ -28,6 +28,10 @@ const scopeOptions = computed(() =>
     ? [scope.value, ...props.scopes]
     : props.scopes,
 )
+// Returns the label of a scope key. A key with no label shows the key.
+function scopeName(key: string): string {
+  return props.scopeLabels[key] || key
+}
 const decision = ref("")
 const noAnswer = ref(false)
 const q = ref("")
@@ -112,9 +116,7 @@ onBeforeUnmount(() => {
 const allCols = [
   { key: "at", label: "Time" },
   { key: "scope", label: "Scope" },
-  { key: "session", label: "Session" },
   { key: "tool", label: "Tool" },
-  { key: "mcp", label: "MCP server · tool" },
   { key: "rule", label: "Rule" },
   { key: "decision", label: "Decision" },
   { key: "answer", label: "Answer" },
@@ -133,23 +135,6 @@ const rows = computed(
 const total = computed(() => page.value?.total ?? 0)
 const to = computed(() => (page.value?.offset ?? 0) + (page.value?.rows.length ?? 0))
 
-function pad2(n: number): string {
-  return String(n).padStart(2, "0")
-}
-
-// Formats a time as "Nov 20 09:12". A zero time gives an empty text.
-function stamp(iso: string | undefined): string {
-  if (!iso) return ""
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime()) || d.getFullYear() < 1971) return ""
-  return `${MONTHS[d.getMonth()]} ${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
-}
-
-// Returns the "server · tool" text of an MCP call.
-function mcp(r: Record<string, unknown>): string {
-  return [r.server, r.tool_name].filter(Boolean).join(" · ")
-}
-
 function open(r: Record<string, unknown>): void {
   detail.value = page.value?.rows[r.idx as number] ?? null
 }
@@ -158,14 +143,14 @@ const fields = computed(() => {
   const d = detail.value
   if (!d) return []
   return [
-    ["Time", stamp(d.at)],
+    ["Time", fullTime(d.at)],
     ["Scope", d.scope_label || d.scope],
-    ["Session", d.session_id],
     ["Kind", d.kind],
     ["Tool", d.tool],
     ["MCP server", d.server],
     ["MCP tool", d.tool_name],
-    ["Rule", d.rule],
+    ["Rule", d.rule_description || d.rule],
+    ["Rule ID", d.rule],
     ["Class", d.class],
     ["Decision", d.decision],
     ["Source", d.source],
@@ -179,7 +164,7 @@ const fields = computed(() => {
     <div class="toolbar">
       <select v-model="scope" class="input" aria-label="Scope">
         <option value="">All scopes</option>
-        <option v-for="s in scopeOptions" :key="s" :value="s">{{ s }}</option>
+        <option v-for="s in scopeOptions" :key="s" :value="s">{{ scopeName(s) }}</option>
       </select>
       <select v-model="decision" class="input" aria-label="Decision">
         <option value="">All decisions</option>
@@ -190,7 +175,7 @@ const fields = computed(() => {
       <label class="check"><input v-model="noAnswer" type="checkbox" /> No answer</label>
       <input
         v-model="q"
-        class="input"
+        class="input grow-search"
         type="search"
         aria-label="Search the previews"
         placeholder="Search the previews"
@@ -208,18 +193,19 @@ const fields = computed(() => {
     />
     <template v-else>
       <DataTable :columns="cols" :rows="rows" row-key="idx" class="table-dense" @row-click="open">
-        <template #cell-at="{ row }">{{ stamp(row.at as string) }}</template>
-        <template #cell-scope="{ row }">{{ row.scope_label || row.scope }}</template>
-        <template #cell-session="{ row }">
-          <router-link
-            v-if="row.session_id"
-            :to="{ name: 'transcript', params: { id: row.session_id as string } }"
-            @click.stop
-            >{{ String(row.session_id).slice(0, 8) }}</router-link
-          >
-          <template v-else>—</template>
-        </template>
-        <template #cell-mcp="{ row }">{{ mcp(row) || "—" }}</template>
+        <template #cell-at="{ row }"
+          ><span style="white-space: nowrap" :title="fullTime(row.at as string)">{{
+            shortTime(row.at as string) || "—"
+          }}</span></template
+        >
+        <template #cell-scope="{ row }"
+          ><bdi class="cell-title" :title="String(row.scope_label || row.scope)">{{
+            row.scope_label || row.scope
+          }}</bdi></template
+        >
+        <template #cell-rule="{ row }"
+          ><span :title="row.rule as string">{{ row.rule_description || row.rule }}</span></template
+        >
         <template #cell-decision="{ row }">
           <span class="chip" :class="DECISION[row.decision as string] ?? 'chip-plain'">{{
             row.decision
@@ -257,6 +243,15 @@ const fields = computed(() => {
           <dt>{{ k }}</dt>
           <dd>{{ v || "—" }}</dd>
         </template>
+        <dt>Session</dt>
+        <dd>
+          <router-link
+            v-if="detail.session_id"
+            :to="{ name: 'transcript', params: { id: detail.session_id } }"
+            >{{ detail.session_id }}</router-link
+          >
+          <template v-else>—</template>
+        </dd>
         <dt>Preview</dt>
         <dd>
           <pre class="code-block">{{ detail.preview }}</pre>

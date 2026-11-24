@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { api } from "../api/client"
 import type { CronUsageView, DailyView, UsageModelRow, UsageView } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
@@ -7,6 +7,8 @@ import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { friendlyError } from "../lib/errors"
 import { useLiveData } from "../lib/live"
+import { dayLabel } from "../lib/time"
+import { bucketKeys, bucketOf, formatTick, grainFor, labelStep, niceMax } from "../lib/usagechart"
 import { session } from "../stores/session"
 
 type Range = "today" | "7d" | "30d" | "all" | "session"
@@ -23,17 +25,13 @@ const range = ref<Range>("30d")
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const usage = ref<UsageView | null>(null)
-const daily = ref<DailyView>({ range: "", days: [] })
+const daily = ref<DailyView>({ range: "", from: "", to: "", days: [] })
 const cron = ref<CronUsageView>({ range: "", jobs: [], flagged: [] })
 
 // 31200000 → "31.2M", 1100000 → "1.10M".
 function millions(n: number): string {
   const m = n / 1e6
   return (m >= 10 ? m.toFixed(1) : m.toFixed(2)) + "M"
-}
-
-function pad2(n: number): string {
-  return String(n).padStart(2, "0")
 }
 
 function usd(n: number, digits = 4): string {
@@ -125,7 +123,7 @@ const cronRows = computed(() => {
       job_id: j.job_id,
       name: j.job_name,
       deleted: !j.job_name,
-      cost: usd(j.usd),
+      cost: usd(j.usd) + (j.unpriced ? "+" : ""),
       flagged: n > 0 ? `💸 ${n}` : "—",
     }
   })
@@ -133,7 +131,7 @@ const cronRows = computed(() => {
   out.push({
     job_id: "total",
     name: `Total · ${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}`,
-    cost: usd(jobs.reduce((a, j) => a + j.usd, 0)),
+    cost: usd(jobs.reduce((a, j) => a + j.usd, 0)) + (jobs.some((j) => j.unpriced) ? "+" : ""),
     flagged: m > 0 ? `💸 ${m}` : "—",
     total: true,
   })
@@ -142,43 +140,62 @@ const cronRows = computed(() => {
 
 const table = ref(false)
 
-// The number of days from the first to the last day of the data. It is computed once.
-const daySpan = computed(() => {
-  const days = daily.value.days
-  if (days.length === 0) return 0
-  let lo = days[0].day
-  let hi = lo
-  for (const d of days) {
-    if (d.day < lo) lo = d.day
-    if (d.day > hi) hi = d.day
-  }
-  return (Date.parse(hi + "T00:00:00Z") - Date.parse(lo + "T00:00:00Z")) / 86400000
-})
-
-// Returns the bar key of a day. Only the range All groups by week or by month.
-function bucket(day: string): string {
-  if (range.value !== "all") return day
-  const span = daySpan.value
-  if (span > 365) return day.slice(0, 7)
-  if (span > 60) {
-    const d = new Date(day + "T00:00:00")
-    d.setDate(d.getDate() - ((d.getDay() + 6) % 7))
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
-  }
-  return day
-}
-
 // Returns "Nov 2026" for a month key and "Nov 19" for a day key.
 function label(key: string): string {
-  if (key.length === 7)
-    return new Date(key + "-01T00:00:00").toLocaleDateString("en-US", {
+  if (key.length === 7) {
+    const [y, m] = key.split("-").map(Number)
+    return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString("en-US", {
       month: "short",
       year: "numeric",
+      timeZone: "UTC",
     })
-  return new Date(key + "T00:00:00").toLocaleDateString("en-US", { month: "short", day: "numeric" })
+  }
+  return dayLabel(key)
 }
 
-// Groups the daily rows by bar key, oldest first. The 5 largest models get s1 to s5. Each other
+// The first and the last day of the chart: the range of the answer, else the data.
+const span = computed(() => {
+  const days = daily.value.days.map((d) => d.day).sort()
+  return {
+    from: daily.value.from || days[0] || "",
+    to: daily.value.to || days[days.length - 1] || "",
+  }
+})
+const grain = computed(() => grainFor(range.value, span.value.from, span.value.to))
+
+type Group = {
+  total: number
+  unpriced: boolean
+  inTok: number
+  outTok: number
+  top: string
+  topUsd: number
+  parts: Map<string, { model: string; cls: string; usd: number }>
+}
+
+function empty(): Group {
+  return {
+    total: 0,
+    unpriced: false,
+    inTok: 0,
+    outTok: 0,
+    top: "",
+    topUsd: -1,
+    parts: new Map(),
+  }
+}
+
+// The largest total of a bucket, before the bars are built.
+const top = computed(() => {
+  const sums = new Map<string, number>()
+  for (const d of daily.value.days) {
+    const k = bucketOf(d.day, grain.value)
+    sums.set(k, (sums.get(k) ?? 0) + d.usd)
+  }
+  return niceMax(Math.max(0, ...sums.values()))
+})
+
+// Groups the daily rows by bar key, oldest first. An empty bucket stays in the list. The 5 largest models get s1 to s5. Each other
 // model joins the series Other (s6).
 const bars = computed(() => {
   const totals = new Map<string, number>()
@@ -188,28 +205,15 @@ const bars = computed(() => {
     const i = order.indexOf(m)
     return i < 5 ? { name: m, cls: `s${i + 1}` } : { name: "Other", cls: "s6" }
   }
-  const flaggedKeys = new Set(cron.value.flagged.map((f) => bucket(f.at.slice(0, 10))))
-  type Group = {
-    total: number
-    unpriced: boolean
-    inTok: number
-    outTok: number
-    top: string
-    topUsd: number
-    parts: Map<string, { model: string; cls: string; usd: number }>
-  }
+  const flaggedKeys = new Set(
+    cron.value.flagged.map((f) => bucketOf(f.at.slice(0, 10), grain.value)),
+  )
   const groups = new Map<string, Group>()
+  for (const key of bucketKeys(span.value.from, span.value.to, grain.value))
+    groups.set(key, empty())
   for (const d of daily.value.days) {
-    const key = bucket(d.day)
-    const g = groups.get(key) ?? {
-      total: 0,
-      unpriced: false,
-      inTok: 0,
-      outTok: 0,
-      top: "",
-      topUsd: -1,
-      parts: new Map(),
-    }
+    const key = bucketOf(d.day, grain.value)
+    const g = groups.get(key) ?? empty()
     g.total += d.usd
     g.unpriced = g.unpriced || d.unpriced
     g.inTok += d.in
@@ -224,7 +228,6 @@ const bars = computed(() => {
     g.parts.set(sr.name, part)
     groups.set(key, g)
   }
-  const max = Math.max(0, ...[...groups.values()].map((g) => g.total))
   return [...groups.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([key, g]) => ({
@@ -239,10 +242,99 @@ const bars = computed(() => {
       parts: [...g.parts.values()].map((p) => ({
         model: p.model,
         cls: p.cls,
-        pct: max > 0 ? (p.usd / max) * 100 : 0,
+        usd: p.usd,
+        pct: (p.usd / top.value) * 100,
       })),
     }))
 })
+
+const chartCard = ref<HTMLElement | null>(null)
+const sbarsEl = ref<HTMLElement | null>(null)
+const width = ref(600)
+const chartHeight = ref(170)
+const ticks = computed(() => {
+  const t = top.value
+  return (chartHeight.value < 160 ? [t, 0] : [t, t / 2, 0]).map(formatTick)
+})
+const step = computed(() => labelStep(bars.value.length, width.value))
+
+// The label width in px that labelStep reserves.
+const LABEL_PX = 56
+// The first and the last label grow inward by their full width, so a middle label keeps room
+// for one and a half labels from each end. The count is in bars.
+const endGap = computed(() => {
+  const pitch = width.value / Math.max(1, bars.value.length)
+  return Math.max(step.value, Math.ceil((1.5 * LABEL_PX) / pitch - 0.5))
+})
+
+// Returns true when the bar at index i gets a date label.
+function showLabel(i: number): boolean {
+  const n = bars.value.length
+  if (i === 0 || i === n - 1) return true
+  return i % step.value === 0 && i >= endGap.value && n - 1 - i >= endGap.value
+}
+
+let observer: ResizeObserver | null = null
+function stopObserver(): void {
+  observer?.disconnect()
+  observer = null
+}
+watch(chartCard, (el) => {
+  stopObserver()
+  if (!el || typeof ResizeObserver === "undefined") return
+  observer = new ResizeObserver((entries) => {
+    // The labels share the bar area, which is narrower than the card by the padding and
+    // the tick column. Use the card width only when the bar area has no width.
+    const box = sbarsEl.value
+    const pad = box ? parseFloat(getComputedStyle(box).paddingLeft) || 0 : 0
+    const area = box ? box.clientWidth - pad : 0
+    const w = area > 0 ? area : (entries[entries.length - 1]?.contentRect.width ?? 0)
+    if (w > 0) width.value = w
+    const h = sbarsEl.value?.clientHeight ?? 0
+    if (h > 0) chartHeight.value = h
+  })
+  observer.observe(el)
+})
+
+const tipIndex = ref(-1)
+const tipLeft = ref(8)
+const tipEl = ref<HTMLElement | null>(null)
+
+// Opens the tooltip of bar i. It never closes the tooltip.
+function openTip(i: number, bar: HTMLElement): void {
+  tipIndex.value = i
+  const card = chartCard.value
+  if (!card) return
+  const tipW = tipEl.value?.offsetWidth || 200
+  const c = card.getBoundingClientRect()
+  const r = bar.getBoundingClientRect()
+  const left = r.left - c.left + r.width / 2 - tipW / 2
+  tipLeft.value = Math.max(8, Math.min(left, c.width - tipW - 8))
+}
+
+// Keeps the tooltip on the bar under a finger that moves over the bars.
+function follow(e: PointerEvent): void {
+  if (tipIndex.value < 0) return
+  const bar = document.elementFromPoint?.(e.clientX, e.clientY)?.closest<HTMLElement>(".sbar")
+  if (bar?.dataset.i !== undefined) openTip(Number(bar.dataset.i), bar)
+}
+
+function onKey(e: KeyboardEvent): void {
+  if (e.key === "Escape") tipIndex.value = -1
+}
+function onDown(e: Event): void {
+  if (!chartCard.value?.contains(e.target as Node)) tipIndex.value = -1
+}
+onMounted(() => {
+  document.addEventListener("keydown", onKey)
+  document.addEventListener("pointerdown", onDown)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener("keydown", onKey)
+  document.removeEventListener("pointerdown", onDown)
+  stopObserver()
+})
+
 const legend = computed(() => {
   const seen = new Map<string, string>()
   for (const b of bars.value)
@@ -251,7 +343,6 @@ const legend = computed(() => {
     .map(([model, cls]) => ({ model, cls }))
     .sort((a, b) => a.cls.localeCompare(b.cls))
 })
-const maxDay = computed(() => Math.max(0, ...bars.value.map((b) => b.total)))
 </script>
 
 <template>
@@ -310,7 +401,7 @@ const maxDay = computed(() => Math.max(0, ...bars.value.map((b) => b.total)))
         This session: {{ session.title || "New session" }}
       </p>
 
-      <div v-else class="card">
+      <div v-else ref="chartCard" class="card" style="position: relative">
         <div class="card-h">
           <h3>Spend per day</h3>
           <span v-for="l in legend" :key="l.model" class="lg"
@@ -342,20 +433,19 @@ const maxDay = computed(() => Math.max(0, ...bars.value.map((b) => b.total)))
             </table>
           </div>
           <template v-else>
-            <div class="sbars">
+            <div ref="sbarsEl" class="sbars" @pointermove="follow">
               <div class="axis-y">
-                <span>{{ usd(maxDay, 2) }}</span
-                ><span>{{ usd(maxDay / 2, 2) }}</span
-                ><span>$0</span>
+                <span v-for="t in ticks" :key="t">{{ t }}</span>
               </div>
-              <div
-                v-for="b in bars"
+              <button
+                v-for="(b, i) in bars"
                 :key="b.key"
+                type="button"
                 class="sbar"
-                tabindex="0"
-                role="img"
+                :data-i="i"
                 :aria-label="`${b.label}: ${usd(b.total, 2)}`"
-                :title="`${b.key}: ${usd(b.total)}${b.unpriced ? ' (+ unpriced calls)' : ''}`"
+                @pointerenter="openTip(i, $event.currentTarget as HTMLElement)"
+                @click="openTip(i, $event.currentTarget as HTMLElement)"
               >
                 <span v-if="b.spike" class="spike" aria-hidden="true">💸</span>
                 <i
@@ -364,12 +454,34 @@ const maxDay = computed(() => Math.max(0, ...bars.value.map((b) => b.total)))
                   :class="p.cls"
                   :style="{ height: `${p.pct}%` }"
                 />
-              </div>
+              </button>
             </div>
             <div class="axis-x">
-              <span v-for="b in bars" :key="b.key">{{ b.label }}</span>
+              <span v-for="(b, i) in bars" :key="b.key">{{ showLabel(i) ? b.label : "" }}</span>
             </div>
           </template>
+        </div>
+        <div
+          v-if="tipIndex >= 0 && bars[tipIndex]"
+          ref="tipEl"
+          class="popover usage-tip"
+          role="tooltip"
+          :style="{
+            position: 'absolute',
+            left: tipLeft + 'px',
+            top: '48px',
+            zIndex: 5,
+            padding: '8px 10px',
+            minWidth: '160px',
+          }"
+        >
+          <b>{{ bars[tipIndex].label }}</b>
+          <div v-for="p in bars[tipIndex].parts" :key="p.model" class="t-12">
+            {{ p.model }} {{ usd(p.usd) }}
+          </div>
+          <div class="t-12">
+            <b>Total {{ usd(bars[tipIndex].total) }}{{ bars[tipIndex].unpriced ? "+" : "" }}</b>
+          </div>
         </div>
       </div>
 

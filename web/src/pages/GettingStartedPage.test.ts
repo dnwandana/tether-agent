@@ -105,7 +105,11 @@ describe("GettingStartedPage", () => {
     expect(rows[3].find(".lead").text()).toBe("?")
     expect(rows[3].text()).toContain("Run the doctor on the System page.")
     expect(rows[3].find("code").exists()).toBe(false)
-    expect(btns(w, "Run doctor")).toHaveLength(2)
+    expect(btns(w, "Run doctor")).toHaveLength(1)
+    expect(rows[3].find("button").exists()).toBe(false)
+    expect(rows[4].find("button").exists()).toBe(false)
+    const html = w.html()
+    expect(html.indexOf("Run doctor")).toBeLessThan(html.indexOf("Primary provider"))
     expect(rows[6].text()).toContain("How to turn on HTTPS")
     expect(btns(w, "Copy")).toHaveLength(3)
   })
@@ -153,13 +157,28 @@ describe("GettingStartedPage", () => {
     expect(api).toHaveBeenCalledWith("GET", "/api/setup")
   })
 
-  it("shows the HTTPS note in place of Copy on plain HTTP", async () => {
+  it("shows the HTTPS note in place of Copy on plain HTTP, but not in the HTTPS row", async () => {
     vi.mocked(isSecure).mockReturnValue(false)
     const w = await mk()
     expect(btns(w, "Copy")).toHaveLength(0)
+    const rows = w.findAll(".li")
     expect(
-      w.findAll(".li").filter((r: any) => r.text().includes("Copy needs HTTPS or localhost.")),
-    ).toHaveLength(3)
+      rows.filter((r: any) => r.text().includes("Copy needs HTTPS or localhost.")),
+    ).toHaveLength(2)
+    expect(rows[6].text()).not.toContain("Copy needs HTTPS or localhost.")
+    expect(
+      rows[6].findAll("button").filter((b: any) => b.text() === "How to turn on HTTPS"),
+    ).toHaveLength(1)
+  })
+
+  it("shows no Run doctor button when no step is unknown", async () => {
+    vi.mocked(api).mockImplementation(async (m: string) =>
+      m === "POST"
+        ? ({ task_id: "t1" } as any)
+        : (steps.filter((s) => s.state !== "unknown") as any),
+    )
+    const w = await mk()
+    expect(btns(w, "Run doctor")).toHaveLength(0)
   })
 
   it("reloads only on a focus and a reconnect", async () => {

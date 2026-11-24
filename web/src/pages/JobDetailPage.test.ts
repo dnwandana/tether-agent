@@ -17,6 +17,7 @@ import { confirm } from "../stores/ui"
 import JobDetailPage from "./JobDetailPage.vue"
 import { ApiError } from "../api/client"
 import { emitEvents } from "../lib/bus"
+import { shortTime } from "../lib/time"
 const notFound = () =>
   Object.assign(Object.create(ApiError.prototype), {
     status: 404,
@@ -24,7 +25,7 @@ const notFound = () =>
     message: "No job with this id.",
   })
 const hhmm = (iso: string) =>
-  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
 
 const Blank = { render: () => null }
 const run = (id: number) => ({
@@ -55,10 +56,12 @@ const detail = {
     watch: false,
     draft_only: false,
     ok: 4,
-    last_cost_usd: 0.0021,
-    last_cost_known: true,
     pause_reason: "",
     history_off: false,
+    state: "failing",
+    cost_7d_usd: 0.0192,
+    cost_7d_known: true,
+    cost_7d_unpriced: false,
   },
   prompt: "p",
   script: "",
@@ -84,7 +87,6 @@ const detail = {
   })),
   week_ok: 4,
   week_total: 7,
-  week_cost_usd: 0.0192,
   runs_total: 38,
 }
 
@@ -294,7 +296,7 @@ describe("JobDetailPage", () => {
     })
     const { w } = await mk()
     expect(w.text()).toContain(
-      "No runs yet. The first run is at " + hhmm("2026-11-24T07:00:00Z") + ".",
+      "No runs yet. The first run is at " + shortTime("2026-11-24T07:00:00Z") + ".",
     )
     w.findAllComponents({ name: "StateBlock" })
       .find((s) => s.props("action") === "⚡ Run now")!
@@ -333,5 +335,41 @@ describe("JobDetailPage", () => {
     emitEvents([{ name: "job.run", data: { job_id: "j2", status: "ok" } }])
     await flushPromises()
     expect(w.findComponent({ name: "JobForm" }).vm).toBe(form.vm)
+  })
+
+  it("shows the 7-day cost of the job, the state glyph, and a stopped run", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/jobs/j2"
+          ? {
+              ...detail,
+              job: { ...detail.job, icon: "" },
+              last7: [{ ...run(1), status: "stopped" }, ...detail.last7.slice(1)],
+            }
+          : [run(1)]) as any,
+    )
+    const { w } = await mk()
+    expect(w.text()).toContain("4 of 7 OK · $0.0192")
+    expect(w.find("h1").text()).toContain("⚠")
+    const bars = w.findAll(".runs7 i")
+    expect(bars[bars.length - 1].classes()).toContain("stop")
+    expect(w.find(".page-stack").exists()).toBe(true)
+  })
+
+  it("shows a dash for a cost that is not known, and done as muted text", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/jobs/j2"
+          ? {
+              ...detail,
+              job: { ...detail.job, state: "done", enabled: false, cost_7d_known: false },
+            }
+          : [run(1)]) as any,
+    )
+    const { w } = await mk()
+    expect(w.text()).toContain("4 of 7 OK · —")
+    expect(w.find(".page-h .chip").exists()).toBe(false)
+    expect(w.findAll(".page-h .c-3").some((s: any) => s.text() === "done")).toBe(true)
+    expect(w.findAll("button").some((b: any) => b.text() === "⏸ Pause")).toBe(false)
   })
 })

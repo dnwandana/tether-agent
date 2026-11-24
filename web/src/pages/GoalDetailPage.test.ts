@@ -18,6 +18,7 @@ import { emitEvents } from "../lib/bus"
 import { api, runCommand } from "../api/client"
 import { confirm } from "../stores/ui"
 import { session } from "../stores/session"
+import { fullTime, shortTime } from "../lib/time"
 import GoalDetailPage from "./GoalDetailPage.vue"
 
 const Blank = { render: () => null }
@@ -125,6 +126,13 @@ describe("GoalDetailPage", () => {
     expect(w.text()).toContain("1 / 2")
     expect(w.text()).toContain("FAIL internal/gateway")
     expect(w.text()).not.toContain("ok internal/cron")
+  })
+
+  it("shows the times in the short format inside a page stack", async () => {
+    const w = await mk()
+    expect(w.find(".page-stack").exists()).toBe(true)
+    for (const t of ["2026-11-20T09:30:00Z", "2026-11-20T09:00:00Z"])
+      expect(w.find(`[title="${fullTime(t)}"]`).text()).toBe(shortTime(t))
   })
 
   it("removes a subgoal and adds a gate with the commands", async () => {

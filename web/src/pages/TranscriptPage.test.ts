@@ -14,6 +14,7 @@ vi.mock("../stores/ui", async (importOriginal) => ({
 }))
 import { api, runCommand } from "../api/client"
 import TranscriptPage from "./TranscriptPage.vue"
+import { fullTime, shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
 const info = {
@@ -414,5 +415,18 @@ describe("TranscriptPage", () => {
       vi.useRealTimers()
       vi.unstubAllGlobals()
     }
+  })
+
+  it("shows message and start times in the shared format", async () => {
+    const { w } = await mk()
+    const t = w.find("#msg-11 time")
+    expect(t.text()).toBe(shortTime("2026-11-20T09:05:00Z"))
+    expect(t.attributes("title")).toBe(fullTime("2026-11-20T09:05:00Z"))
+    expect(t.attributes("datetime")).toBe("2026-11-20T09:05:00Z")
+    expect(w.text()).toContain(shortTime("2026-11-19T09:00:00Z"))
+    const started = w.find('[data-test="started"]')
+    expect(started.text()).toBe(shortTime("2026-11-19T09:00:00Z"))
+    expect(started.attributes("title")).toBe(fullTime("2026-11-19T09:00:00Z"))
+    expect(started.attributes("style")).toContain("white-space: nowrap")
   })
 })
