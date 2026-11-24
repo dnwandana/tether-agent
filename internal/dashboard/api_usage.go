@@ -27,7 +27,10 @@ type UsageDeps struct {
 	Cfg      *config.Config
 	Health   func(now time.Time) []provider.HealthRow
 	Fallback func() provider.FallbackStatus
-	Now      func() time.Time
+	// ContextWindow returns the context window that the agent uses for the entry:
+	// pricing.Service.ContextWindow. Nil keeps the context_window of the config.
+	ContextWindow func(name string, p config.Provider) int
+	Now           func() time.Time
 	// Redact masks the base URLs. Nil keeps them.
 	Redact func(string) string
 }
@@ -68,17 +71,23 @@ type DayRow struct {
 	Out      int64   `json:"out"`
 }
 
-// DailyView is the daily cost series of one range.
+// DailyView is the daily cost series of one range. From and To are the first and the last
+// day key of the range in the host time zone. From is "" for "all" with no data, and both
+// are "" for "session".
 type DailyView struct {
 	Range string   `json:"range"`
+	From  string   `json:"from"`
+	To    string   `json:"to"`
 	Days  []DayRow `json:"days"`
 }
 
 // JobCostRow is the cost of the cron sessions of one job. JobName is "" for a deleted job.
+// Unpriced is true when one or more calls have no price ("+" on the page).
 type JobCostRow struct {
-	JobID   string  `json:"job_id"`
-	JobName string  `json:"job_name"`
-	USD     float64 `json:"usd"`
+	JobID    string  `json:"job_id"`
+	JobName  string  `json:"job_name"`
+	USD      float64 `json:"usd"`
+	Unpriced bool    `json:"unpriced"`
 }
 
 // FlaggedRow is a run that cost more than 3 times the median of its job.
@@ -254,6 +263,15 @@ func (a *UsageAPI) daily(w http.ResponseWriter, r *http.Request) {
 		for _, d := range days {
 			v.Days = append(v.Days, DayRow(d))
 		}
+		const dayKey = "2006-01-02"
+		v.To = a.d.Now().In(time.Local).Format(dayKey)
+		if name == "all" {
+			if len(days) > 0 {
+				v.From = days[0].Day
+			}
+		} else {
+			v.From = since.In(time.Local).Format(dayKey)
+		}
 	}
 	usageJSON(w, http.StatusOK, v)
 }
@@ -294,8 +312,8 @@ func (a *UsageAPI) cronFill(ctx context.Context, v *CronUsageView, since time.Ti
 	for _, j := range jobs {
 		names[j.ID] = j.Name
 	}
-	for id, usd := range costs {
-		v.Jobs = append(v.Jobs, JobCostRow{JobID: id, JobName: names[id], USD: usd})
+	for id, c := range costs {
+		v.Jobs = append(v.Jobs, JobCostRow{JobID: id, JobName: names[id], USD: c.USD, Unpriced: c.Unpriced})
 	}
 	slices.SortFunc(v.Jobs, func(x, y JobCostRow) int {
 		switch {
@@ -362,6 +380,9 @@ func (a *UsageAPI) models(w http.ResponseWriter, r *http.Request) {
 		}
 		row := ModelEntryRow{Name: name, Preset: p.Preset, Format: p.Format, Model: p.Model, BaseURL: a.d.Redact(u), Vision: p.Vision,
 			ContextWindow: p.ContextWindow, Effort: p.Effort, Status: "ok"}
+		if a.d.ContextWindow != nil {
+			row.ContextWindow = a.d.ContextWindow(name, p)
+		}
 		if p.Unusable != "" {
 			row.Status, row.Cause = "unusable", p.UnusableCause
 		} else if h, hit := byKey[hkey{name, p.Model}]; hit {

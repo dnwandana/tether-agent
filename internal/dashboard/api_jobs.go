@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -44,24 +45,39 @@ type JobsDeps struct {
 // JobsAPI serves the Jobs page.
 type JobsAPI struct{ d JobsDeps }
 
+// JobState is the state of a job. cron.StateOf gives the value.
+type JobState string
+
+const (
+	JobStateDone    JobState = "done"
+	JobStatePaused  JobState = "paused"
+	JobStateFailing JobState = "failing"
+	JobStateWatch   JobState = "watch"
+	JobStateOK      JobState = "ok"
+	JobStatePending JobState = "pending"
+)
+
 type JobRow struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	Icon          string    `json:"icon"`
-	Schedule      string    `json:"schedule"`
-	Enabled       bool      `json:"enabled"`
-	PauseReason   string    `json:"pause_reason"`
-	NextRun       time.Time `json:"next_run"`
-	LastRun       time.Time `json:"last_run"`
-	LastStatus    string    `json:"last_status"`
-	FailStreak    int       `json:"fail_streak"`
-	Watch         bool      `json:"watch"`
-	DraftOnly     bool      `json:"draft_only"`
-	OK            int       `json:"ok"` // ok runs in the newest 7 runs
-	LastCostUSD   float64   `json:"last_cost_usd"`
-	LastCostKnown bool      `json:"last_cost_known"`
-	HistoryOff    bool      `json:"history_off"`
-	Last7         []string  `json:"last7"` // run statuses of the newest 7 runs, oldest first
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Icon        string    `json:"icon"`
+	State       JobState  `json:"state"`
+	Schedule    string    `json:"schedule"`
+	Enabled     bool      `json:"enabled"`
+	PauseReason string    `json:"pause_reason"`
+	NextRun     time.Time `json:"next_run"`
+	LastRun     time.Time `json:"last_run"`
+	LastStatus  string    `json:"last_status"`
+	FailStreak  int       `json:"fail_streak"`
+	Watch       bool      `json:"watch"`
+	DraftOnly   bool      `json:"draft_only"`
+	OK          int       `json:"ok"` // ok runs in the newest 7 runs
+	// The cost of the cron sessions of the last 7 days. Known is false when the job has no such session.
+	Cost7dUSD      float64  `json:"cost_7d_usd"`
+	Cost7dKnown    bool     `json:"cost_7d_known"`
+	Cost7dUnpriced bool     `json:"cost_7d_unpriced"`
+	HistoryOff     bool     `json:"history_off"`
+	Last7          []string `json:"last7"` // run statuses of the newest 7 runs, oldest first
 }
 
 type RunRow struct {
@@ -98,7 +114,6 @@ type JobDetail struct {
 	Last7       []RunRow `json:"last7"`
 	WeekOK      int      `json:"week_ok"`
 	WeekTotal   int      `json:"week_total"`
-	WeekCostUSD float64  `json:"week_cost_usd"` // from cron.CostByJob for the last 7 days
 	RunsTotal   int      `json:"runs_total"`
 	FailLimit   int      `json:"fail_limit"` // cron.fail_streak_limit; 0 is off
 
@@ -146,7 +161,11 @@ type BriefView struct {
 	DefaultDeliver string          `json:"default_deliver"`
 }
 
-func init() { registerAPI(JobRow{}, RunRow{}, JobDetail{}, HeldView{}, BriefLineView{}, BriefView{}) }
+func init() {
+	registerAPI(JobRow{}, RunRow{}, JobDetail{}, HeldView{}, BriefLineView{}, BriefView{})
+	registerEnum(reflect.TypeFor[JobState](), string(JobStateDone), string(JobStateFailing), string(JobStateOK),
+		string(JobStatePaused), string(JobStatePending), string(JobStateWatch))
+}
 
 const (
 	jobsLastRuns   = 7
@@ -201,29 +220,20 @@ func (a *JobsAPI) jobsFail(w http.ResponseWriter, status int, err error) {
 }
 
 // jobsIcon returns the state icon of the job j. It follows jobIcon of the gateway.
-func jobsIcon(j cron.Job) string {
-	switch {
-	case !j.Enabled && j.RepeatLeft == 0:
-		return "✔"
-	case !j.Enabled:
-		return "⏸"
-	case j.FailStreak > 0:
-		return "⚠"
-	case j.Watch:
-		return "👁"
-	case j.LastStatus == "ok":
-		return "✅"
-	}
-	return "⏳"
-}
+func jobsIcon(j cron.Job) string { return jobsGlyph[JobState(cron.StateOf(j))] }
+
+var jobsGlyph = map[JobState]string{JobStateDone: "✔", JobStatePaused: "⏸", JobStateFailing: "⚠",
+	JobStateWatch: "👁", JobStateOK: "✅", JobStatePending: "⏳"}
 
 func (a *JobsAPI) historyOff() bool { return a.d.Jobs.RunHistory == 0 }
 
 // jobsRow builds the row of the job j. It reads the newest runs first.
-func (a *JobsAPI) jobsRow(ctx context.Context, j cron.Job) (JobRow, error) {
-	row := JobRow{ID: j.ID, Name: j.Name, Icon: jobsIcon(j), Schedule: j.Schedule, Enabled: j.Enabled,
+func (a *JobsAPI) jobsRow(ctx context.Context, j cron.Job, costs map[string]cron.JobCost) (JobRow, error) {
+	row := JobRow{ID: j.ID, Name: j.Name, Icon: jobsIcon(j), State: JobState(cron.StateOf(j)), Schedule: j.Schedule, Enabled: j.Enabled,
 		PauseReason: j.PauseReason, NextRun: j.NextRun, LastRun: j.LastRun, LastStatus: j.LastStatus,
 		FailStreak: j.FailStreak, Watch: j.Watch, DraftOnly: j.DraftOnly, HistoryOff: a.historyOff(), Last7: []string{}}
+	c, ok := costs[j.ID]
+	row.Cost7dUSD, row.Cost7dKnown, row.Cost7dUnpriced = c.USD, ok, c.Unpriced
 	if row.HistoryOff {
 		return row, nil
 	}
@@ -236,9 +246,6 @@ func (a *JobsAPI) jobsRow(ctx context.Context, j cron.Job) (JobRow, error) {
 			row.OK++
 		}
 		row.Last7 = append([]string{r.Status}, row.Last7...) // newest first in, oldest first out
-	}
-	if len(runs) > 0 && runs[0].CostUSD != nil {
-		row.LastCostUSD, row.LastCostKnown = *runs[0].CostUSD, true
 	}
 	return row, nil
 }
@@ -296,9 +303,14 @@ func (a *JobsAPI) list(w http.ResponseWriter, r *http.Request) {
 		a.jobsFail(w, http.StatusInternalServerError, err)
 		return
 	}
+	costs, err := cron.CostByJob(r.Context(), a.d.DB, a.d.Now().Add(-jobsWeek))
+	if err != nil {
+		a.jobsFail(w, http.StatusInternalServerError, err)
+		return
+	}
 	rows := make([]JobRow, 0, len(jobs))
 	for _, j := range jobs {
-		row, err := a.jobsRow(r.Context(), j)
+		row, err := a.jobsRow(r.Context(), j, costs)
 		if err != nil {
 			a.jobsFail(w, http.StatusInternalServerError, err)
 			return
@@ -319,7 +331,13 @@ func (a *JobsAPI) detail(w http.ResponseWriter, r *http.Request) {
 		a.jobsFail(w, http.StatusInternalServerError, err)
 		return
 	}
-	row, err := a.jobsRow(ctx, j)
+	since := a.d.Now().Add(-jobsWeek)
+	costs, err := cron.CostByJob(ctx, a.d.DB, since)
+	if err != nil {
+		a.jobsFail(w, http.StatusInternalServerError, err)
+		return
+	}
+	row, err := a.jobsRow(ctx, j, costs)
 	if err != nil {
 		a.jobsFail(w, http.StatusInternalServerError, err)
 		return
@@ -342,7 +360,6 @@ func (a *JobsAPI) detail(w http.ResponseWriter, r *http.Request) {
 		for _, run := range runs {
 			v.Last7 = append(v.Last7, a.runView(run))
 		}
-		since := a.d.Now().Add(-jobsWeek)
 		if v.WeekOK, v.WeekTotal, err = a.d.Jobs.RunsOK(ctx, id, since); err != nil {
 			a.jobsFail(w, http.StatusInternalServerError, err)
 			return
@@ -351,12 +368,6 @@ func (a *JobsAPI) detail(w http.ResponseWriter, r *http.Request) {
 			a.jobsFail(w, http.StatusInternalServerError, err)
 			return
 		}
-		costs, err := cron.CostByJob(ctx, a.d.DB, since)
-		if err != nil {
-			a.jobsFail(w, http.StatusInternalServerError, err)
-			return
-		}
-		v.WeekCostUSD = costs[id]
 	}
 	if j.Watch {
 		n, err := a.d.Jobs.ModelRunsSince(ctx, id, a.d.Now().Add(-24*time.Hour))

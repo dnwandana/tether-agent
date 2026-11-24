@@ -199,16 +199,7 @@ func (a *SessionsAPI) sourceLabel(s sessions.Session) string {
 	case "cron":
 		return "Cron"
 	case "telegram":
-		if a.ChatTitle != nil {
-			if chat, topic, ok := a.ChatTitle(s.ChatID, s.ThreadID); ok {
-				label := "Telegram › " + a.red(chat)
-				if topic != "" {
-					label += " › " + a.red(topic)
-				}
-				return label
-			}
-		}
-		return "Telegram › " + s.ChatID
+		return telegramLabel(a.ChatTitle, s.ChatID, s.ThreadID, a.red)
 	}
 	return s.Source
 }

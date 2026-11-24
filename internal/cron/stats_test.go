@@ -214,7 +214,12 @@ func TestCostByJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := map[string]float64{"a": 0.75, "b": 0.125, "c": 0}; !reflect.DeepEqual(got, want) {
+	want := map[string]JobCost{
+		"a": {USD: 0.75, Unpriced: true}, // s2 has one assistant row with no price
+		"b": {USD: 0.125},
+		"c": {USD: 0, Unpriced: true}, // only calls with no price
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 	if got, err := CostByJob(ctx, s.DB, c.t); err != nil || len(got) != 0 {

@@ -60,6 +60,8 @@ export interface BootstrapView {
   tls: boolean;
   drain_s: number;
   toolsets: string[];
+  host_zone: string;
+  host_offset_min: number;
 }
 
 export interface BriefLineView {
@@ -187,6 +189,8 @@ export interface CronUsageView {
 
 export interface DailyView {
   range: string;
+  from: string;
+  to: string;
   days: DayRow[];
 }
 
@@ -339,6 +343,7 @@ export interface JobCostRow {
   job_id: string;
   job_name: string;
   usd: number;
+  unpriced: boolean;
 }
 
 export interface JobDetail {
@@ -360,7 +365,6 @@ export interface JobDetail {
   last7: RunRow[];
   week_ok: number;
   week_total: number;
-  week_cost_usd: number;
   runs_total: number;
   fail_limit: number;
   watch_limit_hit: boolean;
@@ -372,6 +376,7 @@ export interface JobRow {
   id: string;
   name: string;
   icon: string;
+  state: JobState;
   schedule: string;
   enabled: boolean;
   pause_reason: string;
@@ -382,11 +387,14 @@ export interface JobRow {
   watch: boolean;
   draft_only: boolean;
   ok: number;
-  last_cost_usd: number;
-  last_cost_known: boolean;
+  cost_7d_usd: number;
+  cost_7d_known: boolean;
+  cost_7d_unpriced: boolean;
   history_off: boolean;
   last7: string[];
 }
+
+export type JobState = "done" | "failing" | "ok" | "paused" | "pending" | "watch";
 
 export interface LogEntry {
   at: string;
@@ -398,6 +406,7 @@ export interface LogEntry {
   server: string;
   tool_name: string;
   rule: string;
+  rule_description: string;
   class: string;
   decision: string;
   source: string;
@@ -703,6 +712,7 @@ export interface SecurityView {
   process_mode: string;
   cron_mode: string;
   log_scopes: string[];
+  log_scope_labels: Record<string, string>;
 }
 
 export interface SessionPage {

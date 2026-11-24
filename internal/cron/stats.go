@@ -149,11 +149,20 @@ func (s *Store) RunsTotal(ctx context.Context, jobID string) (int, error) {
 	return n, nil
 }
 
+// JobCost is the cost of the cron sessions of one job. Unpriced is true when one or more calls
+// have no stored cost.
+type JobCost struct {
+	USD      float64
+	Unpriced bool
+}
+
 // CostByJob returns the cost of the cron sessions of each job since since, by job id. It sums
 // messages.cost_usd of the assistant rows of the "cron:<id>" sessions, because cron_runs keeps
-// only the last runs of a job. A job whose calls have no price gets 0.
-func CostByJob(ctx context.Context, d *db.DB, since time.Time) (map[string]float64, error) {
-	rows, err := d.QueryContext(ctx, `SELECT substr(s.session_key, 6), COALESCE(SUM(m.cost_usd), 0)
+// only the last runs of a job. Unpriced is true for a job with one or more calls that have no
+// price.
+func CostByJob(ctx context.Context, d *db.DB, since time.Time) (map[string]JobCost, error) {
+	rows, err := d.QueryContext(ctx, `SELECT substr(s.session_key, 6), COALESCE(SUM(m.cost_usd), 0),
+			COUNT(m.cost_usd) < COUNT(*)
 		FROM messages m JOIN sessions s ON s.id = m.session_id
 		WHERE s.session_key LIKE 'cron:%' AND m.role = 'assistant' AND m.timestamp >= ?
 		GROUP BY s.session_key`, since.UnixMilli())
@@ -161,14 +170,18 @@ func CostByJob(ctx context.Context, d *db.DB, since time.Time) (map[string]float
 		return nil, fmt.Errorf("cron: read the cost by job: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]float64{}
+	out := map[string]JobCost{}
 	for rows.Next() {
 		var id string
 		var cost float64
-		if err := rows.Scan(&id, &cost); err != nil {
+		var unpriced int64
+		if err := rows.Scan(&id, &cost, &unpriced); err != nil {
 			return nil, fmt.Errorf("cron: read the cost by job: %w", err)
 		}
-		out[id] += cost
+		c := out[id]
+		c.USD += cost
+		c.Unpriced = c.Unpriced || unpriced != 0
+		out[id] = c
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("cron: read the cost by job: %w", err)

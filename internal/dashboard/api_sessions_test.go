@@ -158,7 +158,7 @@ func TestSessionsListAPI(t *testing.T) {
 	}{
 		dash.ID: {"Dashboard", false},
 		tg.ID:   {"Telegram › Ops › Alerts", true},
-		tg2.ID:  {"Telegram › 43", true},
+		tg2.ID:  {"Telegram › chat 43", true},
 		cli.ID:  {"CLI", true},
 	} {
 		if r := rows[id]; r.SourceLabel != want.label || r.ReadOnly != want.readOnly {
@@ -612,5 +612,25 @@ func TestTranscriptTimesAndParent(t *testing.T) {
 	if code := sessGet(t, mux, "/api/sessions/"+parent.ID, &row); code != 200 || row.ParentID != "" ||
 		len(row.Children) != 1 || row.Children[0].ParentID != parent.ID {
 		t.Fatalf("%d %+v", code, row)
+	}
+}
+
+func TestSessionsSourceLabelFallback(t *testing.T) {
+	a := &SessionsAPI{}
+	for _, c := range []struct {
+		chat, thread, want string
+	}{
+		{"43", "", "Telegram › chat 43"},
+		{"44", "9", "Telegram › chat 44 › topic 9"},
+		{"45", "0", "Telegram › chat 45"},
+	} {
+		s := sessions.Session{Source: "telegram", ChatID: c.chat, ThreadID: c.thread}
+		if got := a.sourceLabel(s); got != c.want {
+			t.Errorf("%+v: %q, want %q", c, got, c.want)
+		}
+	}
+	a.ChatTitle = func(chatID, threadID string) (string, string, bool) { return "Ops", "", true }
+	if got := a.sourceLabel(sessions.Session{Source: "telegram", ChatID: "42", ThreadID: "7"}); got != "Telegram › Ops › topic 7" {
+		t.Fatalf("%q", got)
 	}
 }

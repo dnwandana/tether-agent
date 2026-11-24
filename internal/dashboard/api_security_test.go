@@ -146,7 +146,7 @@ func TestSecurityView(t *testing.T) {
 	// A new state.db: the dashboard scope is guarded, and the lists are [] and not null.
 	empty := securityMux(NewSecurityAPI(&security.Gate{DB: securityDB(t)}, gateway.SecretsDeps{}, SecurityFixed{}, nil, securityNow))
 	body := securityDo(t, empty, http.MethodGet, "/api/security", "", "").Body.String()
-	for _, want := range []string{`"mode":"guarded"`, `"modes":[]`, `"grants":[]`, `"remove_all":""`, `"secrets":[]`, `"log_scopes":[]`} {
+	for _, want := range []string{`"mode":"guarded"`, `"modes":[]`, `"grants":[]`, `"remove_all":""`, `"secrets":[]`, `"log_scopes":[]`, `"log_scope_labels":{}`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body has no %s: %s", want, body)
 		}
@@ -304,5 +304,90 @@ func TestSecurityLogFilters(t *testing.T) {
 	if err := json.Unmarshal(securityDo(t, mux, http.MethodGet, "/api/security", "", "").Body.Bytes(), &v); err != nil ||
 		!slices.Equal(v.LogScopes, []string{"cli", "dashboard", "telegram:-100:7"}) {
 		t.Fatalf("%v %v", v.LogScopes, err)
+	}
+}
+
+func TestSecurityScopeLabels(t *testing.T) {
+	ctx := context.Background()
+	d := securityDB(t)
+	for i, scope := range []string{"telegram:5:0", "telegram:-100:7", "telegram:-200:0", "cli", "dashboard"} {
+		if _, err := d.ExecContext(ctx, `INSERT INTO approval_log(at, scope, decision, source, preview)
+			VALUES (?, ?, 'allowed', 'owner', 'x')`, int64(i+1), scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := NewSecurityAPI(&security.Gate{DB: d}, gateway.SecretsDeps{}, SecurityFixed{}, nil, securityNow)
+	api.ChatTitle = func(chatID, threadID string) (string, string, bool) {
+		switch chatID {
+		case "5":
+			return "Ana", "", true
+		case "-100":
+			return "Ops", "Alerts", true
+		}
+		return "", "", false
+	}
+	var v SecurityView
+	rec := securityDo(t, securityMux(api), http.MethodGet, "/api/security", "", "")
+	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil {
+		t.Fatal(rec.Code, err)
+	}
+	want := map[string]string{
+		"telegram:5:0":    "Telegram › Ana",
+		"telegram:-100:7": "Telegram › Ops › Alerts",
+		"telegram:-200:0": "Telegram › chat -200",
+		"cli":             "cli",
+		"dashboard":       "Dashboard",
+	}
+	if !reflect.DeepEqual(v.LogScopeLabels, want) {
+		t.Fatalf("got %v, want %v", v.LogScopeLabels, want)
+	}
+	// Redact masks a cached name, as on the Sessions page.
+	api.Redact = func(s string) string { return strings.ReplaceAll(s, "Ana", "[REDACTED]") }
+	if got := api.scopeLabel("telegram:5:0"); got != "Telegram › [REDACTED]" {
+		t.Errorf("redact: %q", got)
+	}
+	api.Redact = nil
+	// A nil ChatTitle gives the fallback, not the raw key.
+	api.ChatTitle = nil
+	for scope, want := range map[string]string{
+		"telegram:5:0":    "Telegram › chat 5",
+		"telegram:-100:7": "Telegram › chat -100 › topic 7",
+		"telegram:-100:":  "Telegram › chat -100",
+	} {
+		if got := api.scopeLabel(scope); got != want {
+			t.Errorf("%s: %q, want %q", scope, got, want)
+		}
+	}
+}
+
+func TestSecurityLogRuleDescription(t *testing.T) {
+	t.Cleanup(func() { security.AddProtectedPathPatterns(nil) })
+	security.AddProtectedPathPatterns([]string{"/srv/x/.env"})
+	ctx := context.Background()
+	d := securityDB(t)
+	rules := []string{"recursive_delete", "recursive_delete_home_directory", "protected_path_write_srv_x_env", "old_rule_x"}
+	for i, rule := range rules {
+		if _, err := d.ExecContext(ctx, `INSERT INTO approval_log(at, scope, rule, decision, source, preview)
+			VALUES (?, 'cli', ?, 'blocked', 'hardline', 'x')`, int64(i+1), rule); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mux := securityMux(NewSecurityAPI(&security.Gate{DB: d}, gateway.SecretsDeps{}, SecurityFixed{}, nil, securityNow))
+	var p LogPage
+	if err := json.Unmarshal(securityDo(t, mux, http.MethodGet, "/api/security/log", "", "").Body.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range p.Rows {
+		got[r.Rule] = r.RuleDescription
+	}
+	want := map[string]string{
+		"recursive_delete":                "recursive delete",
+		"recursive_delete_home_directory": "recursive delete of home directory",
+		"protected_path_write_srv_x_env":  "write to protected path /srv/x/.env",
+		"old_rule_x":                      "old_rule_x",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %v, want %v", got, want)
 	}
 }

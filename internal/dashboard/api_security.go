@@ -75,6 +75,8 @@ type SecurityView struct {
 	ProcessMode    string          `json:"process_mode"` // approvals.mode: manual, smart, or off
 	CronMode       string          `json:"cron_mode"`    // approvals.cron_mode: deny or approve
 	LogScopes      []string        `json:"log_scopes"`   // the scopes that the approval log holds
+	// LogScopeLabels holds the readable label of each key of LogScopes.
+	LogScopeLabels map[string]string `json:"log_scope_labels"`
 }
 
 type LogEntry struct {
@@ -87,11 +89,13 @@ type LogEntry struct {
 	Server     string    `json:"server"`
 	ToolName   string    `json:"tool_name"`
 	Rule       string    `json:"rule"`
-	Class      string    `json:"class"`
-	Decision   string    `json:"decision"`
-	Source     string    `json:"source"`
-	Answer     string    `json:"answer"`
-	Preview    string    `json:"preview"`
+	// RuleDescription is the text of the rule. It is the rule id when no text is known.
+	RuleDescription string `json:"rule_description"`
+	Class           string `json:"class"`
+	Decision        string `json:"decision"`
+	Source          string `json:"source"`
+	Answer          string `json:"answer"`
+	Preview         string `json:"preview"`
 }
 
 type LogPage struct {
@@ -123,25 +127,44 @@ type SecurityAPI struct {
 	// ChatTitle reads the title cache of the Telegram chats. It never calls Telegram. Nil gives
 	// the raw scope keys.
 	ChatTitle func(chatID, threadID string) (chat, topic string, ok bool)
+	// Redact masks a cached chat or topic name, as on the Sessions page. Nil keeps the name.
+	Redact func(string) string
 }
 
-// scopeLabel returns a readable name for a scope key. An unknown key gives the raw key.
+// telegramLabel returns "Telegram › <chat> › <topic>" for a Telegram chat. With no cached
+// name it gives "Telegram › chat <id>", and with a thread but no topic name " › topic <thread>".
+// The thread "" and "0" mean no topic. red masks a cached name; nil keeps it.
+func telegramLabel(title func(chatID, threadID string) (chat, topic string, ok bool), chatID, threadID string, red func(string) string) string {
+	if red == nil {
+		red = func(s string) string { return s }
+	}
+	var chat, topic string
+	var ok bool
+	if title != nil {
+		chat, topic, ok = title(chatID, threadID)
+	}
+	label := "Telegram › chat " + chatID
+	if ok && chat != "" {
+		label = "Telegram › " + red(chat)
+	}
+	if ok && topic != "" {
+		label += " › " + red(topic)
+	} else if threadID != "" && threadID != "0" {
+		label += " › topic " + threadID
+	}
+	return label
+}
+
+// scopeLabel returns a readable name for a scope key. A Telegram key with no cached name gives
+// the chat id. Another unknown key gives the raw key.
 func (a *SecurityAPI) scopeLabel(scope string) string {
 	if scope == ChannelName {
 		return "Dashboard"
 	}
 	parts := strings.Split(scope, ":")
 	// Telegram scopes are "telegram:<chat>:<thread>". A chat id can start with "-".
-	if len(parts) == 3 && parts[0] == "telegram" && a.ChatTitle != nil {
-		if chat, topic, ok := a.ChatTitle(parts[1], parts[2]); ok && chat != "" {
-			label := "Telegram › " + chat
-			if topic != "" {
-				label += " › " + topic
-			} else if parts[2] != "" && parts[2] != "0" {
-				label += " › topic " + parts[2]
-			}
-			return label
-		}
+	if len(parts) == 3 && parts[0] == "telegram" {
+		return telegramLabel(a.ChatTitle, parts[1], parts[2], a.Redact)
 	}
 	return scope
 }
@@ -221,6 +244,10 @@ func (a *SecurityAPI) view(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v.LogScopes = append([]string{}, scopes...)
+	v.LogScopeLabels = make(map[string]string, len(scopes))
+	for _, scope := range scopes {
+		v.LogScopeLabels[scope] = a.scopeLabel(scope)
+	}
 	securityJSON(w, http.StatusOK, v)
 }
 
@@ -309,8 +336,13 @@ func (a *SecurityAPI) log(w http.ResponseWriter, r *http.Request) {
 	}
 	page := LogPage{Rows: make([]LogEntry, 0, len(rows)), Total: total, Offset: offset, Limit: limit}
 	for _, row := range rows {
+		desc, ok := security.RuleText(row.Rule)
+		if !ok {
+			desc = row.Rule
+		}
 		page.Rows = append(page.Rows, LogEntry{
-			At: row.At, SessionID: row.SessionID, Scope: row.Scope, ScopeLabel: a.scopeLabel(row.Scope), Kind: row.Kind, Tool: row.Tool, Server: row.Server,
+			RuleDescription: desc,
+			At:              row.At, SessionID: row.SessionID, Scope: row.Scope, ScopeLabel: a.scopeLabel(row.Scope), Kind: row.Kind, Tool: row.Tool, Server: row.Server,
 			ToolName: row.ToolName, Rule: row.Rule, Class: row.Class, Decision: row.Decision,
 			Source: row.Source, Answer: row.Answer, Preview: row.Preview,
 		})

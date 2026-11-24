@@ -1,6 +1,9 @@
 package dashboard
 
-import "net/http"
+import (
+	"net/http"
+	"time"
+)
 
 // CommandRow is one slash command of the command palette. Name starts with "/".
 type CommandRow struct {
@@ -18,6 +21,10 @@ type BootstrapView struct {
 	TLS         bool         `json:"tls"`
 	DrainS      int          `json:"drain_s"`
 	Toolsets    []string     `json:"toolsets"`
+	// HostZone is the time zone of the host and HostOffsetMin is its offset in minutes
+	// east of UTC. A cron expression runs in this zone.
+	HostZone      string `json:"host_zone"`
+	HostOffsetMin int    `json:"host_offset_min"`
 }
 
 func init() { registerAPI(BootstrapView{}, CommandRow{}) }
@@ -58,6 +65,7 @@ func bootRows(f func() []CommandRow) []CommandRow {
 }
 
 func (b *bootstrapAPI) get(w http.ResponseWriter, _ *http.Request) {
+	name, off := time.Now().Zone()
 	writeJSON(w, BootstrapView{
 		Commands:    bootRows(b.d.Commands),
 		Skills:      bootRows(b.d.Skills),
@@ -67,5 +75,8 @@ func (b *bootstrapAPI) get(w http.ResponseWriter, _ *http.Request) {
 		TLS:         b.d.TLS,
 		DrainS:      b.d.DrainS,
 		Toolsets:    nonNil(b.d.Toolsets),
+
+		HostZone:      name,
+		HostOffsetMin: off / 60,
 	})
 }

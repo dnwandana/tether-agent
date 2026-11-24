@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dnwandana/tether-agent/internal/cron"
 )
 
 type genInner struct {
@@ -146,5 +148,33 @@ func TestDashboardTypesCurrent(t *testing.T) {
 	got, err := os.ReadFile("../../web/src/api/types.gen.ts")
 	if err != nil || string(got) != GenerateTypes() {
 		t.Fatal("web/src/api/types.gen.ts is out of date: run go run ./cmd/tether gen-dashboard-types")
+	}
+}
+
+func TestJobStateEnum(t *testing.T) {
+	want := []string{"done", "failing", "ok", "paused", "pending", "watch"}
+	if got := enumValues[reflect.TypeFor[JobState]()]; !reflect.DeepEqual(got, want) {
+		t.Fatalf("registered %q, want %q", got, want)
+	}
+	for _, c := range []struct {
+		j    cron.Job
+		want JobState
+	}{
+		{cron.Job{Enabled: false, RepeatLeft: 0}, JobStateDone},
+		{cron.Job{Enabled: false, RepeatLeft: -1}, JobStatePaused},
+		{cron.Job{Enabled: true, RepeatLeft: -1, FailStreak: 2}, JobStateFailing},
+		{cron.Job{Enabled: true, RepeatLeft: -1, Watch: true}, JobStateWatch},
+		{cron.Job{Enabled: true, RepeatLeft: -1, LastStatus: "ok"}, JobStateOK},
+		{cron.Job{Enabled: true, RepeatLeft: -1}, JobStatePending},
+	} {
+		if got := JobState(cron.StateOf(c.j)); got != c.want {
+			t.Errorf("%+v: got %q, want %q", c.j, got, c.want)
+		}
+	}
+	text := GenerateTypes()
+	for _, line := range []string{`export type JobState = "done" | "failing" | "ok" | "paused" | "pending" | "watch";`, "  state: JobState;"} {
+		if !strings.Contains(text, line) {
+			t.Errorf("types.gen.ts has no line %q", line)
+		}
 	}
 }

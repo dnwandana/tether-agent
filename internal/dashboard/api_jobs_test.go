@@ -165,8 +165,8 @@ func TestJobsListDetailAndRuns(t *testing.T) {
 		}
 	}
 	rows := jobsDecode[[]JobRow](t, f.do(t, "GET", "/api/jobs", ""), 200)
-	if len(rows) != 1 || rows[0].ID != j.ID || rows[0].Name != "nightly-backup" || rows[0].Icon != "⏳" ||
-		rows[0].OK != 2 || !rows[0].LastCostKnown || rows[0].LastCostUSD != 0.12 || rows[0].HistoryOff {
+	if len(rows) != 1 || rows[0].ID != j.ID || rows[0].Name != "nightly-backup" || rows[0].Icon != "⏳" || rows[0].State != JobStatePending ||
+		rows[0].OK != 2 || rows[0].HistoryOff {
 		t.Fatalf("%+v", rows)
 	}
 	det := jobsDecode[JobDetail](t, f.do(t, "GET", "/api/jobs/"+j.ID, ""), 200)
@@ -360,5 +360,95 @@ func TestJobsDetailFlagsAndLabel(t *testing.T) {
 	det = jobsDecode[JobDetail](t, f.do(t, "GET", "/api/jobs/"+plain.ID, ""), 200)
 	if det.WatchLimitHit || det.PromptMasked || det.DeliverLabel != "" {
 		t.Fatalf("no watch, no mask, and no cached title: %+v", det)
+	}
+}
+
+// jobsCost writes one assistant message of the cron session "cron:<jobID>".
+func jobsCost(t *testing.T, f *jobsFixture, sessionID, jobID string, cost any) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := f.d.ExecContext(ctx, `INSERT OR IGNORE INTO sessions (id, session_key, source) VALUES (?, ?, 'cron')`,
+		sessionID, "cron:"+jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.d.ExecContext(ctx, `INSERT INTO messages (session_id, role, cost_usd, model, timestamp)
+		VALUES (?, 'assistant', ?, 'm', ?)`, sessionID, cost, time.Now().Add(-time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJobsStateAndWeekCost(t *testing.T) {
+	f := newJobsFixture(t, false)
+	ctx := context.Background()
+	mk := func(name string) cron.Job {
+		t.Helper()
+		j, err := f.jobs.Create(ctx, cron.Job{Name: name, Schedule: "every 1h", Prompt: "x", Enabled: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	priced, unpriced, idle := mk("priced"), mk("unpriced"), mk("idle")
+	jobsCost(t, f, "s1", priced.ID, 0.25)
+	jobsCost(t, f, "s1", priced.ID, 0.5)
+	jobsCost(t, f, "s2", unpriced.ID, nil)
+	if err := f.jobs.SetEnabled(ctx, idle.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	check := func(rows []JobRow) {
+		t.Helper()
+		byName := map[string]JobRow{}
+		for _, r := range rows {
+			byName[r.Name] = r
+		}
+		if r := byName["priced"]; r.State != JobStatePending || r.Cost7dUSD != 0.75 || !r.Cost7dKnown || r.Cost7dUnpriced {
+			t.Errorf("priced: %+v", r)
+		}
+		if r := byName["unpriced"]; r.Cost7dUSD != 0 || !r.Cost7dKnown || !r.Cost7dUnpriced {
+			t.Errorf("unpriced: %+v", r)
+		}
+		if r := byName["idle"]; r.State != JobStatePaused || r.Cost7dKnown || r.Cost7dUSD != 0 {
+			t.Errorf("idle: %+v", r)
+		}
+	}
+	check(jobsDecode[[]JobRow](t, f.do(t, "GET", "/api/jobs", ""), 200))
+	det := jobsDecode[JobDetail](t, f.do(t, "GET", "/api/jobs/"+priced.ID, ""), 200)
+	if det.Job.Cost7dUSD != 0.75 || !det.Job.Cost7dKnown {
+		t.Fatalf("detail: %+v", det.Job)
+	}
+	// With run history off, the cost still comes from the messages.
+	f.jobs.RunHistory = 0
+	rows := jobsDecode[[]JobRow](t, f.do(t, "GET", "/api/jobs", ""), 200)
+	check(rows)
+	for _, r := range rows {
+		if !r.HistoryOff {
+			t.Fatalf("history off: %+v", r)
+		}
+	}
+	if det := jobsDecode[JobDetail](t, f.do(t, "GET", "/api/jobs/"+priced.ID, ""), 200); det.Job.Cost7dUSD != 0.75 || !det.Job.Cost7dKnown {
+		t.Fatalf("detail with history off: %+v", det.Job)
+	}
+}
+
+func TestJobsNoOldCostFields(t *testing.T) {
+	f := newJobsFixture(t, false)
+	j, err := f.jobs.Create(context.Background(), cron.Job{Name: "n", Schedule: "every 1h", Prompt: "p", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"/api/jobs", "/api/jobs/" + j.ID} {
+		rec := f.do(t, "GET", p, "")
+		if rec.Code != 200 {
+			t.Fatalf("%s: status %d: %s", p, rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		for _, k := range []string{`"last_cost_usd"`, `"last_cost_known"`, `"week_cost_usd"`} {
+			if strings.Contains(body, k) {
+				t.Fatalf("%s: the key %s is still in the answer: %s", p, k, body)
+			}
+		}
+		if !strings.Contains(body, `"cost_7d_usd"`) {
+			t.Fatalf("%s: the key \"cost_7d_usd\" is not in the answer: %s", p, body)
+		}
 	}
 }

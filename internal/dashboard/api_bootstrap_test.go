@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestBootstrapView(t *testing.T) {
@@ -32,6 +33,10 @@ func TestBootstrapView(t *testing.T) {
 		v.Version != "v0.24.0" || v.MaxUploadMB != 20 || !v.TLS || v.BuildID != BuildID() ||
 		v.DrainS != 180 || len(v.Toolsets) != 2 || v.Toolsets[1] != "web" {
 		t.Fatalf("%+v", v)
+	}
+	name, off := time.Now().Zone()
+	if v.HostZone != name || v.HostOffsetMin != off/60 {
+		t.Fatalf("host zone %q %d, want %q %d", v.HostZone, v.HostOffsetMin, name, off/60)
 	}
 }
 

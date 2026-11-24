@@ -150,10 +150,20 @@ func TestUsageAPICron(t *testing.T) {
 		t.Fatal(err)
 	}
 	usageInsert(t, f.d, cs.ID, "glm-4.7", "primary", 100, 0, 10, 0.3, time.Now())
+	j2, err := f.cron.Create(ctx, cron.Job{Name: "probe", Schedule: "every 1h", Prompt: "x", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cs2, err := f.sess.Create(ctx, sessions.Session{Key: "cron:" + j2.ID, Source: "cron", Kind: "cron"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usageInsert(t, f.d, cs2.ID, "mystery", "local", 100, 0, 10, nil, time.Now())
 	var cv CronUsageView
 	w := usageGet(t, f, "/api/usage/cron?range=7d", &cv)
-	if w.Code != 200 || len(cv.Jobs) != 1 || cv.Jobs[0] != (JobCostRow{JobID: j.ID, JobName: "digest", USD: 0.3}) ||
-		!strings.Contains(w.Body.String(), `"flagged":[]`) {
+	if w.Code != 200 || len(cv.Jobs) != 2 || cv.Jobs[0] != (JobCostRow{JobID: j.ID, JobName: "digest", USD: 0.3}) ||
+		cv.Jobs[1] != (JobCostRow{JobID: j2.ID, JobName: "probe", USD: 0, Unpriced: true}) ||
+		!strings.Contains(w.Body.String(), `"unpriced":true`) || !strings.Contains(w.Body.String(), `"flagged":[]`) {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 }
@@ -210,5 +220,85 @@ func TestUsageAPIModels(t *testing.T) {
 	}
 	if !usable["delegation"] || !usable["goal_judge"] || !usable["tts"] || usable["outbound_guard"] {
 		t.Fatalf("only the role on the unusable entry local is not usable: %v", usable)
+	}
+}
+
+// usageFixedAPI returns a mux with the database of f and a fixed now.
+func usageFixedAPI(t *testing.T, f *usageFixture, now time.Time, window func(string, config.Provider) int) *http.ServeMux {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{
+		"primary":    {Format: "openai", Model: "glm-4.7", ContextWindow: 200000},
+		"openrouter": {Format: "openai", Model: "z-ai/glm-4.7"},
+	}
+	cfg.Agent.Fallback = []string{"openrouter"}
+	mux := http.NewServeMux()
+	NewUsageAPI(UsageDeps{DB: f.d, Sessions: f.sess, Cron: f.cron, Cfg: &cfg,
+		Now: func() time.Time { return now }, ContextWindow: window}).Register(mux)
+	return mux
+}
+
+func TestUsageAPIDailyRange(t *testing.T) {
+	f := newUsageFixture(t)
+	now := time.Date(2026, 11, 24, 10, 0, 0, 0, time.Local)
+	mux := usageFixedAPI(t, f, now, nil)
+	get := func(path string) DailyView {
+		t.Helper()
+		var v DailyView
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &v) != nil {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body.String())
+		}
+		return v
+	}
+	// No data yet: "all" has no start.
+	if v := get("/api/usage/daily?range=all"); v.From != "" || v.To != "2026-11-24" {
+		t.Fatalf("all, no data: %+v", v)
+	}
+	usageInsert(t, f.d, "s", "glm-4.7", "primary", 10, 0, 10, 0.5, time.Date(2026, 11, 2, 10, 0, 0, 0, time.Local))
+	for path, want := range map[string][2]string{
+		"/api/usage/daily?range=today": {"2026-11-24", "2026-11-24"},
+		"/api/usage/daily?range=7d":    {"2026-11-17", "2026-11-24"},
+		"/api/usage/daily?range=30d":   {"2026-10-25", "2026-11-24"},
+		"/api/usage/daily?range=all":   {"2026-11-02", "2026-11-24"},
+	} {
+		if v := get(path); v.From != want[0] || v.To != want[1] {
+			t.Errorf("%s: from %q to %q, want %q %q", path, v.From, v.To, want[0], want[1])
+		}
+	}
+	if v := get("/api/usage/daily?range=session"); v.From != "" || v.To != "" {
+		t.Fatalf("session: %+v", v)
+	}
+}
+
+func TestUsageAPIContextWindow(t *testing.T) {
+	f := newUsageFixture(t)
+	now := time.Date(2026, 11, 24, 10, 0, 0, 0, time.Local)
+	window := func(name string, p config.Provider) int {
+		if p.ContextWindow > 0 {
+			return p.ContextWindow
+		}
+		if name == "openrouter" {
+			return 131072
+		}
+		return 128000
+	}
+	for _, c := range []struct {
+		window       func(string, config.Provider) int
+		primary, rtr int
+	}{
+		{window, 200000, 131072},
+		{nil, 200000, 0}, // a nil function keeps the config value
+	} {
+		var mv ModelsView
+		w := httptest.NewRecorder()
+		usageFixedAPI(t, f, now, c.window).ServeHTTP(w, httptest.NewRequest("GET", "/api/models", nil))
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &mv) != nil || len(mv.Entries) != 2 {
+			t.Fatalf("%d %s", w.Code, w.Body.String())
+		}
+		if mv.Entries[0].ContextWindow != c.primary || mv.Entries[1].ContextWindow != c.rtr {
+			t.Errorf("%+v", mv.Entries)
+		}
 	}
 }
