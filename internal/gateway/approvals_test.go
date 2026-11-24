@@ -760,3 +760,22 @@ func TestApprovalsLogRedactedAnswer(t *testing.T) {
 		t.Fatalf("got:\n%s\nwant:\n%s", r.Text, want)
 	}
 }
+
+func TestLogRuleTextKeepsTelegramText(t *testing.T) {
+	for id, want := range map[string]string{
+		"could_not_read":                  "could not read the command",
+		"execute_code":                    "run a Python script on the host",
+		"sudo_stdin":                      "sudo password on stdin",
+		"acp:edit":                        "coding agent permission",
+		"recursive_delete":                "recursive delete",
+		"git_force_push":                  "git force push (rewrites remote history)",
+		"recursive_delete_home_directory": "recursive delete of home directory",
+		"human_only_password_change":      "password change",
+		"gateway_self_kill":               "kill own gateway process",
+		"old_rule_x":                      `old\_rule\_x`,
+	} {
+		if got := logRuleText(id); got != want {
+			t.Errorf("logRuleText(%q) = %q, want %q", id, got, want)
+		}
+	}
+}

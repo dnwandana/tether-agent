@@ -491,26 +491,10 @@ func logRowText(r security.LogRow, now time.Time, all bool) string {
 }
 
 // logRuleText returns the escaped text of the rule of a log row.
+// security.RuleText holds the texts.
 func logRuleText(rule string) string {
-	switch {
-	case rule == security.CouldNotReadPatternID:
-		return "could not read the command"
-	case rule == security.ScriptPatternID:
-		return "run a Python script on the host"
-	case rule == "sudo_stdin":
-		return "sudo password on stdin"
-	case strings.HasPrefix(rule, "acp:"):
-		return "coding agent permission"
-	}
-	if p, ok := security.PatternByID(rule); ok && p.Description != "" {
-		return EscapeMarkdown(p.Description)
-	}
-	for _, list := range [][]security.Pattern{security.HardlinePatterns, security.HumanOnlyPatterns, security.GatewaySelfPatterns} {
-		for _, p := range list {
-			if p.ID == rule && p.Description != "" {
-				return EscapeMarkdown(p.Description)
-			}
-		}
+	if text, ok := security.RuleText(rule); ok {
+		return EscapeMarkdown(text)
 	}
 	return EscapeMarkdown(oneLine(rule))
 }
