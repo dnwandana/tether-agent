@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/cron"
+	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -394,5 +396,198 @@ func TestHoldDeliveryPublishesHeld(t *testing.T) {
 	}
 	if e := waitDashEvent(t, ev, "held"); e.data != `{"id":"h2"}` {
 		t.Fatal(e.data)
+	}
+}
+
+func TestChatTitlesPut(t *testing.T) {
+	now := time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC)
+	c := &chatTitles{TTL: time.Hour, Now: func() time.Time { return now }}
+	c.put(telegram.Chat{ID: 7}, 0, "", true) // no name: skipped, and the nil map is safe
+	if _, _, ok := c.names(ctx, 7, 0); ok {
+		t.Fatal("a chat with no name must not go into the cache")
+	}
+	c.put(telegram.Chat{ID: -100, Type: "supergroup", Title: "Ops"}, 9, "Alerts", true)
+	c.put(telegram.Chat{ID: -100, Type: "supergroup", Title: "Ops"}, 9, "", true) // an icon-only rename keeps the name
+	if chat, topic, ok := c.names(ctx, -100, 9); !ok || chat != "Ops" || topic != "Alerts" {
+		t.Fatalf("%q %q %v", chat, topic, ok)
+	}
+	if chat, topic, ok := c.names(ctx, -100, 0); !ok || chat != "Ops" || topic != "" {
+		t.Fatalf("no thread: %q %q %v", chat, topic, ok)
+	}
+	if _, _, ok := c.names(ctx, 5, 0); ok {
+		t.Fatal("an unknown chat")
+	}
+	// The map holds at most 1000 chats. A put into a full map removes the oldest entry.
+	for i := int64(1); i <= 1000; i++ {
+		now = now.Add(time.Second)
+		c.put(telegram.Chat{ID: 1000 + i, FirstName: "U"}, 0, "", true)
+	}
+	if len(c.m) != 1000 {
+		t.Fatalf("%d chats, want 1000", len(c.m))
+	}
+	if _, _, ok := c.names(ctx, -100, 0); ok {
+		t.Fatal("the oldest chat must go")
+	}
+	if chat, _, ok := c.names(ctx, 2000, 0); !ok || chat != "U" {
+		t.Fatal("the newest chat must stay")
+	}
+}
+
+func TestChatTitlesKV(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	kv := func(key string) string {
+		t.Helper()
+		v, _, err := d.KVGet(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	c := &chatTitles{TTL: time.Hour, DB: d}
+	c.put(telegram.Chat{ID: -100, Title: "Ops"}, 9, "Alerts", true)
+	if kv("tg.chat.-100") != "Ops" || kv("tg.topic.-100.9") != "Alerts" {
+		t.Fatalf("%q %q", kv("tg.chat.-100"), kv("tg.topic.-100.9"))
+	}
+	// The same name makes no write.
+	if err := d.KVDelete(ctx, "tg.chat.-100"); err != nil {
+		t.Fatal(err)
+	}
+	c.put(telegram.Chat{ID: -100, Title: "Ops"}, 0, "", true)
+	if v := kv("tg.chat.-100"); v != "" {
+		t.Fatalf("the same name wrote %q", v)
+	}
+	c.put(telegram.Chat{ID: -100, Title: "Ops 2"}, 0, "", true)
+	if v := kv("tg.chat.-100"); v != "Ops 2" {
+		t.Fatalf("a new name must be written: %q", v)
+	}
+	// After a restart, a new cache with the same database reads the names.
+	c2 := &chatTitles{TTL: time.Hour, DB: d}
+	if chat, topic, ok := c2.names(ctx, -100, 9); !ok || chat != "Ops 2" || topic != "Alerts" {
+		t.Fatalf("%q %q %v", chat, topic, ok)
+	}
+	if _, _, ok := c2.names(ctx, -300, 0); ok {
+		t.Fatal("an unknown chat")
+	}
+}
+
+// A message in a topic replies to the service message that created the topic, so it holds the
+// first topic name. That name fills a gap, but it must not undo a rename, also after a restart.
+func TestChatTitlesReplyNameKeepsRename(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	ops := telegram.Chat{ID: -100, Type: "supergroup", Title: "Ops"}
+	c := &chatTitles{TTL: time.Hour, DB: d}
+	c.put(ops, 9, "Alerts", false) // no name yet: the reply name fills the gap
+	if _, topic, _ := c.names(ctx, -100, 9); topic != "Alerts" {
+		t.Fatalf("gap: %q", topic)
+	}
+	c.put(ops, 9, "Ops alerts", true) // the rename
+	c.put(ops, 9, "Alerts", false)    // the next message in the topic
+	if _, topic, _ := c.names(ctx, -100, 9); topic != "Ops alerts" {
+		t.Fatalf("memory: %q", topic)
+	}
+	if v, _, _ := d.KVGet(ctx, "tg.topic.-100.9"); v != "Ops alerts" {
+		t.Fatalf("kv: %q", v)
+	}
+	// After a restart, the memory is empty and the KV table holds the rename.
+	c2 := &chatTitles{TTL: time.Hour, DB: d}
+	c2.put(ops, 9, "Alerts", false)
+	if _, topic, _ := c2.names(ctx, -100, 9); topic != "Ops alerts" {
+		t.Fatalf("restart memory: %q", topic)
+	}
+	if v, _, _ := d.KVGet(ctx, "tg.topic.-100.9"); v != "Ops alerts" {
+		t.Fatalf("restart kv: %q", v)
+	}
+}
+
+// A getChat answer fills the memory only. A later message with the same name must still write
+// the name to the KV table, so the name stays after a restart.
+func TestChatTitlesPutWritesNameFromGetChat(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	ops := telegram.Chat{ID: -100, Type: "supergroup", Title: "Ops"}
+	c := &chatTitles{TTL: time.Hour, DB: d}
+	c.mu.Lock()
+	c.storeChat(ops.ID, titleEntry{chat: ops, at: time.Now()}) // what get stores
+	c.mu.Unlock()
+	c.put(ops, 0, "", true)
+	if v, _, _ := d.KVGet(ctx, "tg.chat.-100"); v != "Ops" {
+		t.Fatalf("kv: %q", v)
+	}
+}
+
+// names keeps a miss for a short time, so a list of unknown chats makes no KV read for each
+// row. A put clears the miss at once.
+func TestChatTitlesNamesCachesMiss(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	now := time.Date(2026, 11, 24, 9, 0, 0, 0, time.UTC)
+	c := &chatTitles{TTL: time.Hour, DB: d, Now: func() time.Time { return now }}
+	if _, _, ok := c.names(ctx, -100, 0); ok {
+		t.Fatal("unknown chat")
+	}
+	if err := d.KVSet(ctx, "tg.chat.-100", "Ops"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := c.names(ctx, -100, 0); ok {
+		t.Fatal("a cached miss must skip the KV read")
+	}
+	now = now.Add(2 * time.Minute)
+	if chat, _, ok := c.names(ctx, -100, 0); !ok || chat != "Ops" {
+		t.Fatalf("after the miss time: %q %v", chat, ok)
+	}
+	// A topic miss, then a put of the topic name.
+	if _, topic, _ := c.names(ctx, -100, 9); topic != "" {
+		t.Fatalf("topic: %q", topic)
+	}
+	c.put(telegram.Chat{ID: -100, Title: "Ops"}, 9, "Alerts", true)
+	if _, topic, _ := c.names(ctx, -100, 9); topic != "Alerts" {
+		t.Fatalf("a put must clear the miss: %q", topic)
+	}
+	// A chat miss, then a put of the chat.
+	if _, _, ok := c.names(ctx, -300, 0); ok {
+		t.Fatal("unknown chat")
+	}
+	c.put(telegram.Chat{ID: -300, Title: "Dev"}, 0, "", true)
+	if chat, _, ok := c.names(ctx, -300, 0); !ok || chat != "Dev" {
+		t.Fatalf("a put must clear the chat miss: %q %v", chat, ok)
+	}
+}
+
+func TestBootChatTitleFromChatSeen(t *testing.T) {
+	url, _, _ := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, outboundTG)
+	if _, err := a.AddTelegram(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if a.Telegram.ChatSeen == nil {
+		t.Fatal("AddTelegram must set ChatSeen")
+	}
+	if _, _, ok := a.bootChatTitle("-100", "7"); ok {
+		t.Fatal("no name yet")
+	}
+	a.Telegram.ChatSeen(telegram.Chat{ID: -100, Type: "supergroup", Title: "Ops"}, 7, "Alerts", true)
+	for thread, want := range map[string]string{"7": "Alerts", "0": "", "": ""} {
+		if chat, topic, ok := a.bootChatTitle("-100", thread); !ok || chat != "Ops" || topic != want {
+			t.Errorf("thread %q: %q %q %v", thread, chat, topic, ok)
+		}
+	}
+	// A restart: a new cache with the same database.
+	a.titles = &chatTitles{C: a.titles.C, TTL: time.Hour, DB: a.DB}
+	if chat, topic, ok := a.bootChatTitle("-100", "7"); !ok || chat != "Ops" || topic != "Alerts" {
+		t.Fatalf("after a restart: %q %q %v", chat, topic, ok)
 	}
 }

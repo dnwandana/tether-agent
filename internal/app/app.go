@@ -140,7 +140,7 @@ type App struct {
 	acpReaper chan struct{}
 	// Sched is the cron scheduler. It is nil outside the gateway role.
 	Sched *cron.Scheduler
-	// titles caches the chat titles of the cron deliveries. AddTelegram sets it.
+	// titles caches the chat and topic names of Telegram. AddTelegram sets it in the gateway role.
 	titles *chatTitles
 	// heldCards posts the owner cards of held sends. AddTelegram sets it.
 	heldCards *telegram.HeldCards
@@ -788,8 +788,13 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 	ch.PrivateChat = func(chat int64) bool {
 		return a.isPrivateTarget(context.Background(), cron.Target{Source: "telegram", ChatID: strconv.FormatInt(chat, 10)})
 	}
+	ch.ChatSeen = func(c telegram.Chat, threadID int, topic string, exact bool) {
+		if t := a.titles; t != nil {
+			t.put(c, threadID, topic, exact)
+		}
+	}
 	if a.Sched != nil {
-		a.titles = &chatTitles{C: c, TTL: time.Hour}
+		a.titles = &chatTitles{C: c, TTL: time.Hour, DB: a.DB, Log: a.Log}
 		a.heldCards = &telegram.HeldCards{C: c, Log: a.Log, Jobs: a.Cron, Send: a.sendHeld,
 			OnResolved: a.publishHeld}
 		ch.HeldCards = a.heldCards

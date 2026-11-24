@@ -20,7 +20,6 @@ import (
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/skills"
-	"github.com/dnwandana/tether-agent/internal/telegram"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
@@ -60,6 +59,9 @@ func (a *App) dashboardRoutes(ch *dashboard.Channel, f DashboardFuncs) []dashboa
 	}
 
 	usage := dashboard.UsageDeps{DB: a.DB, Sessions: a.Store, Cron: a.Cron, Cfg: a.Cfg, Now: now, Redact: redact}
+	if a.Prices != nil {
+		usage.ContextWindow = a.Prices.ContextWindow
+	}
 	if a.Set != nil && a.Set.Health != nil {
 		usage.Health = a.Set.Health.Snapshot
 	}
@@ -100,6 +102,7 @@ func (a *App) dashboardRoutes(ch *dashboard.Channel, f DashboardFuncs) []dashboa
 
 	sec := dashboard.NewSecurityAPI(a.Gate, a.secretsDeps(), a.bootSecurityFixed(), devices, now)
 	sec.ChatTitle = a.bootChatTitle
+	sec.Redact = redact
 
 	routes := []dashboard.Routes{
 		dashboard.NewBootstrap(dashboard.BootstrapDeps{
@@ -201,8 +204,9 @@ func (a *App) bootSkills() []dashboard.CommandRow {
 	return rows
 }
 
-// bootChatTitle reads the title cache of the Telegram chats. It makes no getChat call.
-func (a *App) bootChatTitle(chatID, _ string) (chat, topic string, ok bool) {
+// bootChatTitle returns the cached name of a Telegram chat and of its topic. It reads memory,
+// then the KV table. It makes no getChat call.
+func (a *App) bootChatTitle(chatID, threadID string) (chat, topic string, ok bool) {
 	if a.Telegram == nil || a.titles == nil {
 		return "", "", false
 	}
@@ -210,27 +214,11 @@ func (a *App) bootChatTitle(chatID, _ string) (chat, topic string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	c, found := a.titles.cached(id)
-	if !found {
-		return "", "", false
+	thread, err := strconv.Atoi(threadID)
+	if err != nil {
+		thread = 0
 	}
-	switch {
-	case c.Title != "":
-		return c.Title, "", true
-	case c.FirstName != "":
-		return c.FirstName, "", true
-	case c.Username != "":
-		return c.Username, "", true
-	}
-	return "", "", false
-}
-
-// cached returns the chat from the cache only. It never calls getChat.
-func (c *chatTitles) cached(id int64) (chat telegram.Chat, ok bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.m[id]
-	return e.chat, ok
+	return a.titles.names(context.Background(), id, thread)
 }
 
 // bootSecurityFixed builds the view-only lists of the Security page from the running config.

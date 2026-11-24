@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/cron"
+	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/telegram"
@@ -73,16 +75,60 @@ func (a *App) channelOutbound() func(sid string, chat int64, text string) (strin
 type titleEntry struct {
 	chat telegram.Chat
 	at   time.Time
+	// kv is true when the KV table holds the name. A getChat answer is in memory only.
+	kv bool
 }
 
-// chatTitles keeps the getChat answers for TTL, so that a note or a card makes few calls.
+type topicEntry struct {
+	name string
+	at   time.Time
+}
+
+type topicKey struct {
+	chat   int64
+	thread int
+}
+
+// maxTitles is the limit of the chat map and of the topic map. A new entry in a full map
+// removes the oldest entry.
+const maxTitles = 1000
+
+// missTTL is how long names keeps a KV miss. A list of chats with no name then makes no KV
+// read for each row. A put clears the miss at once.
+const missTTL = time.Minute
+
+// chatTitles keeps the chat names and the topic names of Telegram. The getChat answers, the
+// incoming updates, and the KV table fill it. It holds at most maxTitles chats and maxTitles topics.
 type chatTitles struct {
 	C   *telegram.Client
 	TTL time.Duration
 	Now func() time.Time
+	// DB keeps the names across a restart. Nil keeps them in memory only.
+	DB *db.DB
+	// Log gets the debug line of a KV error. Nil writes no log line.
+	Log *slog.Logger
 
-	mu sync.Mutex
-	m  map[int64]titleEntry
+	mu     sync.Mutex
+	m      map[int64]titleEntry
+	topics map[topicKey]topicEntry
+	// misses holds the time of each KV miss. The key {chat, 0} is a chat miss, and the key
+	// {chat, thread} is a topic miss.
+	misses   map[topicKey]time.Time
+	kvLogged bool
+}
+
+// missed reports whether names had a KV miss for k less than missTTL ago. The caller holds c.mu.
+func (c *chatTitles) missed(k topicKey) bool {
+	at, ok := c.misses[k]
+	return ok && c.now().Sub(at) < missTTL
+}
+
+// addMiss keeps a KV miss for k. A full map starts again empty. The caller holds c.mu.
+func (c *chatTitles) addMiss(k topicKey) {
+	if c.misses == nil || len(c.misses) >= maxTitles {
+		c.misses = map[topicKey]time.Time{}
+	}
+	c.misses[k] = c.now()
 }
 
 func (c *chatTitles) now() time.Time {
@@ -90,6 +136,182 @@ func (c *chatTitles) now() time.Time {
 		return c.Now()
 	}
 	return time.Now()
+}
+
+// displayName returns the title, else the first name, else the username of chat.
+func displayName(chat telegram.Chat) string {
+	switch {
+	case chat.Title != "":
+		return chat.Title
+	case chat.FirstName != "":
+		return chat.FirstName
+	}
+	return chat.Username
+}
+
+// storeChat keeps e under id. It removes the oldest entry when the map is full and id is new.
+// The caller holds c.mu.
+func (c *chatTitles) storeChat(id int64, e titleEntry) {
+	if c.m == nil {
+		c.m = map[int64]titleEntry{}
+	}
+	if _, ok := c.m[id]; !ok && len(c.m) >= maxTitles {
+		var oldest int64
+		var at time.Time
+		first := true
+		for k, v := range c.m {
+			if first || v.at.Before(at) {
+				oldest, at, first = k, v.at, false
+			}
+		}
+		delete(c.m, oldest)
+	}
+	c.m[id] = e
+}
+
+// storeTopic keeps e under k with the same limit as storeChat. The caller holds c.mu.
+func (c *chatTitles) storeTopic(k topicKey, e topicEntry) {
+	if c.topics == nil {
+		c.topics = map[topicKey]topicEntry{}
+	}
+	if _, ok := c.topics[k]; !ok && len(c.topics) >= maxTitles {
+		var oldest topicKey
+		var at time.Time
+		first := true
+		for key, v := range c.topics {
+			if first || v.at.Before(at) {
+				oldest, at, first = key, v.at, false
+			}
+		}
+		delete(c.topics, oldest)
+	}
+	c.topics[k] = e
+}
+
+func chatKey(id int64) string { return "tg.chat." + strconv.FormatInt(id, 10) }
+
+func topicKV(id int64, thread int) string {
+	return "tg.topic." + strconv.FormatInt(id, 10) + "." + strconv.Itoa(thread)
+}
+
+// kvFailed writes one debug line for the first KV error.
+func (c *chatTitles) kvFailed() {
+	c.mu.Lock()
+	first := !c.kvLogged
+	c.kvLogged = true
+	c.mu.Unlock()
+	if first && c.Log != nil {
+		c.Log.Debug("telegram names: cannot write the KV table; the names stay in memory")
+	}
+}
+
+// put keeps the display name of chat and, for a thread id that is not 0, the topic name.
+// It skips a chat with no title, no first name, and no username, and an empty topic name.
+// It writes a KV key only when the name differs from the cached name. A topic name that is
+// not exact can be the old name of a renamed topic, so it only fills a gap: it is kept only
+// when neither the memory nor the KV table has a name for the topic.
+func (c *chatTitles) put(chat telegram.Chat, threadID int, topic string, exact bool) {
+	name := displayName(chat)
+	if name == "" {
+		return
+	}
+	ctx := context.Background()
+	k := topicKey{chat.ID, threadID}
+	fromKV := false
+	if threadID != 0 && topic != "" && !exact {
+		c.mu.Lock()
+		_, cached := c.topics[k]
+		c.mu.Unlock()
+		if cached {
+			topic = ""
+		} else if c.DB != nil {
+			v, hit, err := c.DB.KVGet(ctx, topicKV(chat.ID, threadID))
+			if err == nil && hit && v != "" {
+				topic, fromKV = v, true
+			}
+		}
+	}
+	now := c.now()
+	c.mu.Lock()
+	prev, had := c.m[chat.ID]
+	writeChat := !had || !prev.kv || displayName(prev.chat) != name
+	c.storeChat(chat.ID, titleEntry{chat: chat, at: now, kv: c.DB != nil})
+	delete(c.misses, topicKey{chat.ID, 0})
+	delete(c.misses, k)
+	writeTopic := false
+	if threadID != 0 && topic != "" {
+		pt, ok := c.topics[k]
+		writeTopic = !fromKV && (!ok || pt.name != topic)
+		c.storeTopic(k, topicEntry{name: topic, at: now})
+	}
+	c.mu.Unlock()
+	if c.DB == nil {
+		return
+	}
+	if writeChat {
+		if err := c.DB.KVSet(ctx, chatKey(chat.ID), name); err != nil {
+			c.kvFailed()
+		}
+	}
+	if writeTopic {
+		if err := c.DB.KVSet(ctx, topicKV(chat.ID, threadID), topic); err != nil {
+			c.kvFailed()
+		}
+	}
+}
+
+// names returns the display name of the chat and, for a thread id that is not 0, the topic
+// name. It reads the memory cache first, then the KV table, and puts a KV hit into memory.
+// ok is false when the chat name is not known. It never calls getChat.
+func (c *chatTitles) names(ctx context.Context, chatID int64, threadID int) (chat, topic string, ok bool) {
+	ck := topicKey{chatID, 0}
+	c.mu.Lock()
+	e, found := c.m[chatID]
+	skip := c.missed(ck)
+	c.mu.Unlock()
+	if found {
+		chat = displayName(e.chat)
+	}
+	if chat == "" && c.DB != nil && !skip {
+		v, hit, err := c.DB.KVGet(ctx, chatKey(chatID))
+		c.mu.Lock()
+		if err == nil && hit && v != "" {
+			chat = v
+			if _, again := c.m[chatID]; !again {
+				c.storeChat(chatID, titleEntry{chat: telegram.Chat{ID: chatID, Title: v}, kv: true})
+			}
+		} else if err == nil {
+			c.addMiss(ck)
+		}
+		c.mu.Unlock()
+	}
+	if chat == "" {
+		return "", "", false
+	}
+	if threadID == 0 {
+		return chat, "", true
+	}
+	k := topicKey{chatID, threadID}
+	c.mu.Lock()
+	te, found := c.topics[k]
+	skip = c.missed(k)
+	c.mu.Unlock()
+	if found {
+		return chat, te.name, true
+	}
+	if c.DB != nil && !skip {
+		v, hit, err := c.DB.KVGet(ctx, topicKV(chatID, threadID))
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err == nil && hit && v != "" {
+			c.storeTopic(k, topicEntry{name: v})
+			return chat, v, true
+		}
+		if err == nil {
+			c.addMiss(k)
+		}
+	}
+	return chat, "", true
 }
 
 // get returns the chat from the cache or from getChat. Only a successful answer goes into the cache.
@@ -105,10 +327,7 @@ func (c *chatTitles) get(ctx context.Context, id int64) (telegram.Chat, bool) {
 		return telegram.Chat{}, false
 	}
 	c.mu.Lock()
-	if c.m == nil {
-		c.m = map[int64]titleEntry{}
-	}
-	c.m[id] = titleEntry{chat: chat, at: c.now()}
+	c.storeChat(id, titleEntry{chat: chat, at: c.now()})
 	c.mu.Unlock()
 	return chat, true
 }
