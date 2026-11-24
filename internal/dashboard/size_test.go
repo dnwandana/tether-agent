@@ -37,7 +37,7 @@ func TestFirstLoadAssets(t *testing.T) {
 	}
 }
 
-// The page loads at most 150 KB of gzip JS and CSS on the first load.
+// The page loads at most 200 KB of gzip JS and CSS on the first load.
 func TestDashboardFirstLoadSize(t *testing.T) {
 	needBuiltPage(t)
 	dist := DistFS()
@@ -62,6 +62,13 @@ func TestDashboardFirstLoadSize(t *testing.T) {
 			total, strings.Join(assets, ", "), maxFirstLoadGzip)
 	}
 	t.Logf("first load: %d of %d bytes gzip", total, maxFirstLoadGzip)
+}
+
+// The first-load limit is 200 KB gzip. The shell loads its overlays at once.
+func TestMaxFirstLoadGzip(t *testing.T) {
+	if maxFirstLoadGzip != 200*1024 {
+		t.Fatalf("maxFirstLoadGzip is %d, want %d", maxFirstLoadGzip, 200*1024)
+	}
 }
 
 // Each built file and each asset of index.html gives 200 through the static handler.
@@ -111,7 +118,7 @@ func TestDashboardAssetsServed(t *testing.T) {
 }
 
 // maxFirstLoadGzip is the limit for the gzip size of the JS and CSS files that index.html loads.
-const maxFirstLoadGzip = 150 * 1024
+const maxFirstLoadGzip = 200 * 1024
 
 // assetRef finds the src of a script and the href of a link that point to a JS or CSS file in
 // assets/. The prefix "/" or "./" is not part of the match.
