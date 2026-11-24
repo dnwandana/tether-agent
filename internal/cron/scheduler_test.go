@@ -1143,3 +1143,87 @@ func TestPanicAlertRepeats(t *testing.T) {
 		t.Fatalf("%+v", j)
 	}
 }
+
+// runEnds records each RunEnd call with the status that the store holds at that time.
+type runEnds struct {
+	mu  sync.Mutex
+	got [][3]string // job id, status, stored LastStatus
+}
+
+func (r *runEnds) hook(s *Store) func(id, status string) {
+	return func(id, status string) {
+		stored := "read error"
+		if j, err := s.Get(ctx, id); err == nil {
+			stored = j.LastStatus
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.got = append(r.got, [3]string{id, status, stored})
+	}
+}
+
+func (r *runEnds) list() [][3]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][3]string(nil), r.got...)
+}
+
+// RunEnd runs once on each exit path of a run, after the run record, with the recorded status.
+func TestRunEndAfterTheRecord(t *testing.T) {
+	t.Run("ok", func(t *testing.T) {
+		s, clk := scheduler(t)
+		ends := &runEnds{}
+		s.RunEnd = ends.hook(s.Store)
+		id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+		clk.t = clk.t.Add(31 * time.Minute)
+		s.TickOnce(ctx)
+		if got := ends.list(); len(got) != 1 || got[0] != [3]string{id, "ok", "ok"} {
+			t.Fatal(got)
+		}
+	})
+	t.Run("delivery failed", func(t *testing.T) {
+		s, clk := scheduler(t)
+		s.sendErr = errors.New("telegram down")
+		ends := &runEnds{}
+		s.RunEnd = ends.hook(s.Store)
+		id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Deliver: "telegram:123", Enabled: true})
+		clk.t = clk.t.Add(31 * time.Minute)
+		s.TickOnce(ctx)
+		if got := ends.list(); len(got) != 1 || got[0] != [3]string{id, "delivery_failed", "delivery_failed"} {
+			t.Fatal(got)
+		}
+	})
+	t.Run("stopped", func(t *testing.T) {
+		s, clk := scheduler(t)
+		ends := &runEnds{}
+		s.RunEnd = ends.hook(s.Store)
+		id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+		clk.t = clk.t.Add(31 * time.Minute)
+		shutdownRun(t, s)
+		if got := ends.list(); len(got) != 1 || got[0] != [3]string{id, "stopped", "stopped"} {
+			t.Fatal(got)
+		}
+	})
+	t.Run("skipped", func(t *testing.T) {
+		s, clk := scheduler(t)
+		s.Store.RunHistory, s.Store.FailStreakLimit = 50, 10
+		s.Runner.Jobs = s.Store
+		ends := &runEnds{}
+		s.RunEnd = ends.hook(s.Store)
+		writeScript(t, s, "w.sh", "exit 3\n")
+		id := mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Script: "w.sh", Watch: true, Enabled: true})
+		failTicks(s, clk, 1)
+		writeScript(t, s, "w.sh", "echo v1\n")
+		failTicks(s, clk, 1)
+		got := ends.list()
+		if len(got) != 2 || got[1][0] != id || got[1][1] != got[1][2] {
+			t.Fatal(got)
+		}
+	})
+	t.Run("nil hook", func(t *testing.T) {
+		s, clk := scheduler(t)
+		mustCreate(t, s.Store, Job{Name: "a", Schedule: "30m", Prompt: "x", Enabled: true})
+		clk.t = clk.t.Add(31 * time.Minute)
+		s.TickOnce(ctx) // must not panic
+	})
+}

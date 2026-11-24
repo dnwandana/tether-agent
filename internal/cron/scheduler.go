@@ -73,6 +73,9 @@ type Scheduler struct {
 	Brief func(ctx context.Context) (text string, empty bool, err error)
 	// BriefAt is cron.brief_at in minutes after midnight, in the zone of the clock.
 	BriefAt int
+	// RunEnd runs after the record of each run, on each exit path, with the recorded status.
+	// The app sets it to send the dashboard event. Nil does nothing.
+	RunEnd func(jobID, status string)
 
 	initOnce sync.Once
 	sem      chan struct{}
@@ -409,6 +412,12 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 	delete(s.manual, j.ID)
 	s.mu.Unlock()
 	o := s.run(ctx, j, manual)
+	status := ""
+	defer func() {
+		if s.RunEnd != nil {
+			s.RunEnd(j.ID, status)
+		}
+	}()
 	// The duration ends before the delivery, so the wait of the Telegram pace budget is not in it.
 	finishedAt := s.now()
 	// The writes use a context without cancel, so a shutdown still records the run.
@@ -420,12 +429,18 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 		// restart. A stopped run that follows a stopped run counts as a run.
 		o.Text = fmt.Sprintf("⚠ Cron job %s stopped: the gateway shut down before the run ended.", j.Name)
 		s.log().Warn("cron job stopped by shutdown", "job", j.ID, "name", j.Name)
+		status = StatusStopped
 		s.noteMark(j.ID, s.Store.MarkStopped(wctx, j.ID, RunRecord{Status: StatusStopped, LastStatus: StatusStopped,
 			Delivery: DeliveryNone, Output: o.Text, SessionID: o.SessionID, RanAt: ranAt, FinishedAt: finishedAt}))
 		return
 	}
 	if o.Skipped {
-		// A run that skips the model makes no delivery and keeps the fail streak.
+		// A run that skips the model makes no delivery and keeps the fail streak. The store keeps
+		// the status of the run before, except after a stop, so the event sends the same status.
+		status = j.LastStatus
+		if status == StatusStopped {
+			status = o.Status
+		}
 		s.noteMark(j.ID, s.Store.MarkRun(wctx, j.ID, RunRecord{Skipped: true, Status: o.Status,
 			LastStatus: o.Status, Delivery: DeliveryNone, Output: o.Text, SessionID: o.SessionID,
 			RanAt: ranAt, FinishedAt: finishedAt, Manual: manual, WatchHash: o.WatchHash,
@@ -468,6 +483,7 @@ func (s *Scheduler) runJob(ctx context.Context, j Job) {
 			lastStatus, deliveryErr = "delivery_failed", err.Error()
 		}
 	}
+	status = lastStatus
 	// A pause alert that did not go out does not pause the job. The streak goes on, and the
 	// next failed run sends the alert and pauses again.
 	pause := o.Pause && delivery != DeliveryFailed
