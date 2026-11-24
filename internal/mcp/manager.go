@@ -1021,7 +1021,10 @@ type ServerStatus struct {
 	Connected       bool
 	// Tools is the count of the tools of the server that are in the registry. Classes counts
 	// them by class.
-	Tools       int
+	Tools int
+	// ToolNames holds the raw MCP names of the tools in the registry, sorted. It is nil for a
+	// server with no tool.
+	ToolNames   []string
 	Classes     map[string]int
 	LastError   string
 	LastErrorAt time.Time
@@ -1052,8 +1055,10 @@ func (m *Manager) ServerStatus() []ServerStatus {
 			}
 			c, _ := finalClass(st.name, d, st.cfg.Tools.Class)
 			s.Tools++
+			s.ToolNames = append(s.ToolNames, d.Name)
 			s.Classes[string(c)]++
 		}
+		slices.Sort(s.ToolNames)
 		st.mu.Unlock()
 		out = append(out, s)
 	}

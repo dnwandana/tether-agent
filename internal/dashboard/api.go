@@ -11,14 +11,15 @@ type Event struct {
 
 // Snapshot is the data of the hello event. It shows the state of the session at connect time.
 type Snapshot struct {
-	Turn          *TurnView   `json:"turn"`
-	Cards         []Card      `json:"cards"`
-	Status        Status      `json:"status"`
-	SessionID     string      `json:"session_id"`
-	Session       SessionView `json:"session"`
-	LastMessageID int64       `json:"last_message_id"`
-	Notices       []Notice    `json:"notices"`
-	BuildID       string      `json:"build_id"`
+	Turn          *TurnView      `json:"turn"`
+	Cards         []Card         `json:"cards"`
+	Status        Status         `json:"status"`
+	SessionID     string         `json:"session_id"`
+	Session       SessionView    `json:"session"`
+	LastMessageID int64          `json:"last_message_id"`
+	Notices       []Notice       `json:"notices"`
+	Answered      []AnsweredCard `json:"answered"`
+	BuildID       string         `json:"build_id"`
 }
 
 // SessionView is the header data of the session. It is also the data of the session event.
@@ -26,6 +27,7 @@ type SessionView struct {
 	ID       string       `json:"id"`
 	Title    string       `json:"title"`
 	Model    string       `json:"model"`
+	Entry    string       `json:"entry"`
 	Effort   string       `json:"effort"`
 	GoalLine string       `json:"goal_line"`
 	Context  *ContextView `json:"context"`
@@ -100,18 +102,34 @@ type Card struct {
 	Code        string    `json:"code"`
 }
 
+// AnsweredCard is the record of one answered card. Header and Preview are redacted and cut at
+// 300 characters.
+type AnsweredCard struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	Header    string    `json:"header"`
+	Preview   string    `json:"preview"`
+	SessionID string    `json:"session_id"`
+	At        time.Time `json:"at"`
+}
+
 // Status is the data of the status bar.
 type Status struct {
-	Model         string  `json:"model"`
-	Entry         string  `json:"entry"`
-	Fallback      bool    `json:"fallback"`
-	FallbackCause string  `json:"fallback_cause"`
-	Mode          string  `json:"mode"`
-	Waiting       int     `json:"waiting"`
-	Running       int     `json:"running"`
-	Spend24h      float64 `json:"spend24h"`
-	Unpriced      bool    `json:"unpriced"`
-	TLS           bool    `json:"tls"`
+	Model         string `json:"model"`
+	Entry         string `json:"entry"`
+	Fallback      bool   `json:"fallback"`
+	FallbackCause string `json:"fallback_cause"`
+	Mode          string `json:"mode"`
+	Waiting       int    `json:"waiting"`
+	// Running is the sum of RunningBatches, RunningACP, and RunningShell.
+	Running        int     `json:"running"`
+	RunningBatches int     `json:"running_batches"`
+	RunningACP     int     `json:"running_acp"`
+	RunningShell   int     `json:"running_shell"`
+	BrowserOn      bool    `json:"browser_on"`
+	Spend24h       float64 `json:"spend24h"`
+	Unpriced       bool    `json:"unpriced"`
+	TLS            bool    `json:"tls"`
 }
 
 // Notice is a message that went to no live renderer.
@@ -167,10 +185,25 @@ type AckView struct {
 
 // TaskView is the state of a background task.
 type TaskView struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
-	State string `json:"state"`
-	Text  string `json:"text"`
+	ID      string        `json:"id"`
+	Kind    string        `json:"kind"`
+	State   string        `json:"state"`
+	Text    string        `json:"text"`
+	Subject string        `json:"subject"`          // what the task is about, for example the skill name
+	Code    string        `json:"code"`             // the refusal code: need_force, need_override, or empty
+	Waiting bool          `json:"waiting"`          // true while a confirm card waits
+	Backup  *BackupReport `json:"backup,omitempty"` // the report of a backup task
+}
+
+// BackupReport is the result of a backup. Replaced holds key paths only, never a secret value.
+type BackupReport struct {
+	Size     int64    `json:"size"`
+	Sessions int      `json:"sessions"`
+	Messages int      `json:"messages"`
+	CronJobs int      `json:"cron_jobs"`
+	Replaced []string `json:"replaced"`
+	Warnings []string `json:"warnings"`
+	Skipped  []string `json:"skipped"`
 }
 
 // CardAnswer is the answer of a page to a card.
@@ -196,6 +229,6 @@ func registerAPI(vs ...any) { apiTypes = append(apiTypes, vs...) }
 
 func init() {
 	registerAPI(Snapshot{}, SessionView{}, ContextView{}, TurnView{}, ToolView{}, PlanItem{}, QueueItem{},
-		Card{}, Status{}, Notice{}, Button{}, ReplyView{}, CostView{}, TurnDone{}, AckView{}, TaskView{},
+		Card{}, AnsweredCard{}, Status{}, Notice{}, Button{}, ReplyView{}, CostView{}, TurnDone{}, AckView{}, TaskView{}, BackupReport{},
 		CardAnswer{}, FileRef{})
 }

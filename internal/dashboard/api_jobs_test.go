@@ -62,6 +62,12 @@ func newJobsFixture(t *testing.T, telegramOn bool) *jobsFixture {
 		Publish:  func(e Event) { f.events = append(f.events, e) },
 		Redact:   func(s string) string { return strings.ReplaceAll(s, "sk-secret", "[REDACTED]") },
 		Now:      time.Now,
+		ChatTitle: func(chatID, threadID string) (string, string, bool) {
+			if chatID == "-100" && threadID == "7" {
+				return "Ops", "Alerts", true
+			}
+			return "", "", false
+		},
 	})
 	f.mux = http.NewServeMux()
 	api.Register(f.mux)
@@ -325,5 +331,34 @@ func TestJobsHeldMarkErrorAnswers200(t *testing.T) {
 	r := jobsDecode[ReplyView](t, f.do(t, "POST", "/api/held/h1", `{"action":"drop"}`), 200)
 	if r.Text != "Dropped." || len(f.events) != 1 || f.events[0].Name != "held" {
 		t.Fatalf("%+v %+v", r, f.events)
+	}
+}
+
+// The detail tells the watch limit, a masked prompt, and the cached title of the delivery chat.
+func TestJobsDetailFlagsAndLabel(t *testing.T) {
+	f := newJobsFixture(t, true)
+	ctx := context.Background()
+	j, err := f.jobs.Create(ctx, cron.Job{Name: "w", Schedule: "every 1h", Prompt: "use sk-secret", Script: "check.sh",
+		Watch: true, Enabled: true, Deliver: "telegram:-100:7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := sessions.New(f.d)
+	for range cron.WatchModelRunsPerDay {
+		if _, err := ss.Create(ctx, sessions.Session{Key: "cron:" + j.ID, Source: "cron"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	det := jobsDecode[JobDetail](t, f.do(t, "GET", "/api/jobs/"+j.ID, ""), 200)
+	if !det.WatchLimitHit || !det.PromptMasked || det.DeliverLabel != "Ops › Alerts" {
+		t.Fatalf("%+v", det)
+	}
+	plain, err := f.jobs.Create(ctx, cron.Job{Name: "p", Schedule: "every 1h", Prompt: "p", Enabled: true, Deliver: "telegram:55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	det = jobsDecode[JobDetail](t, f.do(t, "GET", "/api/jobs/"+plain.ID, ""), 200)
+	if det.WatchLimitHit || det.PromptMasked || det.DeliverLabel != "" {
+		t.Fatalf("no watch, no mask, and no cached title: %+v", det)
 	}
 }

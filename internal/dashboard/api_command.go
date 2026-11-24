@@ -49,7 +49,13 @@ type BulkResult struct {
 	Answered int `json:"answered"`
 }
 
-func init() { registerAPI(CommandRequest{}, Accepted{}, BulkRequest{}, BulkResult{}) }
+// CardsView is the body of GET /api/cards. A page reads it after a 409.
+type CardsView struct {
+	Open     []Card         `json:"open"`
+	Answered []AnsweredCard `json:"answered"`
+}
+
+func init() { registerAPI(CommandRequest{}, Accepted{}, BulkRequest{}, BulkResult{}, CardsView{}) }
 
 type commandAPI struct {
 	ch     *Channel
@@ -65,8 +71,9 @@ func NewCommandAPI(ch *Channel, redact func(string) string) Routes {
 	return &commandAPI{ch: ch, redact: redact}
 }
 
-// Register adds POST /api/command, POST /api/cards/bulk, and POST /api/cards/{id}.
+// Register adds POST /api/command, GET /api/cards, POST /api/cards/bulk, and POST /api/cards/{id}.
 func (a *commandAPI) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/cards", a.cards)
 	mux.HandleFunc("POST /api/command", a.command)
 	mux.HandleFunc("POST /api/cards/bulk", a.bulk)
 	mux.HandleFunc("POST /api/cards/{id}", a.card)
@@ -87,6 +94,15 @@ func cmdDecode(w http.ResponseWriter, r *http.Request, v any) bool {
 		return false
 	}
 	return true
+}
+
+// cards sends the open cards and the answered-card ring. Both lists are never nil.
+func (a *commandAPI) cards(w http.ResponseWriter, r *http.Request) {
+	answered := a.ch.hub.Answered()
+	if answered == nil {
+		answered = []AnsweredCard{}
+	}
+	cmdJSON(w, http.StatusOK, CardsView{Open: a.ch.Cards().Open(), Answered: answered})
 }
 
 func (a *commandAPI) command(w http.ResponseWriter, r *http.Request) {

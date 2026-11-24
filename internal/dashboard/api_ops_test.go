@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -126,6 +127,16 @@ func TestOpsBackupCreateListDownload(t *testing.T) {
 		!strings.Contains(v.Text, list.Files[0].Name) {
 		t.Fatalf("%+v", list)
 	}
+	r := v.Backup
+	if r == nil || r.Size != list.Files[0].Size || r.Sessions != 0 || r.Messages != 0 || r.CronJobs != 0 ||
+		r.Replaced == nil || r.Warnings == nil || r.Skipped == nil {
+		t.Fatalf("the task carries the report, with [] lists: %+v", r)
+	}
+	for _, path := range r.Replaced {
+		if strings.Contains(path, "sk-") {
+			t.Fatalf("Replaced holds key paths only: %q", path)
+		}
+	}
 	f := list.Files[0]
 	w = opsDo(mux, "GET", "/api/backup/"+f.Name, "")
 	if w.Code != http.StatusOK || int64(w.Body.Len()) != f.Size ||
@@ -153,8 +164,12 @@ func TestOpsUpdate(t *testing.T) {
 	})
 	w := opsDo(mux, "GET", "/api/update", "")
 	var got UpdateInfo
-	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got != info {
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || got.CheckedAt.IsZero() {
 		t.Fatalf("%+v %v", got, err)
+	}
+	got.CheckedAt = time.Time{}
+	if got != info {
+		t.Fatalf("%+v", got)
 	}
 	if w := opsDo(mux, "POST", "/api/update", "{}"); w.Code != http.StatusBadRequest || opsError(t, w) != "Confirm the update." {
 		t.Fatal(w.Code, w.Body)
@@ -192,5 +207,65 @@ func TestOpsTaskErrorsRedacted(t *testing.T) {
 		if v.State != "error" || strings.Contains(v.Text, "sk-secret") || !strings.Contains(v.Text, "[REDACTED]") {
 			t.Errorf("%s: %+v", path, v)
 		}
+	}
+}
+
+// GET /api/update calls the GitHub check at most once in 10 min and tells when it ran.
+func TestOpsUpdateCheckCache(t *testing.T) {
+	now := time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC)
+	var checks atomic.Int32
+	mux, _ := opsSetup(t, OpsOptions{
+		UpdateCheck: func(context.Context) (UpdateInfo, error) {
+			checks.Add(1)
+			return UpdateInfo{Current: "v0.23.0", Latest: "v0.24.0", Newer: true}, nil
+		},
+		Now: func() time.Time { return now },
+	})
+	get := func() UpdateInfo {
+		t.Helper()
+		var v UpdateInfo
+		if w := opsDo(mux, "GET", "/api/update", ""); w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &v) != nil {
+			t.Fatal(w.Code, w.Body)
+		}
+		return v
+	}
+	first := get()
+	if !first.CheckedAt.Equal(now) || first.Latest != "v0.24.0" || checks.Load() != 1 {
+		t.Fatalf("%+v %d", first, checks.Load())
+	}
+	now = now.Add(9 * time.Minute)
+	if second := get(); !second.CheckedAt.Equal(first.CheckedAt) || checks.Load() != 1 {
+		t.Fatalf("a check within 10 min uses the cache: %+v %d", second, checks.Load())
+	}
+	now = now.Add(2 * time.Minute)
+	if third := get(); !third.CheckedAt.Equal(now) || checks.Load() != 2 {
+		t.Fatalf("a check after 10 min runs again: %+v %d", third, checks.Load())
+	}
+}
+
+func TestOpsUpdateCheckOnceForTwoLoads(t *testing.T) {
+	var checks atomic.Int32
+	release := make(chan struct{})
+	mux, _ := opsSetup(t, OpsOptions{
+		UpdateCheck: func(context.Context) (UpdateInfo, error) {
+			checks.Add(1)
+			<-release
+			return UpdateInfo{Current: "v0.23.0", Latest: "v0.24.0", Newer: true}, nil
+		},
+	})
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Go(func() {
+			if w := opsDo(mux, "GET", "/api/update", ""); w.Code != 200 {
+				t.Error(w.Code, w.Body)
+			}
+		})
+	}
+	// Both loads are in flight before the first check returns.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	if n := checks.Load(); n != 1 {
+		t.Fatalf("two loads at the same time make %d checks, want 1", n)
 	}
 }

@@ -15,6 +15,7 @@ var ErrQuerySyntax = errors.New(`FTS5 query syntax: quote phrases with "..."`)
 // Hit is one message that matches a search.
 type Hit struct {
 	SessionID, Title string
+	Source, Kind     string
 	Date             time.Time
 	MessageID        int64
 	Snippet          string
@@ -30,20 +31,51 @@ type Hit struct {
 // It also skips the aux sessions, because an aux row holds only the task name
 // of a side call. It returns only the hits in the sessions of sc.
 func (s *Store) Search(ctx context.Context, query string, limit int, sc Scope) ([]Hit, error) {
+	return s.SearchFiltered(ctx, query, SearchFilter{Limit: limit}, sc)
+}
+
+// SearchFilter narrows a search. Limit 0 or less means 10. An empty Source or Kind, and a
+// nil Archived, match each session.
+type SearchFilter struct {
+	Limit, Offset int
+	Source, Kind  string
+	Archived      *bool
+}
+
+// SearchFiltered runs the search of Search with the filter f. The filter and the
+// offset run in SQL, so the paging counts only the filtered hits.
+func (s *Store) SearchFiltered(ctx context.Context, query string, f SearchFilter, sc Scope) ([]Hit, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, errors.New("sessions: search: the query is empty")
 	}
-	if limit <= 0 {
-		limit = 10
+	if f.Limit <= 0 {
+		f.Limit = 10
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+	args := []any{query, KindGoalJudge, KindReview, KindAux}
+	var cond strings.Builder
+	if f.Source != "" {
+		cond.WriteString(" AND s.source = ?")
+		args = append(args, f.Source)
+	}
+	if f.Kind != "" {
+		cond.WriteString(" AND s.kind = ?")
+		args = append(args, f.Kind)
+	}
+	if f.Archived != nil {
+		cond.WriteString(" AND s.archived = ?")
+		args = append(args, boolInt(*f.Archived))
 	}
 	scope, scopeArgs := scopeFilter("m.session_id", sc)
-	args := append([]any{query, KindGoalJudge, KindReview, KindAux}, scopeArgs...)
-	args = append(args, limit)
-	rows, err := s.db.QueryContext(ctx, `SELECT m.session_id, s.title, m.timestamp, m.id,
+	args = append(args, scopeArgs...)
+	args = append(args, f.Limit, f.Offset)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.session_id, s.title, s.source, s.kind, m.timestamp, m.id,
 		snippet(messages_fts, 0, '[', ']', '…', 12)
 		FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.id = m.session_id
-		WHERE messages_fts MATCH ? AND s.kind NOT IN (?, ?, ?)`+scope+` ORDER BY m.id DESC LIMIT ?`, args...)
+		WHERE messages_fts MATCH ? AND s.kind NOT IN (?, ?, ?)`+cond.String()+scope+` ORDER BY m.id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, searchErr(err)
 	}
@@ -54,7 +86,7 @@ func (s *Store) Search(ctx context.Context, query string, limit int, sc Scope) (
 			h  Hit
 			at int64
 		)
-		if err := rows.Scan(&h.SessionID, &h.Title, &at, &h.MessageID, &h.Snippet); err != nil {
+		if err := rows.Scan(&h.SessionID, &h.Title, &h.Source, &h.Kind, &at, &h.MessageID, &h.Snippet); err != nil {
 			return nil, searchErr(err)
 		}
 		h.Date = time.UnixMilli(at).UTC()

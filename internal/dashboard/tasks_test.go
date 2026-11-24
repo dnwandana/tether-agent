@@ -196,3 +196,77 @@ func TestTasksRoute(t *testing.T) {
 		t.Fatal(rec.Code, rec.Body)
 	}
 }
+
+// The handle sets the waiting flag, the code, and the backup report, and each change is a task event.
+func TestTasksStartWithHandle(t *testing.T) {
+	tk, rec := tasksNew(t, context.Background())
+	release := make(chan struct{})
+	report := BackupReport{Size: 10, Sessions: 2, Messages: 5, CronJobs: 1,
+		Replaced: []string{"providers.primary.api_key"}, Warnings: []string{}, Skipped: []string{}}
+	id, err := tk.StartWith(TaskOpts{Kind: "skills", Subject: "pdf"}, func(ctx context.Context, h TaskHandle) (string, error) {
+		h.Waiting(true)
+		<-release
+		h.Waiting(false)
+		h.Code("need_force")
+		h.Backup(report)
+		h.Progress("step 2")
+		return "", errors.New("blocked")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if v, _ := tk.Get(id); v.Waiting {
+			if v.Subject != "pdf" || v.State != "running" || v.Kind != "skills" {
+				t.Fatalf("%+v", v)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the task never waited")
+		}
+	}
+	close(release)
+	got := tasksWait(t, tk, id)
+	if got.State != "error" || got.Text != "blocked" || got.Code != "need_force" || got.Waiting ||
+		got.Subject != "pdf" || got.Backup == nil || got.Backup.Sessions != 2 || got.Backup.Replaced[0] != "providers.primary.api_key" {
+		t.Fatalf("%+v", got)
+	}
+	views := rec.views()
+	if len(views) != 7 || !views[1].Waiting || views[2].Waiting || views[3].Code != "need_force" ||
+		views[4].Backup == nil || views[5].Text != "step 2" || views[5].Code != "need_force" {
+		t.Fatalf("one event for each change, and each keeps the earlier fields: %+v", views)
+	}
+}
+
+// GET /api/tasks lists the tasks of a kind, newest first. No kind lists all tasks.
+func TestTasksListRoute(t *testing.T) {
+	tk, _ := tasksNew(t, context.Background())
+	a, _ := tk.Start("doctor", func(context.Context, func(string)) (string, error) { return "a", nil })
+	tasksWait(t, tk, a)
+	b, _ := tk.StartWith(TaskOpts{Kind: "skills", Subject: "pdf"}, func(context.Context, TaskHandle) (string, error) { return "b", nil })
+	tasksWait(t, tk, b)
+	c, _ := tk.StartWith(TaskOpts{Kind: "skills", Subject: "git"}, func(context.Context, TaskHandle) (string, error) { return "c", nil })
+	tasksWait(t, tk, c)
+	mux := http.NewServeMux()
+	NewTasksAPI(tk).Register(mux)
+	get := func(path string) (string, []TaskView) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		var out []TaskView
+		if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+			t.Fatal(rec.Code, rec.Body)
+		}
+		return strings.TrimSpace(rec.Body.String()), out
+	}
+	if _, got := get("/api/tasks?kind=skills"); len(got) != 2 || got[0].ID != c || got[0].Subject != "git" || got[1].ID != b {
+		t.Fatalf("%+v", got)
+	}
+	if _, got := get("/api/tasks"); len(got) != 3 || got[0].ID != c || got[2].ID != a {
+		t.Fatalf("%+v", got)
+	}
+	if body, _ := get("/api/tasks?kind=backup"); body != "[]" {
+		t.Fatalf("no task gives [] and not null: %s", body)
+	}
+}

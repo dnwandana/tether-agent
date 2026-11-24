@@ -40,11 +40,24 @@ func (a *skillsAsker) questions() []tools.Question {
 	return slices.Clone(a.qs)
 }
 
+// taskRecorder is a TaskHandle that keeps the waiting changes and the last code.
+type taskRecorder struct {
+	mu    sync.Mutex
+	waits []bool
+	code  string
+}
+
+func (r *taskRecorder) Progress(string)     {}
+func (r *taskRecorder) Backup(BackupReport) {}
+func (r *taskRecorder) Waiting(on bool)     { r.mu.Lock(); r.waits = append(r.waits, on); r.mu.Unlock() }
+func (r *taskRecorder) Code(code string)    { r.mu.Lock(); r.code = code; r.mu.Unlock() }
+
 func TestInstallPrompterConfirmAndAsk(t *testing.T) {
 	var report bytes.Buffer
 	report.WriteString("Skill: pdf — Read PDF files.\n")
 	ask := &skillsAsker{answer: tools.Answer{Choices: []string{"Yes"}}}
-	p := newInstallPrompter(context.Background(), ask, &report, "pdf")
+	h := &taskRecorder{}
+	p := newInstallPrompter(context.Background(), ask, &report, "pdf", h)
 	if !p.Terminal() {
 		t.Fatal("the prompter must say Terminal, so the installer asks it")
 	}
@@ -57,6 +70,9 @@ func TestInstallPrompterConfirmAndAsk(t *testing.T) {
 		q.Multi || q.Timeout != 5*time.Minute {
 		t.Fatalf("%+v", q)
 	}
+	if !slices.Equal(h.waits, []bool{true, false}) {
+		t.Fatalf("Confirm waits for the card and then stops: %v", h.waits)
+	}
 	ask.answer = tools.Answer{Choices: []string{"No"}}
 	if ok, err := p.Confirm(`Install "pdf"?`); err != nil || ok {
 		t.Fatalf("No must be no: %v %v", ok, err)
@@ -66,6 +82,9 @@ func TestInstallPrompterConfirmAndAsk(t *testing.T) {
 		"Run this command in a terminal on the host: tether skills install pdf"
 	if err == nil || err.Error() != want {
 		t.Fatalf("got %v", err)
+	}
+	if h.code != "need_override" {
+		t.Fatalf("a dangerous refusal sets need_override: %q", h.code)
 	}
 	if len(ask.questions()) != 2 {
 		t.Fatal("Ask must send no card")

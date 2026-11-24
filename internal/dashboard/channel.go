@@ -245,7 +245,7 @@ func (c *Channel) refreshNow() {
 
 // sameSessionView reports whether a and b show the same thing.
 func sameSessionView(a, b SessionView) bool {
-	if a.ID != b.ID || a.Title != b.Title || a.Model != b.Model || a.Effort != b.Effort || a.GoalLine != b.GoalLine {
+	if a.ID != b.ID || a.Title != b.Title || a.Model != b.Model || a.Entry != b.Entry || a.Effort != b.Effort || a.GoalLine != b.GoalLine {
 		return false
 	}
 	if a.Context == nil || b.Context == nil {
@@ -353,7 +353,7 @@ func (c *Channel) events(w http.ResponseWriter, r *http.Request) {
 	}
 	c.hub.handler(func() Snapshot {
 		return Snapshot{Turn: c.turn.View(), Cards: c.cards.Open(), Status: status,
-			Notices: c.hub.Notices(), BuildID: BuildID()}
+			Notices: c.hub.Notices(), Answered: c.hub.Answered(), BuildID: BuildID()}
 	}, fill)(w, r)
 }
 
@@ -434,6 +434,24 @@ func (c *Channel) queueNow() {
 	}
 	c.hub.publishWith(Event{Name: "queue", Data: map[string]any{"items": items, "max": max}},
 		func() { c.turn.SetQueue(items) })
+}
+
+// RestartProgress is the data of a restart event during the drain of a gateway stop.
+// Reason is "stopping", the same as the first restart event.
+type RestartProgress struct {
+	Reason   string `json:"reason"`
+	ElapsedS int    `json:"elapsed_s"`
+	DrainS   int    `json:"drain_s"`
+	Turns    int    `json:"turns"`
+	Goals    int    `json:"goals"`
+}
+
+func init() { registerAPI(RestartProgress{}) }
+
+// PublishRestart sends the drain progress of a stop to the open pages. The hub drops it
+// after it closes.
+func (c *Channel) PublishRestart(p RestartProgress) {
+	c.hub.Publish(Event{Name: "restart", Data: p})
 }
 
 // Run serves the dashboard until ctx ends. The server and the streams stay until the work

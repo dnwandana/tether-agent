@@ -226,7 +226,11 @@ func (a *App) holdDelivery(ctx context.Context, h cron.HeldSend, card cron.HeldC
 	if err != nil {
 		return fmt.Errorf("cron: post the held card of job %s: %w", card.JobName, err)
 	}
-	return a.Sched.Deliver.Held.SetCard(ctx, h.ID, strconv.FormatInt(chat, 10), id)
+	if err := a.Sched.Deliver.Held.SetCard(ctx, h.ID, strconv.FormatInt(chat, 10), id); err != nil {
+		return err
+	}
+	a.publishHeld(h.ID)
+	return nil
 }
 
 // errHeldTelegramOff is the answer of a dashboard Post when Telegram is off.
@@ -258,7 +262,17 @@ func (a *App) resolveHeld(ctx context.Context, id, action string) (string, error
 	if action == "post" && a.Telegram == nil {
 		return "", errHeldTelegramOff
 	}
-	return cron.ResolveHeld(ctx, a.Cron, id, action, a.sendHeld, a.editHeldCard)
+	result, err := cron.ResolveHeld(ctx, a.Cron, id, action, a.sendHeld, a.editHeldCard)
+	if result != "" {
+		a.publishHeld(id)
+	}
+	return result, err
+}
+
+// publishHeld tells the open dashboard pages that the held send id changed. It does
+// nothing when the dashboard is off.
+func (a *App) publishHeld(id string) {
+	a.publishDashboard("held", map[string]any{"id": id})
 }
 
 // sendHeld sends a held row to its target. A row of kind "original" skips the channel scan.

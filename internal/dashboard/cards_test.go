@@ -189,17 +189,65 @@ func TestCardDeadline(t *testing.T) {
 	if got.s != security.ScopeTimeout || !errors.Is(got.err, context.DeadlineExceeded) {
 		t.Fatalf("%+v", got)
 	}
-	if done := cardOf(t, nextEvent(t, ev), "card.done"); done.Header != "⌛ No answer in 2 min" {
+	if done := cardOf(t, nextEvent(t, ev), "card.done"); done.Header != "⌛ Approval denied · no answer in 2 min" {
 		t.Fatalf("%q", done.Header)
 	}
-	// A stopped turn denies.
+	// A stopped turn has its own text. It is not a Deny tap.
 	sctx, stop := context.WithCancel(context.Background())
 	out = promptCard(cards, sctx, security.ApprovalRequest{Command: "y"})
 	nextEvent(t, ev)
 	stop()
 	<-out
-	if done := cardOf(t, nextEvent(t, ev), "card.done"); done.Header != "❌ Approval denied" {
+	if done := cardOf(t, nextEvent(t, ev), "card.done"); done.Header != "⏹ No answer · the turn stopped" {
 		t.Fatalf("%q", done.Header)
+	}
+}
+
+// card.done carries the record. The header and the preview are redacted and cut at 300 runes.
+func TestCardDoneRecord(t *testing.T) {
+	at := time.Date(2026, 11, 23, 9, 30, 0, 0, time.UTC)
+	cards, h, ev := cardsFixture(t, nil, func() time.Time { return at })
+	cards.SetRedact(func(s string) string { return strings.ReplaceAll(s, "sk-live-123", "***") })
+	out := promptCard(cards, context.Background(), security.ApprovalRequest{SessionID: "s1",
+		Command: "deploy --token sk-live-123", Description: "deploy"})
+	card := cardOf(t, nextEvent(t, ev), "card")
+	if err := cards.Answer(context.Background(), card.ID, CardAnswer{Answer: "once"}); err != nil {
+		t.Fatal(err)
+	}
+	<-out
+	e := nextEvent(t, ev)
+	var rec AnsweredCard
+	if e.Name != "card.done" || json.Unmarshal(e.Data, &rec) != nil || !rec.At.Equal(at) {
+		t.Fatalf("%s %s", e.Name, e.Data)
+	}
+	rec.At = at
+	want := AnsweredCard{ID: card.ID, Kind: "approval", Header: "✅ Approval allowed · once",
+		Preview: "deploy --token ***", SessionID: "s1", At: at}
+	if rec != want {
+		t.Fatalf("got %+v, want %+v", rec, want)
+	}
+
+	// A clarify header holds the typed answer, so it is redacted and cut too.
+	ans := make(chan tools.Answer, 1)
+	go func() {
+		a, _ := cards.Ask(context.Background(), tools.Question{Text: "Which branch?"})
+		ans <- a
+	}()
+	q := cardOf(t, nextEvent(t, ev), "card")
+	if err := cards.Answer(context.Background(), q.ID, CardAnswer{Text: "sk-live-123 " + strings.Repeat("a", 400)}); err != nil {
+		t.Fatal(err)
+	}
+	<-ans
+	var rq AnsweredCard
+	if e := nextEvent(t, ev); json.Unmarshal(e.Data, &rq) != nil {
+		t.Fatal(string(e.Data))
+	}
+	wantHeader := string([]rune("✅ *** " + strings.Repeat("a", 400))[:300])
+	if rq.Kind != "clarify" || rq.Header != wantHeader || rq.Preview != "Which branch?" || rq.SessionID != "" {
+		t.Fatalf("%+v", rq)
+	}
+	if got := h.Answered(); len(got) != 2 || got[0].ID != q.ID || got[1].ID != card.ID {
+		t.Fatalf("the ring is newest first: %+v", got)
 	}
 }
 
@@ -548,5 +596,40 @@ func TestSecretCardSaveFailsWhileTurnEnds(t *testing.T) {
 	}
 	if len(cards.Open()) != 0 {
 		t.Fatal("the card must close")
+	}
+}
+
+// "Approve all once" skips a send card with findings, from the tray and from a typed /approve all.
+func TestBulkSkipsSendWithFindings(t *testing.T) {
+	cards, _, ev := cardsFixture(t, nil, time.Now)
+	open := func(req security.ApprovalRequest) (string, chan scopeResult) {
+		out := promptCard(cards, context.Background(), req)
+		return cardOf(t, nextEvent(t, ev), "card").ID, out
+	}
+	a, aOut := open(security.ApprovalRequest{Command: "a"})
+	s, sOut := open(security.ApprovalRequest{Command: "post the report", Class: "send",
+		Findings: []security.Finding{{Label: "[email]"}}})
+	if n, err := cards.Bulk(context.Background(), []string{a, s}, "once"); err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	if (<-aOut).s != security.ScopeOnce {
+		t.Fatal("a")
+	}
+	nextEvent(t, ev) // card.done of a
+	if open := cards.Open(); len(open) != 1 || open[0].ID != s {
+		t.Fatalf("a send with findings stays open: %+v", open)
+	}
+	reply, ok := cards.Local("/approve all")
+	if !ok || reply != "🔒 **No command was approved**\n1 send with findings still waits for a tap." {
+		t.Fatalf("%q", reply)
+	}
+	if len(cards.Open()) != 1 {
+		t.Fatal("a typed /approve all must skip the send with findings")
+	}
+	if n, err := cards.Bulk(context.Background(), []string{s}, "deny"); err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	if (<-sOut).s != security.ScopeDeny {
+		t.Fatal("deny all still answers a send with findings")
 	}
 }

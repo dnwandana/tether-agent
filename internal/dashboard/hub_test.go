@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -373,4 +374,23 @@ func checkScan(t *testing.T, sc *bufio.Scanner) {
 		return
 	}
 	t.Error("the event stream failed:", err)
+}
+
+// The ring keeps the last 30 answered cards, newest first, and Answered returns a copy.
+func TestHubAnsweredRing(t *testing.T) {
+	h := NewHub(1 << 20)
+	if got := h.Answered(); len(got) != 0 {
+		t.Fatalf("%+v", got)
+	}
+	for i := range 32 {
+		h.addAnswered(AnsweredCard{ID: strconv.Itoa(i)})
+	}
+	got := h.Answered()
+	if len(got) != 30 || got[0].ID != "31" || got[29].ID != "2" {
+		t.Fatalf("%d %+v", len(got), got)
+	}
+	got[0].ID = "x"
+	if h.Answered()[0].ID != "31" {
+		t.Fatal("Answered must return a copy")
+	}
 }

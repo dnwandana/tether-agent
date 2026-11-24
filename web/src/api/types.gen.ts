@@ -8,7 +8,9 @@ export interface AccessView {
   pairing_on: boolean;
   pending: PairingRow[];
   approved: PairingRow[];
-  tries_left: number;
+  revoked: PairingRow[];
+  locked_until: string | null;
+  tries_left: number | null;
 }
 
 export interface AckView {
@@ -19,10 +21,29 @@ export interface AckView {
   buttons: Button[][];
 }
 
+export interface AnsweredCard {
+  id: string;
+  kind: string;
+  header: string;
+  preview: string;
+  session_id: string;
+  at: string;
+}
+
 export interface BackupFile {
   name: string;
   size: number;
   modified: string;
+}
+
+export interface BackupReport {
+  size: number;
+  sessions: number;
+  messages: number;
+  cron_jobs: number;
+  replaced: string[];
+  warnings: string[];
+  skipped: string[];
 }
 
 export interface BackupView {
@@ -37,6 +58,8 @@ export interface BootstrapView {
   build_id: string;
   max_upload_mb: number;
   tls: boolean;
+  drain_s: number;
+  toolsets: string[];
 }
 
 export interface BriefLineView {
@@ -106,6 +129,11 @@ export interface CardAnswer {
   choices: string[];
   text: string;
   value: string;
+}
+
+export interface CardsView {
+  open: Card[];
+  answered: AnsweredCard[];
 }
 
 export interface CatalogRow {
@@ -231,6 +259,8 @@ export interface GoalDetail {
   stop_when: string;
   subgoals: string[];
   gates: GoalGateView[];
+  subgoal_hashes: string[];
+  gate_hashes: string[];
   waiting_reason: string;
   waiting_since: string;
   waiting_until: string;
@@ -263,7 +293,10 @@ export interface GoalRowView {
   turns_used: number;
   max_turns: number;
   updated_at: string;
-  actionable: boolean;
+  last_verdict: string;
+  last_turn_at: string | null;
+  can_stop: boolean;
+  can_resume: boolean;
 }
 
 export interface GrantView {
@@ -330,6 +363,9 @@ export interface JobDetail {
   week_cost_usd: number;
   runs_total: number;
   fail_limit: number;
+  watch_limit_hit: boolean;
+  prompt_masked: boolean;
+  deliver_label: string;
 }
 
 export interface JobRow {
@@ -354,7 +390,9 @@ export interface JobRow {
 
 export interface LogEntry {
   at: string;
+  session_id: string;
   scope: string;
+  scope_label: string;
   kind: string;
   tool: string;
   server: string;
@@ -394,6 +432,12 @@ export interface McpRow {
   transport: string;
   connected: boolean;
   tools: number;
+  tool_names: string[];
+  always_on: boolean;
+  idle_stop_minutes: number;
+  include: string[];
+  exclude: string[];
+  enabled: boolean;
   classes: Record<string, number>;
   last_error: string;
   last_error_at: string;
@@ -454,6 +498,7 @@ export interface MessageResult {
 export interface MessageView {
   id: number;
   role: string;
+  created: string;
   text: string;
   reasoning: string;
   reasoning_tokens: number;
@@ -477,6 +522,7 @@ export interface ModelEntryRow {
   preset: string;
   format: string;
   model: string;
+  base_url: string;
   vision: boolean;
   context_window: number;
   effort: string;
@@ -490,6 +536,7 @@ export interface ModelRoleRow {
   role: string;
   key: string;
   value: string;
+  entry_usable: boolean;
 }
 
 export interface ModelsView {
@@ -514,6 +561,11 @@ export interface PairingRow {
   expires: string;
 }
 
+export interface PinView {
+  path: string;
+  sha256: string;
+}
+
 export interface PlanItem {
   text: string;
   state: string;
@@ -530,6 +582,14 @@ export interface ReplyView {
   text: string;
   buttons: Button[][];
   edit: boolean;
+}
+
+export interface RestartProgress {
+  reason: string;
+  elapsed_s: number;
+  drain_s: number;
+  turns: number;
+  goals: number;
 }
 
 export interface RunRow {
@@ -597,6 +657,7 @@ export interface RuntimeView {
 
 export interface ScopeModeView {
   scope: string;
+  scope_label: string;
   mode: string;
   set_at: string;
 }
@@ -607,6 +668,8 @@ export interface SearchHitView {
   snippet: string;
   message_id: number;
   date: string;
+  source: string;
+  kind: string;
 }
 
 export interface SecretView {
@@ -614,7 +677,7 @@ export interface SecretView {
   state: string;
   commands: string[];
   failed_at: string;
-  programs: string[];
+  pins: PinView[];
   set: string;
   unpin: string;
 }
@@ -639,6 +702,7 @@ export interface SecurityView {
   fixed: SecurityFixed;
   process_mode: string;
   cron_mode: string;
+  log_scopes: string[];
 }
 
 export interface SessionPage {
@@ -650,6 +714,7 @@ export interface SessionRow {
   id: string;
   title: string;
   kind: string;
+  parent_id: string;
   source: string;
   source_label: string;
   last_active: string;
@@ -665,14 +730,17 @@ export interface SessionView {
   id: string;
   title: string;
   model: string;
+  entry: string;
   effort: string;
   goal_line: string;
   context: ContextView | null;
 }
 
+export type SetupState = "done" | "open" | "unknown";
+
 export interface SetupStep {
   name: string;
-  state: string;
+  state: SetupState;
   detail: string;
   command: string;
 }
@@ -713,8 +781,14 @@ export interface SkillDetailView {
   unscanned: string[];
 }
 
+export interface SkillFileView {
+  text: string;
+  cut: boolean;
+}
+
 export interface SkillFinding {
   severity: string;
+  pattern: string;
   category: string;
   description: string;
   file: string;
@@ -744,6 +818,7 @@ export interface Snapshot {
   session: SessionView;
   last_message_id: number;
   notices: Notice[];
+  answered: AnsweredCard[];
   build_id: string;
 }
 
@@ -755,6 +830,10 @@ export interface Status {
   mode: string;
   waiting: number;
   running: number;
+  running_batches: number;
+  running_acp: number;
+  running_shell: number;
+  browser_on: boolean;
   spend24h: number;
   unpriced: boolean;
   tls: boolean;
@@ -765,6 +844,10 @@ export interface TaskView {
   kind: string;
   state: string;
   text: string;
+  subject: string;
+  code: string;
+  waiting: boolean;
+  backup?: BackupReport | null;
 }
 
 export interface ToolView {
@@ -813,6 +896,7 @@ export interface UpdateInfo {
   notes_url: string;
   writable: boolean;
   path: string;
+  checked_at: string;
 }
 
 export interface UsageModelRow {

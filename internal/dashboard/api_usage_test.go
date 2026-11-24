@@ -49,14 +49,15 @@ func newUsageFixture(t *testing.T) *usageFixture {
 	t0 := time.Unix(1_800_000_000, 0)
 	cfg := config.Default()
 	cfg.Providers = map[string]config.Provider{
-		"primary":    {Preset: "zai", Format: "openai", BaseURL: "https://api.example/v1", APIKey: "sk-secret-zai", Model: "glm-4.7", ContextWindow: 200000, Effort: "high"},
+		"primary":    {Preset: "zai", Format: "openai", BaseURL: "https://api.example/v1?key=sk-secret-url", APIKey: "sk-secret-zai", Model: "glm-4.7", ContextWindow: 200000, Effort: "high"},
 		"openrouter": {Format: "openai", Model: "z-ai/glm-4.7", Vision: true},
 		"local":      {Format: "openai", Model: "qwen3", Unusable: "provider local: no API key", UnusableCause: config.UnusableNoKey},
-		"backup":     {Format: "anthropic", Model: "claude-x"},
+		"backup":     {Preset: "anthropic", Format: "anthropic", Model: "claude-x"},
 	}
 	cfg.Agent.Fallback = []string{"openrouter", "local"}
 	cfg.Agent.DelegationProvider = "openrouter"
 	cfg.Goals.JudgeProvider = "backup"
+	cfg.Outbound.GuardProvider = "local"
 	f := &usageFixture{d: d, sess: sessions.New(d), cron: &cron.Store{DB: d}, t0: t0}
 	api := NewUsageAPI(UsageDeps{
 		DB: d, Sessions: f.sess, Cron: f.cron, Cfg: &cfg,
@@ -69,7 +70,8 @@ func newUsageFixture(t *testing.T) *usageFixture {
 		Fallback: func() provider.FallbackStatus {
 			return provider.FallbackStatus{FirstName: "primary", PrimaryModel: "glm-4.7", FallbackName: "primary", FallbackModel: "glm-4.7"}
 		},
-		Now: time.Now,
+		Now:    time.Now,
+		Redact: func(s string) string { return strings.ReplaceAll(s, "sk-secret-url", "[REDACTED]") },
 	})
 	f.mux = http.NewServeMux()
 	api.Register(f.mux)
@@ -160,7 +162,7 @@ func TestUsageAPIModels(t *testing.T) {
 	f := newUsageFixture(t)
 	var mv ModelsView
 	w := usageGet(t, f, "/api/models", &mv)
-	if w.Code != 200 || strings.Contains(w.Body.String(), "sk-secret") || strings.Contains(w.Body.String(), "api.example") {
+	if w.Code != 200 || strings.Contains(w.Body.String(), "sk-secret") {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 	var names, states []string
@@ -193,5 +195,20 @@ func TestUsageAPIModels(t *testing.T) {
 	}
 	if len(mv.Roles) != 7 || roles["delegation"] != "openrouter" || roles["goal_judge"] != "backup" || roles["vision"] != "" {
 		t.Fatalf("%+v", mv.Roles)
+	}
+	urls := map[string]string{}
+	for _, e := range mv.Entries {
+		urls[e.Name] = e.BaseURL
+	}
+	if urls["primary"] != "https://api.example/v1?key=[REDACTED]" || urls["backup"] != "https://api.anthropic.com" ||
+		urls["openrouter"] != "" {
+		t.Fatalf("the config URL, else the preset URL, through the redactor: %v", urls)
+	}
+	usable := map[string]bool{}
+	for _, r := range mv.Roles {
+		usable[r.Role] = r.EntryUsable
+	}
+	if !usable["delegation"] || !usable["goal_judge"] || !usable["tts"] || usable["outbound_guard"] {
+		t.Fatalf("only the role on the unusable entry local is not usable: %v", usable)
 	}
 }

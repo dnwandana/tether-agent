@@ -1235,8 +1235,8 @@ func TestServerStatusCountsAndTransport(t *testing.T) {
 	}
 	got := m.ServerStatus()
 	want := []ServerStatus{
-		{Name: "gh", Transport: "stdio", Tools: 2, Classes: map[string]int{"read": 1, "write": 1}},
-		{Name: "notes", Transport: "sse", Tools: 1, Classes: map[string]int{"read": 1}},
+		{Name: "gh", Transport: "stdio", Tools: 2, ToolNames: []string{"create_issue", "search"}, Classes: map[string]int{"read": 1, "write": 1}},
+		{Name: "notes", Transport: "sse", Tools: 1, ToolNames: []string{"search_notes"}, Classes: map[string]int{"read": 1}},
 		{Name: "web", Transport: "http", Tools: 0, Classes: map[string]int{}},
 	}
 	if !reflect.DeepEqual(got, want) {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +60,7 @@ type openCard struct {
 	reply               chan cardReply // capacity 1
 	signIn              func(allow bool)
 	signInState         func() string
+	sessionID           string
 	// done ends when the waiter stops waiting, for example when its turn ends.
 	done <-chan struct{}
 }
@@ -149,9 +149,44 @@ func (c *Cards) take(id string) *openCard {
 	return c.takeLocked(id)
 }
 
-// done sends "card.done" with the id, the kind, and the header.
+// answeredMaxRunes is the cut of the header and the preview of an answered card.
+const answeredMaxRunes = 300
+
+// record builds the answered-card record of card. It redacts the header and the preview, and
+// then cuts each one.
+func (c *Cards) record(card *openCard, header string) AnsweredCard {
+	v := card.view
+	var preview string
+	switch v.Kind {
+	case "approval":
+		preview = v.Command
+		if preview == "" {
+			preview = v.Summary
+		}
+	case "pin":
+		preview = v.SecretName + " " + v.Description
+	case "clarify":
+		preview = v.Summary
+	case "secret":
+		preview = v.SecretName
+	case "signin":
+		preview = v.Device
+	}
+	c.mu.Lock()
+	redact := c.redact
+	c.mu.Unlock()
+	if redact != nil {
+		header, preview = redact(header), redact(preview)
+	}
+	return AnsweredCard{ID: v.ID, Kind: v.Kind, Header: cutRunes(header, answeredMaxRunes),
+		Preview: cutRunes(preview, answeredMaxRunes), SessionID: card.sessionID, At: c.now()}
+}
+
+// done sends "card.done" with the answered-card record. The hub keeps the record in its ring
+// in the same step, so a page that connects at that moment gets the record once.
 func (c *Cards) done(card *openCard, header string) {
-	c.h.Publish(Event{Name: "card.done", Data: Card{ID: card.view.ID, Kind: card.view.Kind, Header: header}})
+	rec := c.record(card, header)
+	c.h.publishWith(Event{Name: "card.done", Data: rec}, func() { c.h.addAnswered(rec) })
 }
 
 // finish ends a card that the caller took: it sends the reply to the waiter and closes the card.
@@ -175,35 +210,9 @@ func (c *Cards) wait(ctx context.Context, oc *openCard) (cardReply, bool) {
 	return cardReply{}, false
 }
 
-// formatWait returns a wait as whole minutes ("2 min"), or as seconds ("45 s") under a minute.
-func formatWait(d time.Duration) string {
-	if d < time.Minute {
-		return strconv.Itoa(int(d/time.Second)) + " s"
-	}
-	return strconv.Itoa(int(d/time.Minute)) + " min"
-}
-
-// resultHeader returns the header after the answer s of an approval or a pin card.
-func resultHeader(pin bool, s security.Scope, wait time.Duration) string {
-	switch s {
-	case security.ScopeOnce:
-		if pin {
-			return "✅ Program allowed"
-		}
-		return "✅ Approval allowed · once"
-	case security.ScopeSession:
-		return "✅ Approval allowed · this session"
-	case security.ScopeAlways:
-		return "✅ Approval allowed · always"
-	case security.ScopeRedacted:
-		return "✅ Sent redacted"
-	case security.ScopeTimeout:
-		return "⌛ No answer in " + formatWait(wait)
-	}
-	if pin {
-		return "❌ Program denied"
-	}
-	return "❌ Approval denied"
+// cardHeader returns the header after the answer s of an approval, pin, or send card.
+func cardHeader(kind string, s security.Scope) string {
+	return gateway.CardResultHeader(gateway.CardResult{Kind: kind, Scope: string(s)})
 }
 
 // approvalHeaderOf returns the header text of the scope for the Local replies.
@@ -239,6 +248,13 @@ func (c *Cards) PromptApproval(ctx context.Context, req security.ApprovalRequest
 		HumanOnly:   req.HumanOnly,
 	}
 	pin := req.PinName != ""
+	kind := "approval"
+	switch {
+	case pin:
+		kind = "pin"
+	case req.Class == "send":
+		kind = "send"
+	}
 	if pin {
 		view.Kind = "pin"
 		view.Header = gateway.PinQuestion(req)
@@ -275,6 +291,7 @@ func (c *Cards) PromptApproval(ctx context.Context, req security.ApprovalRequest
 	}
 	oc := c.add(ctx, view, func(oc *openCard) {
 		oc.noAlways, oc.noSession = req.NoAlways, req.NoSession
+		oc.sessionID = req.SessionID
 		if pin {
 			oc.noAlways, oc.noSession = true, true
 		}
@@ -283,9 +300,9 @@ func (c *Cards) PromptApproval(ctx context.Context, req security.ApprovalRequest
 	if ok {
 		return r.scope, nil
 	}
-	header := resultHeader(pin, security.ScopeDeny, 0)
+	header := gateway.CardResultHeader(gateway.CardResult{Kind: kind, Stopped: true})
 	if dl, has := ctx.Deadline(); has && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		header = resultHeader(pin, security.ScopeTimeout, dl.Sub(oc.opened))
+		header = gateway.CardResultHeader(gateway.CardResult{Kind: kind, Scope: string(security.ScopeTimeout), Wait: dl.Sub(oc.opened)})
 	}
 	c.done(oc, header)
 	return security.ScopeTimeout, ctx.Err()
@@ -394,7 +411,7 @@ func (c *Cards) Answer(ctx context.Context, id string, a CardAnswer) error {
 		c.takeLocked(id)
 		c.mu.Unlock()
 		scope = security.FitScope(scope, oc.noAlways, oc.noSession)
-		c.finish(oc, cardReply{scope: scope}, resultHeader(kind == "pin", scope, 0))
+		c.finish(oc, cardReply{scope: scope}, cardHeader(kind, scope))
 		return nil
 	case "clarify":
 		ans, summary, ok := clarifyAnswer(view, a)
@@ -524,8 +541,8 @@ func clarifyAnswer(view Card, a CardAnswer) (tools.Answer, string, bool) {
 }
 
 // Bulk answers the open approval and pin cards in ids with deny or once. It skips a human-only
-// card for once, and it skips every clarify, secret, and sign-in card. It returns the count of
-// answered cards.
+// card and a send card with findings for once, and it skips every clarify, secret, and sign-in
+// card. It returns the count of answered cards.
 func (c *Cards) Bulk(ctx context.Context, ids []string, answer string) (int, error) {
 	if answer != "deny" && answer != "once" {
 		return 0, errBadAnswer
@@ -541,14 +558,14 @@ func (c *Cards) Bulk(ctx context.Context, ids []string, answer string) (int, err
 	c.mu.Lock()
 	for _, id := range ids {
 		oc := c.open[id]
-		if oc == nil || (oc.view.Kind != "approval" && oc.view.Kind != "pin") || (scope == security.ScopeOnce && oc.view.HumanOnly) {
+		if oc == nil || (oc.view.Kind != "approval" && oc.view.Kind != "pin") || (scope == security.ScopeOnce && (oc.view.HumanOnly || len(oc.view.Findings) > 0)) {
 			continue
 		}
 		taken = append(taken, c.takeLocked(id))
 	}
 	c.mu.Unlock()
 	for _, oc := range taken {
-		c.finish(oc, cardReply{scope: scope}, resultHeader(oc.view.Kind == "pin", scope, 0))
+		c.finish(oc, cardReply{scope: scope}, cardHeader(oc.view.Kind, scope))
 	}
 	return len(taken), nil
 }
@@ -576,7 +593,7 @@ func (c *Cards) Local(text string) (reply string, ok bool) {
 		scope = security.ScopeDeny
 	}
 	var list []*openCard
-	waiting := 0
+	waiting, sends := 0, 0
 	c.mu.Lock()
 	for _, oc := range c.open {
 		if oc.view.Kind == "approval" || oc.view.Kind == "pin" {
@@ -588,6 +605,10 @@ func (c *Cards) Local(text string) (reply string, ok bool) {
 		for _, oc := range list {
 			if oc.view.HumanOnly {
 				waiting++
+				continue
+			}
+			if len(oc.view.Findings) > 0 {
+				sends++
 				continue
 			}
 			kept = append(kept, oc)
@@ -605,20 +626,31 @@ func (c *Cards) Local(text string) (reply string, ok bool) {
 	applied := scope
 	for _, oc := range list {
 		applied = security.FitScope(scope, oc.noAlways, oc.noSession)
-		c.finish(oc, cardReply{scope: applied}, resultHeader(oc.view.Kind == "pin", applied, 0))
+		c.finish(oc, cardReply{scope: applied}, cardHeader(oc.view.Kind, applied))
 	}
-	return resolveReply(name, applied, len(list), waiting), true
+	return resolveReply(name, applied, len(list), waiting, sends), true
 }
 
 // resolveReply returns the reply to /approve or /deny that answered n cards. These are the
 // Telegram texts.
-func resolveReply(name string, scope security.Scope, n, waiting int) string {
+func resolveReply(name string, scope security.Scope, n, waiting, sends int) string {
 	line := "1 human-only request still waits for a tap."
 	if waiting > 1 {
 		line = fmt.Sprintf("%d human-only requests still wait for a tap.", waiting)
 	}
-	if n == 0 && waiting > 0 {
-		return "🔒 **No command was approved**\n" + line
+	sendLine := "1 send with findings still waits for a tap."
+	if sends > 1 {
+		sendLine = fmt.Sprintf("%d sends with findings still wait for a tap.", sends)
+	}
+	lines := ""
+	if waiting > 0 {
+		lines += "\n" + line
+	}
+	if sends > 0 {
+		lines += "\n" + sendLine
+	}
+	if n == 0 && waiting+sends > 0 {
+		return "🔒 **No command was approved**" + lines
 	}
 	var reply string
 	switch {
@@ -634,10 +666,7 @@ func resolveReply(name string, scope security.Scope, n, waiting int) string {
 		e, t, d := approvalHeaderOf(scope)
 		reply = markdownHeader(e, t, d) + "\nThe agent continues."
 	}
-	if n > 0 && waiting > 0 {
-		reply += "\n" + line
-	}
-	return reply
+	return reply + lines
 }
 
 // Open returns copies of the open cards, oldest first.

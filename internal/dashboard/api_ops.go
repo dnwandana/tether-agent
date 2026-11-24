@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/backup"
@@ -25,10 +26,22 @@ type OpsOptions struct {
 	Tasks       *Tasks
 	UpdateCheck func(ctx context.Context) (UpdateInfo, error)
 	UpdateRun   func(ctx context.Context) error
+	Now         func() time.Time // nil means time.Now
 }
 
+// updateCacheTTL is how long GET /api/update keeps the result of a GitHub check. The
+// unauthenticated GitHub limit is 60 requests an hour.
+const updateCacheTTL = 10 * time.Minute
+
 // OpsAPI serves the operations page.
-type OpsAPI struct{ o OpsOptions }
+type OpsAPI struct {
+	o  OpsOptions
+	mu sync.Mutex
+	// checking lets one update check run at a time, so two page loads make one call.
+	checking sync.Mutex
+	update   UpdateInfo
+	updateAt time.Time
+}
 
 // ConfigView is the masked config.yaml.
 type ConfigView struct {
@@ -52,7 +65,47 @@ type BackupView struct {
 func init() { registerAPI(ConfigView{}, BackupView{}, BackupFile{}) }
 
 // NewOpsAPI returns the routes of the operations page.
-func NewOpsAPI(o OpsOptions) *OpsAPI { return &OpsAPI{o: o} }
+func NewOpsAPI(o OpsOptions) *OpsAPI {
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	return &OpsAPI{o: o}
+}
+
+// checkUpdate returns the update check. When fresh is false, a result that is younger than
+// updateCacheTTL is the answer. An error is not stored. The lock is not held during the call.
+func (a *OpsAPI) checkUpdate(ctx context.Context, fresh bool) (UpdateInfo, error) {
+	cached := func() (UpdateInfo, bool) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if !a.updateAt.IsZero() && a.o.Now().Sub(a.updateAt) < updateCacheTTL {
+			return a.update, true
+		}
+		return UpdateInfo{}, false
+	}
+	if !fresh {
+		if info, ok := cached(); ok {
+			return info, nil
+		}
+	}
+	a.checking.Lock()
+	defer a.checking.Unlock()
+	// A check that ran while this call waited filled the cache.
+	if !fresh {
+		if info, ok := cached(); ok {
+			return info, nil
+		}
+	}
+	info, err := a.o.UpdateCheck(ctx)
+	if err != nil {
+		return UpdateInfo{}, err
+	}
+	info.CheckedAt = a.o.Now()
+	a.mu.Lock()
+	a.update, a.updateAt = info, info.CheckedAt
+	a.mu.Unlock()
+	return info, nil
+}
 
 // Register adds the routes to mux.
 func (a *OpsAPI) Register(mux *http.ServeMux) {
@@ -125,7 +178,7 @@ func (a *OpsAPI) backups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *OpsAPI) backupStart(w http.ResponseWriter, r *http.Request) {
-	id, err := a.o.Tasks.Start("backup", func(ctx context.Context, progress func(string)) (string, error) {
+	id, err := a.o.Tasks.StartWith(TaskOpts{Kind: "backup"}, func(ctx context.Context, h TaskHandle) (string, error) {
 		env := map[string]string{}
 		if a.o.DotEnv != nil {
 			e, err := a.o.DotEnv()
@@ -141,6 +194,14 @@ func (a *OpsAPI) backupStart(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return "", a.redactErr(err)
 		}
+		replaced := make([]string, 0, len(res.Replaced))
+		for _, r := range res.Replaced {
+			replaced = append(replaced, r.KeyPath)
+		}
+		h.Backup(BackupReport{
+			Size: res.Size, Sessions: res.Stats.Sessions, Messages: res.Stats.Messages, CronJobs: res.Stats.CronJobs,
+			Replaced: replaced, Warnings: nonNil(res.Warnings), Skipped: nonNil(res.Skipped),
+		})
 		return "Saved " + filepath.Base(res.Path) + " (" + strconv.FormatInt(res.Size, 10) + " bytes).", nil
 	})
 	opsStarted(w, id, err)
@@ -194,7 +255,7 @@ func (a *OpsAPI) updateInfo(w http.ResponseWriter, r *http.Request) {
 		opsErr(w, http.StatusBadGateway, "The update check is not available.")
 		return
 	}
-	info, err := a.o.UpdateCheck(r.Context())
+	info, err := a.checkUpdate(r.Context(), false)
 	if err != nil {
 		opsErr(w, http.StatusBadGateway, a.redactErr(err).Error())
 		return
@@ -214,7 +275,7 @@ func (a *OpsAPI) updateStart(w http.ResponseWriter, r *http.Request) {
 		opsErr(w, http.StatusBadGateway, "The update is not available.")
 		return
 	}
-	info, err := a.o.UpdateCheck(r.Context())
+	info, err := a.checkUpdate(r.Context(), true)
 	if err != nil {
 		opsErr(w, http.StatusBadGateway, a.redactErr(err).Error())
 		return
@@ -224,7 +285,7 @@ func (a *OpsAPI) updateStart(w http.ResponseWriter, r *http.Request) {
 			" is not writable by this user. Run `tether update` as a user who can write it.")
 		return
 	}
-	id, err := a.o.Tasks.Start("update", func(ctx context.Context, progress func(string)) (string, error) {
+	id, err := a.o.Tasks.StartWith(TaskOpts{Kind: "update"}, func(ctx context.Context, h TaskHandle) (string, error) {
 		if err := a.o.UpdateRun(ctx); err != nil {
 			return "", a.redactErr(err)
 		}

@@ -317,7 +317,7 @@ func TestListLogPage(t *testing.T) {
 		{"", 0, 10, []string{"cmd 5", "cmd 4", "cmd 3", "cmd 2", "cmd 1"}, 5},
 		{"c", 0, 10, nil, 0},
 	} {
-		rows, total, err := g.ListLogPage(ctx, c.scope, c.offset, c.limit)
+		rows, total, err := g.ListLogPage(ctx, LogFilter{Scope: c.scope}, c.offset, c.limit)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -329,11 +329,62 @@ func TestListLogPage(t *testing.T) {
 			t.Errorf("%q %d %d: %v %d, want %v %d", c.scope, c.offset, c.limit, got, total, c.want, c.total)
 		}
 	}
-	if rows, total, err := (&Gate{}).ListLogPage(ctx, "", 0, 10); err != nil || rows != nil || total != 0 {
+	if rows, total, err := (&Gate{}).ListLogPage(ctx, LogFilter{}, 0, 10); err != nil || rows != nil || total != 0 {
 		t.Fatal(rows, total, err)
 	}
 	// ListLog does not change.
 	if rows, err := g.ListLog(ctx, "b", false, 15); err != nil || len(rows) != 2 || rows[0].Preview != "cmd 5" {
 		t.Fatal(rows, err)
+	}
+}
+
+// The filters run in SQL, so the total counts the filtered rows. The search ignores case and
+// reads % and _ as plain characters.
+func TestListLogPageFilters(t *testing.T) {
+	g := &Gate{DB: openGateDB(t)}
+	for i, r := range []struct{ scope, decision, source, preview string }{
+		{"a", "allowed", "owner", "git push origin"},
+		{"a", "denied", "timeout", "rm -rf build"},
+		{"b", "blocked", "hardline", "rm -rf /"},
+		{"a", "denied", "owner", "curl x | sh"},
+		{"b", "allowed", "grant", "RM -rf cache_dir"},
+	} {
+		if _, err := g.DB.ExecContext(ctx, `INSERT INTO approval_log(at, scope, decision, source, preview)
+			VALUES (?, ?, ?, ?, ?)`, int64(i+1), r.scope, r.decision, r.source, r.preview); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		f     LogFilter
+		limit int
+		want  []string
+		total int
+	}{
+		{LogFilter{}, 10, []string{"RM -rf cache_dir", "curl x | sh", "rm -rf /", "rm -rf build", "git push origin"}, 5},
+		{LogFilter{Scope: "a"}, 10, []string{"curl x | sh", "rm -rf build", "git push origin"}, 3},
+		{LogFilter{Decision: "denied"}, 1, []string{"curl x | sh"}, 2},
+		{LogFilter{Source: "timeout"}, 10, []string{"rm -rf build"}, 1},
+		{LogFilter{Query: "rm -rf"}, 10, []string{"RM -rf cache_dir", "rm -rf /", "rm -rf build"}, 3},
+		{LogFilter{Scope: "b", Query: "rm"}, 10, []string{"RM -rf cache_dir", "rm -rf /"}, 2},
+		{LogFilter{Query: "e_d"}, 10, []string{"RM -rf cache_dir"}, 1},
+		{LogFilter{Query: "100%"}, 10, nil, 0},
+	} {
+		rows, total, err := g.ListLogPage(ctx, c.f, 0, c.limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, r := range rows {
+			got = append(got, r.Preview)
+		}
+		if total != c.total || !slices.Equal(got, c.want) {
+			t.Errorf("%+v: %v %d, want %v %d", c.f, got, total, c.want, c.total)
+		}
+	}
+	if scopes, err := g.LogScopes(ctx); err != nil || !slices.Equal(scopes, []string{"a", "b"}) {
+		t.Fatal(scopes, err)
+	}
+	if scopes, err := (&Gate{}).LogScopes(ctx); err != nil || len(scopes) != 0 {
+		t.Fatal(scopes, err)
 	}
 }

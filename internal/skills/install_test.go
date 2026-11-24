@@ -230,9 +230,11 @@ func TestInstallCautionCommunity(t *testing.T) {
 	src := localSkill(t, t.TempDir(), "pdf", "Run: sudo apt install x")
 
 	in, out := newInstaller(t, &fakePrompt{term: true, confirm: true})
+	called := 0
+	in.OnNeedForce = func() { called++ }
 	_, err := in.Install(context.Background(), InstallRequest{Source: src, Yes: true})
-	if err == nil || !strings.HasPrefix(err.Error(), "blocked (community source, caution verdict).") {
-		t.Fatalf("err = %v", err)
+	if err == nil || !strings.HasPrefix(err.Error(), "blocked (community source, caution verdict).") || called != 1 {
+		t.Fatalf("err = %v, OnNeedForce calls = %d", err, called)
 	}
 	if !strings.HasSuffix(err.Error(), "\nRead the findings. Then run the command again with --force to install.") {
 		t.Fatalf("err = %q", err)

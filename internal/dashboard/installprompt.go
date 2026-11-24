@@ -21,10 +21,11 @@ type installPrompter struct {
 	ask    tools.Asker
 	report *bytes.Buffer // the installer output so far
 	name   string
+	h      TaskHandle // gets the waiting flag and the refusal code
 }
 
-func newInstallPrompter(ctx context.Context, ask tools.Asker, report *bytes.Buffer, name string) *installPrompter {
-	return &installPrompter{ctx: ctx, ask: ask, report: report, name: name}
+func newInstallPrompter(ctx context.Context, ask tools.Asker, report *bytes.Buffer, name string, h TaskHandle) *installPrompter {
+	return &installPrompter{ctx: ctx, ask: ask, report: report, name: name, h: h}
 }
 
 // Terminal returns true, so the installer asks this prompter and does not refuse at once.
@@ -32,6 +33,8 @@ func (p *installPrompter) Terminal() bool { return true }
 
 // Confirm opens a card with the report and the question. Only the answer Yes is a yes.
 func (p *installPrompter) Confirm(question string) (bool, error) {
+	p.h.Waiting(true)
+	defer p.h.Waiting(false)
 	ans, err := p.ask.Ask(p.ctx, tools.Question{
 		Text:    skills.Sanitize(p.report.String()) + "\n" + question,
 		Choices: []string{"No", "Yes"},
@@ -45,6 +48,7 @@ func (p *installPrompter) Confirm(question string) (bool, error) {
 
 // Ask refuses. It sends no card.
 func (p *installPrompter) Ask(string) (string, error) {
+	p.h.Code("need_override")
 	return "", errors.New("The guard rates this skill dangerous, so the dashboard does not install it. " +
 		"Run this command in a terminal on the host: tether skills install " + p.name)
 }

@@ -16,18 +16,23 @@ type BootstrapView struct {
 	BuildID     string       `json:"build_id"`
 	MaxUploadMB int          `json:"max_upload_mb"`
 	TLS         bool         `json:"tls"`
+	DrainS      int          `json:"drain_s"`
+	Toolsets    []string     `json:"toolsets"`
 }
 
 func init() { registerAPI(BootstrapView{}, CommandRow{}) }
 
-// BootstrapDeps holds what the bootstrap route reads. A nil Commands or Skills gives an
-// empty list.
+// BootstrapDeps holds what the bootstrap route reads. A nil Commands, Skills, or Toolsets
+// gives an empty list. DrainS is the drain limit of a restart in seconds
+// (agent.restart_drain_timeout_s). Toolsets are the toolset names for the job form.
 type BootstrapDeps struct {
 	Commands    func() []CommandRow
 	Skills      func() []CommandRow
 	Version     string
 	MaxUploadMB int
 	TLS         bool
+	DrainS      int
+	Toolsets    []string
 }
 
 type bootstrapAPI struct{ d BootstrapDeps }
@@ -60,5 +65,7 @@ func (b *bootstrapAPI) get(w http.ResponseWriter, _ *http.Request) {
 		BuildID:     BuildID(),
 		MaxUploadMB: b.d.MaxUploadMB,
 		TLS:         b.d.TLS,
+		DrainS:      b.d.DrainS,
+		Toolsets:    nonNil(b.d.Toolsets),
 	})
 }

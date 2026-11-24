@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/acp"
 	"github.com/dnwandana/tether-agent/internal/agent"
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -18,13 +21,15 @@ import (
 // SystemSources are the parts of the gateway that the System page reads. A nil field is a
 // part that is off.
 type SystemSources struct {
-	Doctor  func(ctx context.Context) ([]DoctorCheck, time.Time, error)
-	MCP     func() []mcp.ServerStatus
-	Batches func(ctx context.Context, limit int) ([]agent.BatchInfo, error)
-	ACP     func() []acp.SessionInfo
-	Procs   func() []tools.ProcInfo
-	Tail    func(pid, n int) string
-	Browser func() bool
+	Doctor func(ctx context.Context) ([]DoctorCheck, time.Time, error)
+	MCP    func() []mcp.ServerStatus
+	// MCPConfig gives the mcp.servers of the config. Nil shows the manager rows only.
+	MCPConfig func() map[string]config.MCPServer
+	Batches   func(ctx context.Context, limit int) ([]agent.BatchInfo, error)
+	ACP       func() []acp.SessionInfo
+	Procs     func() []tools.ProcInfo
+	Tail      func(pid, n int) string
+	Browser   func() bool
 }
 
 // DoctorView is the last kept doctor result. TaskID is the id of the last doctor task.
@@ -36,13 +41,19 @@ type DoctorView struct {
 
 // McpRow is the state of one MCP server.
 type McpRow struct {
-	Name        string         `json:"name"`
-	Transport   string         `json:"transport"`
-	Connected   bool           `json:"connected"`
-	Tools       int            `json:"tools"`
-	Classes     map[string]int `json:"classes"`
-	LastError   string         `json:"last_error"`
-	LastErrorAt time.Time      `json:"last_error_at"`
+	Name            string         `json:"name"`
+	Transport       string         `json:"transport"`
+	Connected       bool           `json:"connected"`
+	Tools           int            `json:"tools"`
+	ToolNames       []string       `json:"tool_names"`
+	AlwaysOn        bool           `json:"always_on"`
+	IdleStopMinutes int            `json:"idle_stop_minutes"`
+	Include         []string       `json:"include"`
+	Exclude         []string       `json:"exclude"`
+	Enabled         bool           `json:"enabled"`
+	Classes         map[string]int `json:"classes"`
+	LastError       string         `json:"last_error"`
+	LastErrorAt     time.Time      `json:"last_error_at"`
 }
 
 // RuntimeView is the running work of the gateway. Running is the sum that the status bar shows.
@@ -206,12 +217,55 @@ func (a *SystemAPI) runDoctor(ctx context.Context, _ func(string)) (string, erro
 
 func (a *SystemAPI) getMCP(w http.ResponseWriter, _ *http.Request) {
 	rows := []McpRow{}
-	if a.src.MCP != nil {
-		for _, s := range a.src.MCP() {
-			rows = append(rows, McpRow{Name: s.Name, Transport: s.Transport, Connected: s.Connected,
-				Tools: s.Tools, Classes: s.Classes, LastError: a.redact(s.LastError), LastErrorAt: s.LastErrorAt})
+	var cfgs map[string]config.MCPServer
+	if a.src.MCPConfig != nil {
+		cfgs = a.src.MCPConfig()
+	}
+	// settings fills the config fields of a row. The lists are never nil.
+	settings := func(r *McpRow) {
+		if c, ok := cfgs[r.Name]; ok {
+			r.AlwaysOn, r.IdleStopMinutes = c.AlwaysOn, c.IdleStopMinutes
+			r.Include, r.Exclude = slices.Clone(c.Tools.Include), slices.Clone(c.Tools.Exclude)
+		}
+		if r.Include == nil {
+			r.Include = []string{}
+		}
+		if r.Exclude == nil {
+			r.Exclude = []string{}
 		}
 	}
+	listed := map[string]bool{}
+	if a.src.MCP != nil {
+		for _, s := range a.src.MCP() {
+			listed[s.Name] = true
+			r := McpRow{Name: s.Name, Transport: s.Transport, Connected: s.Connected,
+				Tools: s.Tools, ToolNames: append([]string{}, s.ToolNames...), Classes: s.Classes,
+				LastError: a.redact(s.LastError), LastErrorAt: s.LastErrorAt, Enabled: true}
+			if r.Classes == nil {
+				r.Classes = map[string]int{}
+			}
+			settings(&r)
+			rows = append(rows, r)
+		}
+	}
+	// The manager lists only enabled servers, so a disabled one comes from the config.
+	for name, c := range cfgs {
+		if listed[name] || c.Enabled {
+			continue
+		}
+		r := McpRow{Name: name, ToolNames: []string{}, Classes: map[string]int{}}
+		switch {
+		case len(c.Command) > 0:
+			r.Transport = "stdio"
+		case strings.ToLower(c.Transport) == "sse":
+			r.Transport = "sse"
+		default:
+			r.Transport = "http"
+		}
+		settings(&r)
+		rows = append(rows, r)
+	}
+	slices.SortFunc(rows, func(x, y McpRow) int { return strings.Compare(x.Name, y.Name) })
 	systemJSON(w, http.StatusOK, rows)
 }
 

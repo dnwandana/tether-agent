@@ -48,6 +48,9 @@ type Installer struct {
 	// skill, for example `"morning-brief" (a1b2)`. Uninstall calls it when
 	// UninstallRequest.CronUsers is nil. Nil means no cron check.
 	CronUsers func(ctx context.Context) (map[string][]string, error)
+	// OnNeedForce runs when the install policy stops an install or an update until the owner
+	// adds --force. The dashboard sets it to give the page the refusal code. Nil does nothing.
+	OnNeedForce func()
 }
 
 // InstallRequest holds the arguments and flags of one install.
@@ -395,6 +398,9 @@ func (in *Installer) authorize(s *staged, yes, force bool, question string, disc
 	terminal := in.Prompt != nil && in.Prompt.Terminal()
 	switch Decide(s.trust, s.scan.Verdict, force) {
 	case DecideNeedForce:
+		if in.OnNeedForce != nil {
+			in.OnNeedForce()
+		}
 		//lint:ignore ST1005 the text is a fixed user message with full sentences.
 		return false, errors.New("blocked (community source, caution verdict).\n" +
 			"Read the findings. Then run the command again with --force to install.")

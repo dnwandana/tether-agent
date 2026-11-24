@@ -38,6 +38,7 @@ type SessionRow struct {
 	ID          string       `json:"id"`
 	Title       string       `json:"title"`
 	Kind        string       `json:"kind"`
+	ParentID    string       `json:"parent_id"`
 	Source      string       `json:"source"`
 	SourceLabel string       `json:"source_label"`
 	LastActive  time.Time    `json:"last_active"`
@@ -59,6 +60,7 @@ type SessionPage struct {
 type MessageView struct {
 	ID              int64      `json:"id"`
 	Role            string     `json:"role"`
+	Created         time.Time  `json:"created"`
 	Text            string     `json:"text"`
 	Reasoning       string     `json:"reasoning"`
 	ReasoningTokens int        `json:"reasoning_tokens"`
@@ -98,6 +100,8 @@ type SearchHitView struct {
 	Snippet   string    `json:"snippet"`
 	MessageID int64     `json:"message_id"`
 	Date      time.Time `json:"date"`
+	Source    string    `json:"source"`
+	Kind      string    `json:"kind"`
 }
 
 func init() { registerAPI(SessionRow{}, SessionPage{}, MessageView{}, MessagePage{}, SearchHitView{}) }
@@ -158,7 +162,7 @@ func (a *SessionsAPI) fail(w http.ResponseWriter, err error) {
 // row converts one summary to a SessionRow. It reads the cost and, when kids is true, the children.
 func (a *SessionsAPI) row(ctx context.Context, s sessions.SessionSummary, kids bool) (SessionRow, error) {
 	r := SessionRow{
-		ID: s.ID, Title: a.red(s.Title), Kind: s.Kind, Source: s.Source, SourceLabel: a.sourceLabel(s.Session),
+		ID: s.ID, Title: a.red(s.Title), Kind: s.Kind, ParentID: s.ParentID, Source: s.Source, SourceLabel: a.sourceLabel(s.Session),
 		LastActive: s.LastActive, Started: s.StartedAt, Messages: s.MessageCount, Archived: s.Archived,
 		ReadOnly: s.Key != SessionKey || slices.Contains(sessions.HiddenChildKinds, s.Kind),
 		Children: []SessionRow{},
@@ -504,7 +508,22 @@ func (a *SessionsAPI) search(w http.ResponseWriter, r *http.Request) {
 	if limit == 0 {
 		limit = sessSearchDefault
 	}
-	hits, err := a.D.Sessions.Search(r.Context(), q, int(min(limit, sessSearchMax)), sessions.Scope{All: true})
+	offset, err := sessQueryInt(r, "offset", 0)
+	if err != nil {
+		authError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	f := sessions.SearchFilter{Limit: int(min(limit, sessSearchMax)), Offset: int(min(offset, int64(1<<30))),
+		Source: r.URL.Query().Get("source"), Kind: r.URL.Query().Get("kind")}
+	if v := r.URL.Query().Get("archived"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			authError(w, http.StatusBadRequest, `The value of "archived" is not a valid bool.`)
+			return
+		}
+		f.Archived = &b
+	}
+	hits, err := a.D.Sessions.SearchFiltered(r.Context(), q, f, sessions.Scope{All: true})
 	if errors.Is(err, sessions.ErrQuerySyntax) {
 		authError(w, http.StatusBadRequest, err.Error())
 		return
@@ -516,7 +535,7 @@ func (a *SessionsAPI) search(w http.ResponseWriter, r *http.Request) {
 	out := make([]SearchHitView, 0, len(hits))
 	for _, h := range hits {
 		out = append(out, SearchHitView{SessionID: h.SessionID, Title: a.red(h.Title), Snippet: a.red(h.Snippet),
-			MessageID: h.MessageID, Date: h.Date})
+			MessageID: h.MessageID, Date: h.Date, Source: h.Source, Kind: h.Kind})
 	}
 	writeJSON(w, out)
 }
@@ -561,7 +580,7 @@ func (a *SessionsAPI) views(ctx context.Context, sessionID string, page []sessio
 		if m.Msg.Role == provider.RoleTool && hasCall[m.Msg.ToolCallID] {
 			continue
 		}
-		v := MessageView{ID: m.ID, Role: string(m.Msg.Role), Compacted: inRange(m.ID), Files: []FileRef{}, Tools: []ToolView{}}
+		v := MessageView{ID: m.ID, Role: string(m.Msg.Role), Created: m.At, Compacted: inRange(m.ID), Files: []FileRef{}, Tools: []ToolView{}}
 		text := m.Msg.Content
 		if a.Files != nil && (m.Msg.Role == provider.RoleUser || m.Msg.Role == provider.RoleAssistant) {
 			var files []FileRef
@@ -590,7 +609,7 @@ func (a *SessionsAPI) views(ctx context.Context, sessionID string, page []sessio
 		out = append(out, v)
 		for _, c := range comps {
 			if c.UptoMessageID == m.ID {
-				out = append(out, MessageView{ID: -c.ID, Role: "summary", Text: a.red(c.Summary), Compacted: true,
+				out = append(out, MessageView{ID: -c.ID, Role: "summary", Created: m.At, Text: a.red(c.Summary), Compacted: true,
 					Files: []FileRef{}, Tools: []ToolView{}})
 			}
 		}

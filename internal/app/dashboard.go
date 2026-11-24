@@ -91,11 +91,15 @@ func (n signInNotifier) NotifySignIn(ctx context.Context, req dashboard.SignInRe
 // dashboardSession gives the header data of the active dashboard session.
 func (a *App) dashboardSession(ctx context.Context) dashboard.SessionView {
 	sess, err := a.Store.Active(ctx, dashboard.SessionKey)
-	if err != nil || sess == nil {
+	if err != nil {
 		return dashboard.SessionView{}
 	}
+	if sess == nil {
+		ms := a.Agent.CurrentModel(nil)
+		return dashboard.SessionView{Model: ms.Model, Entry: ms.Name}
+	}
 	ms := a.Agent.CurrentModel(sess)
-	v := dashboard.SessionView{ID: sess.ID, Title: sess.Title, Model: ms.Model, Effort: sess.Effort}
+	v := dashboard.SessionView{ID: sess.ID, Title: sess.Title, Model: ms.Model, Entry: ms.Name, Effort: sess.Effort}
 	if tokens, window, threshold, err := a.Agent.ContextEstimate(ctx, sess.ID); err == nil {
 		v.Context = &dashboard.ContextView{Tokens: tokens, Window: window, Threshold: threshold}
 	}
@@ -129,14 +133,16 @@ func (a *App) dashboardStatus(ctx context.Context) dashboard.Status {
 		st.Waiting = len(a.Dashboard.Cards().Open())
 	}
 	if a.Batches != nil {
-		st.Running += a.Batches.Running(dashboard.SessionKey)
+		st.RunningBatches = a.Batches.Running(dashboard.SessionKey)
 	}
 	if a.ACP != nil {
-		st.Running += len(a.ACP.Busy())
+		st.RunningACP = len(a.ACP.Busy())
 	}
 	if sess != nil && a.Procs != nil {
-		st.Running += len(a.Procs.Running(sess.ID))
+		st.RunningShell = len(a.Procs.Running(sess.ID))
 	}
+	st.Running = st.RunningBatches + st.RunningACP + st.RunningShell
+	st.BrowserOn = a.Browser != nil && a.Browser.Running()
 	since := time.Now().Add(-24 * time.Hour).UnixMilli()
 	var calls, priced int
 	var usd float64

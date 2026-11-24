@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"time"
 
 	"github.com/dnwandana/tether-agent/internal/config"
@@ -55,6 +56,8 @@ type UpdateInfo struct {
 	NotesURL string `json:"notes_url"`
 	Writable bool   `json:"writable"`
 	Path     string `json:"path"`
+	// CheckedAt is the time of the GitHub check. The operations route keeps a result for 10 min.
+	CheckedAt time.Time `json:"checked_at"`
 }
 
 // PairingFuncs are the pairing actions of telegram.Pairing. cmd/tether gives them.
@@ -64,9 +67,13 @@ type PairingFuncs struct {
 	Revoke  func(ctx context.Context, platform, userID string) error
 	// TriesLeft returns the failed approvals left before the lockout. It can be nil.
 	TriesLeft func(ctx context.Context) (int, error)
+	// ListRevoked returns the revoked people. It can be nil.
+	ListRevoked func(ctx context.Context) ([]PairingRow, error)
+	// LockedUntil returns the end of the lockout, or the zero time. It can be nil.
+	LockedUntil func(ctx context.Context) (time.Time, error)
 }
 
-// PairingRow is one pending request or one approved user. Status is pending or approved.
+// PairingRow is one pending request, one approved user, or one revoked user. Status is pending, approved, or revoked.
 type PairingRow struct {
 	Platform string    `json:"platform"`
 	UserID   string    `json:"user_id"`
@@ -76,13 +83,26 @@ type PairingRow struct {
 	Expires  time.Time `json:"expires"`
 }
 
-// SetupStep is one step of "Getting started". State is done, open, or warn. Command is the
+// SetupState is the state of one Getting started step.
+type SetupState string
+
+// The states of a setup step. Unknown means that the step needs a doctor result.
+const (
+	SetupDone    SetupState = "done"
+	SetupOpen    SetupState = "open"
+	SetupUnknown SetupState = "unknown"
+)
+
+// SetupStep is one step of "Getting started". State is done, open, or unknown. Command is the
 // command that does the step.
 type SetupStep struct {
-	Name    string `json:"name"`
-	State   string `json:"state"`
-	Detail  string `json:"detail"`
-	Command string `json:"command"`
+	Name    string     `json:"name"`
+	State   SetupState `json:"state"`
+	Detail  string     `json:"detail"`
+	Command string     `json:"command"`
 }
 
-func init() { registerAPI(DoctorCheck{}, UpdateInfo{}, PairingRow{}, SetupStep{}) }
+func init() {
+	registerAPI(DoctorCheck{}, UpdateInfo{}, PairingRow{}, SetupStep{})
+	registerEnum(reflect.TypeFor[SetupState](), string(SetupDone), string(SetupOpen), string(SetupUnknown))
+}

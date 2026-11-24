@@ -58,6 +58,19 @@ func (s *PinStore) Unpin(ctx context.Context, name string) (int64, error) {
 	return n, nil
 }
 
+// UnpinPath deletes the pin of name for the file at path and returns the count of deleted rows.
+func (s *PinStore) UnpinPath(ctx context.Context, name, path string) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM secret_pins WHERE name = ? AND path = ?`, name, path)
+	if err != nil {
+		return 0, fmt.Errorf("secret pins: cannot delete the pin %s of %s: %w", path, name, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("secret pins: cannot count the deleted pins of %s: %w", name, err)
+	}
+	return n, nil
+}
+
 // List returns the pins of name, sorted by path. The table has no interpreter flag, so
 // Interpreter is false in each result.
 func (s *PinStore) List(ctx context.Context, name string) ([]PinTarget, error) {

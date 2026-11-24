@@ -93,6 +93,9 @@ func (a *App) secretsDeps() gateway.SecretsDeps {
 		Unpin: func(ctx context.Context, name string) (int64, error) {
 			return a.terminal.Pins.Unpin(ctx, name)
 		},
+		UnpinPath: func(ctx context.Context, name, path string) (int64, error) {
+			return a.terminal.Pins.UnpinPath(ctx, name, path)
+		},
 		Start: a.startSecret,
 	}
 }

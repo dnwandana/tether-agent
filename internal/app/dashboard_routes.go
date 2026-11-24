@@ -53,13 +53,13 @@ func (a *App) dashboardRoutes(ch *dashboard.Channel, f DashboardFuncs) []dashboa
 	jobs := dashboard.JobsDeps{
 		Jobs: a.Cron, Held: &cron.HeldStore{DB: a.DB}, Goals: &goals.Store{DB: a.DB}, Sessions: a.Store,
 		DB: a.DB, TelegramOn: a.Telegram != nil, PostHeld: a.sendHeld, EditCard: a.editHeldCard,
-		Publish: ch.Hub().Publish, Redact: redact, Now: now, Log: a.Log,
+		Publish: ch.Hub().Publish, Redact: redact, Now: now, Log: a.Log, ChatTitle: a.bootChatTitle,
 	}
 	if t, ok := a.Registry.Get("cronjob"); ok {
 		jobs.Tool = t.Run
 	}
 
-	usage := dashboard.UsageDeps{DB: a.DB, Sessions: a.Store, Cron: a.Cron, Cfg: a.Cfg, Now: now}
+	usage := dashboard.UsageDeps{DB: a.DB, Sessions: a.Store, Cron: a.Cron, Cfg: a.Cfg, Now: now, Redact: redact}
 	if a.Set != nil && a.Set.Health != nil {
 		usage.Health = a.Set.Health.Snapshot
 	}
@@ -71,6 +71,7 @@ func (a *App) dashboardRoutes(ch *dashboard.Channel, f DashboardFuncs) []dashboa
 	sys := dashboard.SystemSources{Doctor: f.Doctor, Tail: nil}
 	if a.MCP != nil {
 		sys.MCP = a.MCP.ServerStatus
+		sys.MCPConfig = func() map[string]config.MCPServer { return a.Cfg.MCP.Servers }
 	}
 	if a.Batches != nil {
 		sys.Batches = func(ctx context.Context, limit int) ([]agent.BatchInfo, error) {
@@ -97,10 +98,14 @@ func (a *App) dashboardRoutes(ch *dashboard.Channel, f DashboardFuncs) []dashboa
 		UpdateRun:   f.UpdateRun,
 	}
 
+	sec := dashboard.NewSecurityAPI(a.Gate, a.secretsDeps(), a.bootSecurityFixed(), devices, now)
+	sec.ChatTitle = a.bootChatTitle
+
 	routes := []dashboard.Routes{
 		dashboard.NewBootstrap(dashboard.BootstrapDeps{
 			Commands: a.bootCommands, Skills: a.bootSkills, Version: a.bootVersion(),
 			MaxUploadMB: a.Cfg.Dashboard.MaxUploadMB, TLS: a.Cfg.Dashboard.TLS(),
+			DrainS: a.Cfg.Agent.RestartDrainTimeoutS, Toolsets: tools.AllToolsets(),
 		}),
 		dashboard.NewCommandAPI(ch, redact),
 		dashboard.NewMessages(ch, up),
@@ -109,8 +114,8 @@ func (a *App) dashboardRoutes(ch *dashboard.Channel, f DashboardFuncs) []dashboa
 		dashboard.NewTasksAPI(tasks),
 		dashboard.NewJobsAPI(jobs),
 		dashboard.NewGoalsAPI(&goals.Store{DB: a.DB}, a.Store, redact, now),
-		dashboard.NewSecurityAPI(a.Gate, a.secretsDeps(), a.bootSecurityFixed(), devices, now),
-		dashboard.NewSkillsAPI(a.DataDir, a.Cfg, ch.Cards(), tasks, dashboard.CronSkillUsers(a.Cron)),
+		sec,
+		dashboard.NewSkillsAPI(a.DataDir, a.Cfg, ch.Cards(), tasks, dashboard.CronSkillUsers(a.Cron), redact),
 		dashboard.NewUsageAPI(usage),
 		dashboard.NewSystemAPI(sys, tasks, redact),
 		dashboard.NewOpsAPI(ops),

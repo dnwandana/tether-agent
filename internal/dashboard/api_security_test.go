@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -86,7 +87,14 @@ func TestSecurityView(t *testing.T) {
 		},
 	}
 	fixed := SecurityFixed{ProtectedPaths: []string{"/home/u/.tether/state.db"}, Toolsets: map[string][]string{"dashboard": {"all"}}}
-	mux := securityMux(NewSecurityAPI(gate, secrets, fixed, NewStore(d), securityNow))
+	api := NewSecurityAPI(gate, secrets, fixed, NewStore(d), securityNow)
+	api.ChatTitle = func(chatID, threadID string) (string, string, bool) {
+		if chatID == "5" {
+			return "Ana", "", true
+		}
+		return "", "", false
+	}
+	mux := securityMux(api)
 
 	rec := securityDo(t, mux, http.MethodGet, "/api/security", "", "")
 	if rec.Code != http.StatusOK {
@@ -101,6 +109,12 @@ func TestSecurityView(t *testing.T) {
 	}
 	if v.Mode != "full" || len(v.Modes) != 2 || v.Modes[0].Scope != "dashboard" || v.Modes[1].Mode != "read-only" {
 		t.Fatalf("modes: %q %+v", v.Mode, v.Modes)
+	}
+	if v.Modes[0].ScopeLabel != "Dashboard" || v.Modes[1].ScopeLabel != "Telegram › Ana" {
+		t.Fatalf("labels: %+v", v.Modes)
+	}
+	if v.LogScopes == nil || len(v.LogScopes) != 0 {
+		t.Fatalf("no log rows give []: %v", v.LogScopes)
 	}
 	if len(v.Grants) != 1 {
 		t.Fatalf("grants: %+v", v.Grants)
@@ -119,10 +133,10 @@ func TestSecurityView(t *testing.T) {
 	}
 	gh, npm := v.Secrets[0], v.Secrets[1]
 	if gh.Name != "GH_TOKEN" || gh.State != "check" || !gh.FailedAt.Equal(mark) || !slices.Equal(gh.Commands, []string{"gh"}) ||
-		!slices.Equal(gh.Programs, []string{"/usr/bin/gh"}) || gh.Set != "/secrets set GH_TOKEN" || gh.Unpin != "/secrets unpin GH_TOKEN" {
+		!reflect.DeepEqual(gh.Pins, []PinView{{Path: "/usr/bin/gh", SHA256: "ab12"}}) || gh.Set != "/secrets set GH_TOKEN" || gh.Unpin != "/secrets unpin GH_TOKEN" {
 		t.Fatalf("GH_TOKEN: %+v", gh)
 	}
-	if npm.Name != "NPM_TOKEN" || npm.State != "not set" || len(npm.Programs) != 0 || !npm.FailedAt.IsZero() {
+	if npm.Name != "NPM_TOKEN" || npm.State != "not set" || len(npm.Pins) != 0 || !npm.FailedAt.IsZero() {
 		t.Fatalf("NPM_TOKEN: %+v", npm)
 	}
 	if !slices.Equal(v.Fixed.ProtectedPaths, fixed.ProtectedPaths) || !slices.Equal(v.Fixed.Toolsets["dashboard"], []string{"all"}) {
@@ -132,7 +146,7 @@ func TestSecurityView(t *testing.T) {
 	// A new state.db: the dashboard scope is guarded, and the lists are [] and not null.
 	empty := securityMux(NewSecurityAPI(&security.Gate{DB: securityDB(t)}, gateway.SecretsDeps{}, SecurityFixed{}, nil, securityNow))
 	body := securityDo(t, empty, http.MethodGet, "/api/security", "", "").Body.String()
-	for _, want := range []string{`"mode":"guarded"`, `"modes":[]`, `"grants":[]`, `"remove_all":""`, `"secrets":[]`} {
+	for _, want := range []string{`"mode":"guarded"`, `"modes":[]`, `"grants":[]`, `"remove_all":""`, `"secrets":[]`, `"log_scopes":[]`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("body has no %s: %s", want, body)
 		}
@@ -233,5 +247,62 @@ func TestSecurityDevices(t *testing.T) {
 	rows(securityDo(t, h, http.MethodPost, "/api/devices/"+idA+"/revoke", cookieA, headerA))
 	if rec := securityDo(t, h, http.MethodGet, "/api/devices", cookieA, headerA); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("a revoked session gets 401 at once: %d", rec.Code)
+	}
+}
+
+// The log route filters on the server and names the session and the scope of each row.
+func TestSecurityLogFilters(t *testing.T) {
+	ctx := context.Background()
+	d := securityDB(t)
+	for i, r := range []struct{ session, scope, decision, source, preview string }{
+		{"s1", "dashboard", "allowed", "owner", "git push"},
+		{"s9", "telegram:-100:7", "denied", "timeout", "rm -rf build"},
+		{"", "cli", "denied", "owner", "rm -rf cache"},
+	} {
+		if _, err := d.ExecContext(ctx, `INSERT INTO approval_log(at, session_id, scope, decision, source, preview)
+			VALUES (?, ?, ?, ?, ?, ?)`, int64(i+1), r.session, r.scope, r.decision, r.source, r.preview); err != nil {
+			t.Fatal(err)
+		}
+	}
+	api := NewSecurityAPI(&security.Gate{DB: d}, gateway.SecretsDeps{}, SecurityFixed{}, nil, securityNow)
+	api.ChatTitle = func(chatID, threadID string) (string, string, bool) {
+		if chatID == "-100" {
+			return "Ops", "", true
+		}
+		return "", "", false
+	}
+	mux := securityMux(api)
+	page := func(query string) LogPage {
+		t.Helper()
+		var p LogPage
+		rec := securityDo(t, mux, http.MethodGet, "/api/security/log?"+query, "", "")
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &p) != nil {
+			t.Fatal(query, rec.Code, rec.Body.String())
+		}
+		return p
+	}
+	if p := page("decision=denied&source=timeout&q=RM"); p.Total != 1 || p.Rows[0].SessionID != "s9" ||
+		p.Rows[0].ScopeLabel != "Telegram › Ops › topic 7" {
+		t.Fatalf("%+v", p)
+	}
+	if p := page("decision=denied"); p.Total != 2 || p.Rows[0].ScopeLabel != "cli" {
+		t.Fatalf("%+v", p)
+	}
+	if p := page("scope=dashboard"); p.Total != 1 || p.Rows[0].ScopeLabel != "Dashboard" {
+		t.Fatalf("%+v", p)
+	}
+	for query, want := range map[string]string{
+		"decision=maybe": `{"error":"decision must be allowed, denied, or blocked."}`,
+		"source=owner":   `{"error":"source must be timeout."}`,
+	} {
+		rec := securityDo(t, mux, http.MethodGet, "/api/security/log?"+query, "", "")
+		if rec.Code != http.StatusBadRequest || strings.TrimSpace(rec.Body.String()) != want {
+			t.Errorf("%s: %d %s", query, rec.Code, rec.Body.String())
+		}
+	}
+	var v SecurityView
+	if err := json.Unmarshal(securityDo(t, mux, http.MethodGet, "/api/security", "", "").Body.Bytes(), &v); err != nil ||
+		!slices.Equal(v.LogScopes, []string{"cli", "dashboard", "telegram:-100:7"}) {
+		t.Fatalf("%v %v", v.LogScopes, err)
 	}
 }

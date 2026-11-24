@@ -28,9 +28,10 @@ type SecurityFixed struct {
 }
 
 type ScopeModeView struct {
-	Scope string    `json:"scope"`
-	Mode  string    `json:"mode"`
-	SetAt time.Time `json:"set_at"`
+	Scope      string    `json:"scope"`
+	ScopeLabel string    `json:"scope_label"`
+	Mode       string    `json:"mode"`
+	SetAt      time.Time `json:"set_at"`
 }
 
 type GrantView struct {
@@ -51,9 +52,15 @@ type SecretView struct {
 	State    string    `json:"state"` // set, not set, or check
 	Commands []string  `json:"commands"`
 	FailedAt time.Time `json:"failed_at"` // the auth-failure mark; zero with no mark
-	Programs []string  `json:"programs"`  // the paths of the pinned programs
+	Pins     []PinView `json:"pins"`      // the allowed programs, with their SHA-256 hashes
 	Set      string    `json:"set"`       // "/secrets set NAME"
 	Unpin    string    `json:"unpin"`     // "/secrets unpin NAME"
+}
+
+// PinView is one allowed program of a secret.
+type PinView struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
 }
 
 type SecurityView struct {
@@ -67,21 +74,24 @@ type SecurityView struct {
 	Fixed          SecurityFixed   `json:"fixed"`
 	ProcessMode    string          `json:"process_mode"` // approvals.mode: manual, smart, or off
 	CronMode       string          `json:"cron_mode"`    // approvals.cron_mode: deny or approve
+	LogScopes      []string        `json:"log_scopes"`   // the scopes that the approval log holds
 }
 
 type LogEntry struct {
-	At       time.Time `json:"at"`
-	Scope    string    `json:"scope"`
-	Kind     string    `json:"kind"`
-	Tool     string    `json:"tool"`
-	Server   string    `json:"server"`
-	ToolName string    `json:"tool_name"`
-	Rule     string    `json:"rule"`
-	Class    string    `json:"class"`
-	Decision string    `json:"decision"`
-	Source   string    `json:"source"`
-	Answer   string    `json:"answer"`
-	Preview  string    `json:"preview"`
+	At         time.Time `json:"at"`
+	SessionID  string    `json:"session_id"`
+	Scope      string    `json:"scope"`
+	ScopeLabel string    `json:"scope_label"`
+	Kind       string    `json:"kind"`
+	Tool       string    `json:"tool"`
+	Server     string    `json:"server"`
+	ToolName   string    `json:"tool_name"`
+	Rule       string    `json:"rule"`
+	Class      string    `json:"class"`
+	Decision   string    `json:"decision"`
+	Source     string    `json:"source"`
+	Answer     string    `json:"answer"`
+	Preview    string    `json:"preview"`
 }
 
 type LogPage struct {
@@ -109,6 +119,31 @@ type SecurityAPI struct {
 	fixed   SecurityFixed
 	devices *Store
 	now     func() time.Time
+
+	// ChatTitle reads the title cache of the Telegram chats. It never calls Telegram. Nil gives
+	// the raw scope keys.
+	ChatTitle func(chatID, threadID string) (chat, topic string, ok bool)
+}
+
+// scopeLabel returns a readable name for a scope key. An unknown key gives the raw key.
+func (a *SecurityAPI) scopeLabel(scope string) string {
+	if scope == ChannelName {
+		return "Dashboard"
+	}
+	parts := strings.Split(scope, ":")
+	// Telegram scopes are "telegram:<chat>:<thread>". A chat id can start with "-".
+	if len(parts) == 3 && parts[0] == "telegram" && a.ChatTitle != nil {
+		if chat, topic, ok := a.ChatTitle(parts[1], parts[2]); ok && chat != "" {
+			label := "Telegram › " + chat
+			if topic != "" {
+				label += " › " + topic
+			} else if parts[2] != "" && parts[2] != "0" {
+				label += " › topic " + parts[2]
+			}
+			return label
+		}
+	}
+	return scope
 }
 
 func NewSecurityAPI(gate *security.Gate, secrets gateway.SecretsDeps, fixed SecurityFixed, devices *Store, now func() time.Time) *SecurityAPI {
@@ -147,7 +182,7 @@ func (a *SecurityAPI) view(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, m := range modes {
-		v.Modes = append(v.Modes, ScopeModeView{Scope: m.Scope, Mode: m.Mode, SetAt: m.SetAt})
+		v.Modes = append(v.Modes, ScopeModeView{Scope: m.Scope, ScopeLabel: a.scopeLabel(m.Scope), Mode: m.Mode, SetAt: m.SetAt})
 	}
 	rows, err := a.gate.ListAlways(ctx)
 	if err != nil {
@@ -180,6 +215,12 @@ func (a *SecurityAPI) view(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v.Secrets = secrets
+	scopes, err := a.gate.LogScopes(ctx)
+	if err != nil {
+		securityErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	v.LogScopes = append([]string{}, scopes...)
 	securityJSON(w, http.StatusOK, v)
 }
 
@@ -205,7 +246,7 @@ func (a *SecurityAPI) secretViews(ctx context.Context) ([]SecretView, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		sv := SecretView{
-			Name: name, State: "not set", Commands: bound[name], Programs: []string{},
+			Name: name, State: "not set", Commands: bound[name], Pins: []PinView{},
 			Set: "/secrets set " + name, Unpin: "/secrets unpin " + name,
 		}
 		if sv.Commands == nil {
@@ -224,7 +265,7 @@ func (a *SecurityAPI) secretViews(ctx context.Context) ([]SecretView, error) {
 				return nil, err
 			}
 			for _, p := range pins {
-				sv.Programs = append(sv.Programs, p.Path)
+				sv.Pins = append(sv.Pins, PinView{Path: p.Path, SHA256: p.SHA256})
 			}
 		}
 		out = append(out, sv)
@@ -250,7 +291,18 @@ func (a *SecurityAPI) log(w http.ResponseWriter, r *http.Request) {
 	if limit > 200 {
 		limit = 200
 	}
-	rows, total, err := a.gate.ListLogPage(r.Context(), q.Get("scope"), offset, limit)
+	decision, source := q.Get("decision"), q.Get("source")
+	if !slices.Contains([]string{"", "allowed", "denied", "blocked"}, decision) {
+		securityErr(w, http.StatusBadRequest, "decision must be allowed, denied, or blocked.")
+		return
+	}
+	if source != "" && source != "timeout" {
+		securityErr(w, http.StatusBadRequest, "source must be timeout.")
+		return
+	}
+	rows, total, err := a.gate.ListLogPage(r.Context(), security.LogFilter{
+		Scope: q.Get("scope"), Decision: decision, Source: source, Query: q.Get("q"),
+	}, offset, limit)
 	if err != nil {
 		securityErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -258,7 +310,7 @@ func (a *SecurityAPI) log(w http.ResponseWriter, r *http.Request) {
 	page := LogPage{Rows: make([]LogEntry, 0, len(rows)), Total: total, Offset: offset, Limit: limit}
 	for _, row := range rows {
 		page.Rows = append(page.Rows, LogEntry{
-			At: row.At, Scope: row.Scope, Kind: row.Kind, Tool: row.Tool, Server: row.Server,
+			At: row.At, SessionID: row.SessionID, Scope: row.Scope, ScopeLabel: a.scopeLabel(row.Scope), Kind: row.Kind, Tool: row.Tool, Server: row.Server,
 			ToolName: row.ToolName, Rule: row.Rule, Class: row.Class, Decision: row.Decision,
 			Source: row.Source, Answer: row.Answer, Preview: row.Preview,
 		})
@@ -350,4 +402,4 @@ func grantCode(s string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(s)))[:8]
 }
 
-func init() { registerAPI(SecurityView{}, LogPage{}, DeviceRow{}) }
+func init() { registerAPI(SecurityView{}, LogPage{}, DeviceRow{}, PinView{}) }

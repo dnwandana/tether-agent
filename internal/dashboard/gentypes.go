@@ -5,9 +5,22 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// enumValues holds the values of each string type that registerEnum named.
+var enumValues = map[reflect.Type][]string{}
+
+// registerEnum registers the values of a named string type. The generator writes the type
+// as a union of the values.
+func registerEnum(t reflect.Type, values ...string) {
+	if t.Kind() != reflect.String || t.Name() == "" {
+		panic("dashboard: registerEnum needs a named string type")
+	}
+	enumValues[t] = values
+}
 
 // GenerateTypes returns web/src/api/types.gen.ts for the types that registerAPI collected.
 func GenerateTypes() string { return generateTypes(apiTypes) }
@@ -40,6 +53,14 @@ func generateTypes(vs []any) string {
 	for len(pending) > 0 {
 		rt := pending[0]
 		pending = pending[1:]
+		if vals, ok := enumValues[rt]; ok {
+			quoted := make([]string, len(vals))
+			for i, v := range vals {
+				quoted[i] = strconv.Quote(v)
+			}
+			body[rt.Name()] = "export type " + rt.Name() + " = " + strings.Join(quoted, " | ") + ";\n"
+			continue
+		}
 		var b strings.Builder
 		fmt.Fprintf(&b, "export interface %s {\n", rt.Name())
 		writeFields(&b, rt, queue)
@@ -106,6 +127,10 @@ func tsType(rt reflect.Type, queue func(reflect.Type)) string {
 		return "string"
 	case rawType:
 		return "unknown"
+	}
+	if _, ok := enumValues[rt]; ok {
+		queue(rt)
+		return rt.Name()
 	}
 	switch rt.Kind() {
 	case reflect.String:

@@ -17,6 +17,9 @@ var (
 // noticeMax is the size of the notice buffer.
 const noticeMax = 20
 
+// answeredMax is the size of the answered-card ring.
+const answeredMax = 30
+
 // textStopping is the 503 text of a stream after Close.
 const textStopping = "The gateway is stopping."
 
@@ -30,6 +33,10 @@ type Hub struct {
 
 	noticeMu sync.Mutex
 	notices  []Notice
+
+	// The ring has its own mutex, because the snapshot reads it under mu.
+	answeredMu sync.Mutex
+	answered   []AnsweredCard
 }
 
 // stream is the queue of one open page. Hub.mu guards its fields.
@@ -229,6 +236,24 @@ func (h *Hub) Notices() []Notice {
 	h.noticeMu.Lock()
 	defer h.noticeMu.Unlock()
 	return append([]Notice(nil), h.notices...)
+}
+
+// addAnswered puts a first in the ring. The ring keeps the last answeredMax records.
+func (h *Hub) addAnswered(a AnsweredCard) {
+	h.answeredMu.Lock()
+	defer h.answeredMu.Unlock()
+	n := min(len(h.answered)+1, answeredMax)
+	next := make([]AnsweredCard, 0, n)
+	next = append(next, a)
+	next = append(next, h.answered[:n-1]...)
+	h.answered = next
+}
+
+// Answered returns a copy of the answered-card ring, newest first.
+func (h *Hub) Answered() []AnsweredCard {
+	h.answeredMu.Lock()
+	defer h.answeredMu.Unlock()
+	return append([]AnsweredCard{}, h.answered...)
 }
 
 // Close ends every stream. After Close, Handler answers 503.

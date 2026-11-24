@@ -445,7 +445,21 @@ func runGateway(args []string, stdout, stderr io.Writer) int {
 		waitTurns: gw.Wait,
 		stopWork:  stopWork,
 		waits:     waits,
-		log:       log,
+		progress: func(elapsed time.Duration) {
+			if a.Dashboard == nil {
+				return
+			}
+			goalsN := 0
+			if a.Goals != nil {
+				if act, err := a.Goals.Active(base); err == nil {
+					goalsN = len(act)
+				}
+			}
+			a.Dashboard.PublishRestart(dashboard.RestartProgress{Reason: "stopping",
+				ElapsedS: int(elapsed / time.Second), DrainS: int(drain / time.Second),
+				Turns: len(gw.BusyKeys()), Goals: goalsN})
+		},
+		log: log,
 	}.run()
 	// The deferred a.Close closes MCP, Chrome, and the database last.
 	log.Info("gateway stopped")
@@ -495,8 +509,17 @@ type gatewayStop struct {
 	stopWork func()
 	// waits are the parts that end after stopWork.
 	waits []stopWait
-	log   *slog.Logger
+	// progress reports the drain progress with the time since the drain started. It runs
+	// at each progressEvery while waitTurns waits, and never after the drain. A nil field
+	// is skipped.
+	progress func(elapsed time.Duration)
+	// progressEvery is the interval of progress. 0 uses restartProgressEvery.
+	progressEvery time.Duration
+	log           *slog.Logger
 }
+
+// restartProgressEvery is the interval of the drain progress of a stop.
+const restartProgressEvery = 2 * time.Second
 
 // stopWait is one part that a gateway stop waits for.
 type stopWait struct {
@@ -518,7 +541,10 @@ func (s gatewayStop) run() {
 		s.notify()
 	}
 	start := time.Now()
-	if s.waitTurns(s.drain) {
+	stopProgress := s.startProgress(start)
+	drained := s.waitTurns(s.drain)
+	stopProgress()
+	if drained {
 		s.log.Info("gateway: all turns ended", "wait", time.Since(start).Round(time.Millisecond).String())
 	} else {
 		s.log.Warn("gateway: some turns did not end in time, so the gateway cancels them", "wait", s.drain.String())
@@ -534,6 +560,37 @@ func (s gatewayStop) run() {
 		if !w.wait(max(time.Until(end), 0)) {
 			s.log.Warn("gateway: a part did not stop in time after the cancel", "part", w.name, "wait", s.grace.String())
 		}
+	}
+}
+
+// startProgress starts the goroutine that calls progress during the drain. The returned
+// function stops it and waits until it exits, so no call comes after it returns.
+func (s gatewayStop) startProgress(start time.Time) (stop func()) {
+	if s.progress == nil {
+		return func() {}
+	}
+	every := s.progressEvery
+	if every <= 0 {
+		every = restartProgressEvery
+	}
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				s.progress(time.Since(start))
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-exited
 	}
 }
 
@@ -634,12 +691,11 @@ func notWritableError(path string) error {
 // setupSteps returns the Getting started steps from the running config and the last
 // doctor result. It runs no check.
 func setupSteps(cfg *config.Config, last []setup.Check) []dashboard.SetupStep {
-	const open, done, unknown = "open", "done", "unknown"
 	step := func(name string, ok bool, detail, cmd string) dashboard.SetupStep {
 		if ok {
-			return dashboard.SetupStep{Name: name, State: done}
+			return dashboard.SetupStep{Name: name, State: dashboard.SetupDone}
 		}
-		return dashboard.SetupStep{Name: name, State: open, Detail: detail, Command: cmd}
+		return dashboard.SetupStep{Name: name, State: dashboard.SetupOpen, Detail: detail, Command: cmd}
 	}
 	find := func(name string) (setup.Check, bool) {
 		for _, c := range last {
@@ -650,7 +706,7 @@ func setupSteps(cfg *config.Config, last []setup.Check) []dashboard.SetupStep {
 		return setup.Check{}, false
 	}
 	noDoctor := func(name string) dashboard.SetupStep {
-		return dashboard.SetupStep{Name: name, State: unknown, Detail: "Run the doctor on the System page.", Command: "tether doctor"}
+		return dashboard.SetupStep{Name: name, State: dashboard.SetupUnknown, Detail: "Run the doctor on the System page.", Command: "tether doctor"}
 	}
 	steps := []dashboard.SetupStep{
 		step("Primary provider", cfg.Providers["primary"].Model != "", "No primary provider.", "tether setup"),
@@ -712,6 +768,16 @@ func dashboardFuncs(a *app.App, dir string) app.DashboardFuncs {
 			},
 			TriesLeft: func(ctx context.Context) (int, error) {
 				return store.TriesLeft(ctx, defaultPairPlatform)
+			},
+			ListRevoked: func(ctx context.Context) ([]dashboard.PairingRow, error) {
+				rows, err := store.ListRevoked(ctx, defaultPairPlatform)
+				if err != nil {
+					return nil, err
+				}
+				return pairingRows(rows), nil
+			},
+			LockedUntil: func(ctx context.Context) (time.Time, error) {
+				return store.LockedUntil(ctx, defaultPairPlatform)
 			},
 		}
 	}

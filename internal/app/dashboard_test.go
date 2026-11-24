@@ -145,11 +145,28 @@ func TestDashboardStatus(t *testing.T) {
 	if got := a.dashboardStatus(ctx); got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
+	got := a.dashboardStatus(ctx)
+	if got.Running != got.RunningBatches+got.RunningACP+got.RunningShell || got.BrowserOn {
+		t.Fatalf("Running is the sum of the kinds, and the browser is off: %+v", got)
+	}
 	if err := a.Gate.SetMode(ctx, "dashboard", security.ModeGuarded); err != nil {
 		t.Fatal(err)
 	}
 	if got := a.dashboardStatus(ctx); got.Mode != security.ModeGuarded {
 		t.Fatalf("a scope with no row is guarded: %q", got.Mode)
+	}
+}
+
+// With no active session, the header still shows the model and the entry.
+func TestDashboardSessionNoActive(t *testing.T) {
+	a := dashApp(t)
+	ms := a.Agent.CurrentModel(nil)
+	if v := a.dashboardSession(ctx); v.ID != "" || v.Model != ms.Model || v.Entry != ms.Name || v.Entry == "" {
+		t.Fatalf("got %+v, want the model %q of the entry %q", v, ms.Model, ms.Name)
+	}
+	sess := dashSession(t, a)
+	if v := a.dashboardSession(ctx); v.ID != sess.ID || v.Entry != a.Agent.CurrentModel(sess).Name {
+		t.Fatalf("%+v", v)
 	}
 }
 

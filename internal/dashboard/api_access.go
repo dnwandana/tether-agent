@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // AccessView is the pairing state of the Access page.
@@ -12,7 +13,11 @@ type AccessView struct {
 	PairingOn bool         `json:"pairing_on"` // false when Telegram is off
 	Pending   []PairingRow `json:"pending"`
 	Approved  []PairingRow `json:"approved"`
-	TriesLeft int          `json:"tries_left"` // failed approvals left before the lockout; 0 while locked
+	Revoked   []PairingRow `json:"revoked"`
+	// LockedUntil is the end of the lockout; null when not locked.
+	LockedUntil *time.Time `json:"locked_until"`
+	// TriesLeft is the failed approvals left before the lockout; 0 while locked; null when not known.
+	TriesLeft *int `json:"tries_left"`
 }
 
 // AccessAPI serves the Access page and the Getting started page.
@@ -51,7 +56,7 @@ func accessErr(w http.ResponseWriter, status int, msg string) {
 
 // view reads the pairing rows and splits them by status.
 func (a *AccessAPI) view(ctx context.Context) (AccessView, error) {
-	v := AccessView{Pending: []PairingRow{}, Approved: []PairingRow{}}
+	v := AccessView{Pending: []PairingRow{}, Approved: []PairingRow{}, Revoked: []PairingRow{}}
 	if a.pairing.List == nil {
 		return v, nil
 	}
@@ -61,7 +66,23 @@ func (a *AccessAPI) view(ctx context.Context) (AccessView, error) {
 		if err != nil {
 			return v, err
 		}
-		v.TriesLeft = n
+		v.TriesLeft = &n
+	}
+	if a.pairing.LockedUntil != nil {
+		t, err := a.pairing.LockedUntil(ctx)
+		if err != nil {
+			return v, err
+		}
+		if !t.IsZero() {
+			v.LockedUntil = &t
+		}
+	}
+	if a.pairing.ListRevoked != nil {
+		rows, err := a.pairing.ListRevoked(ctx)
+		if err != nil {
+			return v, err
+		}
+		v.Revoked = append(v.Revoked, rows...)
 	}
 	rows, err := a.pairing.List(ctx)
 	if err != nil {

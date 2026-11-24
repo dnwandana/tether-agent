@@ -24,18 +24,21 @@ func NewGoalsAPI(gs *goals.Store, ss *sessions.Store, redact func(string) string
 }
 
 type GoalRowView struct {
-	SessionID    string    `json:"session_id"`
-	Title        string    `json:"title"`
-	Source       string    `json:"source"`
-	Goal         string    `json:"goal"`
-	Status       string    `json:"status"`
-	Waiting      bool      `json:"waiting"`
-	WaitTarget   string    `json:"wait_target"`
-	PausedReason string    `json:"paused_reason"`
-	TurnsUsed    int       `json:"turns_used"`
-	MaxTurns     int       `json:"max_turns"`
-	UpdatedAt    time.Time `json:"updated_at"`
-	Actionable   bool      `json:"actionable"`
+	SessionID    string     `json:"session_id"`
+	Title        string     `json:"title"`
+	Source       string     `json:"source"`
+	Goal         string     `json:"goal"`
+	Status       string     `json:"status"`
+	Waiting      bool       `json:"waiting"`
+	WaitTarget   string     `json:"wait_target"`
+	PausedReason string     `json:"paused_reason"`
+	TurnsUsed    int        `json:"turns_used"`
+	MaxTurns     int        `json:"max_turns"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	LastVerdict  string     `json:"last_verdict"`
+	LastTurnAt   *time.Time `json:"last_turn_at"`
+	CanStop      bool       `json:"can_stop"`   // a dashboard or Telegram goal: the page can pause or clear it
+	CanResume    bool       `json:"can_resume"` // the goal of the active dashboard session only
 }
 
 type GoalGateView struct {
@@ -59,6 +62,8 @@ type GoalDetail struct {
 	StopWhen             string         `json:"stop_when"`
 	Subgoals             []string       `json:"subgoals"`
 	Gates                []GoalGateView `json:"gates"`
+	SubgoalHashes        []string       `json:"subgoal_hashes"` // same order as Subgoals
+	GateHashes           []string       `json:"gate_hashes"`    // same order as Gates
 	WaitingReason        string         `json:"waiting_reason"`
 	WaitingSince         time.Time      `json:"waiting_since"`
 	WaitingUntil         time.Time      `json:"waiting_until"`
@@ -110,7 +115,14 @@ func (a *GoalsAPI) goalsRow(id, title, source string, st goals.State, upd time.T
 		TurnsUsed:    st.TurnsUsed,
 		MaxTurns:     st.MaxTurns,
 		UpdatedAt:    upd,
-		Actionable:   id != "" && id == activeID,
+		LastVerdict:  goalsText(st.LastVerdict),
+		// A CLI goal lives in the tether chat process, so it stays view only.
+		CanStop:   id != "" && (source == ChannelName || source == "telegram"),
+		CanResume: id != "" && id == activeID,
+	}
+	if st.LastTurnAt != 0 {
+		t := goalsTime(st.LastTurnAt)
+		v.LastTurnAt = &t
 	}
 	if st.Status == goals.StatusActive {
 		if t := st.WaitTarget(now); t != "" {
@@ -194,6 +206,8 @@ func (a *GoalsAPI) detail(w http.ResponseWriter, r *http.Request) {
 		StopWhen:             a.redact(st.Contract.StopWhen),
 		Subgoals:             []string{},
 		Gates:                []GoalGateView{},
+		SubgoalHashes:        []string{},
+		GateHashes:           []string{},
 		WaitingReason:        a.redact(goalsText(st.WaitingReason)),
 		WaitingSince:         goalsTime(st.WaitingSince),
 		WaitingUntil:         goalsTime(st.WaitingUntil),
@@ -208,8 +222,10 @@ func (a *GoalsAPI) detail(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, sg := range st.Subgoals {
 		d.Subgoals = append(d.Subgoals, a.redact(sg))
+		d.SubgoalHashes = append(d.SubgoalHashes, goals.ItemHash(sg))
 	}
 	for _, g := range st.Gates {
+		d.GateHashes = append(d.GateHashes, goals.ItemHash(g.Command))
 		d.Gates = append(d.Gates, GoalGateView{
 			Command:        a.redact(g.Command),
 			TimeoutSeconds: g.TimeoutSeconds,

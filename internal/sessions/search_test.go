@@ -201,3 +201,52 @@ func TestSearchSkipsAuxSessions(t *testing.T) {
 		t.Fatalf("%+v %v", hits, err)
 	}
 }
+
+// SearchFiltered pages the hits and filters them by source, kind, and archived state in SQL.
+func TestSearchFilteredPagesAndFilters(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	add := func(sess Session, text string) {
+		t.Helper()
+		created, err := s.Create(ctx, sess)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Append(ctx, created.ID, provider.Message{Role: provider.RoleUser, Content: text}, MessageMeta{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add(Session{Key: "dashboard:owner", Source: "dashboard", Kind: "chat"}, "otter one")
+	add(Session{Key: "telegram:dm:1", Source: "telegram", Kind: "chat"}, "otter two")
+	add(Session{Key: "cron:j1", Source: "cron", Kind: "cron"}, "otter three")
+	add(Session{Key: "dashboard:owner", Source: "dashboard", Kind: "chat", Archived: true}, "otter four")
+	yes, no := true, false
+	for _, c := range []struct {
+		name string
+		f    SearchFilter
+		want []string
+	}{
+		{"all", SearchFilter{Limit: 10}, []string{"[otter] four", "[otter] three", "[otter] two", "[otter] one"}},
+		{"second page", SearchFilter{Limit: 2, Offset: 2}, []string{"[otter] two", "[otter] one"}},
+		{"source", SearchFilter{Limit: 10, Source: "telegram"}, []string{"[otter] two"}},
+		{"kind", SearchFilter{Limit: 10, Kind: "cron"}, []string{"[otter] three"}},
+		{"archived", SearchFilter{Limit: 10, Archived: &yes}, []string{"[otter] four"}},
+		{"active dashboard", SearchFilter{Limit: 10, Source: "dashboard", Archived: &no}, []string{"[otter] one"}},
+	} {
+		hits, err := s.SearchFiltered(ctx, "otter", c.f, Scope{All: true})
+		if err != nil {
+			t.Fatal(c.name, err)
+		}
+		var got []string
+		for _, h := range hits {
+			got = append(got, h.Snippet)
+		}
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	hits, err := s.SearchFiltered(ctx, "three", SearchFilter{Limit: 10}, Scope{All: true})
+	if err != nil || len(hits) != 1 || hits[0].Source != "cron" || hits[0].Kind != "cron" {
+		t.Fatalf("a hit names its source and kind: %+v %v", hits, err)
+	}
+}

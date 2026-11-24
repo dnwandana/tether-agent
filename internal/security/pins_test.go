@@ -59,3 +59,31 @@ func TestPinStore(t *testing.T) {
 		t.Fatal(n, err)
 	}
 }
+
+// UnpinPath deletes the one pin of the name and the path. Other paths and other names stay.
+func TestPinStoreUnpinPath(t *testing.T) {
+	ctx := context.Background()
+	s := &PinStore{DB: openGateDB(t)}
+	twine := PinTarget{Path: "/home/user/my tools/twine", SHA256: strings.Repeat("a", 64)}
+	uv := PinTarget{Path: "/usr/bin/uv", SHA256: strings.Repeat("b", 64)}
+	for _, pt := range []PinTarget{twine, uv} {
+		if err := s.Allow(ctx, "PYPI_TOKEN", pt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Allow(ctx, "GH_TOKEN", twine); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := s.UnpinPath(ctx, "PYPI_TOKEN", twine.Path); err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	if got, _ := s.List(ctx, "PYPI_TOKEN"); len(got) != 1 || got[0].Path != uv.Path {
+		t.Fatalf("%+v", got)
+	}
+	if got, _ := s.List(ctx, "GH_TOKEN"); len(got) != 1 {
+		t.Fatal("a pin of another name must stay:", got)
+	}
+	if n, err := s.UnpinPath(ctx, "PYPI_TOKEN", twine.Path); err != nil || n != 0 {
+		t.Fatal(n, err)
+	}
+}

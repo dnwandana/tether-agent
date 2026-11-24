@@ -418,6 +418,9 @@ func (a *App) goalDeps() goals.Deps {
 		Now:         time.Now,
 		Log:         a.Log,
 		Redact:      a.Redactor.Redact,
+		Changed: func(sessionID, status string) {
+			a.publishDashboard("goal.state", map[string]string{"session_id": sessionID, "status": status})
+		},
 
 		InGateway:       a.Gate.InGateway,
 		SudoPasswordSet: a.Gate.SudoPasswordSet,
@@ -592,6 +595,9 @@ func (a *App) newScheduler() *cron.Scheduler {
 		MaxParallel: cfg.Cron.MaxParallelJobs,
 		Missed:      cfg.Cron.MissedRuns,
 		Log:         a.Log,
+		RunEnd: func(jobID, status string) {
+			a.publishDashboard("job.run", map[string]string{"job_id": jobID, "status": status})
+		},
 	}
 	if cfg.Cron.QuietHours != "" {
 		if w, err := config.ParseWindow(cfg.Cron.QuietHours); err != nil {
@@ -609,6 +615,15 @@ func (a *App) newScheduler() *cron.Scheduler {
 		}
 	}
 	return s
+}
+
+// publishDashboard sends an event to the open dashboard pages. It reads a.Dashboard at call
+// time, so it does nothing in the chat role, when the dashboard is off, or before
+// AddDashboard. The hub drops an event after it closes.
+func (a *App) publishDashboard(name string, data any) {
+	if d := a.Dashboard; d != nil {
+		d.Hub().Publish(dashboard.Event{Name: name, Data: data})
+	}
 }
 
 // cronCost returns the cost of a cron run: the sum of the priced calls of each session of the
@@ -775,7 +790,8 @@ func (a *App) AddTelegram(ctx context.Context) (*telegram.Channel, error) {
 	}
 	if a.Sched != nil {
 		a.titles = &chatTitles{C: c, TTL: time.Hour}
-		a.heldCards = &telegram.HeldCards{C: c, Log: a.Log, Jobs: a.Cron, Send: a.sendHeld}
+		a.heldCards = &telegram.HeldCards{C: c, Log: a.Log, Jobs: a.Cron, Send: a.sendHeld,
+			OnResolved: a.publishHeld}
 		ch.HeldCards = a.heldCards
 		a.Sched.Deliver.Send = func(ctx context.Context, to cron.Target, text string, files []string, noSound bool) error {
 			return ch.Send(ctx, gateway.Target{Source: "telegram", ChatID: to.ChatID, ThreadID: to.ThreadID},

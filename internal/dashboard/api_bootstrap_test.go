@@ -14,6 +14,8 @@ func TestBootstrapView(t *testing.T) {
 		Version:     "v0.24.0",
 		MaxUploadMB: 20,
 		TLS:         true,
+		DrainS:      180,
+		Toolsets:    []string{"terminal", "web"},
 	})
 	mux := http.NewServeMux()
 	r.Register(mux)
@@ -27,7 +29,8 @@ func TestBootstrapView(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(v.Commands) != 1 || v.Commands[0].Name != "/usage" || len(v.Skills) != 1 ||
-		v.Version != "v0.24.0" || v.MaxUploadMB != 20 || !v.TLS || v.BuildID != BuildID() {
+		v.Version != "v0.24.0" || v.MaxUploadMB != 20 || !v.TLS || v.BuildID != BuildID() ||
+		v.DrainS != 180 || len(v.Toolsets) != 2 || v.Toolsets[1] != "web" {
 		t.Fatalf("%+v", v)
 	}
 }
@@ -41,7 +44,7 @@ func TestBootstrapNilListsAreEmptyArrays(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
 		t.Fatal(err)
 	}
-	if string(raw["commands"]) != "[]" || string(raw["skills"]) != "[]" {
+	if string(raw["commands"]) != "[]" || string(raw["skills"]) != "[]" || string(raw["toolsets"]) != "[]" {
 		t.Fatalf("%s", rec.Body.String())
 	}
 }

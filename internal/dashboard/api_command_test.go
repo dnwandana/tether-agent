@@ -303,3 +303,38 @@ func TestCardRouteBulk(t *testing.T) {
 		t.Fatal(code, got)
 	}
 }
+
+// GET /api/cards gives the open cards and the answered-card ring.
+func TestCardsRoute(t *testing.T) {
+	h := newCmdHarness(t, &cmdProv{})
+	get := func() CardsView {
+		t.Helper()
+		resp, err := http.Get(h.srv.URL + "/api/cards")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var v CardsView
+		if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&v) != nil {
+			t.Fatal(resp.Status)
+		}
+		return v
+	}
+	if v := get(); v.Open == nil || v.Answered == nil || len(v.Open) != 0 || len(v.Answered) != 0 {
+		t.Fatalf("the lists are [] and not null: %+v", v)
+	}
+	a, ra := cmdCard(t, h, "rm -rf a")
+	b, _ := cmdCard(t, h, "rm -rf b")
+	if code, got := h.post(t, "/api/cards/"+a, `{"answer": "deny"}`); code != http.StatusOK {
+		t.Fatal(code, got)
+	}
+	<-ra
+	v := get()
+	if len(v.Open) != 1 || v.Open[0].ID != b {
+		t.Fatalf("open: %+v", v.Open)
+	}
+	if len(v.Answered) != 1 || v.Answered[0].ID != a || v.Answered[0].Header != "❌ Approval denied" ||
+		v.Answered[0].Preview != "rm -rf a" || v.Answered[0].Kind != "approval" {
+		t.Fatalf("answered: %+v", v.Answered)
+	}
+}

@@ -37,6 +37,8 @@ type JobsDeps struct {
 	Redact     func(string) string
 	Now        func() time.Time
 	Log        *slog.Logger
+	// ChatTitle reads the title cache of the Telegram chats. It never calls Telegram. Nil gives no label.
+	ChatTitle func(chatID, threadID string) (chat, topic string, ok bool)
 }
 
 // JobsAPI serves the Jobs page.
@@ -99,6 +101,10 @@ type JobDetail struct {
 	WeekCostUSD float64  `json:"week_cost_usd"` // from cron.CostByJob for the last 7 days
 	RunsTotal   int      `json:"runs_total"`
 	FailLimit   int      `json:"fail_limit"` // cron.fail_streak_limit; 0 is off
+
+	WatchLimitHit bool   `json:"watch_limit_hit"` // a watch job used its model runs of the last 24 h
+	PromptMasked  bool   `json:"prompt_masked"`   // the prompt holds a secret that the page does not show
+	DeliverLabel  string `json:"deliver_label"`   // the cached chat title of a Telegram target, or ""
 }
 
 type HeldView struct {
@@ -325,7 +331,8 @@ func (a *JobsAPI) detail(w http.ResponseWriter, r *http.Request) {
 	v := JobDetail{Job: row, Prompt: a.d.Redact(j.Prompt), Script: j.Script, Workdir: j.Workdir, Deliver: j.Deliver,
 		Model: model, Effort: j.Effort, Skills: nonNil(j.Skills), Toolsets: nonNil(j.Toolsets), NoAgent: j.NoAgent,
 		Continuity: j.Continuity, RepeatLeft: j.RepeatLeft, LastOutput: a.d.Redact(j.LastOutput),
-		LastError: a.d.Redact(j.LastError), WatchOutput: a.d.Redact(j.WatchOutput), Last7: []RunRow{}, FailLimit: a.d.Jobs.FailStreakLimit}
+		LastError: a.d.Redact(j.LastError), WatchOutput: a.d.Redact(j.WatchOutput), Last7: []RunRow{}, FailLimit: a.d.Jobs.FailStreakLimit,
+		PromptMasked: a.d.Redact(j.Prompt) != j.Prompt, DeliverLabel: a.deliverLabel(j.Deliver)}
 	if !row.HistoryOff {
 		runs, err := a.d.Jobs.Runs(ctx, id, jobsLastRuns, 0)
 		if err != nil {
@@ -351,7 +358,34 @@ func (a *JobsAPI) detail(w http.ResponseWriter, r *http.Request) {
 		}
 		v.WeekCostUSD = costs[id]
 	}
+	if j.Watch {
+		n, err := a.d.Jobs.ModelRunsSince(ctx, id, a.d.Now().Add(-24*time.Hour))
+		if err != nil {
+			a.jobsFail(w, http.StatusInternalServerError, err)
+			return
+		}
+		v.WatchLimitHit = n >= cron.WatchModelRunsPerDay
+	}
 	jobsJSON(w, http.StatusOK, v)
+}
+
+// deliverLabel returns the cached title of the Telegram chat of a deliver target.
+// It returns "" for another form, for no cache, or for a title that is not cached.
+func (a *JobsAPI) deliverLabel(deliver string) string {
+	rest, ok := strings.CutPrefix(deliver, "telegram:")
+	if !ok || a.d.ChatTitle == nil {
+		return ""
+	}
+	chatID, threadID, _ := strings.Cut(rest, ":")
+	chat, topic, ok := a.d.ChatTitle(chatID, threadID)
+	if !ok {
+		return ""
+	}
+	label := a.d.Redact(chat)
+	if topic != "" {
+		label += " › " + a.d.Redact(topic)
+	}
+	return label
 }
 
 // jobsInt reads a non-negative integer query value. It returns def when the value is absent or bad.

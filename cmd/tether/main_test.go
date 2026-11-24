@@ -1927,10 +1927,12 @@ func TestDashboardFuncMaps(t *testing.T) {
 	rows := pairingRows([]telegram.PairRow{
 		{Platform: "telegram", UserID: "42", UserName: "ann", Status: telegram.PairApproved, CreatedAt: at, ApprovedAt: at.Add(time.Hour)},
 		{Platform: "telegram", UserID: "43", UserName: "bob", Status: telegram.PairPending, CreatedAt: at, ExpiresAt: at.Add(time.Hour)},
+		{Platform: "telegram", UserID: "44", UserName: "cy", Status: telegram.PairRevoked, CreatedAt: at, ApprovedAt: at.Add(time.Hour)},
 	})
 	wantRows := []dashboard.PairingRow{
 		{Platform: "telegram", UserID: "42", Name: "ann", Status: "approved", Since: at.Add(time.Hour)},
 		{Platform: "telegram", UserID: "43", Name: "bob", Status: "pending", Since: at, Expires: at.Add(time.Hour)},
+		{Platform: "telegram", UserID: "44", Name: "cy", Status: "revoked", Since: at},
 	}
 	if !reflect.DeepEqual(rows, wantRows) {
 		t.Fatalf("%+v", rows)
@@ -2021,7 +2023,51 @@ func TestDashboardFuncsPairingOffWithoutTelegram(t *testing.T) {
 	}
 	defer a.Close()
 	f := dashboardFuncs(a, dir)
-	if f.Pairing.List != nil || f.Pairing.Approve != nil || f.Pairing.Revoke != nil || f.Pairing.TriesLeft != nil {
+	if f.Pairing.List != nil || f.Pairing.Approve != nil || f.Pairing.Revoke != nil || f.Pairing.TriesLeft != nil || f.Pairing.ListRevoked != nil || f.Pairing.LockedUntil != nil {
 		t.Fatal("pairing funcs must be nil when Telegram is off")
 	}
+}
+
+// During the drain, the stop calls progress at each interval with the elapsed time, and it
+// makes no call after the drain ends.
+func TestStopGatewayProgressDuringTheDrain(t *testing.T) {
+	var mu sync.Mutex
+	var got []time.Duration
+	s := gatewayStop{drain: time.Second, grace: 10 * time.Millisecond,
+		stopReceive: func() {}, stopWork: func() {},
+		waitTurns:     func(time.Duration) bool { time.Sleep(55 * time.Millisecond); return true },
+		progressEvery: 10 * time.Millisecond,
+		progress: func(elapsed time.Duration) {
+			mu.Lock()
+			got = append(got, elapsed)
+			mu.Unlock()
+		},
+		log: slog.New(slog.DiscardHandler)}
+	s.run()
+	mu.Lock()
+	n := len(got)
+	mu.Unlock()
+	if n < 3 {
+		t.Fatalf("%d progress calls in a drain of 55 ms with a 10 ms interval", n)
+	}
+	for i := 1; i < n; i++ {
+		if got[i] < got[i-1] {
+			t.Fatal("the elapsed time must grow:", got)
+		}
+	}
+	time.Sleep(30 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != n {
+		t.Fatal("a progress call came after the drain ended")
+	}
+}
+
+// A nil progress function is skipped.
+func TestStopGatewayNoProgress(t *testing.T) {
+	s := gatewayStop{drain: time.Second, grace: 10 * time.Millisecond,
+		stopReceive: func() {}, stopWork: func() {},
+		waitTurns: func(time.Duration) bool { time.Sleep(20 * time.Millisecond); return true },
+		log:       slog.New(slog.DiscardHandler)}
+	s.run()
 }

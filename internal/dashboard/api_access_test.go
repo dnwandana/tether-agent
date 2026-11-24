@@ -159,7 +159,7 @@ func TestAccessTriesLeftAndBodyLimit(t *testing.T) {
 	p := accessPairing(&approved, &revoked)
 	p.TriesLeft = func(context.Context) (int, error) { return 3, nil }
 	mux := accessMux(p, nil)
-	if v := accessView(t, accessDo(t, mux, "GET", "/api/pairing", "")); v.TriesLeft != 3 {
+	if v := accessView(t, accessDo(t, mux, "GET", "/api/pairing", "")); v.TriesLeft == nil || *v.TriesLeft != 3 {
 		t.Fatalf("%+v", v)
 	}
 	big := `{"code":"` + strings.Repeat("A", 4096) + `"}`
@@ -169,5 +169,41 @@ func TestAccessTriesLeftAndBodyLimit(t *testing.T) {
 	bigRevoke := `{"platform":"telegram","user_id":"` + strings.Repeat("1", 4096) + `"}`
 	if rec := accessDo(t, mux, "POST", "/api/pairing/revoke", bigRevoke); rec.Code != http.StatusBadRequest || len(revoked) != 0 {
 		t.Fatal(rec.Code, revoked)
+	}
+}
+
+// The view lists the revoked people and the lockout end. An unknown count of tries is null.
+func TestAccessRevokedAndLockout(t *testing.T) {
+	var approved, revoked []string
+	p := accessPairing(&approved, &revoked)
+	raw := accessDo(t, accessMux(p, nil), http.MethodGet, "/api/pairing", "").Body.String()
+	for _, want := range []string{`"tries_left":null`, `"locked_until":null`, `"revoked":[]`} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("body has no %s: %s", want, raw)
+		}
+	}
+	until := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	p.ListRevoked = func(context.Context) ([]PairingRow, error) {
+		return []PairingRow{{Platform: "telegram", UserID: "43", Name: "Cy", Status: "revoked", Since: accessSince}}, nil
+	}
+	p.LockedUntil = func(context.Context) (time.Time, error) { return until, nil }
+	p.TriesLeft = func(context.Context) (int, error) { return 0, nil }
+	mux := accessMux(p, nil)
+	v := accessView(t, accessDo(t, mux, http.MethodGet, "/api/pairing", ""))
+	if len(v.Revoked) != 1 || v.Revoked[0].UserID != "43" || v.Revoked[0].Status != "revoked" ||
+		v.LockedUntil == nil || !v.LockedUntil.Equal(until) || v.TriesLeft == nil || *v.TriesLeft != 0 {
+		t.Fatalf("%+v", v)
+	}
+	if len(v.Pending) != 1 || len(v.Approved) != 1 {
+		t.Fatalf("a revoked row never goes into pending or approved: %+v", v)
+	}
+	// A deny of a pending request is a revoke of that row.
+	accessView(t, accessDo(t, mux, http.MethodPost, "/api/pairing/revoke", `{"platform":"telegram","user_id":"41"}`))
+	if len(revoked) != 1 || revoked[0] != "telegram/41" {
+		t.Fatalf("%v", revoked)
+	}
+	p.LockedUntil = func(context.Context) (time.Time, error) { return time.Time{}, nil }
+	if raw := accessDo(t, accessMux(p, nil), http.MethodGet, "/api/pairing", "").Body.String(); !strings.Contains(raw, `"locked_until":null`) {
+		t.Fatalf("the zero time is null: %s", raw)
 	}
 }

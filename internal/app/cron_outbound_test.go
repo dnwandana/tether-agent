@@ -345,3 +345,54 @@ func TestResolveHeldPostNeedsTelegram(t *testing.T) {
 		t.Fatal(got, err)
 	}
 }
+
+// resolveHeld sends held, so a page updates after a resolve that is not the dashboard route.
+func TestResolveHeldPublishesHeld(t *testing.T) {
+	a := gatewayApp(t, "", dashOn)
+	if _, err := a.AddDashboard(ctx, DashboardFuncs{}); err != nil {
+		t.Fatal(err)
+	}
+	j, err := a.Cron.Create(ctx, cron.Job{Name: "n", Schedule: "every 2h", Prompt: "p", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (&cron.HeldStore{DB: a.DB}).Insert(ctx, cron.HeldSend{ID: "h1", Kind: "hold", JobID: j.ID,
+		Target: "telegram:-100", TargetTitle: "Family", Text: "report", Reason: "r", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	ev := dashEvents(t, a)
+	if got, err := a.resolveHeld(ctx, "h1", "drop"); err != nil || got != "Dropped." {
+		t.Fatal(got, err)
+	}
+	if e := waitDashEvent(t, ev, "held"); e.data != `{"id":"h1"}` {
+		t.Fatal(e.data)
+	}
+}
+
+// A new held send sends held after its card is posted.
+func TestHoldDeliveryPublishesHeld(t *testing.T) {
+	url, _, _ := fakeBotAPI(t, true)
+	a := gatewayApp(t, url, outboundTG+dashOn)
+	if _, err := a.AddTelegram(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.AddDashboard(ctx, DashboardFuncs{}); err != nil {
+		t.Fatal(err)
+	}
+	j, err := a.Cron.Create(ctx, cron.Job{Name: "n", Schedule: "every 2h", Prompt: "p", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := cron.HeldSend{ID: "h2", Kind: "hold", JobID: j.ID, Target: "telegram:-100", TargetTitle: "Family",
+		Text: "report", Reason: "r", CreatedAt: time.Now()}
+	if err := a.Sched.Deliver.Held.Insert(ctx, h); err != nil {
+		t.Fatal(err)
+	}
+	ev := dashEvents(t, a)
+	if err := a.holdDelivery(ctx, h, cron.HeldCardInfo{JobName: "n", TargetTitle: "Family", Reason: "r"}); err != nil {
+		t.Fatal(err)
+	}
+	if e := waitDashEvent(t, ev, "held"); e.data != `{"id":"h2"}` {
+		t.Fatal(e.data)
+	}
+}

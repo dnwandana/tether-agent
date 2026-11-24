@@ -28,6 +28,8 @@ type UsageDeps struct {
 	Health   func(now time.Time) []provider.HealthRow
 	Fallback func() provider.FallbackStatus
 	Now      func() time.Time
+	// Redact masks the base URLs. Nil keeps them.
+	Redact func(string) string
 }
 
 // UsageModelRow is one row of the usage table. Priced is false when no call has a stored cost.
@@ -102,6 +104,7 @@ type ModelEntryRow struct {
 	Preset        string    `json:"preset"`
 	Format        string    `json:"format"`
 	Model         string    `json:"model"`
+	BaseURL       string    `json:"base_url"`
 	Vision        bool      `json:"vision"`
 	ContextWindow int       `json:"context_window"`
 	Effort        string    `json:"effort"`
@@ -136,6 +139,8 @@ type ModelRoleRow struct {
 	Role  string `json:"role"`
 	Key   string `json:"key"`
 	Value string `json:"value"`
+	// EntryUsable is false when Value names a provider entry that is unusable.
+	EntryUsable bool `json:"entry_usable"`
 }
 
 // ModelsView is the Models page.
@@ -154,6 +159,9 @@ type UsageAPI struct{ d UsageDeps }
 func NewUsageAPI(d UsageDeps) *UsageAPI {
 	if d.Now == nil {
 		d.Now = time.Now
+	}
+	if d.Redact == nil {
+		d.Redact = func(s string) string { return s }
 	}
 	return &UsageAPI{d: d}
 }
@@ -346,7 +354,13 @@ func (a *UsageAPI) models(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		seen[name] = true
-		row := ModelEntryRow{Name: name, Preset: p.Preset, Format: p.Format, Model: p.Model, Vision: p.Vision,
+		u := p.BaseURL
+		if u == "" {
+			if pr, ok := config.PresetByID(p.Preset); ok {
+				u = pr.BaseURL
+			}
+		}
+		row := ModelEntryRow{Name: name, Preset: p.Preset, Format: p.Format, Model: p.Model, BaseURL: a.d.Redact(u), Vision: p.Vision,
 			ContextWindow: p.ContextWindow, Effort: p.Effort, Status: "ok"}
 		if p.Unusable != "" {
 			row.Status, row.Cause = "unusable", p.UnusableCause
@@ -359,14 +373,21 @@ func (a *UsageAPI) models(w http.ResponseWriter, r *http.Request) {
 		}
 		v.Entries = append(v.Entries, row)
 	}
+	usable := func(value string) bool {
+		p, ok := cfg.Providers[value]
+		return !ok || p.Unusable == ""
+	}
+	role := func(role, key, value string) ModelRoleRow {
+		return ModelRoleRow{Role: role, Key: key, Value: value, EntryUsable: usable(value)}
+	}
 	v.Roles = []ModelRoleRow{
-		{"delegation", "agent.delegation_provider", cfg.Agent.DelegationProvider},
-		{"vision", "agent.vision_provider", cfg.Agent.VisionProvider},
-		{"tts", "media.tts", usageMediaValue(cfg.Media.TTS)},
-		{"stt", "media.stt", usageMediaValue(cfg.Media.STT)},
-		{"image", "media.image", usageMediaValue(cfg.Media.Image)},
-		{"goal_judge", "goals.judge_provider", cfg.Goals.JudgeProvider},
-		{"outbound_guard", "outbound.guard_provider", cfg.Outbound.GuardProvider},
+		role("delegation", "agent.delegation_provider", cfg.Agent.DelegationProvider),
+		role("vision", "agent.vision_provider", cfg.Agent.VisionProvider),
+		role("tts", "media.tts", usageMediaValue(cfg.Media.TTS)),
+		role("stt", "media.stt", usageMediaValue(cfg.Media.STT)),
+		role("image", "media.image", usageMediaValue(cfg.Media.Image)),
+		role("goal_judge", "goals.judge_provider", cfg.Goals.JudgeProvider),
+		role("outbound_guard", "outbound.guard_provider", cfg.Outbound.GuardProvider),
 	}
 	usageJSON(w, http.StatusOK, v)
 }

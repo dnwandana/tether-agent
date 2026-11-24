@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/provider"
@@ -328,6 +329,42 @@ func TestSearchRoute(t *testing.T) {
 			t.Errorf("q=%q: %d", q, code)
 		}
 	}
+	// offset, source, kind, and archived reach the SQL of the search.
+	other, err := st.Create(ctx, sessions.Session{Key: "telegram:dm:1", Source: "telegram", ChatID: "1", Kind: "chat", Title: "Phone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Append(ctx, other.ID, provider.Message{Role: provider.RoleUser, Content: "deploy from the phone"}, sessions.MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	search := func(query string) []SearchHitView {
+		t.Helper()
+		var out []SearchHitView
+		if code := sessGet(t, mux, "/api/search?q=deploy&"+query, &out); code != 200 {
+			t.Fatalf("%s: %d", query, code)
+		}
+		return out
+	}
+	if h := search("source=telegram"); len(h) != 1 || h[0].SessionID != other.ID || h[0].Source != "telegram" || h[0].Kind != "chat" {
+		t.Fatalf("%+v", h)
+	}
+	if h := search("limit=1&offset=1"); len(h) != 1 || h[0].SessionID != sess.ID {
+		t.Fatalf("the second hit, newest first: %+v", h)
+	}
+	if h := search("kind=cron"); len(h) != 0 {
+		t.Fatalf("%+v", h)
+	}
+	if h := search("archived=true"); len(h) != 0 {
+		t.Fatalf("%+v", h)
+	}
+	if h := search("archived=false"); len(h) != 2 {
+		t.Fatalf("%+v", h)
+	}
+	for _, q := range []string{"archived=maybe", "offset=-1", "offset=x"} {
+		if code := sessGet(t, mux, "/api/search?q=deploy&"+q, nil); code != http.StatusBadRequest {
+			t.Errorf("%s: %d", q, code)
+		}
+	}
 }
 
 // The list reads the title search from "search".
@@ -544,5 +581,36 @@ func TestMessagesPageResultsAfterCall(t *testing.T) {
 	if code := sessGet(t, mux, base+"?after="+strconv.FormatInt(call, 10), &next); code != 200 || len(next.Rows) != 1 ||
 		next.Rows[0].ID != call || next.Rows[0].Tools[0].Text != "out 0" || next.FirstID != call || next.LastID != res {
 		t.Fatalf("%d %+v", code, next)
+	}
+}
+
+// Each message has its time, and a child row names its parent.
+func TestTranscriptTimesAndParent(t *testing.T) {
+	mux, st, _ := sessionsTestMux(t)
+	ctx := context.Background()
+	parent, err := st.Create(ctx, sessions.Session{Key: SessionKey, Source: ChannelName, ChatID: OwnerChatID, Kind: "chat", Title: "Parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := st.Create(ctx, sessions.Session{Key: SessionKey, Source: ChannelName, ChatID: OwnerChatID,
+		Kind: sessions.KindSubagent, ParentID: parent.ID, Title: "Child"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Append(ctx, child.ID, provider.Message{Role: provider.RoleUser, Content: "hi"}, sessions.MessageMeta{}); err != nil {
+		t.Fatal(err)
+	}
+	var page MessagePage
+	if code := sessGet(t, mux, "/api/sessions/"+child.ID+"/messages", &page); code != 200 || len(page.Rows) != 1 ||
+		page.Rows[0].Created.IsZero() || time.Since(page.Rows[0].Created) > time.Minute {
+		t.Fatalf("%d %+v", code, page)
+	}
+	var row SessionRow
+	if code := sessGet(t, mux, "/api/sessions/"+child.ID, &row); code != 200 || row.ParentID != parent.ID {
+		t.Fatalf("%d %+v", code, row)
+	}
+	if code := sessGet(t, mux, "/api/sessions/"+parent.ID, &row); code != 200 || row.ParentID != "" ||
+		len(row.Children) != 1 || row.Children[0].ParentID != parent.ID {
+		t.Fatalf("%d %+v", code, row)
 	}
 }

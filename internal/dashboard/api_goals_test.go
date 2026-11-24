@@ -54,7 +54,7 @@ func newGoalsFixture(t *testing.T) *goalsFixture {
 	waiting := goals.State{Goal: "Wait for the build", Status: goals.StatusActive, MaxTurns: 20}
 	waiting.WaitOnPID(4242, "build", time.Now())
 	for id, st := range map[string]goals.State{
-		f.dash: {Goal: "Fix the flaky test sk-secret", Status: goals.StatusActive, TurnsUsed: 3, MaxTurns: 20,
+		f.dash: {Goal: "Fix the flaky test sk-secret", Status: goals.StatusActive, TurnsUsed: 3, MaxTurns: 20, LastTurnAt: 1_800_000_000,
 			Subgoals: []string{"no sleeps"}, Contract: goals.Contract{Verification: "go test ./..."},
 			LastVerdict: &verdict, LastReason: &reason,
 			Gates: []goals.Gate{{Command: "go vet ./...", TimeoutSeconds: 300, MaxRetries: 3, Attempts: 2,
@@ -100,15 +100,17 @@ func TestGoalsListOpenGoals(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("%+v", rows)
 	}
-	if d := by[f.dash]; !d.Actionable || d.Goal != "Fix the flaky test [REDACTED]" || d.Title != "Ship the docs [REDACTED]" ||
-		d.Source != "dashboard" || d.Status != "active" || d.TurnsUsed != 3 || d.MaxTurns != 20 || d.Waiting {
+	if d := by[f.dash]; !d.CanStop || !d.CanResume || d.Goal != "Fix the flaky test [REDACTED]" || d.Title != "Ship the docs [REDACTED]" ||
+		d.Source != "dashboard" || d.Status != "active" || d.TurnsUsed != 3 || d.MaxTurns != 20 || d.Waiting ||
+		d.LastVerdict != "continue" || d.LastTurnAt == nil || !d.LastTurnAt.Equal(time.Unix(1_800_000_000, 0)) {
 		t.Fatalf("%+v", d)
 	}
-	if g := by[f.tg]; g.Actionable || g.Status != "paused" || g.PausedReason != "budget" || g.Title != "Phone chat" {
+	if g := by[f.tg]; !g.CanStop || g.CanResume || g.Status != "paused" || g.PausedReason != "budget" ||
+		g.Title != "Phone chat" || g.LastTurnAt != nil || g.LastVerdict != "" {
 		t.Fatalf("%+v", g)
 	}
-	if c := by[f.cli]; c.Actionable || !c.Waiting || c.WaitTarget != "pid 4242" {
-		t.Fatalf("%+v", c)
+	if c := by[f.cli]; c.CanStop || c.CanResume || !c.Waiting || c.WaitTarget != "pid 4242" {
+		t.Fatalf("a CLI goal is view only: %+v", c)
 	}
 }
 
@@ -125,7 +127,7 @@ func TestGoalsDetail(t *testing.T) {
 	f := newGoalsFixture(t)
 	var det GoalDetail
 	f.get(t, "/api/goals/"+f.dash, 200, &det)
-	if !det.Row.Actionable || det.Row.Goal != "Fix the flaky test [REDACTED]" || det.LastVerdict != "continue" ||
+	if !det.Row.CanResume || det.Row.Goal != "Fix the flaky test [REDACTED]" || det.LastVerdict != "continue" ||
 		det.LastReason != "two tests still fail" || det.Verification != "go test ./..." ||
 		!reflect.DeepEqual(det.Subgoals, []string{"no sleeps"}) || strings.Contains(det.StatusLine, "sk-secret") {
 		t.Fatalf("%+v", det)
@@ -141,10 +143,16 @@ func TestGoalsDetail(t *testing.T) {
 		g.LastOutputTail != "token [REDACTED]" || g.TimeoutSeconds != 300 || g.MaxRetries != 3 {
 		t.Fatalf("%+v", g)
 	}
+	if !reflect.DeepEqual(det.SubgoalHashes, []string{"c97edf6d"}) || !reflect.DeepEqual(det.GateHashes, []string{"3d4b424f"}) {
+		t.Fatalf("the hashes of %q and %q: %v %v", "no sleeps", "go vet ./...", det.SubgoalHashes, det.GateHashes)
+	}
 	var wait GoalDetail
 	f.get(t, "/api/goals/"+f.cli, 200, &wait)
-	if wait.WaitingOnPID != 4242 || wait.WaitingReason != "build" || wait.WaitingSince.IsZero() || wait.Row.Actionable {
+	if wait.WaitingOnPID != 4242 || wait.WaitingReason != "build" || wait.WaitingSince.IsZero() || wait.Row.CanStop {
 		t.Fatalf("%+v", wait)
+	}
+	if wait.SubgoalHashes == nil || wait.GateHashes == nil {
+		t.Fatal("empty hash lists are [] and not null")
 	}
 	var e struct {
 		Error string `json:"error"`

@@ -15,6 +15,7 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/acp"
 	"github.com/dnwandana/tether-agent/internal/agent"
+	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/mcp"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
@@ -108,13 +109,44 @@ func TestSystemMCP(t *testing.T) {
 	}}
 	got := systemDecode[[]McpRow](t, systemDo(t, NewSystemAPI(src, systemTasks(t), systemRedact), "GET", "/api/mcp"), 200)
 	want := []McpRow{{Name: "gh", Transport: "stdio", Connected: true, Tools: 2, Classes: map[string]int{"read": 1, "write": 1},
-		LastError: "dial https://x.io/?key=[REDACTED] failed", LastErrorAt: systemT0}}
+		LastError: "dial https://x.io/?key=[REDACTED] failed", LastErrorAt: systemT0,
+		ToolNames: []string{}, Include: []string{}, Exclude: []string{}, Enabled: true}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %+v", got)
 	}
 	rec := systemDo(t, NewSystemAPI(SystemSources{}, systemTasks(t), systemRedact), "GET", "/api/mcp")
 	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Fatal(rec.Code, rec.Body.String())
+	}
+}
+
+// Each row shows the config settings, and a disabled server also shows.
+func TestSystemMCPSettings(t *testing.T) {
+	gh := config.DefaultMCPServer()
+	gh.Command, gh.AlwaysOn, gh.IdleStopMinutes = []string{"gh-mcp"}, true, 0
+	gh.Tools.Include, gh.Tools.Exclude = []string{"search*"}, []string{"delete_repo"}
+	off := config.DefaultMCPServer()
+	off.URL, off.Transport, off.Enabled = "https://mcp.example.com/sse", "sse", false
+	src := SystemSources{
+		MCP: func() []mcp.ServerStatus {
+			return []mcp.ServerStatus{{Name: "gh", Transport: "stdio", Connected: true, Tools: 2,
+				ToolNames: []string{"search", "search_code"}, Classes: map[string]int{"read": 2}}}
+		},
+		MCPConfig: func() map[string]config.MCPServer { return map[string]config.MCPServer{"gh": gh, "zoff": off} },
+	}
+	got := systemDecode[[]McpRow](t, systemDo(t, NewSystemAPI(src, systemTasks(t), systemRedact), "GET", "/api/mcp"), 200)
+	if len(got) != 2 {
+		t.Fatalf("%+v", got)
+	}
+	g, z := got[0], got[1]
+	if g.Name != "gh" || !g.Enabled || !g.AlwaysOn || g.IdleStopMinutes != 0 || g.Tools != 2 ||
+		!reflect.DeepEqual(g.ToolNames, []string{"search", "search_code"}) ||
+		!reflect.DeepEqual(g.Include, []string{"search*"}) || !reflect.DeepEqual(g.Exclude, []string{"delete_repo"}) {
+		t.Fatalf("%+v", g)
+	}
+	if z.Name != "zoff" || z.Enabled || z.Connected || z.Transport != "sse" || z.Tools != 0 || z.IdleStopMinutes != 10 ||
+		z.ToolNames == nil || z.Include == nil || z.Exclude == nil || z.Classes == nil {
+		t.Fatalf("%+v", z)
 	}
 }
 

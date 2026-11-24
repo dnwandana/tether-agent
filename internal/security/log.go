@@ -207,19 +207,45 @@ func scanLogRows(rows *sql.Rows) ([]LogRow, error) {
 	return out, rows.Err()
 }
 
-// ListLogPage returns the rows of scope from offset, newest first, at most limit rows, and
-// the count of all rows of scope. An empty scope means every scope. A nil DB gives nil and 0.
-func (g *Gate) ListLogPage(ctx context.Context, scope string, offset, limit int) ([]LogRow, int, error) {
+// LogFilter narrows a page of the approval log. An empty field matches each row. Query is a
+// text in the preview.
+type LogFilter struct{ Scope, Decision, Source, Query string }
+
+// where returns the WHERE text and the bound values of the filter.
+func (f LogFilter) where() (string, []any) {
+	var conds []string
+	var args []any
+	for _, c := range []struct{ col, val string }{{"scope", f.Scope}, {"decision", f.Decision}, {"source", f.Source}} {
+		if c.val != "" {
+			conds = append(conds, c.col+" = ?")
+			args = append(args, c.val)
+		}
+	}
+	if f.Query != "" {
+		esc := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(f.Query)
+		conds = append(conds, `preview LIKE ? ESCAPE '\'`)
+		args = append(args, "%"+esc+"%")
+	}
+	if len(conds) == 0 {
+		return "", nil
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// ListLogPage returns the rows that match f from offset, newest first, at most limit rows, and
+// the count of all rows that match f. A nil DB gives nil and 0.
+func (g *Gate) ListLogPage(ctx context.Context, f LogFilter, offset, limit int) ([]LogRow, int, error) {
 	if g.DB == nil {
 		return nil, 0, nil
 	}
+	where, args := f.where()
 	var total int
-	if err := g.DB.QueryRowContext(ctx, "SELECT count(*) FROM approval_log WHERE (?='' OR scope=?)", scope, scope).Scan(&total); err != nil {
+	if err := g.DB.QueryRowContext(ctx, "SELECT count(*) FROM approval_log"+where, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("approval log: count the rows: %w", err)
 	}
 	rows, err := g.DB.QueryContext(ctx, `SELECT at, session_id, scope, kind, tool, server, tool_name, rule, class, decision, source,
-		answer, content_sha256, preview FROM approval_log WHERE (?='' OR scope=?)
-		ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`, scope, scope, limit, offset)
+		answer, content_sha256, preview FROM approval_log`+where+`
+		ORDER BY at DESC, id DESC LIMIT ? OFFSET ?`, append(args, limit, offset)...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("approval log: read a page: %w", err)
 	}
@@ -228,6 +254,27 @@ func (g *Gate) ListLogPage(ctx context.Context, scope string, offset, limit int)
 		return nil, 0, fmt.Errorf("approval log: read a page: %w", err)
 	}
 	return out, total, nil
+}
+
+// LogScopes returns the scopes that the approval log holds, in order. A nil DB gives nil.
+func (g *Gate) LogScopes(ctx context.Context) ([]string, error) {
+	if g.DB == nil {
+		return nil, nil
+	}
+	rows, err := g.DB.QueryContext(ctx, "SELECT DISTINCT scope FROM approval_log WHERE scope != '' ORDER BY scope")
+	if err != nil {
+		return nil, fmt.Errorf("approval log: read the scopes: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("approval log: read the scopes: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }
 
 // PruneLog deletes the rows that are older than before. It returns the number of rows.

@@ -169,11 +169,13 @@ func TestChannelServesAndStops(t *testing.T) {
 			t.Fatalf("%s: %d %q", p, resp.StatusCode, b)
 		}
 	}
+	c.hub.addAnswered(AnsweredCard{ID: "a1", Kind: "approval", Header: "✅ Approval allowed · once"})
 	ev := channelStream(t, base, cookie, header)
 	hello := nextEvent(t, ev)
 	var s Snapshot
 	if hello.Name != "hello" || json.Unmarshal(hello.Data, &s) != nil || s.BuildID != BuildID() || s.Status.Model != "m" ||
-		s.Turn != nil || s.SessionID != "" || s.LastMessageID != 0 {
+		s.Turn != nil || s.SessionID != "" || s.LastMessageID != 0 ||
+		len(s.Answered) != 1 || s.Answered[0].ID != "a1" {
 		t.Fatalf("%s %s", hello.Name, hello.Data)
 	}
 	c.NewRenderer("r1").Ack("hi")
@@ -489,4 +491,38 @@ func TestChannelQueueRedacts(t *testing.T) {
 		defer h.ch.turn.mu.Unlock()
 		return len(h.ch.turn.queue) == 1 && h.ch.turn.queue[0].Preview == "pw «PW»"
 	})
+}
+
+// A change of the entry with the same model name is a change of the session view.
+func TestSameSessionViewEntry(t *testing.T) {
+	a := SessionView{ID: "s1", Title: "Notes", Model: "glm-4.7", Entry: "primary"}
+	b := a
+	if !sameSessionView(a, b) {
+		t.Fatal("equal views must be the same")
+	}
+	b.Entry = "backup"
+	if sameSessionView(a, b) {
+		t.Fatal("a new entry must send a session event")
+	}
+}
+
+// PublishRestart sends the drain progress as a restart event. After the hub closes, it
+// sends nothing and does not panic.
+func TestPublishRestart(t *testing.T) {
+	c, err := NewChannel(testDeps(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev, _ := sseClient(t, c.Hub(), func() Snapshot { return Snapshot{} })
+	if e := nextEvent(t, ev); e.Name != "hello" {
+		t.Fatal(e.Name)
+	}
+	c.PublishRestart(RestartProgress{Reason: "stopping", ElapsedS: 4, DrainS: 180, Turns: 2, Goals: 1})
+	e := nextEvent(t, ev)
+	want := `{"reason":"stopping","elapsed_s":4,"drain_s":180,"turns":2,"goals":1}`
+	if e.Name != "restart" || string(e.Data) != want {
+		t.Fatalf("%s %s", e.Name, e.Data)
+	}
+	c.Hub().Close()
+	c.PublishRestart(RestartProgress{Reason: "stopping"})
 }
