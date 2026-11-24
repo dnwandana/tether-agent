@@ -51,6 +51,10 @@ type Deps struct {
 	// Redact masks the secrets in a text before the judge prompt gets it. Nil sends the text
 	// as it is.
 	Redact func(string) string
+	// Changed runs after each goal write with the new status: an Update, the write of the
+	// after-turn step, and a Delete (status ""). A read does not call it. The app sets it to
+	// send the dashboard event. Nil does nothing.
+	Changed func(sessionID, status string)
 	// InGateway and SudoPasswordSet feed the gate check before each run, as they feed the
 	// approval gate.
 	InGateway       bool
@@ -159,7 +163,15 @@ func (m *Manager) Update(ctx context.Context, sessionID string, f func(st *State
 			return State{}, err
 		}
 		m.remember(sessionID, st, newRev)
+		m.changed(sessionID, st.Status)
 		return st, nil
+	}
+}
+
+// changed calls the Changed hook after a goal write. Nil does nothing.
+func (m *Manager) changed(sessionID, status string) {
+	if m.d.Changed != nil {
+		m.d.Changed(sessionID, status)
 	}
 }
 
@@ -169,6 +181,7 @@ func (m *Manager) Delete(ctx context.Context, sessionID string) error {
 		return err
 	}
 	m.forget(sessionID)
+	m.changed(sessionID, "")
 	return nil
 }
 

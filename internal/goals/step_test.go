@@ -658,3 +658,14 @@ func TestStepRetryDelayFromDeps(t *testing.T) {
 		t.Fatalf("the retry waits the deps value: %+v", res)
 	}
 }
+
+// The judge verdict of the after-turn step is a goal write, so it calls Changed.
+func TestStepChangedAfterTheVerdict(t *testing.T) {
+	f := newStepFix(t, stepState("ship it", 1), `{"verdict":"done","reason":"all pass"}`)
+	var got []string
+	f.m.d.Changed = func(sessionID, status string) { got = append(got, sessionID+" "+status) }
+	f.step("all pass")
+	if len(got) != 1 || got[0] != f.sess.ID+" done" {
+		t.Fatalf("%q", got)
+	}
+}

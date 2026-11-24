@@ -1,6 +1,9 @@
 package goals
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestParseCommandVerbs(t *testing.T) {
 	cases := []struct {
@@ -76,8 +79,9 @@ func TestParseCommandWait(t *testing.T) {
 }
 
 func TestParseCommandGate(t *testing.T) {
-	const usage = "Usage: /goal gate [list | add <command> | remove <N> | clear]"
+	const usage = "Usage: /goal gate [list | add <command> | remove <N> [<hash8>] | clear]"
 	const notInt = "/goal gate remove: <N> must be an integer (1-based index)."
+	const badHash = "/goal gate remove: <hash8> must be 8 lowercase hex characters."
 	cases := []struct {
 		in   string
 		want Command
@@ -95,6 +99,12 @@ func TestParseCommandGate(t *testing.T) {
 		{"gate run make", Command{Verb: VerbGate, Usage: usage}},
 		{"gate remove x", Command{Verb: VerbGate, Usage: notInt}},
 		{"gate ok x", Command{Verb: VerbGate, Usage: usage}},
+		{"gate remove 2 22cc66aa", Command{Verb: VerbGate, GateOp: "remove", GateIndex: 2, GateHash: "22cc66aa"}},
+		{"gate rm 1 22cc66aa", Command{Verb: VerbGate, GateOp: "remove", GateIndex: 1, GateHash: "22cc66aa"}},
+		{"gate remove 2 22CC66AA", Command{Verb: VerbGate, Usage: badHash}},
+		{"gate remove 2 22cc66", Command{Verb: VerbGate, Usage: badHash}},
+		{"gate remove 2 22cc66aa extra", Command{Verb: VerbGate, Usage: badHash}},
+		{"gate ok 3 22cc66aa", Command{Verb: VerbGate, Usage: usage}},
 	}
 	for _, tc := range cases {
 		if got := ParseCommand(tc.in); got != tc.want {
@@ -111,8 +121,10 @@ func TestParseSubgoal(t *testing.T) {
 		{"", SubgoalCommand{Op: "list"}},
 		{"no sleeps in the test", SubgoalCommand{Op: "add", Text: "no sleeps in the test"}},
 		{"remove 2", SubgoalCommand{Op: "remove", Index: 2}},
-		{"REMOVE 2 extra", SubgoalCommand{Op: "remove", Index: 2}},
-		{"remove", SubgoalCommand{Op: "remove", Usage: "Usage: /subgoal remove <n>"}},
+		{"remove 2 50d49ae8", SubgoalCommand{Op: "remove", Index: 2, Hash: "50d49ae8"}},
+		{"REMOVE 2 extra", SubgoalCommand{Op: "remove", Usage: "/subgoal remove: <hash8> must be 8 lowercase hex characters."}},
+		{"remove 2 DEADBEEF", SubgoalCommand{Op: "remove", Usage: "/subgoal remove: <hash8> must be 8 lowercase hex characters."}},
+		{"remove", SubgoalCommand{Op: "remove", Usage: "Usage: /subgoal remove <n> [<hash8>]"}},
 		{"remove two", SubgoalCommand{Op: "remove", Usage: "/subgoal remove: <n> must be an integer (1-based index)."}},
 		{"clear", SubgoalCommand{Op: "clear"}},
 	}
@@ -120,5 +132,59 @@ func TestParseSubgoal(t *testing.T) {
 		if got := ParseSubgoal(tc.in); got != tc.want {
 			t.Errorf("%q: %+v, want %+v", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestStripSessionFlag(t *testing.T) {
+	const id = "0123456789abcdef012"
+	cases := []struct {
+		in, rest, id string
+		err          bool
+	}{
+		{"pause --session " + id, "pause", id, false},
+		{"clear --session " + id, "clear", id, false},
+		{"gate clear --session " + id, "gate clear", id, false},
+		{"gate remove 2 ab12cd34 --session " + id, "gate remove 2 ab12cd34", id, false},
+		{"gate rm 2 ab12cd34 --session " + id, "gate rm 2 ab12cd34", id, false},
+		{"remove 2 ab12cd34 --session " + id, "remove 2 ab12cd34", id, false},
+		{"pause", "pause", "", false},
+		// A goal text, a draft, an add, and a text after -- keep the flag as text.
+		{"ship it --session " + id, "ship it --session " + id, "", false},
+		{"-- clear --session " + id, "-- clear --session " + id, "", false},
+		{"draft clear --session " + id, "draft clear --session " + id, "", false},
+		{"gate add go test --session " + id, "gate add go test --session " + id, "", false},
+		{"wait 42 --session " + id, "wait 42 --session " + id, "", false},
+		// A verb that takes the flag with a bad value is a usage error.
+		{"clear --session xyz", "clear --session xyz", "", true},
+		{"pause --session " + id + " now", "pause --session " + id + " now", "", true},
+		{"clear --session", "clear --session", "", true},
+	}
+	for _, tc := range cases {
+		rest, sid, err := StripSessionFlag(tc.in)
+		if rest != tc.rest || sid != tc.id || (err != nil) != tc.err {
+			t.Errorf("%q: %q %q %v", tc.in, rest, sid, err)
+		}
+		if tc.err && !errors.Is(err, ErrSessionFlag) {
+			t.Errorf("%q: the error is not ErrSessionFlag: %v", tc.in, err)
+		}
+	}
+}
+
+// The rest of each form parses to the verb that takes the flag.
+func TestParseAfterStripSessionFlag(t *testing.T) {
+	const id = "0123456789abcdef012"
+	for in, want := range map[string]Command{
+		"pause --session " + id:      {Verb: VerbPause},
+		"clear --session " + id:      {Verb: VerbClear},
+		"gate clear --session " + id: {Verb: VerbGate, GateOp: "clear"},
+	} {
+		rest, _, err := StripSessionFlag(in)
+		if got := ParseCommand(rest); err != nil || got != want {
+			t.Errorf("%q: %+v %v", in, got, err)
+		}
+	}
+	rest, _, _ := StripSessionFlag("clear --session " + id)
+	if sc := ParseSubgoal(rest); sc.Op != "clear" {
+		t.Errorf("%+v", sc)
 	}
 }

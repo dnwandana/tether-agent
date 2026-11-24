@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -286,5 +287,46 @@ func TestManagerWaitEnvBarrierLimit(t *testing.T) {
 	m = NewManager(Deps{Cfg: func() config.GoalsConfig { return config.GoalsConfig{} }})
 	if got := m.WaitEnv("k").BarrierLimit(); got != MaxBarrierWait {
 		t.Fatal("0 keeps the const:", got)
+	}
+}
+
+// changes records each Changed call.
+type changes struct{ got []string }
+
+func (c *changes) hook(sessionID, status string) { c.got = append(c.got, sessionID+" "+status) }
+
+// Changed runs after each write of Update and after Delete. A read, a failed f, and a
+// delete error do not call it.
+func TestManagerChangedAfterEachWrite(t *testing.T) {
+	ctx := context.Background()
+	ch := &changes{}
+	m, _, sess := mgrFix(t, Deps{Changed: ch.hook})
+	mgrSet(t, m, sess.ID, func(s *State) { *s = mgrState("ship it") })
+	mgrSet(t, m, sess.ID, func(s *State) { s.SetStatus(StatusPaused, "paused by the user") })
+	if _, _, err := m.Load(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Active(ctx); err != nil {
+		t.Fatal(err)
+	}
+	boom := errors.New("no goal")
+	if _, err := m.Update(ctx, sess.ID, func(*State, bool) error { return boom }); !errors.Is(err, boom) {
+		t.Fatal(err)
+	}
+	if err := m.Delete(ctx, sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{sess.ID + " active", sess.ID + " paused", sess.ID + " "}
+	if !reflect.DeepEqual(ch.got, want) {
+		t.Fatalf("got %q, want %q", ch.got, want)
+	}
+}
+
+// A nil Changed does nothing.
+func TestManagerChangedNil(t *testing.T) {
+	m, _, sess := mgrFix(t, Deps{})
+	mgrSet(t, m, sess.ID, func(s *State) { *s = mgrState("ship it") })
+	if err := m.Delete(context.Background(), sess.ID); err != nil {
+		t.Fatal(err)
 	}
 }

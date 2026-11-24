@@ -270,6 +270,7 @@ func (m *Manager) writeStep(ctx context.Context, sid string, st State, rev int64
 		newRev, err := m.d.Store.Put(ctx, sid, st, rev)
 		if err == nil {
 			m.remember(sid, st, newRev)
+			m.changed(sid, st.Status)
 			return res
 		}
 		if !errors.Is(err, ErrConflict) {

@@ -1,6 +1,7 @@
 package goals
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 	"unicode"
@@ -30,6 +31,7 @@ type Command struct {
 	GateOp    string // list, add, remove, clear, ok, or no
 	GateArg   string
 	GateIndex int
+	GateHash  string // the <hash8> of a gate remove, or ""
 	Ignored   string // the extra words after a bare control verb
 	Usage     string // a usage error text, or ""
 }
@@ -41,10 +43,12 @@ const (
 	usageDraft        = "Usage: /goal draft <objective in plain language>"
 	usageWait         = "Usage: /goal wait <pid> [reason]"
 	usageWaitPID      = "/goal wait: <pid> must be an integer process id."
-	usageGate         = "Usage: /goal gate [list | add <command> | remove <N> | clear]"
+	usageGate         = "Usage: /goal gate [list | add <command> | remove <N> [<hash8>] | clear]"
 	usageGateIndex    = "/goal gate remove: <N> must be an integer (1-based index)."
-	usageSubgoalRm    = "Usage: /subgoal remove <n>"
+	usageGateHash     = "/goal gate remove: <hash8> must be 8 lowercase hex characters."
+	usageSubgoalRm    = "Usage: /subgoal remove <n> [<hash8>]"
 	usageSubgoalIndex = "/subgoal remove: <n> must be an integer (1-based index)."
+	usageSubgoalHash  = "/subgoal remove: <hash8> must be 8 lowercase hex characters."
 )
 
 // exactVerbs maps a whole command text to its verb, like the Hermes
@@ -86,6 +90,81 @@ func splitFirst(s string) (first, rest string) {
 		return s, ""
 	}
 	return s[:i], strings.TrimSpace(s[i:])
+}
+
+// ErrSessionFlag is the usage error of a --session flag with no valid session id.
+//
+//lint:ignore ST1005 The reply shows this text to the user as it is.
+var ErrSessionFlag = errors.New("Usage: --session <id>. The id is a session id with 19 hex characters.")
+
+// sessionFlagForm reports whether words (the words before a --session flag) are a verb
+// that takes the flag.
+func sessionFlagForm(words []string) bool {
+	lower := make([]string, len(words))
+	for i, w := range words {
+		lower[i] = strings.ToLower(w)
+	}
+	isNum := func(w string) bool {
+		if w == "" {
+			return false
+		}
+		for _, r := range w {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	removeTail := func(w []string) bool {
+		return (len(w) == 2 || len(w) == 3) && isNum(w[1]) && (w[0] == "remove" || w[0] == "rm")
+	}
+	switch {
+	case len(lower) == 1 && (lower[0] == "pause" || lower[0] == "clear"):
+		return true
+	case len(lower) == 2 && lower[0] == "gate" && lower[1] == "clear":
+		return true
+	case len(lower) >= 3 && lower[0] == "gate":
+		return removeTail(lower[1:])
+	case len(lower) >= 2:
+		return removeTail(lower)
+	}
+	return false
+}
+
+func isSessionID(s string) bool {
+	if len(s) != 19 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// StripSessionFlag takes the --session flag out of the args of /goal or /subgoal. It reads
+// the flag only at the end of a pause, a clear, or a remove, never in a goal text and
+// never after --.
+func StripSessionFlag(args string) (rest string, sessionID string, err error) {
+	words := strings.Fields(args)
+	if len(words) == 0 || words[0] == "--" {
+		return args, "", nil
+	}
+	at := -1
+	for i, w := range words {
+		if w == "--session" {
+			at = i
+			break
+		}
+	}
+	if at < 0 || !sessionFlagForm(words[:at]) {
+		return args, "", nil
+	}
+	if len(words) != at+2 || !isSessionID(words[at+1]) {
+		return args, "", ErrSessionFlag
+	}
+	return strings.Join(words[:at], " "), words[at+1], nil
 }
 
 // ParseCommand parses the text after /goal in the order of the Hermes
@@ -154,6 +233,17 @@ func parseGate(rest string) Command {
 	case "clear":
 		return Command{Verb: VerbGate, GateOp: op}
 	}
+	hash := ""
+	if op == "remove" {
+		var extra string
+		arg, extra = splitFirst(arg)
+		if extra != "" {
+			if !isHash8(extra) {
+				return Command{Verb: VerbGate, Usage: usageGateHash}
+			}
+			hash = extra
+		}
+	}
 	n, err := strconv.Atoi(arg)
 	if err != nil {
 		if op == "remove" {
@@ -161,7 +251,20 @@ func parseGate(rest string) Command {
 		}
 		return Command{Verb: VerbGate, Usage: usageGate}
 	}
-	return Command{Verb: VerbGate, GateOp: op, GateIndex: n}
+	return Command{Verb: VerbGate, GateOp: op, GateIndex: n, GateHash: hash}
+}
+
+// isHash8 reports whether s is exactly 8 lowercase hex characters.
+func isHash8(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // IgnoredNote returns the Hermes note for the extra words after a bare
@@ -208,6 +311,7 @@ type SubgoalCommand struct {
 	Op    string
 	Text  string
 	Index int
+	Hash  string // the <hash8> of a remove, or ""
 	Usage string // a usage error text, or ""
 }
 
@@ -224,12 +328,18 @@ func ParseSubgoal(args string) SubgoalCommand {
 		if rest == "" {
 			return SubgoalCommand{Op: "remove", Usage: usageSubgoalRm}
 		}
-		word, _ := splitFirst(rest)
+		word, more := splitFirst(rest)
 		n, err := strconv.Atoi(word)
 		if err != nil {
 			return SubgoalCommand{Op: "remove", Usage: usageSubgoalIndex}
 		}
-		return SubgoalCommand{Op: "remove", Index: n}
+		// A word after <n> must be the hash of the item. A bad hash never removes by index
+		// alone, because the hash guards the remove against a changed list.
+		hash, _ := splitFirst(more)
+		if hash != "" && !isHash8(hash) {
+			return SubgoalCommand{Op: "remove", Usage: usageSubgoalHash}
+		}
+		return SubgoalCommand{Op: "remove", Index: n, Hash: hash}
 	case "clear":
 		return SubgoalCommand{Op: "clear"}
 	}
