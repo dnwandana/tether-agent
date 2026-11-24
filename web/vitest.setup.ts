@@ -2,7 +2,8 @@ import { cleanup } from "@testing-library/vue"
 import { afterEach } from "vitest"
 
 // Node 25 and later have a global localStorage. Without --localstorage-file it is undefined, and
-// it hides the localStorage of jsdom. This file puts a memory Storage in its place for the tests.
+// it hides the localStorage of jsdom. This file puts a memory Storage in its place for the tests,
+// on each Node version.
 
 class MemoryStorage implements Storage {
   private items = new Map<string, string>()
@@ -32,31 +33,15 @@ class MemoryStorage implements Storage {
   }
 }
 
-function usable(s: Storage | undefined): boolean {
-  try {
-    if (!s) return false
-    s.setItem("__tether_probe", "1")
-    s.removeItem("__tether_probe")
-    return true
-  } catch {
-    return false
-  }
-}
-
+// The memory Storage is also used when jsdom has a usable Storage (Node 24). The jsdom Storage
+// turns a property set into a stored item, so vi.spyOn(localStorage, "setItem") sees no call.
+// One Storage class gives the same tests on each Node version.
 for (const name of ["localStorage", "sessionStorage"] as const) {
-  let current: Storage | undefined
-  try {
-    current = globalThis[name]
-  } catch {
-    current = undefined
-  }
-  if (!usable(current)) {
-    Object.defineProperty(globalThis, name, {
-      value: new MemoryStorage(),
-      configurable: true,
-      writable: true,
-    })
-  }
+  Object.defineProperty(globalThis, name, {
+    value: new MemoryStorage(),
+    configurable: true,
+    writable: true,
+  })
 }
 
 // The files with "@vitest-environment node" also load this setup. They have no window.
