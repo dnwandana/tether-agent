@@ -6,6 +6,10 @@ docs/superpowers/
 skills-lock.json
 CLAUDE.local.md
 
+# Browser tools
+.playwright-cli/
+.playwright-mcp/
+
 # Build output
 /bin/
 /dist/
@@ -13,7 +17,7 @@ CLAUDE.local.md
 /tether
 
 # The npm packages and the Vitest coverage output of the web dashboard.
-web/node_modules/
+node_modules/
 web/coverage/
 # The built page of the web dashboard. make web writes it, and the binary embeds it. Git keeps
 # only the placeholder, so the Go build works before make web runs.
