@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import type { CostView } from "../../api/types.gen"
+import { duration } from "../../lib/time"
 
 const props = defineProps<{ cost: CostView }>()
 
@@ -9,13 +10,6 @@ function tokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M"
   if (n >= 1000) return (n / 1000).toFixed(1) + "k"
   return String(n)
-}
-
-// Returns the time of a turn as "38 s" or "2 m 5 s".
-function duration(s: number): string {
-  const total = Math.round(s)
-  if (total < 60) return `${total} s`
-  return `${Math.floor(total / 60)} m ${total % 60} s`
 }
 
 const model = computed(() =>

@@ -40,6 +40,45 @@ describe("DataTable", () => {
     expect(w.find(".nm").text()).toBe("nightly-backup (j1)")
   })
 
+  it("prints nothing when a cell slot renders only comments", () => {
+    const w = mount(DataTable, {
+      props: {
+        columns: [
+          { key: "name", label: "Skill" },
+          { key: "tags", label: "Tags" },
+          { key: "n", label: "Uses", align: "right" as const },
+        ],
+        rows: [{ id: "k1", name: "deploy", tags: [], n: 7 }],
+        rowKey: "id",
+      },
+      slots: {
+        "cell-tags": '<template #cell-tags><button v-if="false">Add</button></template>',
+        "cell-n": '<template #cell-n><button v-if="false">Reset</button></template>',
+      },
+    })
+    const cells = w.findAll("tbody tr")[0].findAll("td")
+    expect(cells.map((c) => c.text())).toEqual(["deploy", "", ""])
+  })
+
+  it("prints only a string or a number when the column has no slot", () => {
+    const w = mount(DataTable, {
+      props: {
+        columns: [
+          { key: "s", label: "S" },
+          { key: "zero", label: "Zero" },
+          { key: "list", label: "List" },
+          { key: "obj", label: "Obj" },
+          { key: "none", label: "None" },
+          { key: "missing", label: "Missing" },
+        ],
+        rows: [{ id: "r1", s: "text", zero: 0, list: ["a", "b"], obj: { a: 1 }, none: null }],
+        rowKey: "id",
+      },
+    })
+    const cells = w.findAll("tbody tr")[0].findAll("td")
+    expect(cells.map((c) => c.text())).toEqual(["text", "0", "", "", "", ""])
+  })
+
   it("emits row-click with the row", async () => {
     const w = mount(DataTable, { props: { columns, rows, rowKey: "id" } })
     await w.findAll("tbody tr")[1].trigger("click")

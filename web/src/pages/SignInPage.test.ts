@@ -59,6 +59,21 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe("SignInPage", () => {
+  it("shows the brand mark before the name on the card", async () => {
+    const { w } = await mk()
+    const brand = w.find(".card-b .row")
+    expect(brand.element.firstElementChild?.classList.contains("rail-mark")).toBe(true)
+    expect(brand.find(".rail-mark").attributes("aria-hidden")).toBe("true")
+    expect(brand.find(".rail-mark svg path").attributes("d")).toBe(
+      "M6.24 7.2H17.76M12 7.2v6.72c0 3.84 3.84 4.56 5.28 1.92",
+    )
+    const dot = brand.find(".rail-mark svg circle")
+    expect(dot.attributes("cx")).toBe("17.28")
+    expect(dot.attributes("cy")).toBe("15.84")
+    expect(dot.attributes("r")).toBe("1.56")
+    expect(brand.text()).toBe("Tether")
+  })
+
   it("requests access with the device label and signs in after Allow", async () => {
     vi.mocked(api)
       .mockResolvedValueOnce({ id: "r1", code: "4821", expires: "2026-11-20T10:05:00Z" })

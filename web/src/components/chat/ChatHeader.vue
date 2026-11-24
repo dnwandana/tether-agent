@@ -16,6 +16,8 @@ const titleInput = ref<HTMLInputElement | null>(null)
 const pop = ref<"menu" | null>(null)
 const promptOpen = ref(false)
 const promptText = ref("")
+const chatH = ref<HTMLElement | null>(null)
+const popLeft = ref(16)
 
 // An action runs as a typed command. The reply popover and the confirm dialog come from useCommand.
 const { run, reply, closeReply } = useCommand()
@@ -31,6 +33,18 @@ const modelLabel = computed(() =>
 function closePop(): void {
   pop.value = null
   closeReply()
+}
+
+// Puts the reply popover under the chip that the user clicked. The popover stays inside
+// the header: 8 px from each side, and at most 420 px wide.
+function chipRun(e: MouseEvent, text: string): void {
+  const box = chatH.value?.getBoundingClientRect()
+  const chip = (e.currentTarget as HTMLElement | null)?.getBoundingClientRect()
+  if (box && chip) {
+    const width = Math.min(420, box.width - 16)
+    popLeft.value = Math.max(8, Math.min(chip.left - box.left, box.width - width - 8))
+  }
+  void run(text)
 }
 
 function html(src: string): string {
@@ -135,7 +149,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="chat-h" style="position: relative">
+  <div ref="chatH" class="chat-h" style="position: relative">
     <input
       v-if="editing"
       ref="titleInput"
@@ -158,8 +172,10 @@ onUnmounted(() => {
       {{ session.title || "New session" }}
     </button>
     <div class="chips">
-      <button type="button" class="chip" @click="run('/model')">model {{ modelLabel }} ▾</button>
-      <button type="button" class="chip" @click="run('/effort')">
+      <button type="button" class="chip" @click="chipRun($event, '/model')">
+        model {{ modelLabel }} ▾
+      </button>
+      <button type="button" class="chip" @click="chipRun($event, '/effort')">
         effort {{ session.effort || "default" }} ▾
       </button>
       <span v-if="session.context" class="ctx">
@@ -179,38 +195,41 @@ onUnmounted(() => {
             }"
           />
         </span>
-        <button type="button" class="btn btn-ghost btn-sm" @click="run('/compact')">Compact</button>
+        <button type="button" class="btn btn-ghost btn-sm hide-phone" @click="run('/compact')">
+          Compact
+        </button>
       </span>
       <button v-if="session.goalLine !== ''" type="button" class="chip chip-acc" @click="openGoal">
         {{ session.goalLine }}
       </button>
     </div>
-    <span class="grow" />
-    <a
-      class="help-link"
-      href="https://github.com/dnwandana/tether-agent/wiki/Dashboard#pages"
-      target="_blank"
-      rel="noreferrer"
-      title="docs/wiki/Dashboard.md#pages"
-      aria-label="Help for the pages: docs/wiki/Dashboard.md#pages"
-      >?</a
-    >
-    <button
-      type="button"
-      class="btn btn-ghost btn-icon"
-      aria-label="Session menu"
-      data-pop
-      @click="togglePop('menu')"
-    >
-      ⋯
-    </button>
-    <button
-      type="button"
-      class="btn btn-ghost btn-sm aside-toggle hide-phone"
-      @click="emit('toggle-details')"
-    >
-      Details
-    </button>
+    <div class="chat-h-end">
+      <a
+        class="help-link"
+        href="https://github.com/dnwandana/tether-agent/wiki/Dashboard#pages"
+        target="_blank"
+        rel="noreferrer"
+        title="docs/wiki/Dashboard.md#pages"
+        aria-label="Help for the pages: docs/wiki/Dashboard.md#pages"
+        >?</a
+      >
+      <button
+        type="button"
+        class="btn btn-ghost btn-icon"
+        aria-label="Session menu"
+        data-pop
+        @click="togglePop('menu')"
+      >
+        ⋯
+      </button>
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm aside-toggle hide-phone"
+        @click="emit('toggle-details')"
+      >
+        Details
+      </button>
+    </div>
 
     <div
       v-if="pop === 'menu'"
@@ -224,6 +243,14 @@ onUnmounted(() => {
         <button type="button" class="menu-item" @click="exportSession">Export JSONL</button>
       </template>
       <button type="button" class="menu-item" @click="openPrompt">Custom prompt…</button>
+      <button
+        v-if="session.context"
+        type="button"
+        class="menu-item only-phone"
+        @click="menuAct('/compact')"
+      >
+        Compact
+      </button>
       <template v-if="session.id !== ''">
         <div class="menu-sep" />
         <button type="button" class="menu-item danger" @click="menuAct('/delete ' + session.id)">
@@ -235,12 +262,12 @@ onUnmounted(() => {
       v-if="reply"
       class="popover"
       data-pop
+      :style="{ left: popLeft + 'px' }"
       style="
         position: absolute;
-        left: 16px;
         top: 100%;
         z-index: 55;
-        max-width: min(420px, calc(100vw - 32px));
+        max-width: min(420px, calc(100% - 16px));
         padding: 12px;
         display: flex;
         flex-direction: column;
@@ -283,18 +310,6 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.help-link {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 32px;
-  min-height: 32px;
-  color: var(--text-3);
-  text-decoration: none;
-}
-.help-link:hover {
-  color: var(--text);
-}
 .ctx .meter {
   position: relative;
   overflow: visible;

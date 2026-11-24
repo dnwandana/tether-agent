@@ -47,6 +47,7 @@ import StatusBar from "./StatusBar.vue"
 import { status } from "../stores/status"
 import { cards } from "../stores/cards"
 import { prefs, setTheme, ui } from "../stores/ui"
+import { ICON } from "../lib/icons"
 
 const card = (id: string) => ({
   id,
@@ -129,6 +130,45 @@ describe("StatusBar", () => {
     expect(document.title).toBe("Tether Agent Dashboard")
   })
 
+  it("keeps the offline item, Commands, and the theme menu out of the scroll box", async () => {
+    Object.assign(status, { stream: "reconnecting", offlineSince: Date.now() })
+    const { w } = await mountBar()
+    const top = [...w.find(".statusbar").element.children].map((e) => e.className)
+    expect(top).toEqual(["sb-scroll", "sb-fixed"])
+    const scroll = w.find(".statusbar > .sb-scroll")
+    expect(scroll.findAll(".sb-item").map((b) => b.attributes("data-act"))).toEqual([
+      "models",
+      "security",
+      "tray",
+      "system",
+      "usage",
+    ])
+    const fixed = w.find(".statusbar > .sb-fixed")
+    const kids = [...fixed.element.children].map((e) => e.getAttribute("data-act") ?? e.className)
+    expect(kids).toEqual(["offline", "palette", "sb-menu-wrap"])
+    expect(scroll.find(".sb-menu-wrap").exists()).toBe(false)
+    expect(scroll.find('[data-act="offline"]').exists()).toBe(false)
+    expect(w.find(".sb-spacer").exists()).toBe(false)
+    expect(fixed.find('[aria-label="Theme and alerts"]').exists()).toBe(true)
+  })
+
+  it("has the short spend form and hides the entry on a phone only", async () => {
+    Object.assign(status, { unpriced: true })
+    const { w } = await mountBar()
+    const spend = w.find('[data-act="usage"]')
+    expect(spend.attributes("aria-label")).toBe("Spend 24 h $1.84+")
+    expect(spend.attributes("title")).toBe("Spend 24 h $1.84+")
+    expect(spend.find(".hide-phone").text()).toBe("Spend 24 h")
+    expect(spend.find("b.mono").text()).toBe("$1.84+")
+    const model = w.find('[data-act="models"]')
+    expect(model.find("b.sb-model").text()).toBe("glm-4.6")
+    const entry = model.find(".c-3")
+    expect(entry.text()).toBe("primary")
+    expect(entry.classes()).toContain("hide-phone")
+    expect(entry.classes()).not.toContain("sb-hide")
+    expect(w.find('[data-act="palette"]').classes()).toContain("hide-phone")
+  })
+
   it("opens the tray and goes to the pages", async () => {
     const { w, router } = await mountBar()
     await w.find('[data-act="tray"]').trigger("click")
@@ -177,26 +217,40 @@ describe("StatusBar", () => {
     expect(w.find('[data-act="system"] .sb-hide').exists()).toBe(false)
   })
 
-  it("sets the theme from the 🎨 menu", async () => {
+  it("sets the theme from the theme menu", async () => {
     setTheme("dark")
     const { w } = await mountBar()
-    await w.find('[aria-label="Theme and alerts"]').trigger("click")
-    const items = () => w.findAll(".menu .menu-item").map((b) => b.text())
-    expect(items()).toEqual([
+    const button = w.find('[aria-label="Theme and alerts"]')
+    expect(button.find("path").attributes("d")).toBe(ICON.theme)
+    expect(button.text()).toBe("")
+    await button.trigger("click")
+    const rows = () => w.findAll(".menu .menu-item")
+    expect(rows().map((b) => b.find(".grow").text())).toEqual([
       "System (now dark)",
-      "✓ 🌙 Dark",
-      "☀️ Light",
-      "🔔 Sound on a new card: On",
+      "Dark",
+      "Light",
+      "Sound on a new card: On",
     ])
-    await w.findAll(".menu .menu-item")[2].trigger("click")
+    expect(rows().map((b) => b.find("path").attributes("d"))).toEqual([
+      ICON.monitor,
+      ICON.moon,
+      ICON.sun,
+      ICON.bell,
+    ])
+    expect(w.find(".menu").text()).not.toMatch(/🎨|🌙|☀️|🔔/)
+    expect(rows()[1].element.lastElementChild?.textContent).toBe("✓")
+    expect(rows()[1].find(".r").attributes("aria-hidden")).toBe("true")
+    expect(rows()[0].find(".r").exists()).toBe(false)
+    await rows()[2].trigger("click")
     expect(prefs.theme).toBe("light")
     expect(document.documentElement.classList.contains("theme-light")).toBe(true)
     await w.find('[aria-label="Theme and alerts"]').trigger("click")
-    await w.findAll(".menu .menu-item")[0].trigger("click")
+    await rows()[0].trigger("click")
     expect(prefs.theme).toBe("system")
     await w.find('[aria-label="Theme and alerts"]').trigger("click")
-    expect(items()[0]).toBe("✓ System (now dark)")
-    await w.findAll(".menu .menu-item")[3].trigger("click")
+    expect(rows()[0].find(".r").text()).toBe("✓")
+    expect(rows()[0].attributes("aria-checked")).toBe("true")
+    await rows()[3].trigger("click")
     expect(prefs.sound).toBe(false)
   })
 
@@ -341,11 +395,12 @@ describe("StatusBar", () => {
     vi.stubGlobal("matchMedia", () => mql)
     const { w } = await mountBar()
     await w.find('[aria-label="Theme and alerts"]').trigger("click")
-    expect(w.findAll(".menu .menu-item")[0].text()).toBe("✓ System (now dark)")
+    expect(w.findAll(".menu .menu-item")[0].find(".grow").text()).toBe("System (now dark)")
+    expect(w.findAll(".menu .menu-item")[0].find(".r").text()).toBe("✓")
     mql.matches = true
     cb!()
     await flushPromises()
-    expect(w.findAll(".menu .menu-item")[0].text()).toBe("✓ System (now light)")
+    expect(w.findAll(".menu .menu-item")[0].find(".grow").text()).toBe("System (now light)")
     w.unmount()
     expect(mql.removeEventListener).toHaveBeenCalled()
   })

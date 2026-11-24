@@ -509,8 +509,8 @@ button.chip:hover {
   font-size: 15px;
 }
 .rail-mark {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border-radius: 6px;
   background: var(--text);
   display: inline-flex;
@@ -519,8 +519,8 @@ button.chip:hover {
   color: var(--bg);
 }
 .rail-mark svg {
-  width: 14px;
-  height: 14px;
+  width: 24px;
+  height: 24px;
 }
 .rail-search {
   display: flex;
@@ -545,8 +545,8 @@ button.chip:hover {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 34px;
-  padding: 0 10px;
+  min-height: 34px;
+  padding: 4px 10px;
   border-radius: var(--r-sm);
   color: var(--text-2);
   font-size: var(--fs-13);
@@ -637,9 +637,6 @@ button.chip:hover {
 }
 .sb-full b {
   color: var(--danger);
-}
-.sb-spacer {
-  flex: 1 1 auto;
 }
 
 /* phone */
@@ -869,6 +866,7 @@ button.chip:hover {
   }
 }
 .spin {
+  display: inline-block;
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -2151,14 +2149,45 @@ mark,
   background: var(--border);
 }
 
+/* The status items scroll in their own box. The bar does not scroll, so the theme menu can
+   open below it, and the fixed group stays on screen. */
 .statusbar {
   flex: none;
   flex-wrap: nowrap;
+}
+.sb-scroll {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
+  /* The padding keeps the focus outline of each item inside the clip box. */
+  padding-block: 4px;
+  margin-block: -4px;
+  padding-inline: 4px;
+  margin-inline: -4px;
 }
-.statusbar::-webkit-scrollbar {
+.sb-scroll::-webkit-scrollbar {
   display: none;
+}
+.sb-fixed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.sb-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (max-width: 599px) {
+  .sb-model {
+    max-width: 14ch;
+  }
 }
 .shell {
   flex: 1 1 auto;
@@ -2584,6 +2613,9 @@ textarea.input {
   height: 100%;
   justify-content: flex-start;
   cursor: default;
+  padding: 0;
+  border: 0;
+  background: none;
 }
 .sbar i {
   display: block;
@@ -2634,12 +2666,21 @@ textarea.input {
   font-size: var(--fs-12);
   color: var(--text-3);
 }
+/* Each span is one bar wide, and a label is wider than a bar. The label step leaves the slots
+   next to a label empty, so the label grows into them. The first and the last label grow
+   inward, so no label goes outside the axis. */
 .axis-x span {
   flex: 1 1 0;
   min-width: 4px;
-  text-align: center;
-  overflow: hidden;
+  display: flex;
+  justify-content: center;
   white-space: nowrap;
+}
+.axis-x span:first-child {
+  justify-content: flex-start;
+}
+.axis-x span:last-child {
+  justify-content: flex-end;
 }
 .sbar {
   position: relative;
@@ -2670,6 +2711,14 @@ textarea.input {
   align-items: center;
   justify-content: center;
   padding: 24px;
+}
+/* The Waiting tray opens under the status bar. Two classes on .ov.scrim win over the bundle order. */
+@media (min-width: 600px) {
+  .ov.scrim.tray-ov {
+    align-items: flex-start;
+    justify-content: flex-start;
+    padding: 48px 12px;
+  }
 }
 .dialog {
   max-height: calc(100dvh - 48px);
@@ -2849,6 +2898,10 @@ textarea.input {
   .only-phone {
     display: revert !important;
   }
+  /* revert gives a button its browser display, so a menu row keeps its flex layout here. */
+  .menu-item.only-phone {
+    display: flex !important;
+  }
   .hide-phone {
     display: none !important;
   }
@@ -2875,6 +2928,7 @@ textarea.input {
     gap: 6px;
   }
   .chat-h .chips {
+    order: 1;
     flex-wrap: nowrap;
     overflow-x: auto;
     width: 100%;
@@ -3032,7 +3086,8 @@ textarea.input {
   .pager {
     flex-wrap: wrap;
   }
-  .sbars {
+  .sbars,
+  .axis-x {
     padding-left: 34px;
     gap: 2px;
   }
@@ -3071,9 +3126,17 @@ button.li {
   font: inherit;
   text-align: left;
   cursor: pointer;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  width: 100%;
 }
 button.li:hover {
   background: var(--surface-3);
+}
+.list > .eyebrow {
+  padding: 12px 14px 4px;
 }
 .card.list {
   padding: 0;
@@ -3087,6 +3150,17 @@ button.li:hover {
 .rail-item .truncate {
   flex: 1 1 auto;
   min-width: 0;
+}
+/* A long page name wraps to two lines. Below 1024 px the rail shows icons only. */
+@media (min-width: 1024px) {
+  .rail-item .truncate {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    white-space: normal;
+    line-height: 16px;
+  }
 }
 .rail-search .grow {
   white-space: nowrap;
@@ -3592,7 +3666,7 @@ td.act {
 .aside-slot {
   display: contents;
 }
-@media (min-width: 1024px) {
+@media (min-width: 1440px) {
   .aside-slot > .aside {
     position: static;
     flex: 0 0 380px;
@@ -3602,6 +3676,37 @@ td.act {
     overflow-y: auto;
     border-left: 1px solid var(--border);
     transform: none;
+  }
+}
+/* From 1024 px to 1439 px, the side panel floats over the page as a drawer. Below 1024 px,
+   the .aside rules of the tablet block apply. The reduced-motion list already stops .aside. */
+@media (min-width: 1024px) and (max-width: 1439px) {
+  .aside {
+    transition: transform 0.2s ease;
+  }
+  .aside-slot > .aside {
+    display: flex;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(420px, 92vw);
+    max-width: none;
+    z-index: 50;
+    /* A closed drawer has no shadow, or the blur shows at the right edge of the page. */
+    box-shadow: none;
+    transform: translateX(100%);
+  }
+  .aside-slot > .aside.is-open {
+    transform: none;
+    box-shadow: var(--shadow-lg);
+  }
+  .aside-slot > .aside-scrim.is-open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 45;
+    background: var(--scrim);
   }
 }
 .discard {
@@ -4213,6 +4318,13 @@ table.rt-cards td code {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+/* A long title wraps inside the card, so the card list stays as wide as the phone. */
+table.rt-cards .cellrow > a,
+table.rt-cards .cellrow > b {
+  white-space: normal;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 /* The composer floats over the list. The list gets the height of the composer as its bottom
    padding, so the last message stays above it. The composer sets --dock-h. */
@@ -4281,6 +4393,74 @@ table.rt-cards td code {
   overflow: auto;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* Shared page rules */
+.page-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+}
+/* A nowrap cell of an auto-layout table grows to its full text, so the title box truncates. */
+.cell-title {
+  display: inline-block;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: top;
+}
+.card > .state {
+  border: 0;
+}
+/* .clamp-3 keeps each newline of plain text. Rendered Markdown has its own blocks. */
+.md.clamp-3 {
+  white-space: normal;
+}
+.table .mono.wrap-any {
+  white-space: normal;
+}
+/* The child selector skips the inputs inside .toolbar .search. */
+.toolbar > .input {
+  width: auto;
+  flex: 0 1 200px;
+}
+.toolbar > .input.grow-search {
+  flex: 1 1 240px;
+}
+.help-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  margin-left: var(--sp-2);
+  color: var(--text-3);
+  text-decoration: none;
+}
+.help-link:hover {
+  color: var(--text);
+}
+.page-h .search {
+  flex: 0 1 320px;
+}
+
+/* The help link, the session menu, and Details stay together at the right end of the chat header. */
+.chat-h-end {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-left: auto;
+}
+@media (min-width: 600px) {
+  .chat-h {
+    flex-wrap: nowrap;
+  }
+  .chat-h .chips {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
 }
 
 /* ---------- Phone tap targets ---------- */

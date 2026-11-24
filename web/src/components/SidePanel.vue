@@ -12,6 +12,8 @@ const panel = ref<HTMLElement | null>(null)
 const dy = ref(0)
 let startY: number | null = null
 
+const WIDE = "(min-width: 1440px)"
+
 function isPhone(): boolean {
   const mm = (globalThis as { matchMedia?: (q: string) => MediaQueryList }).matchMedia
   if (typeof mm !== "function") return false
@@ -21,7 +23,14 @@ function isPhone(): boolean {
 function isWide(): boolean {
   const mm = (globalThis as { matchMedia?: (q: string) => MediaQueryList }).matchMedia
   if (typeof mm !== "function") return false
-  return mm.call(globalThis, "(min-width: 1024px)").matches
+  return mm.call(globalThis, WIDE).matches
+}
+
+// Drives aria-modal. A change event of the media query updates it while the panel is open.
+const wide = ref(isWide())
+let wideQuery: MediaQueryList | null = null
+function onWide(e: MediaQueryListEvent): void {
+  wide.value = e.matches
 }
 
 // True while the panel asks "Discard the changes?".
@@ -41,7 +50,7 @@ function discard(): void {
   emit("close")
 }
 
-// useOverlay reads modal at each open, so the getter follows a resize between two opens.
+// useOverlay reads modal at each key press, so the getter follows a resize while the panel is open.
 useOverlay(toRef(props, "open"), panel, {
   onClose: requestClose,
   get modal() {
@@ -56,6 +65,7 @@ watch(
       asking.value = false
       return
     }
+    wide.value = isWide()
     // Chat closes its TurnDrawer, so that only one side column shows.
     document.dispatchEvent(new CustomEvent("tether:panel-open"))
   },
@@ -83,10 +93,14 @@ function end() {
 }
 
 onMounted(() => {
+  wideQuery = globalThis.matchMedia?.(WIDE) ?? null
+  wideQuery?.addEventListener?.("change", onWide)
   window.addEventListener("mousemove", move)
   window.addEventListener("mouseup", end)
 })
 onBeforeUnmount(() => {
+  wideQuery?.removeEventListener?.("change", onWide)
+  wideQuery = null
   window.removeEventListener("mousemove", move)
   window.removeEventListener("mouseup", end)
 })
@@ -101,7 +115,7 @@ onBeforeUnmount(() => {
       :class="{ 'is-open': open }"
       role="dialog"
       :aria-label="title"
-      :aria-modal="isWide() ? undefined : 'true'"
+      :aria-modal="wide ? undefined : 'true'"
       :inert="open ? undefined : true"
       :style="dy > 0 ? { transform: `translateY(${dy}px)` } : undefined"
     >

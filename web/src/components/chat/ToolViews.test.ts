@@ -81,6 +81,14 @@ describe("tool views", () => {
     expect(cards[1].text()).toContain("timeout")
   })
 
+  it("rounds the duration of a child", () => {
+    const text =
+      '{"results":[{"task":1,"status":"ok","summary":"","tool_calls":1,"duration_s":125.4},{"task":2,"status":"ok","summary":"","tool_calls":2,"duration_s":3.5}]}'
+    const w = mount(ToolResult, { props: { tool: tool("delegate_task", text, "{}") } })
+    const meta = w.findAll(".child-cards .child .meta").map((m) => m.text())
+    expect(meta).toEqual(["1 tool call · 2 m 5 s", "2 tool calls · 4 s"])
+  })
+
   it("shows a background delegation", () => {
     const w = mount(DelegateCards, {
       props: { text: '{"batch_id":"b7","children":["changelog-diff","pr-links"]}', args: "{}" },

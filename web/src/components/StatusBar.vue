@@ -8,6 +8,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "v
 import { useRouter } from "vue-router"
 import type { Card } from "../api/types.gen"
 import { retryNow } from "../api/stream"
+import { ICON } from "../lib/icons"
 import { useOverlay } from "../lib/overlay"
 import { cards } from "../stores/cards"
 import { status } from "../stores/status"
@@ -20,9 +21,17 @@ const MODES: Record<string, string> = {
   guarded: "🛡 Guarded",
   full: "⚡ Full",
 }
+// The rows of the theme menu, with the icon key of each row.
+const THEME_ROWS: { value: Theme; label: string; icon: string }[] = [
+  { value: "system", label: "System", icon: "monitor" },
+  { value: "dark", label: "Dark", icon: "moon" },
+  { value: "light", label: "Light", icon: "sun" },
+]
 const modeText = computed(() => MODES[status.mode] ?? status.mode)
 const waiting = computed(() => cards.open.length)
 const spend = computed(() => "$" + status.spend24h.toFixed(2) + (status.unpriced ? "+" : ""))
+// The full spend text. A phone shows only the amount, so the label keeps the full text.
+const spendLabel = computed(() => "Spend 24 h " + spend.value)
 // The resolved system theme. A change listener keeps it current, because matchMedia is not reactive.
 const lightMq = globalThis.matchMedia?.("(prefers-color-scheme: light)")
 const systemLight = ref(lightMq?.matches === true)
@@ -165,133 +174,166 @@ onBeforeUnmount(() => {
 
 <template>
   <header class="statusbar">
-    <button
-      v-if="status.fallback"
-      type="button"
-      class="sb-item sb-warn"
-      data-act="models"
-      title="A fallback entry answers"
-      @click="go('models')"
-    >
-      <span>⚠</span><b>{{ status.model }}</b
-      ><span class="sb-hide">fallback answers · {{ status.fallback_cause }}</span>
-    </button>
-    <button
-      v-else
-      type="button"
-      class="sb-item"
-      data-act="models"
-      title="Model of this session"
-      @click="go('models')"
-    >
-      <span class="dot dot-ok"></span><b>{{ status.model }}</b
-      ><span class="c-3">{{ status.entry }}</span>
-    </button>
-    <span class="sb-sep"></span>
-    <button
-      type="button"
-      class="sb-item"
-      :class="{ 'sb-full': status.mode === 'full' }"
-      data-act="security"
-      title="Mode of the dashboard scope"
-      @click="go('security')"
-    >
-      {{ modeText }}<span class="c-3 sb-hide">· Dashboard</span>
-    </button>
-    <span class="sb-sep hide-phone"></span>
-    <button
-      type="button"
-      class="sb-item hide-phone"
-      data-act="tray"
-      title="Cards that wait for you"
-      @click="ui.trayOpen = true"
-    >
-      Waiting<span v-if="waiting > 0" class="badge badge-bad">{{ waiting }}</span>
-    </button>
-    <span class="sb-sep"></span>
-    <button
-      type="button"
-      class="sb-item"
-      data-act="system"
-      title="Background work"
-      @click="go('system')"
-    >
-      <span v-if="status.running > 0" class="spin"></span><b>{{ status.running }} running</b
-      ><span v-if="runningList" class="sb-hide c-3">· {{ runningList }}</span>
-    </button>
-    <span class="sb-sep"></span>
-    <button type="button" class="sb-item" data-act="usage" @click="go('usage')">
-      Spend 24 h <b class="mono">{{ spend }}</b>
-    </button>
-    <button
-      v-if="status.stream === 'reconnecting'"
-      type="button"
-      class="sb-item sb-warn"
-      data-act="offline"
-      title="The page lost the event stream"
-      @click="retryNow"
-    >
-      Offline {{ offlineFor }} · Try now
-    </button>
-    <span class="sb-spacer"></span>
-    <button type="button" class="sb-item hide-phone" data-act="palette" @click="openPalette">
-      Commands <span class="kbd">Ctrl</span><span class="kbd">K</span>
-    </button>
-    <span class="sb-menu-wrap">
+    <div class="sb-scroll">
+      <button
+        v-if="status.fallback"
+        type="button"
+        class="sb-item sb-warn"
+        data-act="models"
+        title="A fallback entry answers"
+        @click="go('models')"
+      >
+        <span>⚠</span><b class="sb-model">{{ status.model }}</b
+        ><span class="sb-hide">fallback answers · {{ status.fallback_cause }}</span>
+      </button>
+      <button
+        v-else
+        type="button"
+        class="sb-item"
+        data-act="models"
+        title="Model of this session"
+        @click="go('models')"
+      >
+        <span class="dot dot-ok"></span><b class="sb-model">{{ status.model }}</b
+        ><span class="c-3 hide-phone">{{ status.entry }}</span>
+      </button>
+      <span class="sb-sep"></span>
       <button
         type="button"
         class="sb-item"
-        aria-label="Theme and alerts"
-        title="Theme and alerts"
-        :aria-expanded="menuOpen"
-        data-pop
-        @click="menuOpen = !menuOpen"
+        :class="{ 'sb-full': status.mode === 'full' }"
+        data-act="security"
+        title="Mode of the dashboard scope"
+        @click="go('security')"
       >
-        🎨
+        {{ modeText }}<span class="c-3 sb-hide">· Dashboard</span>
       </button>
-      <div v-if="menuOpen" ref="menuEl" class="menu sb-menu" role="menu" data-pop>
+      <span class="sb-sep hide-phone"></span>
+      <button
+        type="button"
+        class="sb-item hide-phone"
+        data-act="tray"
+        title="Cards that wait for you"
+        @click="ui.trayOpen = true"
+      >
+        Waiting<span v-if="waiting > 0" class="badge badge-bad">{{ waiting }}</span>
+      </button>
+      <span class="sb-sep"></span>
+      <button
+        type="button"
+        class="sb-item"
+        data-act="system"
+        title="Background work"
+        @click="go('system')"
+      >
+        <span v-if="status.running > 0" class="spin"></span><b>{{ status.running }} running</b
+        ><span v-if="runningList" class="sb-hide c-3">· {{ runningList }}</span>
+      </button>
+      <span class="sb-sep"></span>
+      <button
+        type="button"
+        class="sb-item"
+        data-act="usage"
+        :title="spendLabel"
+        :aria-label="spendLabel"
+        @click="go('usage')"
+      >
+        <span class="hide-phone">Spend 24 h</span> <b class="mono">{{ spend }}</b>
+      </button>
+    </div>
+    <div class="sb-fixed">
+      <button
+        v-if="status.stream === 'reconnecting'"
+        type="button"
+        class="sb-item sb-warn"
+        data-act="offline"
+        title="The page lost the event stream"
+        @click="retryNow"
+      >
+        Offline {{ offlineFor }} · Try now
+      </button>
+      <button type="button" class="sb-item hide-phone" data-act="palette" @click="openPalette">
+        Commands <span class="kbd">Ctrl</span><span class="kbd">K</span>
+      </button>
+      <span class="sb-menu-wrap">
         <button
           type="button"
-          class="menu-item"
-          role="menuitemradio"
-          :aria-checked="prefs.theme === 'system'"
-          @click="pickTheme('system')"
+          class="sb-item"
+          aria-label="Theme and alerts"
+          title="Theme and alerts"
+          :aria-expanded="menuOpen"
+          data-pop
+          @click="menuOpen = !menuOpen"
         >
-          {{ prefs.theme === "system" ? "✓ " : "" }}System (now
-          {{ systemLight ? "light" : "dark" }})
+          <svg
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.75"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path :d="ICON.theme" />
+          </svg>
         </button>
-        <button
-          type="button"
-          class="menu-item"
-          role="menuitemradio"
-          :aria-checked="prefs.theme === 'dark'"
-          @click="pickTheme('dark')"
-        >
-          {{ prefs.theme === "dark" ? "✓ " : "" }}🌙 Dark
-        </button>
-        <button
-          type="button"
-          class="menu-item"
-          role="menuitemradio"
-          :aria-checked="prefs.theme === 'light'"
-          @click="pickTheme('light')"
-        >
-          {{ prefs.theme === "light" ? "✓ " : "" }}☀️ Light
-        </button>
-        <button type="button" class="menu-item" role="menuitem" @click="prefs.sound = !prefs.sound">
-          🔔 Sound on a new card: {{ prefs.sound ? "On" : "Off" }}
-        </button>
-        <button
-          v-if="canAskNotify"
-          type="button"
-          class="menu-item"
-          role="menuitem"
-          @click="askPermission"
-        >
-          Turn on notifications…
-        </button>
-      </div>
-    </span>
+        <div v-if="menuOpen" ref="menuEl" class="menu sb-menu" role="menu" data-pop>
+          <button
+            v-for="row in THEME_ROWS"
+            :key="row.value"
+            type="button"
+            class="menu-item"
+            role="menuitemradio"
+            :aria-checked="prefs.theme === row.value"
+            @click="pickTheme(row.value)"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path :d="ICON[row.icon]" />
+            </svg>
+            <span class="grow">{{
+              row.value === "system" ? `System (now ${systemLight ? "light" : "dark"})` : row.label
+            }}</span>
+            <span v-if="prefs.theme === row.value" class="r" aria-hidden="true">✓</span>
+          </button>
+          <button
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            @click="prefs.sound = !prefs.sound"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path :d="ICON.bell" />
+            </svg>
+            <span class="grow">Sound on a new card: {{ prefs.sound ? "On" : "Off" }}</span>
+          </button>
+          <button
+            v-if="canAskNotify"
+            type="button"
+            class="menu-item"
+            role="menuitem"
+            @click="askPermission"
+          >
+            Turn on notifications…
+          </button>
+        </div>
+      </span>
+    </div>
   </header>
 </template>
 

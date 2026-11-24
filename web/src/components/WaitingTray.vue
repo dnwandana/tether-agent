@@ -317,11 +317,4 @@ function openCard(c: Card): void {
 .tray-note {
   margin: 0 0 8px;
 }
-@media (min-width: 600px) {
-  .tray-ov {
-    align-items: flex-start;
-    justify-content: flex-start;
-    padding: 48px 12px;
-  }
-}
 </style>

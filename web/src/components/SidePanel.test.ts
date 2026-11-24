@@ -8,11 +8,17 @@ function media(q: { phone?: boolean; wide?: boolean }) {
   vi.stubGlobal("matchMedia", (s: string) => ({
     matches:
       (q.phone === true && s === "(max-width: 599px)") ||
-      (q.wide === true && s === "(min-width: 1024px)"),
+      (q.wide === true && s === "(min-width: 1440px)"),
     media: s,
     addEventListener: () => {},
     removeEventListener: () => {},
   }))
+}
+
+function pressTab(): KeyboardEvent {
+  const e = new KeyboardEvent("keydown", { key: "Tab", cancelable: true })
+  window.dispatchEvent(e)
+  return e
 }
 
 afterEach(() => {
@@ -96,7 +102,7 @@ describe("SidePanel", () => {
     expect(o.find("aside").attributes("inert")).toBeUndefined()
   })
 
-  it("is a modal dialog below 1024 px and a column at 1024 px and wider", () => {
+  it("is a modal dialog below 1440 px and a column at 1440 px and wider", () => {
     media({})
     const narrow = mount(SidePanel, { props: { open: true, title: "Edit job" } })
     expect(narrow.find("aside").attributes("role")).toBe("dialog")
@@ -106,7 +112,7 @@ describe("SidePanel", () => {
     expect(wide.find("aside").attributes("aria-modal")).toBeUndefined()
   })
 
-  it("moves the focus in on open and back on close below 1024 px", async () => {
+  it("moves the focus in on open and back on close below 1440 px", async () => {
     media({})
     const opener = document.createElement("button")
     document.body.appendChild(opener)
@@ -122,6 +128,46 @@ describe("SidePanel", () => {
     await w.setProps({ open: false })
     await flushPromises()
     expect(document.activeElement).toBe(opener)
+  })
+
+  it("moves the trap and aria-modal with a resize across 1440 px while open", async () => {
+    let wide = false
+    const fns: ((e: { matches: boolean }) => void)[] = []
+    vi.stubGlobal("matchMedia", (s: string) => ({
+      matches: s === "(min-width: 1440px)" && wide,
+      media: s,
+      addEventListener: (_t: string, f: (e: { matches: boolean }) => void) => {
+        if (s === "(min-width: 1440px)") fns.push(f)
+      },
+      removeEventListener: () => {},
+    }))
+    const resize = async (on: boolean) => {
+      wide = on
+      for (const f of fns) f({ matches: on })
+      await flushPromises()
+    }
+    const opener = document.createElement("button")
+    document.body.appendChild(opener)
+    const w = mount(SidePanel, {
+      props: { open: true, title: "Edit job" },
+      slots: { default: '<input class="first" />' },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    expect(w.find("aside").attributes("aria-modal")).toBe("true")
+
+    await resize(true)
+    expect(w.find("aside").attributes("aria-modal")).toBeUndefined()
+    opener.focus()
+    expect(pressTab().defaultPrevented).toBe(false)
+    expect(document.activeElement).toBe(opener)
+
+    await resize(false)
+    expect(w.find("aside").attributes("aria-modal")).toBe("true")
+    opener.focus()
+    expect(pressTab().defaultPrevented).toBe(true)
+    expect(w.find("aside").element.contains(document.activeElement)).toBe(true)
+    w.unmount()
   })
 
   it("reads the modal mode again at each open after a resize", async () => {

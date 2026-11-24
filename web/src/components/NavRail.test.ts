@@ -42,6 +42,7 @@ function makeRouter() {
 
 vi.mock("../api/client", () => ({ api: vi.fn(), ApiError: class extends Error {} }))
 import NavRail from "./NavRail.vue"
+import { ICON } from "../lib/icons"
 import { cards } from "../stores/cards"
 
 async function at(path: string) {
@@ -53,6 +54,15 @@ async function at(path: string) {
 
 describe("NavRail", () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it("draws the T-hook mark in the brand tile", async () => {
+    const w = await at("/chat")
+    const tile = w.find(".rail-brand .rail-mark")
+    expect(tile.attributes("aria-hidden")).toBe("true")
+    expect(tile.find("svg path").attributes("d")).toBe(ICON.mark)
+    expect(tile.find("svg circle").exists()).toBe(true)
+    expect(w.find(".rail-brand .bt").text()).toBe("Tether")
+  })
 
   it("lists the pages in order", async () => {
     const w = await at("/chat")

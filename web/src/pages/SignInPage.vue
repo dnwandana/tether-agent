@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, setSessionHeader } from "../api/client"
 import type { SignInPoll, SignInStart } from "../api/types.gen"
+import BrandMark from "../components/BrandMark.vue"
 import SidePanel from "../components/SidePanel.vue"
 import { deviceLabel } from "../lib/browser"
 import { friendlyError } from "../lib/errors"
@@ -144,7 +145,7 @@ onBeforeUnmount(stopPoll)
   <div class="signin">
     <div class="card">
       <div class="card-b">
-        <div class="row" style="margin-bottom: 12px"><b class="t-16">Tether</b></div>
+        <div class="row" style="margin-bottom: 12px"><BrandMark /><b class="t-16">Tether</b></div>
 
         <template v-if="view === 'start'">
           <h1 class="t-20">Sign in to the dashboard</h1>

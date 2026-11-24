@@ -79,7 +79,10 @@ export function useOverlay(
         entry = {
           el,
           onClose: opts.onClose,
-          modal: !!opts.modal,
+          // A getter, so that a modal value that changes while the overlay is open takes effect.
+          get modal() {
+            return !!opts.modal
+          },
           opener: document.activeElement as HTMLElement | null,
         }
         push(entry)

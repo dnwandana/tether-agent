@@ -59,6 +59,11 @@ const cols = computed(() =>
     label2: i === 0 || c.key === "actions" ? "" : c.label,
   })),
 )
+
+// Returns the text of a cell with no slot. Only a string or a number is a readable value.
+function plain(v: unknown): string {
+  return typeof v === "string" || typeof v === "number" ? String(v) : ""
+}
 </script>
 
 <template>
@@ -82,7 +87,13 @@ const cols = computed(() =>
         </tr>
         <tr v-for="row in rows" :key="String(row[rowKey])" @click="emit('row-click', row)">
           <td v-for="c in cols" :key="c.key" :class="c.cls" :data-l="c.label2">
-            <slot :name="`cell-${c.key}`" :row="row" :value="row[c.key]">{{ row[c.key] }}</slot>
+            <slot
+              v-if="$slots['cell-' + c.key]"
+              :name="`cell-${c.key}`"
+              :row="row"
+              :value="row[c.key]"
+            />
+            <template v-else>{{ plain(row[c.key]) }}</template>
           </td>
         </tr>
       </tbody>

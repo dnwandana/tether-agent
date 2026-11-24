@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { useRoute } from "vue-router"
 import { ICON } from "../lib/icons"
 import { cards } from "../stores/cards"
+import BrandMark from "./BrandMark.vue"
 
 // The nav section of a route: a child page marks its parent.
 const PARENT: Record<string, string> = {
@@ -51,19 +52,7 @@ function openPalette(): void {
 <template>
   <nav class="rail" aria-label="Pages">
     <div class="rail-brand">
-      <span class="rail-mark">
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.75"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
-        >
-          <path :d="ICON.mark" />
-        </svg>
-      </span>
+      <BrandMark />
       <span class="bt">Tether</span>
     </div>
     <button

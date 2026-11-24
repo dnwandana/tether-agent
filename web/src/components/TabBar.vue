@@ -45,10 +45,10 @@ const GROUPS: { label: string; pages: { name: string; label: string }[] }[] = [
   },
 ]
 
-const THEMES: { value: Theme; label: string; mark: string }[] = [
-  { value: "system", label: "System", mark: "" },
-  { value: "dark", label: "Dark", mark: "🌙 " },
-  { value: "light", label: "Light", mark: "☀️ " },
+const THEMES: { value: Theme; label: string; icon: string }[] = [
+  { value: "system", label: "System", icon: "monitor" },
+  { value: "dark", label: "Dark", icon: "moon" },
+  { value: "light", label: "Light", icon: "sun" },
 ]
 
 const route = useRoute()
@@ -169,7 +169,20 @@ function themeLabel(): string {
       <div ref="sheetEl" class="dialog" role="dialog" aria-label="More">
         <div class="grabber"></div>
         <div class="list">
-          <button type="button" class="li" @click="openPalette">⌘ Commands and skills</button>
+          <button type="button" class="li" @click="openPalette">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.75"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path :d="ICON.search" />
+            </svg>
+            Commands and skills
+          </button>
           <template v-for="g in GROUPS" :key="g.label">
             <div class="eyebrow">{{ g.label }}</div>
             <RouterLink
@@ -215,9 +228,22 @@ function themeLabel(): string {
               :key="t.value"
               type="button"
               class="li theme-choice"
+              :aria-pressed="prefs.theme === t.value"
               @click="chooseTheme(t.value)"
             >
-              {{ prefs.theme === t.value ? "✓ " : t.mark }}{{ t.label }}
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path :d="ICON[t.icon]" />
+              </svg>
+              <span class="grow">{{ t.label }}</span>
+              <span v-if="prefs.theme === t.value" aria-hidden="true">✓</span>
             </button>
           </template>
         </div>

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { mount, flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
@@ -52,6 +52,34 @@ beforeEach(() => {
     context: null,
   })
 })
+
+const rectOf = (left: number, width: number) =>
+  ({ left, width, right: left + width, top: 0, bottom: 32, height: 32, x: left, y: 0 }) as DOMRect
+const effortReply = () =>
+  vi.mocked(runCommand).mockResolvedValueOnce(
+    reply("Pick.", [
+      [
+        { text: "a", data: "/effort a" },
+        { text: "b", data: "/effort b" },
+        { text: "c", data: "/effort c" },
+      ],
+    ]),
+  )
+
+async function openAt(boxLeft: number, boxWidth: number, chipLeft: number) {
+  effortReply()
+  const { w } = await mk()
+  vi.spyOn(w.find(".chat-h").element, "getBoundingClientRect").mockReturnValue(
+    rectOf(boxLeft, boxWidth),
+  )
+  const chip = w.findAll("button.chip")[1]
+  vi.spyOn(chip.element, "getBoundingClientRect").mockReturnValue(rectOf(chipLeft, 120))
+  await chip.trigger("click")
+  await flushPromises()
+  return w
+}
+
+afterEach(() => vi.restoreAllMocks())
 
 describe("ChatHeader", () => {
   it("renames the session", async () => {
@@ -212,6 +240,53 @@ describe("ChatHeader", () => {
       "https://github.com/dnwandana/tether-agent/wiki/Dashboard#pages",
     )
     expect(a.attributes("rel")).toBe("noreferrer")
+    w.unmount()
+  })
+  it("opens the reply popover under the clicked chip", async () => {
+    const w = await openAt(100, 1000, 340)
+    expect(w.find(".popover").attributes("style")).toContain("left: 240px")
+    w.unmount()
+  })
+
+  it("keeps the popover inside the header at the right end", async () => {
+    const w = await openAt(100, 1000, 1050)
+    expect(w.find(".popover").attributes("style")).toContain("left: 572px")
+    w.unmount()
+  })
+
+  it("keeps the popover inside the header on a phone", async () => {
+    const w = await openAt(0, 390, 200)
+    expect(w.find(".popover").attributes("style")).toContain("left: 8px")
+    w.unmount()
+  })
+
+  it("puts help, the menu, and Details in one end group", async () => {
+    const { w } = await mk()
+    const end = w.find(".chat-h-end")
+    expect(end.find("a.help-link").exists()).toBe(true)
+    expect(end.find('button[aria-label="Session menu"]').exists()).toBe(true)
+    expect(end.find("button.aside-toggle").text()).toBe("Details")
+    expect(w.find(".chat-h > .grow").exists()).toBe(false)
+    w.unmount()
+  })
+
+  it("moves Compact into the session menu on a phone", async () => {
+    session.context = { tokens: 12345, window: 200000, threshold: 0.5 }
+    const { w } = await mk()
+    expect(w.find(".ctx button").classes()).toContain("hide-phone")
+    await w.find('button[aria-label="Session menu"]').trigger("click")
+    const item = w.findAll(".menu .menu-item").find((b) => b.text() === "Compact")!
+    expect(item.classes()).toContain("only-phone")
+    await item.trigger("click")
+    await flushPromises()
+    expect(runCommand).toHaveBeenLastCalledWith("/compact")
+    w.unmount()
+  })
+
+  it("has no Compact menu item without a context meter", async () => {
+    const { w } = await mk()
+    await w.find('button[aria-label="Session menu"]').trigger("click")
+    expect(w.findAll(".menu .menu-item").map((b) => b.text())).not.toContain("Compact")
     w.unmount()
   })
 })

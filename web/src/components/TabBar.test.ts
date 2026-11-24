@@ -100,7 +100,7 @@ describe("TabBar", () => {
     expect(sheet.findAll(".eyebrow").map((x) => x.text())).toEqual(["Work", "Agent", "Host"])
     const items = sheet.findAll(".li").map((x) => x.text())
     expect(items).toEqual([
-      "⌘ Commands and skills",
+      "Commands and skills",
       "Sessions",
       "Goals",
       "Approvals and security",
@@ -114,6 +114,10 @@ describe("TabBar", () => {
       "Getting started",
       "Theme: System ▸",
     ])
+    const commands = sheet.find("button.li")
+    expect(commands.text()).toBe("Commands and skills")
+    expect(commands.find("path").attributes("d")).toBe(ICON.search)
+    expect(sheet.text()).not.toContain("⌘")
     const usage = sheet.findAll(".li").find((x) => x.text() === "Usage")!
     expect(usage.attributes("aria-current")).toBe("page")
     expect(usage.classes()).toContain("is-on")
@@ -134,12 +138,18 @@ describe("TabBar", () => {
       .findAll(".ov .li")
       .find((x) => x.text() === "Theme: System ▸")!
       .trigger("click")
-    expect(w.findAll(".ov .theme-choice").map((x) => x.text())).toEqual([
-      "✓ System",
-      "🌙 Dark",
-      "☀️ Light",
+    const choices = () => w.findAll(".ov .theme-choice")
+    expect(choices().map((x) => x.find(".grow").text())).toEqual(["System", "Dark", "Light"])
+    expect(choices().map((x) => x.find("path").attributes("d"))).toEqual([
+      ICON.monitor,
+      ICON.moon,
+      ICON.sun,
     ])
-    await w.findAll(".ov .theme-choice")[2].trigger("click")
+    expect(choices()[0].element.lastElementChild?.textContent).toBe("✓")
+    expect(choices()[0].attributes("aria-pressed")).toBe("true")
+    expect(choices()[1].attributes("aria-pressed")).toBe("false")
+    expect(w.find(".ov").text()).not.toMatch(/🌙|☀️/)
+    await choices()[2].trigger("click")
     expect(prefs.theme).toBe("light")
     expect(w.find(".ov").exists()).toBe(false)
   })

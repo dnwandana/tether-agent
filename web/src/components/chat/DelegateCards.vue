@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import { parseDelegate } from "./parse"
+import { duration } from "../../lib/time"
 
 const props = defineProps<{ text: string; args: string }>()
 
@@ -42,7 +43,7 @@ function calls(n: number): string {
       </div>
       <span v-if="r.summary" class="c-2">{{ r.summary }}</span>
       <span v-if="r.error" class="c-bad t-12">{{ r.error }}</span>
-      <span class="meta">{{ calls(r.tool_calls) }} · {{ r.duration_s }} s</span>
+      <span class="meta">{{ calls(r.tool_calls) }} · {{ duration(r.duration_s) }}</span>
     </div>
   </div>
   <p v-else-if="res && res.batch" class="t-13">
