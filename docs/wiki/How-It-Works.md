@@ -43,9 +43,9 @@ The code is in `internal/`. These are the main packages:
 | `security` | The approval gate, protected paths, and secret redaction. |
 | `acp` | The client of the coding agents of `acp_delegate` over the Agent Client Protocol: the adapter processes, the ACP sessions, and the permission requests. |
 
-The page sources are in `web/` (Vue and TypeScript). `make web` builds them into
-`internal/dashboard/dist/`, and the binary embeds that folder. Git keeps no built page, so a
-build from source needs Node.
+The page sources are in `web/` (Vue, TypeScript, and Tailwind CSS, with shadcn-vue components).
+`make web` builds them into `internal/dashboard/dist/`, and the binary embeds that folder. Git
+keeps no built page, so a build from source needs Node.
 
 Other packages are smaller: `browser`, `mcp`, `media`, `sessions`, `pricing`, `obs` (logs and
 usage), `db`, `backup`, `setup`, `update`, `hostos`, and `gatewaylock`.

@@ -3,6 +3,8 @@
 The gateway can serve a web page for the owner. The page has the chat, the prompts, and the
 controls of Telegram and the CLI. Only the gateway serves it. `tether chat` never serves it.
 
+The page needs Safari 16.4 (iOS 16.4), Chrome 111, Firefox 128, or a later version.
+
 ## Turn it on
 
 Add this to `config.yaml`, then restart the gateway:

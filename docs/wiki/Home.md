@@ -78,4 +78,5 @@ The full steps are in [Getting Started](Getting-Started).
 Tether Agent uses the MIT License. It is inspired by
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) from Nous Research. The
 [NOTICE](https://github.com/dnwandana/tether-agent/blob/main/NOTICE) file lists the parts that
-come from Hermes Agent.
+come from Hermes Agent. NOTICE also lists the packages and the copied code in the web dashboard
+page.

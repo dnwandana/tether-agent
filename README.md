@@ -227,7 +227,8 @@ make web-format     # formats web/ with Prettier (needs Node)
 Tether Agent is inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent) from
 Nous Research. Some parts are ports of Hermes Agent code to Go, for example the approval rules,
 the secret redaction, the skill guard, and some prompts. Hermes Agent uses the MIT License. See
-[NOTICE](NOTICE) for the list of these parts and the Hermes Agent copyright notice.
+[NOTICE](NOTICE) for the list of these parts and the Hermes Agent copyright notice. NOTICE also
+lists the packages and the copied code in the web dashboard page.
 
 ## License
 

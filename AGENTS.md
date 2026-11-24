@@ -52,8 +52,8 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
   `goals.Deps.Changed`. `app` sets both function fields. Each function reads `a.Dashboard` at
   call time and does nothing when the dashboard is off. So `cron` and `goals` never import
   `dashboard`. The old `goal` event (`{"line"}`) of the chat goal line does not change.
-  `web/` holds the page (Vue and
-  TypeScript). Run `make web` before `make build`, because git keeps only the placeholder
+  `web/` holds the page (Vue, TypeScript, Tailwind CSS, and shadcn-vue components on Reka UI).
+  Run `make web` before `make build`, because git keeps only the placeholder
   `internal/dashboard/dist/.keep`. `TestDashboardTypesCurrent` fails when `types.gen.ts` is
   old. `TestDashboardAssetsCurrent` fails with "Run make web" when the built page is older than
   `web/`. Both tests skip when no page is built.
@@ -122,6 +122,17 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
 - A change in `web/` must pass `make web-lint` (oxlint and Prettier) and `make web-test`.
   `make web-format` fixes the format. Prettier skips `web/src/api/types.gen.ts`, because
   `TestDashboardTypesCurrent` compares it byte for byte with the generator output.
+- `web/src/components/ui/` holds shadcn-vue code that the shadcn-vue CLI copies. Load the
+  `shadcn-vue` skill before you change `web/`. To add a component, run
+  `npx shadcn-vue@2.9.0 add <name>` in `web/`. Then make sure that each version in
+  `web/package.json` stays exact. The copied files are part of the source, so keep them in the
+  repository.
+- Colors come from the tokens in `web/src/styles/app.css`, for example `bg-primary` and
+  `text-muted-foreground`. Do not use a Tailwind palette class such as `bg-blue-500`.
+- The component and page tests of `web/` find elements by role, label, and text, with
+  `@testing-library/vue`.
+- `web/src/styles/app.css` keeps the classes `.scroll`, `.aside-slot`, `.announce`, and `.pulse`,
+  because code outside the templates reads them.
 - A new config key goes into the structs and `Default()` in `internal/config/config.go`. Add
   its row to `docs/CONFIG.md`. `internal/config/docs_test.go` compares each yaml key and its
   default with that table.

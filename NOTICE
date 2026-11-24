@@ -80,8 +80,11 @@ SOFTWARE.
 
 -------------------------------------------------------------------------------
 
-The web dashboard page in internal/dashboard/dist/ bundles these packages.
-Each package uses the MIT License, with the same terms as the license above:
+The web dashboard page in internal/dashboard/dist/ bundles the packages and
+the code below. Each entry names its license. The MIT License has the same
+terms as the license above.
+
+MIT License:
 
 - vue and its @vue/* packages (https://github.com/vuejs/core)
   Copyright (c) 2018-present, Yuxi (Evan) You
@@ -92,3 +95,108 @@ Each package uses the MIT License, with the same terms as the license above:
   Copyright (c) 2011-2018, Christopher Jeffrey (https://github.com/chjj/)
   The LICENSE file of marked also has a BSD notice for the code of John Gruber
   (Copyright (c) 2004, John Gruber).
+- reka-ui (https://github.com/unovue/reka-ui)
+  Copyright (c) 2023 UnoVue <https://github.com/unovue>
+- @floating-ui/core, @floating-ui/dom, @floating-ui/utils, and
+  @floating-ui/vue (https://github.com/floating-ui/floating-ui)
+  Copyright (c) 2021-present Floating UI contributors
+  Copyright (c) 2021 Floating UI contributors (@floating-ui/vue)
+- aria-hidden (https://github.com/theKashey/aria-hidden)
+  Copyright (c) 2017 Anton Korzunov
+- defu (https://github.com/unjs/defu)
+  Copyright (c) Pooya Parsa <pooya@pi0.io>
+- ohash (https://github.com/unjs/ohash)
+  Copyright (c) Pooya Parsa <pooya@pi0.io>
+- @vueuse/core and @vueuse/shared (https://github.com/vueuse/vueuse)
+  Copyright (c) 2019-PRESENT Anthony Fu<https://github.com/antfu>
+- cn (https://github.com/shadcn-ui/cn)
+  Copyright (c) 2026 shadcn
+- clsx (https://github.com/lukeed/clsx)
+  Copyright (c) Luke Edwards <luke.edwards05@gmail.com> (lukeed.com)
+- vue-sonner and its CSS (https://github.com/xiaoluoboding/vue-sonner)
+  Copyright (c) 2022 Yunwei Xiao
+- tailwindcss, for the base CSS in the built CSS file
+  (https://github.com/tailwindlabs/tailwindcss)
+  Copyright (c) Tailwind Labs, Inc.
+- tw-animate-css, for the animation CSS
+  (https://github.com/Wombosvideo/tw-animate-css)
+  Copyright (c) 2025 Wombosvideo
+- shadcn-vue (https://github.com/unovue/shadcn-vue), for the copied code in
+  web/src/components/ui/, the Typeset file web/src/styles/typeset.css, and
+  the shimmer, shimmer-none, scroll-fade-x, scroll-fade-y, scroll-fade-b, and
+  scrollbar-thumb-transparent utilities in web/src/styles/app.css
+  Copyright (c) 2023 unovue
+
+Apache License 2.0:
+
+- class-variance-authority (https://github.com/joe-bell/cva)
+  Copyright 2022 Joe Bell
+  The text of the Apache License 2.0 is at
+  https://www.apache.org/licenses/LICENSE-2.0.
+
+ISC License:
+
+- @lucide/vue (https://github.com/lucide-icons/lucide)
+  The LICENSE file of @lucide/vue follows. It also has the MIT notice of
+  Feather, which some icons come from.
+
+  ISC License
+
+  Copyright (c) 2026 Lucide Icons and Contributors
+
+  Permission to use, copy, modify, and/or distribute this software for any
+  purpose with or without fee is hereby granted, provided that the above
+  copyright notice and this permission notice appear in all copies.
+
+  THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+  WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+  ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+  WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+  ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+  OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+  ---
+
+  The following Lucide icons are derived from the Feather project:
+
+  airplay, alert-circle, alert-octagon, alert-triangle, aperture,
+  arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down,
+  arrow-left-circle, arrow-left, arrow-right-circle, arrow-right,
+  arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar,
+  cast, check, chevron-down, chevron-left, chevron-right, chevron-up,
+  chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard,
+  clock, code, columns, command, compass, corner-down-left, corner-down-right,
+  corner-left-down, corner-left-up, corner-right-down, corner-right-up,
+  corner-up-left, corner-up-right, crosshair, database, divide-circle,
+  divide-square, dollar-sign, download, external-link, feather, frown, hash,
+  headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link,
+  loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2,
+  minus-circle, minus-square, minus, monitor, moon, more-horizontal,
+  more-vertical, move, music, navigation-2, navigation, octagon, pause-circle,
+  percent, plus-circle, plus-square, plus, power, radio, rss, search, server,
+  share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet,
+  target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle,
+  x-octagon, x-square, x, zoom-in, zoom-out
+
+  The MIT License (MIT) (for the icons listed above)
+
+  Copyright (c) 2013-present Cole Bemis
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
