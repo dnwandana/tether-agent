@@ -141,6 +141,11 @@ export function applyTheme(): void {
     }
   }
   document.documentElement.className = `tt theme-${name}`
+  // The browser bar takes the --bg color of the theme, so the color stays in tokens.css.
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+  if (!meta) return
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim()
+  if (bg) meta.content = bg
 }
 
 export function setTheme(t: Theme): void {

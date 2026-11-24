@@ -83,6 +83,31 @@ func TestStaticHandlerRoutes(t *testing.T) {
 	}
 }
 
+// Each host sends the same type for the icon files, and the icon files skip the immutable cache.
+func TestStaticHandlerIconTypes(t *testing.T) {
+	h := StaticHandler(fstest.MapFS{
+		"index.html":           {Data: []byte("<!doctype html><title>t</title>")},
+		"favicon.ico":          {Data: []byte("ico")},
+		"apple-touch-icon.png": {Data: []byte("png")},
+	})
+	for _, c := range []struct{ path, ctype string }{
+		{"/favicon.ico", "image/x-icon"},
+		{"/apple-touch-icon.png", "image/png"},
+	} {
+		rec := serveStatic(h, "GET", c.path, "")
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s: code %d", c.path, rec.Code)
+			continue
+		}
+		if got := rec.Header().Get("Content-Type"); got != c.ctype {
+			t.Errorf("%s: type %q, want %q", c.path, got, c.ctype)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("%s: cache %q", c.path, got)
+		}
+	}
+}
+
 func TestBuildID(t *testing.T) {
 	needBuiltPage(t)
 	index, err := fs.ReadFile(DistFS(), "index.html")

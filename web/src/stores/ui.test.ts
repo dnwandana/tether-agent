@@ -178,3 +178,40 @@ describe("confirm", () => {
     await expect(b).resolves.toBe(false)
   })
 })
+
+function addMeta(content = ""): HTMLMetaElement {
+  const meta = document.createElement("meta")
+  meta.name = "theme-color"
+  if (content) meta.content = content
+  document.head.append(meta)
+  return meta
+}
+
+describe("theme-color", () => {
+  afterEach(() => {
+    for (const m of document.head.querySelectorAll('meta[name="theme-color"]')) m.remove()
+  })
+
+  it("sets the theme-color meta to the --bg value of the theme", () => {
+    const meta = addMeta()
+    vi.stubGlobal("getComputedStyle", (el: Element) => ({
+      getPropertyValue: (p: string) =>
+        p === "--bg" ? (el.classList.contains("theme-light") ? " #f4f1ec" : " #151311") : "",
+    }))
+    ui.setTheme("light")
+    expect(meta.getAttribute("content")).toBe("#f4f1ec")
+    ui.setTheme("dark")
+    expect(meta.getAttribute("content")).toBe("#151311")
+    stubMedia(true)
+    ui.setTheme("system")
+    expect(meta.getAttribute("content")).toBe("#f4f1ec")
+  })
+
+  it("keeps the content when --bg is empty, and runs with no meta", () => {
+    vi.stubGlobal("getComputedStyle", () => ({ getPropertyValue: () => "" }))
+    expect(() => ui.applyTheme()).not.toThrow()
+    const meta = addMeta("#151311")
+    ui.applyTheme()
+    expect(meta.getAttribute("content")).toBe("#151311")
+  })
+})

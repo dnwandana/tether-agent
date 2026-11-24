@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+// The Go table and the MIME files of a host give different types for .ico. One fixed type
+// gives the same answer on each host and in the tests.
+func init() {
+	_ = mime.AddExtensionType(".ico", "image/x-icon")
+}
+
 //go:embed all:dist
 var distFiles embed.FS
 
