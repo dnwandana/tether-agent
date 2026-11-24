@@ -2,12 +2,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 import { mount, flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
-vi.mock("../api/client", () => ({
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/client")>()),
   api: vi.fn(),
   runCommand: vi.fn(),
-  ApiError: class extends Error {},
 }))
-vi.mock("../stores/ui", () => ({ toast: vi.fn(), confirm: vi.fn() }))
+vi.mock("../stores/ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../stores/ui")>()),
+  toast: vi.fn(),
+  confirm: vi.fn(),
+}))
 import { api, runCommand } from "../api/client"
 import TranscriptPage from "./TranscriptPage.vue"
 
@@ -25,9 +29,11 @@ const info = {
   archived: false,
   read_only: true,
   children: [],
+  parent_id: "",
 }
 const msg = (o: object) => ({
   id: 0,
+  created: "2026-11-20T09:05:00Z",
   role: "user",
   text: "",
   reasoning: "",
@@ -84,17 +90,20 @@ const msgs = [
 ]
 
 // Wraps views in a page. The cursors default to the smallest and the largest positive view id.
-const pg = (rows: object[], o: { first?: number; last?: number; older?: boolean } = {}) => {
+const pg = (
+  rows: object[],
+  o: { first?: number; last?: number; older?: boolean; newer?: boolean } = {},
+) => {
   const ids = rows.map((m) => (m as { id: number }).id).filter((n) => n > 0)
   return {
     rows,
     first_id: o.first ?? (ids.length > 0 ? Math.min(...ids) : 0),
     last_id: o.last ?? (ids.length > 0 ? Math.max(...ids) : 0),
     has_older: o.older ?? false,
-    has_newer: false,
+    has_newer: o.newer ?? false,
   }
 }
-const olderButton = (w: Awaited<ReturnType<typeof mk>>) =>
+const olderButton = (w: Awaited<ReturnType<typeof mk>>["w"]) =>
   w.findAll("button").find((b) => b.text() === "Load older")
 
 async function mk(path = "/sessions/s2") {
@@ -109,7 +118,7 @@ async function mk(path = "/sessions/s2") {
   await router.push(path)
   const w = mount(TranscriptPage, { global: { plugins: [router] } })
   await flushPromises()
-  return w
+  return { w, router }
 }
 
 beforeEach(() => {
@@ -125,7 +134,7 @@ beforeEach(() => {
 
 describe("TranscriptPage", () => {
   it("loads the session and the last page of messages", async () => {
-    const w = await mk()
+    const { w } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2")
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/messages?limit=50")
     expect(w.findAll("details.card")).toHaveLength(1)
@@ -135,15 +144,13 @@ describe("TranscriptPage", () => {
     expect(w.find("details.reasoning summary").text()).toBe("▸ Reasoning · 812 tokens")
     const foot = w.find(".cost-foot").text()
     for (const s of [
-      "deepseek-chat · backup",
+      "deepseek-chat · answered by backup",
       "40.3k in (0 cached)",
       "655 out",
-      "TTFT 1.9 s",
-      "9.7 s",
       "$0.0061+",
+      "10 s",
     ])
       expect(foot).toContain(s)
-    expect(w.text()).toContain("answered by backup")
   })
 
   it("loads older messages before the smallest positive id", async () => {
@@ -164,7 +171,7 @@ describe("TranscriptPage", () => {
                 { older: true },
               )) as any,
     )
-    const w = await mk()
+    const { w } = await mk()
     await w
       .findAll("button")
       .find((b) => b.text() === "Load older")!
@@ -173,7 +180,7 @@ describe("TranscriptPage", () => {
   })
 
   it("shows the read-only banner and forks into the dashboard", async () => {
-    const w = await mk()
+    const { w } = await mk()
     expect(w.find(".ro-banner").text()).toContain(
       "👁 Read-only. This session belongs to Telegram › DM.",
     )
@@ -203,7 +210,7 @@ describe("TranscriptPage", () => {
             ? older
             : pg(views, { first: 30, last: 80, older: true })) as any,
     )
-    const w = await mk()
+    const { w } = await mk()
     expect(olderButton(w)).toBeDefined()
     await olderButton(w)!.trigger("click")
     await flushPromises()
@@ -217,7 +224,7 @@ describe("TranscriptPage", () => {
     vi.mocked(api).mockImplementation(
       async (_m: string, p: string) => (p === "/api/sessions/s2" ? info : pg(full)) as any,
     )
-    const w = await mk()
+    const { w } = await mk()
     expect(olderButton(w)).toBeUndefined()
   })
 
@@ -230,11 +237,152 @@ describe("TranscriptPage", () => {
             ? pg([msg({ id: 9, text: "older" }), msg({ id: 10, text: "again" })])
             : pg([msg({ id: 10, text: "An old question." })], { older: true })) as any,
     )
-    const w = await mk()
+    const { w } = await mk()
     await olderButton(w)!.trigger("click")
     await flushPromises()
     expect(w.findAll("#msg-10")).toHaveLength(1)
     expect(w.find("#msg-9 .bubble-user").text()).toBe("older")
+  })
+
+  it("loads newer messages after the last id", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/sessions/s2"
+          ? info
+          : p.includes("after=")
+            ? pg([msg({ id: 90, text: "a newer question" })])
+            : pg(msgs, { last: 80, newer: true })) as any,
+    )
+    const { w } = await mk()
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "Load newer")!
+      .trigger("click")
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/messages?after=80&limit=50")
+    expect(w.find("#msg-90 .bubble-user").text()).toBe("a newer question")
+    expect(w.findAll("button").some((b) => b.text() === "Load newer")).toBe(false)
+  })
+
+  it("drops a newer page that arrives after a route change", async () => {
+    let release!: (v: unknown) => void
+    const late = new Promise((r) => (release = r))
+    vi.mocked(api).mockImplementation(async (_m: string, p: string) => {
+      if (p.includes("after=")) return (await late) as any
+      if (p === "/api/sessions/s2") return info as any
+      if (p === "/api/sessions/s3") return { ...info, id: "s3" } as any
+      if (p.startsWith("/api/sessions/s3/"))
+        return pg([msg({ id: 5, text: "other session" })]) as any
+      return pg(msgs, { last: 80, newer: true }) as any
+    })
+    const { w, router } = await mk()
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "Load newer")!
+      .trigger("click")
+    await router.push("/sessions/s3")
+    await flushPromises()
+    release(pg([msg({ id: 90, text: "a newer question" })]))
+    await flushPromises()
+    expect(w.text()).toContain("other session")
+    expect(w.text()).not.toContain("a newer question")
+  })
+
+  it("marks the hit and jumps to the latest messages", async () => {
+    const { w, router } = await mk("/sessions/s2?message=11")
+    const hitMsg = w.find("#msg-11")
+    expect(hitMsg.classes()).toContain("is-hit")
+    expect(hitMsg.text()).toContain("Search hit")
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "Jump to latest")!
+      .trigger("click")
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({})
+    expect(api).toHaveBeenLastCalledWith("GET", "/api/sessions/s2/messages?limit=50")
+  })
+
+  it("shows the time of each message", async () => {
+    const { w } = await mk()
+    expect(w.find("#msg-11 time").attributes("datetime")).toBe("2026-11-20T09:05:00Z")
+  })
+
+  it("links the children and the parent", async () => {
+    const child = { ...info, id: "c1", title: "subagent run", kind: "subagent", children: [] }
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/sessions/s2"
+          ? { ...info, parent_id: "p1", children: [child] }
+          : p === "/api/sessions/p1"
+            ? { ...info, id: "p1", title: "Release notes" }
+            : pg(msgs)) as any,
+    )
+    const { w } = await mk()
+    expect(api).toHaveBeenCalledWith("GET", "/api/sessions/p1")
+    expect(w.find("a[href='/sessions/c1']").text()).toBe("subagent run")
+    const parent = w.find("a[href='/sessions/p1']")
+    expect(parent.text()).toBe("↳ child of Release notes")
+  })
+
+  it("opens the arguments and the result of a tool call", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/sessions/s2"
+          ? info
+          : p === "/api/sessions/s2/tools/c1"
+            ? {
+                call: "c1",
+                name: "patch",
+                emoji: "🔧",
+                preview: "internal/cron/jobs.go",
+                args: '{"path":"internal/cron/jobs.go"}',
+                state: "done",
+                duration_ms: 3,
+                text: "--- a\n+++ b\n",
+                cut: false,
+              }
+            : pg(msgs)) as any,
+    )
+    const { w } = await mk()
+    await w.find("button.toolline").trigger("click")
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/tools/c1")
+    expect(w.find(".tool-args").text()).toContain('"path": "internal/cron/jobs.go"')
+    expect(w.find(".tool-result").exists()).toBe(true)
+  })
+
+  it("shows the empty text for a session with no messages", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) => (p === "/api/sessions/s2" ? info : pg([])) as any,
+    )
+    const { w } = await mk()
+    expect(w.text()).toContain("No messages yet.")
+  })
+
+  it("loads again from the action of the error state", async () => {
+    vi.mocked(api).mockRejectedValueOnce(new Error("HTTP 500"))
+    const { w } = await mk()
+    const block = w.findComponent({ name: "StateBlock" })
+    expect(block.props("state")).toBe("error")
+    block.vm.$emit("action")
+    await flushPromises()
+    expect(w.text()).toContain("Photos")
+  })
+
+  it("goes to Chat only when the fork reply is ok", async () => {
+    vi.mocked(runCommand).mockResolvedValueOnce({
+      request_id: "r",
+      text: "⏳ **Busy**\n`/fork` cannot run during a task. Wait for the answer, or stop the task.",
+      buttons: [[{ text: "⏹ Stop the task", data: "/stop" }]],
+      edit: false,
+    })
+    const { w, router } = await mk()
+    await w
+      .findAll("button")
+      .find((b) => b.text() === "Fork into dashboard")!
+      .trigger("click")
+    await flushPromises()
+    expect(router.currentRoute.value.name).toBe("transcript")
   })
 
   it("revokes the export URL after a delay", async () => {
@@ -249,7 +397,7 @@ describe("TranscriptPage", () => {
         "fetch",
         vi.fn(async () => ({ ok: true, blob: async () => new Blob(["x"]) })),
       )
-      const w = await mk()
+      const { w } = await mk()
       await w
         .findAll("button")
         .find((b) => b.text() === "Export JSONL")!

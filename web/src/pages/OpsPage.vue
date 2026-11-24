@@ -1,59 +1,71 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from "vue"
-import { api, ApiError, runCommand } from "../api/client"
-import type {
-  BackupFile,
-  BackupView,
-  ConfigView,
-  ReplyView,
-  TaskView,
-  UpdateInfo,
-} from "../api/types.gen"
+import { computed, onBeforeUnmount, ref } from "vue"
+import { useRouter } from "vue-router"
+import { api } from "../api/client"
+import type { BackupView, BootstrapView, ConfigView, TaskView, UpdateInfo } from "../api/types.gen"
+import DataTable from "../components/DataTable.vue"
+import LiveHeader from "../components/LiveHeader.vue"
 import LogViewer from "../components/LogViewer.vue"
+import ResultNote from "../components/ResultNote.vue"
 import StateBlock from "../components/StateBlock.vue"
-import { status } from "../stores/status"
-import { confirm, toast } from "../stores/ui"
+import Tabs from "../components/Tabs.vue"
+import { friendlyError } from "../lib/errors"
+import { type ResultNoteData, useCommand } from "../lib/command"
+import { followTask, useLiveData } from "../lib/live"
+import { confirm, isSecure, toast } from "../stores/ui"
+
+const router = useRouter()
+const { run } = useCommand()
+
+const LOST_TEXT = "The gateway restarted. The result of the task is lost."
 
 const config = ref<ConfigView | null>(null)
 const configState = ref<"loading" | "ready" | "error">("loading")
 const configError = ref("")
-
+const boot = ref<BootstrapView | null>(null)
+const drain = computed(() => boot.value?.drain_s ?? 180)
 const update = ref<UpdateInfo | null>(null)
 const checking = ref(false)
-const backup = ref<BackupFile | null>(null)
-const backupDir = ref("")
+const backups = ref<BackupView | null>(null)
+const chosen = ref("")
+const group = ref("")
 const backingUp = ref(false)
-// The restart overlay. It closes when status.stream is "open" again after a break.
-const restarting = ref(false)
-let broken = false
+const backupNote = ref<ResultNoteData | null>(null)
+const updateNote = ref<ResultNoteData | null>(null)
+const restartNote = ref<ResultNoteData | null>(null)
+const stops = new Set<() => void>()
+// True after the page unmounts. An await can end after that.
 let gone = false
-const backupText = ref("")
-let pollTimer: ReturnType<typeof setTimeout> | null = null
-
-function errText(e: unknown): string {
-  return e instanceof ApiError ? e.message : e instanceof Error ? e.message : String(e)
-}
+const updating = ref(false)
+const restarting = ref(false)
 
 async function loadConfig(): Promise<void> {
   try {
     config.value = await api<ConfigView>("GET", "/api/config")
     configState.value = "ready"
   } catch (e) {
-    configError.value = errText(e)
+    configError.value = friendlyError(e)
     configState.value = "error"
   }
 }
 
-async function act(text: string): Promise<boolean> {
+async function loadBoot(): Promise<void> {
   try {
-    const r = await runCommand(text)
-    if (!("text" in r) || r.text === undefined)
-      toast("The command runs. The reply comes later.", "info")
-    else toast((r as ReplyView).text, "ok")
-    return true
+    boot.value = await api<BootstrapView>("GET", "/api/bootstrap")
   } catch (e) {
-    toast(errText(e), "error")
-    return false
+    toast(friendlyError(e), "error")
+  }
+}
+
+async function loadBackups(): Promise<void> {
+  try {
+    const v = await api<BackupView>("GET", "/api/backup")
+    const files = [...(v.files ?? [])].sort((a, b) => b.modified.localeCompare(a.modified))
+    backups.value = { ...v, files }
+    if (!chosen.value || !files.some((f) => f.name === chosen.value))
+      chosen.value = files[0]?.name ?? ""
+  } catch (e) {
+    toast(friendlyError(e), "error")
   }
 }
 
@@ -62,119 +74,181 @@ async function checkUpdate(): Promise<void> {
   try {
     update.value = await api<UpdateInfo>("GET", "/api/update")
   } catch (e) {
-    toast(errText(e), "error")
+    toast(friendlyError(e), "error")
   } finally {
     checking.value = false
   }
 }
 
-function showOverlay(): void {
-  broken = status.stream !== "open"
-  restarting.value = true
+async function load(): Promise<void> {
+  await Promise.all([loadConfig(), loadBoot(), loadBackups(), checkUpdate()])
+}
+
+// Reloads on the end of a backup or update task, and on each restart event.
+function isLive(name: string, data: unknown): boolean {
+  if (name === "restart") return true
+  if (name !== "task") return false
+  const t = data as Partial<TaskView> | null
+  return (
+    (t?.kind === "backup" || t?.kind === "update") && (t.state === "done" || t.state === "error")
+  )
+}
+
+const { stale, updatedAt, refresh } = useLiveData(load, {
+  events: ["task", "restart"],
+  filter: isLive,
+})
+
+function note(title: string, text: string, kind: ResultNoteData["kind"]): ResultNoteData {
+  return { title, at: new Date(), text, kind }
 }
 
 async function runUpdate(): Promise<void> {
   const u = update.value
-  if (!u || !u.newer || !u.writable) return
+  if (!u || !u.newer || !u.writable || updating.value) return
   const ok = await confirm({
     title: `Update to ${u.latest} and restart?`,
-    body: "The gateway downloads the release, checks its SHA-256, runs it once, swaps the binary, and restarts. Running turns finish first.",
+    body: `The gateway downloads the release, checks its SHA-256, runs it once, swaps the binary, and restarts. Running turns finish first (up to ${drain.value} s).`,
     confirmLabel: "Update and restart",
+    danger: true,
   })
-  if (!ok) return
+  if (!ok || updating.value) return
+  updating.value = true
+  updateNote.value = null
   try {
     const r = await api<{ task_id: string }>("POST", "/api/update", { confirm: true })
-    showOverlay()
-    void followUpdate(r.task_id)
+    const stop = followTask(r.task_id, (t) => {
+      if (t.state === "error") updateNote.value = note("Update", t.text, "error")
+      else if (t.state === "lost") updateNote.value = note("Update", LOST_TEXT, "error")
+      else if (t.state !== "done") return
+      updating.value = false
+      stop()
+      stops.delete(stop)
+    })
+    // A follow that starts after the page is gone stops at once.
+    if (gone) stop()
+    else stops.add(stop)
   } catch (e) {
-    toast(errText(e), "error")
-  }
-}
-
-// Closes the restart overlay and shows the error when the update task fails.
-async function followUpdate(taskId: string): Promise<void> {
-  const t = await followTask(taskId)
-  if (t?.state === "error") {
-    restarting.value = false
-    toast(t.text, "error")
+    toast(friendlyError(e), "error")
+    updating.value = false
   }
 }
 
 async function restart(): Promise<void> {
   const ok = await confirm({
     title: "Restart the gateway?",
-    body: "Running turns finish first (up to 180 s). This page reconnects by itself.",
+    body: `Running turns finish first (up to ${drain.value} s). This page reconnects by itself.`,
     confirmLabel: "Restart",
+    danger: true,
   })
-  if (!ok) return
-  if (await act("/restart")) showOverlay()
-}
-
-function stopPoll(): void {
-  if (pollTimer !== null) {
-    clearTimeout(pollTimer)
-    pollTimer = null
-  }
-}
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((r) => {
-    pollTimer = setTimeout(r, ms)
-  })
-
-// Polls a task every 2 s for 90 s at most. It returns the last view, or null when the time ends.
-// A failed read keeps the poll, because a restart can cut the connection.
-async function followTask(taskId: string): Promise<TaskView | null> {
-  for (let i = 0; i < 45; i++) {
-    await sleep(2000)
-    if (gone) return null
-    try {
-      const t = await api<TaskView>("GET", `/api/tasks/${taskId}`)
-      if (t.state === "done" || t.state === "error") return t
-    } catch {
-      // Keep the poll. The next try can work.
-    }
-  }
-  return null
-}
-
-async function listBackups(): Promise<BackupView | null> {
+  if (!ok || restarting.value) return
+  restarting.value = true
+  restartNote.value = null
   try {
-    return await api<BackupView>("GET", "/api/backup")
-  } catch {
-    return null
+    await run("/restart", { result: restartNote, title: "Restart" })
+  } finally {
+    restarting.value = false
   }
 }
 
-// Starts the backup task, polls it, then reads the backup list for the new file.
+const num = (n: number): string => n.toLocaleString("en-US")
+
+// Returns the text of the backup report, one item on each line.
+function report(t: TaskView): string {
+  const lines = [t.text]
+  const b = t.backup
+  if (b) {
+    lines.push(
+      `Sessions: ${num(b.sessions)} · Messages: ${num(b.messages)} · Cron jobs: ${num(b.cron_jobs)}`,
+    )
+    if (b.replaced?.length) lines.push(`Replaced keys: ${b.replaced.join(", ")}`)
+    for (const w of b.warnings ?? []) lines.push(`⚠ ${w}`)
+    if (b.skipped?.length) lines.push(`Skipped: ${b.skipped.join(", ")}`)
+  }
+  return lines.join("\n")
+}
+
 async function createBackup(): Promise<void> {
   if (backingUp.value) return
   backingUp.value = true
-  backup.value = null
-  backupText.value = ""
+  backupNote.value = null
   try {
-    const before = new Set(((await listBackups())?.files ?? []).map((f) => f.name))
     const r = await api<{ task_id: string }>("POST", "/api/backup")
-    const t = await followTask(r.task_id)
-    if (!t) {
-      if (!gone) toast("The backup did not finish in 90 s. Look again later.", "error")
-      return
-    }
-    if (t.state === "error") {
-      toast(t.text, "error")
-      return
-    }
-    const v = await listBackups()
-    const files = v?.files ?? []
-    backup.value = files.find((f) => !before.has(f.name)) ?? files[0] ?? null
-    backupDir.value = v?.dir ?? ""
-    backupText.value = t.text
+    const stop = followTask(r.task_id, (t) => {
+      if (t.state === "done") {
+        const warn = (t.backup?.warnings ?? []).length > 0
+        backupNote.value = note("Backup", report(t), warn ? "warn" : "info")
+        void loadBackups()
+      } else if (t.state === "error") backupNote.value = note("Backup", t.text, "error")
+      else if (t.state === "lost") backupNote.value = note("Backup", LOST_TEXT, "error")
+      else return
+      backingUp.value = false
+      stop()
+      stops.delete(stop)
+    })
+    // A follow that starts after the page is gone stops at once.
+    if (gone) stop()
+    else stops.add(stop)
   } catch (e) {
-    toast(errText(e), "error")
-  } finally {
+    toast(friendlyError(e), "error")
     backingUp.value = false
   }
 }
+
+function restoreLines(): string[] {
+  const dir = backups.value?.dir ?? "~/.tether/backups"
+  return [
+    "systemctl --user stop tether.service",
+    `tether restore ${dir}/${chosen.value || "<file>"}`,
+    "systemctl --user start tether.service",
+  ]
+}
+const restoreText = computed(() =>
+  restoreLines()
+    .map((l, i) => `${i + 1}. ${l}`)
+    .join("\n"),
+)
+
+async function copyRestore(): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(restoreLines().join("\n"))
+    toast("Copied.", "ok")
+  } catch (e) {
+    toast(friendlyError(e), "error")
+  }
+}
+
+// Splits the config text into groups. A line that starts a top-level key opens a group.
+function groups(text: string): { key: string; text: string }[] {
+  const out: { key: string; text: string }[] = []
+  for (const line of text.split("\n")) {
+    const m = /^([A-Za-z_][\w-]*):/.exec(line)
+    if (m) out.push({ key: m[1], text: line })
+    else if (out.length === 0) out.push({ key: "", text: line })
+    else out[out.length - 1].text += "\n" + line
+  }
+  return out
+}
+const configGroups = computed(() => groups(config.value?.text ?? ""))
+const groupKeys = computed(() => configGroups.value.map((g) => g.key).filter((k) => k !== ""))
+const shownConfig = computed(() => {
+  const text = config.value?.text ?? ""
+  if (!group.value) return text
+  return configGroups.value.find((g) => g.key === group.value)?.text ?? text
+})
+
+const tab = computed({
+  get: () => "ops",
+  set: (v: string) => void router.push({ name: v }),
+})
+
+const checkedAt = computed(() => {
+  const raw = update.value?.checked_at
+  if (!raw) return ""
+  const d = new Date(raw)
+  if (Number.isNaN(d.getTime()) || d.getFullYear() < 2000) return ""
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+})
 
 // Downloads a file with the session header and saves it from a blob URL.
 async function download(path: string, name: string): Promise<void> {
@@ -199,42 +273,58 @@ async function download(path: string, name: string): Promise<void> {
     // Safari on iOS can start the download after click() returns.
     setTimeout(() => URL.revokeObjectURL(url), 30_000)
   } catch (e) {
-    toast(errText(e), "error")
+    toast(friendlyError(e), "error")
   }
 }
 
 const mb = (n: number): string => (n / (1024 * 1024)).toFixed(1)
-
-watch(
-  () => status.stream,
-  (s) => {
-    if (!restarting.value) return
-    if (s !== "open") broken = true
-    else if (broken) {
-      restarting.value = false
-      broken = false
-    }
-  },
+const rows = computed(() =>
+  (backups.value?.files ?? []).map((f) => ({
+    name: f.name,
+    size: `${mb(f.size)} MB`,
+    modified: new Date(f.modified).toLocaleString(),
+  })),
 )
+const cols = [
+  { key: "name", label: "File" },
+  { key: "size", label: "Size", align: "right" as const },
+  { key: "modified", label: "Date" },
+  { key: "actions", label: "" },
+]
 
-onMounted(loadConfig)
 onBeforeUnmount(() => {
   gone = true
-  stopPoll()
+  stops.forEach((f) => f())
+  stops.clear()
 })
 </script>
 
 <template>
   <div class="page">
-    <div class="page-h"><h1 class="t-20">System</h1></div>
-    <div class="tabs">
-      <router-link :to="{ name: 'system' }" class="tab">Health</router-link>
-      <router-link :to="{ name: 'ops' }" class="tab is-on">Operations</router-link>
+    <div class="page-h">
+      <h1 class="t-20">System</h1>
+      <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
     </div>
+    <Tabs
+      v-model="tab"
+      :tabs="[
+        { id: 'system', label: 'Health' },
+        { id: 'ops', label: 'Operations' },
+      ]"
+    />
 
     <div class="card">
       <div class="card-h">
         <h3>config.yaml</h3>
+        <select
+          v-if="configState === 'ready'"
+          v-model="group"
+          class="input"
+          aria-label="Config group"
+        >
+          <option value="">All keys</option>
+          <option v-for="k in groupKeys" :key="k" :value="k">{{ k }}</option>
+        </select>
         <span class="c-3 t-12">read-only · a change needs a restart</span>
       </div>
       <StateBlock v-if="configState === 'loading'" state="loading" />
@@ -243,16 +333,16 @@ onBeforeUnmount(() => {
         state="error"
         :text="configError"
         action="Retry"
-        @retry="loadConfig"
+        @action="loadConfig"
       />
-      <div v-else class="code-block">{{ config?.text }}</div>
+      <pre v-else class="code-block config-view">{{ shownConfig }}</pre>
     </div>
 
     <div class="grid-2">
       <div class="card">
         <div class="card-h"><h3>Update</h3></div>
         <div class="li">
-          <span class="grow">tether {{ update?.current ?? "" }}</span>
+          <span class="grow">tether {{ boot?.version ?? update?.current ?? "" }}</span>
           <span v-if="checking" class="c-3">checking…</span>
           <span v-else-if="!update" class="c-3">not checked yet</span>
           <span v-else-if="update.newer">
@@ -261,6 +351,9 @@ onBeforeUnmount(() => {
           </span>
           <span v-else class="c-3">up to date</span>
         </div>
+        <div v-if="checkedAt" class="li c-3 t-12">Checked {{ checkedAt }}</div>
+        <ResultNote :note="updateNote" @close="updateNote = null" />
+        <div v-if="update && !update.newer" class="li c-3 t-12">You have the newest version.</div>
         <div v-if="update && update.newer && !update.writable" class="li c-3 t-12">
           The binary at {{ update.path }} is not writable by this user. Run `tether update` as a
           user who can write it.
@@ -272,7 +365,7 @@ onBeforeUnmount(() => {
           <button
             class="btn btn-primary"
             type="button"
-            :disabled="!(update && update.newer && update.writable)"
+            :disabled="updating || !(update && update.newer && update.writable)"
             @click="runUpdate"
           >
             Update and restart
@@ -283,10 +376,12 @@ onBeforeUnmount(() => {
       <div class="card">
         <div class="card-h"><h3>Restart</h3></div>
         <div class="li c-2">
-          Running turns finish first (up to 180 s). Cut replies and goals resume after the start.
+          Running turns finish first (up to {{ drain }} s). Cut replies and goals resume after the
+          start.
         </div>
+        <ResultNote :note="restartNote" @close="restartNote = null" />
         <div class="li">
-          <button class="btn btn-secondary" type="button" @click="restart">
+          <button class="btn btn-secondary" type="button" :disabled="restarting" @click="restart">
             Restart the gateway
           </button>
         </div>
@@ -309,22 +404,19 @@ onBeforeUnmount(() => {
           </button>
           <span v-if="backingUp" class="c-3">Creating the backup…</span>
         </div>
-        <div v-if="backupText" class="li c-2">{{ backupText }}</div>
-        <dl v-if="backup" class="kv">
-          <dt>File</dt>
-          <dd class="mono">{{ backup.name }}</dd>
-          <dt>Folder</dt>
-          <dd class="mono">{{ backupDir }}</dd>
-        </dl>
-        <div v-if="backup" class="li">
-          <button
-            class="btn btn-primary"
-            type="button"
-            @click="download('/api/backup/' + backup.name, backup.name)"
-          >
-            Download ({{ mb(backup.size) }} MB)
-          </button>
-        </div>
+        <ResultNote :note="backupNote" @close="backupNote = null" />
+        <DataTable v-if="rows.length" class="backups" :columns="cols" :rows="rows" row-key="name">
+          <template #cell-actions="{ row }">
+            <button
+              class="btn btn-secondary btn-sm"
+              type="button"
+              @click="download('/api/backup/' + row.name, String(row.name))"
+            >
+              Download
+            </button>
+          </template>
+        </DataTable>
+        <StateBlock v-else state="empty" text="No backups yet." />
       </div>
 
       <div class="card">
@@ -335,26 +427,23 @@ onBeforeUnmount(() => {
         <div class="li c-2">
           Restore replaces state.db, so it runs only while the gateway is stopped.
         </div>
-        <div class="code-block">
-          systemctl --user stop tether.service tether restore ~/.tether/backups/&lt;file&gt;
-          systemctl --user start tether.service
+        <div v-if="backups?.files.length" class="li">
+          <select v-model="chosen" class="input" aria-label="Backup to restore">
+            <option v-for="f in backups.files" :key="f.name" :value="f.name">{{ f.name }}</option>
+          </select>
         </div>
+        <pre class="code-block restore-steps">{{ restoreText }}</pre>
+        <p class="t-12 c-3">The dashboard goes offline until step 3.</p>
+        <button v-if="isSecure()" class="btn btn-secondary" type="button" @click="copyRestore">
+          Copy all 3
+        </button>
+        <p v-else class="t-12 c-3">Copy needs HTTPS or localhost.</p>
       </div>
     </div>
 
     <div class="card">
       <div class="card-h"><h3>Logs</h3></div>
       <LogViewer />
-    </div>
-
-    <div
-      v-if="restarting"
-      class="state"
-      role="status"
-      style="position: fixed; inset: 0; z-index: 50; background: var(--bg, #fff)"
-    >
-      <span class="spin" aria-hidden="true" />
-      <h4>Restarting…</h4>
     </div>
   </div>
 </template>

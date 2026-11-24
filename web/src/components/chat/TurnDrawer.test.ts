@@ -43,6 +43,16 @@ const mk = (t: ToolView | null = tool) =>
 beforeEach(() => phone(false))
 
 describe("TurnDrawer", () => {
+  it("closes when a side panel opens, so only one side column shows", async () => {
+    const w = mk()
+    document.dispatchEvent(new CustomEvent("tether:panel-open"))
+    expect(w.emitted("close")).toHaveLength(1)
+    await w.setProps({ open: false })
+    document.dispatchEvent(new CustomEvent("tether:panel-open"))
+    expect(w.emitted("close")).toHaveLength(1)
+    w.unmount()
+  })
+
   it("shows the tool call", () => {
     const w = mk()
     expect(w.find(".aside-h").text()).toContain("Turn details")

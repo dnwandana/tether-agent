@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, type Ref } from "vue"
+import { ref, onMounted, onUnmounted, useId, type Ref } from "vue"
 import type { Card } from "../../api/types.gen"
 import { answerCard } from "../../stores/cards"
 
@@ -9,9 +9,12 @@ const props = defineProps<{ card: Card }>()
 function useCountdown(deadline: () => string): {
   text: Ref<string>
   pct: Ref<number>
+  aria: Ref<string>
 } {
   const text = ref("")
   const pct = ref(100)
+  const aria = ref("")
+  let ticks = 0
   let total = 0
   let timer: ReturnType<typeof setInterval> | undefined
   function tick(): void {
@@ -19,12 +22,17 @@ function useCountdown(deadline: () => string): {
     // Go sends the zero time for a card with no deadline. It is before 1970 in Unix time.
     if (!deadline() || Number.isNaN(end) || end < 86_400_000) {
       text.value = ""
+      aria.value = ""
       return
     }
     const left = Math.max(0, end - Date.now())
     if (total === 0) total = Math.max(left, 1)
     const s = Math.ceil(left / 1000)
-    text.value = `⌛ ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
+    const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
+    text.value = `⌛ ${clock}`
+    // A screen reader hears the time on the first tick and on each 15th tick after it.
+    if (ticks % 15 === 0) aria.value = `Time left: ${clock}`
+    ticks++
     pct.value = Math.min(100, (left / total) * 100)
   }
   tick()
@@ -34,10 +42,11 @@ function useCountdown(deadline: () => string): {
   onUnmounted(() => {
     if (timer) clearInterval(timer)
   })
-  return { text, pct }
+  return { text, pct, aria }
 }
 
 const cd = useCountdown(() => props.card.deadline)
+const answerId = useId()
 const busy = ref(false)
 const error = ref("")
 const picked = ref<string[]>([])
@@ -85,16 +94,19 @@ function sendText(): void {
 </script>
 
 <template>
-  <div :id="'card-' + card.id" class="icard">
+  <div :id="'card-' + card.id" class="icard" role="group" :aria-label="card.header">
     <div class="icard-h">
       <span>{{ card.header }}</span>
       <span v-if="card.child" class="t-12 c-3">· {{ card.child }}</span>
-      <span v-if="cd.text.value" class="cd">{{ cd.text.value }}</span>
+      <span v-if="cd.text.value" class="cd" role="timer" :aria-label="cd.aria.value">{{
+        cd.text.value
+      }}</span>
     </div>
     <div v-if="cd.text.value" class="countdown">
       <span :style="{ width: cd.pct.value + '%' }"></span>
     </div>
     <div class="icard-b">
+      <p v-if="card.summary" class="clarify-q">{{ card.summary }}</p>
       <template v-if="card.choices.length">
         <div class="choices">
           <button
@@ -122,8 +134,9 @@ function sendText(): void {
         </div>
       </template>
       <template v-else>
-        <div class="t-12 c-3">(Reply with a message.)</div>
+        <label class="t-12 c-3" :for="answerId">Your answer</label>
         <input
+          :id="answerId"
           v-model="text"
           class="input"
           type="text"
@@ -140,3 +153,14 @@ function sendText(): void {
     </div>
   </div>
 </template>
+
+<style scoped>
+.clarify-q {
+  margin: 0;
+  font-size: var(--fs-14);
+  line-height: var(--lh-14);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>

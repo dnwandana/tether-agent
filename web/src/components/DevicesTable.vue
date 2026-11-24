@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { deviceLabel } from "../lib/browser"
 import { computed, onMounted, ref } from "vue"
 import { useRouter } from "vue-router"
 import { api, setSessionHeader } from "../api/client"
 import type { DeviceRow } from "../api/types.gen"
+import { friendlyError } from "../lib/errors"
 import { confirm, toast } from "../stores/ui"
 import DataTable from "./DataTable.vue"
 import StateBlock from "./StateBlock.vue"
@@ -60,7 +62,7 @@ function until(iso: string, at: number): string {
 }
 
 function fail(e: unknown): void {
-  toast(e instanceof Error ? e.message : String(e), "error")
+  toast(friendlyError(e), "error")
 }
 
 async function load(): Promise<void> {
@@ -69,7 +71,7 @@ async function load(): Promise<void> {
     now.value = Date.now()
     state.value = "ready"
   } catch (e) {
-    cause.value = e instanceof Error ? e.message : String(e)
+    cause.value = friendlyError(e)
     state.value = "error"
   }
 }
@@ -77,11 +79,11 @@ async function load(): Promise<void> {
 async function revoke(d: DeviceRow): Promise<void> {
   const body = d.this_device
     ? "This is the device you use now. You go to the sign-in screen."
-    : `${d.browser} at ${d.ip} must ask for access again.`
+    : `${deviceLabel(d.browser)} at ${d.ip} must ask for access again.`
   const ok = await confirm({
     title: `Sign out ${d.label}?`,
     body,
-    confirmLabel: "Revoke",
+    confirmLabel: "Sign out",
     danger: true,
   })
   if (!ok) return
@@ -102,7 +104,7 @@ async function revoke(d: DeviceRow): Promise<void> {
 
 async function revokeOthers(): Promise<void> {
   const ok = await confirm({
-    title: `Sign out ${others.value} other devices?`,
+    title: `Sign out ${others.value} other ${others.value === 1 ? "device" : "devices"}?`,
     body: "Each of them must ask for access again. This device stays signed in.",
     confirmLabel: "Sign out all others",
     danger: true,
@@ -138,7 +140,7 @@ onMounted(load)
       </button>
     </div>
     <StateBlock v-if="state === 'loading'" state="loading" />
-    <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @retry="load" />
+    <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @action="load" />
     <DataTable v-else :columns="columns" :rows="rows" row-key="id" :cards-below="1024">
       <template #cell-label="{ row }">
         <svg
@@ -159,6 +161,12 @@ onMounted(load)
           >This device</span
         >
       </template>
+      <template #cell-browser="{ row }"
+        ><details>
+          <summary>{{ deviceLabel((row as unknown as DeviceRow).browser) }}</summary>
+          <span class="mono t-12">{{ (row as unknown as DeviceRow).browser }}</span>
+        </details></template
+      >
       <template #cell-ip="{ row }"
         ><span class="mono">{{ (row as unknown as DeviceRow).ip }}</span></template
       >
@@ -177,7 +185,7 @@ onMounted(load)
           type="button"
           @click="revoke(row as unknown as DeviceRow)"
         >
-          Revoke
+          Sign out
         </button>
       </template>
     </DataTable>

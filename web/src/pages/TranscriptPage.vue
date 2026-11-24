@@ -1,32 +1,37 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue"
+import { computed, nextTick, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
-import { api, ApiError, runCommand } from "../api/client"
-import type { MessagePage, MessageView, ReplyView, SessionRow } from "../api/types.gen"
+import { api } from "../api/client"
+import type { CostView, MessagePage, MessageView, SessionRow, ToolView } from "../api/types.gen"
+import CostFooter from "../components/chat/CostFooter.vue"
+import ReasoningBlock from "../components/chat/ReasoningBlock.vue"
+import ToolLine from "../components/chat/ToolLine.vue"
+import ToolResult from "../components/chat/ToolResult.vue"
+import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
+import { friendlyError } from "../lib/errors"
+import { useCommand } from "../lib/command"
+import { useLiveData } from "../lib/live"
 import { renderMarkdown } from "../lib/markdown"
 import { session } from "../stores/session"
-import { confirm, toast } from "../stores/ui"
+import { toast } from "../stores/ui"
 
 const route = useRoute()
 const router = useRouter()
+const { run } = useCommand()
 const id = computed(() => String(route.params.id))
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const info = ref<SessionRow | null>(null)
+const parentTitle = ref("")
 const messages = ref<MessageView[]>([])
 // The smallest saved message id of the loaded pages. It is the cursor of the older page.
 const firstId = ref(0)
+// The largest saved message id of the loaded pages. It is the cursor of the newer page.
+const lastId = ref(0)
 const more = ref(false)
-
-// Formats a token count: 655 -> "655", 40300 -> "40.3k".
-function tokens(n: number): string {
-  return n > 999 ? (n / 1000).toFixed(1) + "k" : String(n)
-}
-
-function secs(ms: number): string {
-  return (ms / 1000).toFixed(1) + " s"
-}
+const newer = ref(false)
+const openTool = ref<ToolView | null>(null)
 
 function usd(n: number, unpriced: boolean): string {
   return "$" + n.toFixed(4) + (unpriced ? "+" : "")
@@ -37,17 +42,59 @@ function when(s: string): string {
   return Number.isNaN(d.getTime()) || d.getFullYear() < 2000 ? "—" : d.toLocaleString()
 }
 
+function costOf(m: MessageView): CostView {
+  return {
+    model: m.model,
+    provider: m.provider,
+    calls: 1,
+    in: m.in,
+    cached: m.cached,
+    out: m.out,
+    usd: m.cost_usd,
+    unpriced: m.unpriced,
+    seconds: m.latency_ms / 1000,
+    answered_by: m.answered_by,
+  }
+}
+
+// Returns the arguments with 2 spaces of indent, or the raw text when it is not JSON.
+function argsText(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
+
 const shown = computed(() => messages.value.filter((m) => m.role !== "tool"))
 const hitId = computed(() => {
   const m = Number(route.query.message)
   return Number.isFinite(m) && m > 0 ? m : 0
 })
 
+// Counts the loads. A reply of an older load or of another session must not write to the page.
+let gen = 0
+
 async function load(): Promise<void> {
+  const my = ++gen
   state.value = "loading"
+  openTool.value = null
   try {
     const base = `/api/sessions/${id.value}`
-    info.value = await api<SessionRow>("GET", base)
+    const row = await api<SessionRow>("GET", base)
+    if (my !== gen) return
+    info.value = row
+    parentTitle.value = ""
+    if (row.parent_id) {
+      try {
+        const parent = await api<SessionRow>("GET", `/api/sessions/${row.parent_id}`)
+        if (my !== gen) return
+        parentTitle.value = parent.title
+      } catch {
+        if (my !== gen) return
+        parentTitle.value = ""
+      }
+    }
     // A tool result merges into the view of its call, so the number of views does not tell if
     // older messages exist. The page tells it with has_older.
     const page = await api<MessagePage>(
@@ -56,16 +103,20 @@ async function load(): Promise<void> {
         ? `${base}/messages?around=${hitId.value}&limit=25`
         : `${base}/messages?limit=50`,
     )
+    if (my !== gen) return
     messages.value = page.rows ?? []
     firstId.value = page.first_id
+    lastId.value = page.last_id
     more.value = page.has_older
+    newer.value = page.has_newer
     state.value = "ready"
     if (hitId.value > 0) {
       await nextTick()
       document.getElementById("msg-" + hitId.value)?.scrollIntoView?.({ block: "center" })
     }
   } catch (e) {
-    errorText.value = e instanceof Error ? e.message : String(e)
+    if (my !== gen) return
+    errorText.value = friendlyError(e)
     state.value = "error"
   }
 }
@@ -74,46 +125,76 @@ async function load(): Promise<void> {
 // a negative id and stays where the server puts it. A row that shows already is not added again.
 async function loadOlder(): Promise<void> {
   if (firstId.value <= 0) return
+  const my = gen
   try {
     const page = await api<MessagePage>(
       "GET",
       `/api/sessions/${id.value}/messages?before=${firstId.value}&limit=50`,
     )
+    if (my !== gen) return
     const have = new Set(messages.value.map((m) => m.id))
     messages.value = [...(page.rows ?? []).filter((m) => !have.has(m.id)), ...messages.value]
     if (page.first_id > 0) firstId.value = Math.min(firstId.value, page.first_id)
     more.value = page.has_older
   } catch (e) {
-    toast(e instanceof Error ? e.message : String(e), "error")
+    toast(friendlyError(e), "error")
   }
 }
 
-async function act(text: string, navigates = false): Promise<boolean> {
+// Loads the 50 saved messages after the largest saved id of the loaded pages.
+async function loadNewer(): Promise<void> {
+  const my = gen
   try {
-    const r = await runCommand(text)
-    if (!("text" in r) || r.text === undefined) {
-      toast("The command runs. The reply comes later.", "info")
-    } else {
-      const reply = r as ReplyView
-      const button = (reply.buttons ?? []).flat().find((b) => b.data.endsWith("confirm"))
-      if (button) {
-        const [title, ...rest] = reply.text.split("\n")
-        const yes = await confirm({
-          title,
-          body: rest.join("\n").trim(),
-          confirmLabel: button.text,
-          danger: true,
-        })
-        if (yes) await act(button.data, navigates)
-        return yes
-      }
-      toast(reply.text, "ok")
-    }
-    if (!navigates) await load()
-    return true
+    const page = await api<MessagePage>(
+      "GET",
+      `/api/sessions/${id.value}/messages?after=${lastId.value}&limit=50`,
+    )
+    if (my !== gen) return
+    const have = new Set(messages.value.map((m) => m.id))
+    messages.value = [...messages.value, ...(page.rows ?? []).filter((m) => !have.has(m.id))]
+    lastId.value = Math.max(lastId.value, page.last_id)
+    newer.value = page.has_newer
   } catch (e) {
-    toast(e instanceof ApiError ? e.message : String(e), "error")
-    return false
+    toast(friendlyError(e), "error")
+  }
+}
+
+// A live reload keeps the older pages. It reads the session row and the newer messages.
+async function live(): Promise<void> {
+  if (state.value !== "ready") {
+    await load()
+    return
+  }
+  const my = gen
+  try {
+    const row = await api<SessionRow>("GET", `/api/sessions/${id.value}`)
+    if (my !== gen) return
+    info.value = row
+  } catch (e) {
+    toast(friendlyError(e), "error")
+    return
+  }
+  await loadNewer()
+}
+
+const { stale, updatedAt, refresh } = useLiveData(live)
+
+function jumpLatest(): void {
+  void router.push({ name: "transcript", params: { id: id.value } })
+}
+
+async function selectTool(t: ToolView): Promise<void> {
+  if (openTool.value?.call === t.call) {
+    openTool.value = null
+    return
+  }
+  try {
+    openTool.value = await api<ToolView>(
+      "GET",
+      `/api/sessions/${id.value}/tools/${encodeURIComponent(t.call)}`,
+    )
+  } catch (e) {
+    toast(friendlyError(e), "error")
   }
 }
 
@@ -141,16 +222,16 @@ async function download(path: string, name: string): Promise<void> {
     // The browser needs the URL for a while after the click to start the download.
     setTimeout(() => URL.revokeObjectURL(url), 30_000)
   } catch (e) {
-    toast(e instanceof Error ? e.message : String(e), "error")
+    toast(friendlyError(e), "error")
   }
 }
 
 async function fork(): Promise<void> {
-  if (await act("/fork from " + id.value, true)) router.push({ name: "chat" })
+  if ((await run("/fork from " + id.value)) === "ok") void router.push({ name: "chat" })
 }
 
 async function resume(): Promise<void> {
-  if (await act("/resume " + id.value, true)) router.push({ name: "chat" })
+  if ((await run("/resume " + id.value)) === "ok") void router.push({ name: "chat" })
 }
 
 watch(
@@ -159,7 +240,6 @@ watch(
     if (route.name === "transcript") void load()
   },
 )
-onMounted(load)
 </script>
 
 <template>
@@ -172,13 +252,30 @@ onMounted(load)
       state="error"
       :text="errorText"
       action="Retry"
-      @retry="load"
+      @action="load"
     />
     <template v-else-if="info">
       <div class="page-h">
         <h1 class="t-20">{{ info.title }}</h1>
         <span class="chip">{{ info.source_label }}</span>
         <span class="chip">{{ info.kind }}</span>
+        <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
+      </div>
+      <router-link
+        v-if="parentTitle"
+        class="link"
+        :to="{ name: 'transcript', params: { id: info.parent_id } }"
+        >↳ child of {{ parentTitle }}</router-link
+      >
+      <div v-if="(info.children ?? []).length > 0" class="t-12 c-3">
+        Children:
+        <router-link
+          v-for="c in info.children"
+          :key="c.id"
+          class="link"
+          :to="{ name: 'transcript', params: { id: c.id } }"
+          >{{ c.title }}</router-link
+        >
       </div>
       <div class="grid-4">
         <div class="card">
@@ -233,6 +330,10 @@ onMounted(load)
       </div>
 
       <button v-if="more" class="btn btn-ghost" type="button" @click="loadOlder">Load older</button>
+      <button v-if="hitId > 0" class="btn btn-ghost" type="button" @click="jumpLatest">
+        Jump to latest
+      </button>
+      <StateBlock v-if="shown.length === 0" state="empty" text="No messages yet." />
 
       <template v-for="m in shown" :key="m.id">
         <details
@@ -251,7 +352,11 @@ onMounted(load)
           :class="{ 'is-hit': m.id === hitId }"
           :style="m.compacted ? 'opacity: 0.7' : undefined"
         >
-          <div class="msg-meta"><b>You</b></div>
+          <div class="msg-meta">
+            <b>You</b>
+            <time :datetime="m.created">{{ when(m.created) }}</time>
+            <span v-if="m.id === hitId" class="chip chip-acc">Search hit</span>
+          </div>
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div class="bubble-user" v-html="renderMarkdown(m.text)" />
           <button
@@ -273,17 +378,17 @@ onMounted(load)
         >
           <div class="msg-meta">
             <b>Tether</b>
-            <span v-if="m.answered_by" class="chip">answered by {{ m.answered_by }}</span>
+            <time :datetime="m.created">{{ when(m.created) }}</time>
+            <span v-if="m.id === hitId" class="chip chip-acc">Search hit</span>
           </div>
-          <details v-if="m.reasoning" class="reasoning">
-            <summary>▸ Reasoning · {{ m.reasoning_tokens }} tokens</summary>
-            <div class="rs-b">{{ m.reasoning }}</div>
-          </details>
-          <div v-for="t in m.tools" :key="t.call" class="toolline is-done">
-            <span class="em">{{ t.emoji || "🛠" }}</span>
-            <span class="name">{{ t.name }}</span>
-            <span v-if="t.preview" class="args">"{{ t.preview }}"</span>
-          </div>
+          <ReasoningBlock :text="m.reasoning" :tokens="m.reasoning_tokens" />
+          <template v-for="t in m.tools" :key="t.call">
+            <ToolLine :tool="t" :selected="openTool?.call === t.call" @select="selectTool(t)" />
+            <template v-if="openTool?.call === t.call">
+              <pre class="code-block tool-args">{{ argsText(openTool.args) }}</pre>
+              <ToolResult :tool="openTool" />
+            </template>
+          </template>
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div class="answer" v-html="renderMarkdown(m.text)" />
           <button
@@ -295,16 +400,20 @@ onMounted(load)
           >
             {{ f.name }}
           </button>
-          <div class="cost-foot">
-            <span>{{ m.model }} · {{ m.provider }}</span>
-            <span>{{ tokens(m.in) }} in ({{ tokens(m.cached) }} cached)</span>
-            <span>{{ tokens(m.out) }} out</span>
-            <span>TTFT {{ secs(m.first_ms) }}</span>
-            <span>{{ secs(m.latency_ms) }}</span>
-            <span>{{ usd(m.cost_usd, m.unpriced) }}</span>
-          </div>
+          <CostFooter :cost="costOf(m)" />
         </div>
       </template>
+      <button v-if="newer" class="btn btn-ghost" type="button" @click="loadNewer">
+        Load newer
+      </button>
     </template>
   </div>
 </template>
+
+<style scoped>
+.is-hit {
+  outline: 2px solid var(--accent-tint);
+  outline-offset: 4px;
+  border-radius: 8px;
+}
+</style>

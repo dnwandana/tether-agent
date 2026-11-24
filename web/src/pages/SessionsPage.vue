@@ -1,34 +1,48 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
-import { useRouter } from "vue-router"
-import { api, ApiError, runCommand } from "../api/client"
-import type { ReplyView, SearchHitView, SessionPage, SessionRow } from "../api/types.gen"
+import { computed, onBeforeUnmount, ref, watch } from "vue"
+import { useRoute, useRouter } from "vue-router"
+import { api } from "../api/client"
+import type { SearchHitView, SessionPage, SessionRow } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
+import LiveHeader from "../components/LiveHeader.vue"
+import RowMenu from "../components/RowMenu.vue"
 import StateBlock from "../components/StateBlock.vue"
+import { friendlyError } from "../lib/errors"
+import { useCommand } from "../lib/command"
+import { useLiveData } from "../lib/live"
 import { session } from "../stores/session"
-import { confirm, toast } from "../stores/ui"
+import { toast, type ToastKind } from "../stores/ui"
 
 type TableRow = SessionRow & { child?: boolean; actions?: string }
 
 const router = useRouter()
+const route = useRoute()
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const rows = ref<SessionRow[]>([])
 const total = ref(0)
 const hits = ref<SearchHitView[]>([])
-const search = ref("")
+const q0 = route.query
+const str = (v: unknown): string => (typeof v === "string" ? v : "")
+const off0 = Number(str(q0.off))
+const search = ref(str(q0.q))
 const fullText = ref(false)
-const source = ref("")
-const kind = ref("chat")
-const archived = ref(false)
-const offset = ref(0)
-const menuFor = ref("")
+const source = ref(str(q0.src))
+const kind = ref(typeof q0.kind === "string" ? q0.kind : "chat")
+const archived = ref(str(q0.arch) === "1")
+const offset = ref(Number.isInteger(off0) && off0 >= 0 ? off0 : 0)
+const hitsMore = ref(false)
+const searchError = ref("")
+const activeTotal = ref(0)
+const archivedTotal = ref(0)
 const renaming = ref("")
 const renameText = ref("")
 
 const columns = [
   { key: "title", label: "Session" },
+  { key: "kind", label: "Kind" },
   { key: "source_label", label: "Source" },
+  { key: "started", label: "Started" },
   { key: "last_active", label: "Last active" },
   { key: "messages", label: "Messages", align: "right" as const },
   { key: "cost_usd", label: "Cost", align: "right" as const },
@@ -51,21 +65,73 @@ function listPath(f: {
   search: string
   archived: boolean
   offset: number
+  limit: number
 }): string {
   const q = new URLSearchParams({
     source: f.source,
     kind: f.kind,
     search: f.search,
     archived: f.archived ? "1" : "0",
-    limit: "50",
+    limit: String(f.limit),
     offset: String(f.offset),
   })
   return "/api/sessions?" + q.toString()
 }
 
+// The route query holds the filters. A key with its default value is left out.
+function routeQuery(): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (search.value !== "") out.q = search.value
+  if (source.value !== "") out.src = source.value
+  if (kind.value !== "chat") out.kind = kind.value
+  if (archived.value) out.arch = "1"
+  if (offset.value > 0) out.off = String(offset.value)
+  return out
+}
+
+function syncRoute(): void {
+  void router.replace({ query: routeQuery() })
+}
+
+// Builds the search query with the six keys in a fixed order.
+function searchPath(off: number): string {
+  const q = new URLSearchParams({
+    q: search.value.trim(),
+    limit: "20",
+    offset: String(off),
+    source: source.value,
+    kind: kind.value,
+    archived: archived.value ? "1" : "0",
+  })
+  return "/api/search?" + q.toString()
+}
+
+// Counts the loads. A reply that is older than the newest request is dropped.
+let seq = 0
+
+const searching = computed(() => fullText.value && search.value.trim() !== "")
+
 async function load(): Promise<void> {
+  const my = ++seq
+  const text = search.value.trim()
+  if (fullText.value && text !== "") {
+    try {
+      const res = (await api<SearchHitView[]>("GET", searchPath(0))) ?? []
+      if (my !== seq) return
+      hits.value = res
+      hitsMore.value = res.length === 20
+      searchError.value = ""
+    } catch (e) {
+      if (my !== seq) return
+      searchError.value = "Search failed: " + friendlyError(e)
+    }
+    if (state.value === "loading") state.value = "ready"
+    return
+  }
+  hits.value = []
+  hitsMore.value = false
+  searchError.value = ""
   try {
-    const text = search.value.trim()
     const res = await api<SessionPage>(
       "GET",
       listPath({
@@ -74,49 +140,90 @@ async function load(): Promise<void> {
         search: fullText.value ? "" : text,
         archived: archived.value,
         offset: offset.value,
+        limit: 50,
       }),
     )
+    if (my !== seq) return
+    // The other state needs only its total. A failure keeps the old count.
+    let otherTotal: number | null = null
+    try {
+      const other = await api<SessionPage>(
+        "GET",
+        listPath({
+          source: source.value,
+          kind: kind.value,
+          search: fullText.value ? "" : text,
+          archived: !archived.value,
+          offset: 0,
+          limit: 1,
+        }),
+      )
+      otherTotal = other.total
+    } catch {
+      otherTotal = null
+    }
+    if (my !== seq) return
     rows.value = res.rows ?? []
     total.value = res.total
-    hits.value =
-      fullText.value && text !== ""
-        ? ((await api<SearchHitView[]>("GET", "/api/search?q=" + encodeURIComponent(text))) ?? [])
-        : []
+    if (archived.value) {
+      archivedTotal.value = res.total
+      if (otherTotal !== null) activeTotal.value = otherTotal
+    } else {
+      activeTotal.value = res.total
+      if (otherTotal !== null) archivedTotal.value = otherTotal
+    }
     state.value = "ready"
   } catch (e) {
-    errorText.value = e instanceof Error ? e.message : String(e)
+    if (my !== seq) return
+    errorText.value = friendlyError(e)
     state.value = "error"
   }
 }
 
-async function act(text: string): Promise<boolean> {
-  let ok = true
+async function loadMoreHits(): Promise<void> {
+  const my = ++seq
   try {
-    const r = await runCommand(text)
-    if (!("text" in r) || r.text === undefined) {
-      toast("The command runs. The reply comes later.", "info")
-    } else {
-      const reply = r as ReplyView
-      const button = (reply.buttons ?? []).flat().find((b) => b.data.endsWith("confirm"))
-      if (button) {
-        const [title, ...rest] = reply.text.split("\n")
-        const yes = await confirm({
-          title,
-          body: rest.join("\n").trim(),
-          confirmLabel: button.text,
-          danger: true,
-        })
-        if (yes) await act(button.data)
-        return yes
-      }
-      toast(reply.text, "ok")
-    }
+    const res = (await api<SearchHitView[]>("GET", searchPath(hits.value.length))) ?? []
+    if (my !== seq) return
+    hits.value = [...hits.value, ...res]
+    hitsMore.value = res.length === 20
+    searchError.value = ""
   } catch (e) {
-    ok = false
-    toast(e instanceof ApiError ? e.message : String(e), "error")
+    if (my !== seq) return
+    searchError.value = "Search failed: " + friendlyError(e)
   }
-  await load()
-  return ok
+}
+
+// Splits a search snippet into text parts. A part between "[" and "]" is a match.
+function markParts(s: string): { text: string; mark: boolean }[] {
+  const out: { text: string; mark: boolean }[] = []
+  let cur = ""
+  let open = false
+  const flush = (): void => {
+    if (cur !== "") out.push({ text: cur, mark: open })
+    cur = ""
+  }
+  for (const ch of s) {
+    if (ch === "[" && !open) {
+      flush()
+      open = true
+    } else if (ch === "]" && open) {
+      flush()
+      open = false
+    } else cur += ch
+  }
+  flush()
+  return out
+}
+
+const { run } = useCommand()
+const { stale, updatedAt, refresh } = useLiveData(load)
+
+// Runs one command, then loads the page again.
+async function command(text: string): Promise<ToastKind> {
+  const result = await run(text)
+  await refresh()
+  return result
 }
 
 // Downloads a file with the session header. A plain link cannot send it.
@@ -157,6 +264,10 @@ const tableRows = computed<TableRow[]>(() => {
   return out
 })
 
+const pageText = computed(
+  () => `Page ${Math.floor(offset.value / 50) + 1} of ${Math.max(1, Math.ceil(total.value / 50))}`,
+)
+
 const range = computed(() => {
   if (rows.value.length === 0) return "0 of " + total.value
   return `${offset.value + 1}–${offset.value + rows.value.length} of ${total.value}`
@@ -167,32 +278,54 @@ function view(id: string): void {
 }
 
 async function resume(id: string): Promise<void> {
-  if (await act("/resume " + id)) router.push({ name: "chat" })
+  if ((await run("/resume " + id)) === "ok") router.push({ name: "chat" })
+  else await refresh()
 }
 
 async function newSession(): Promise<void> {
-  if (await act("/new")) router.push({ name: "chat" })
+  if ((await run("/new")) === "ok") router.push({ name: "chat" })
+  else await refresh()
 }
 
-function toggleMenu(id: string): void {
-  menuFor.value = menuFor.value === id ? "" : id
+async function fork(id: string): Promise<void> {
+  if ((await run("/fork from " + id)) === "ok") router.push({ name: "chat" })
+  else await refresh()
 }
+
+const vFocus = { mounted: (el: HTMLElement) => el.focus() }
 
 function startRename(r: SessionRow): void {
-  menuFor.value = ""
   renaming.value = r.id
   renameText.value = r.title
+}
+
+function cancelRename(): void {
+  renaming.value = ""
 }
 
 async function finishRename(id: string): Promise<void> {
   const t = renameText.value.trim()
   renaming.value = ""
-  if (t !== "") await act(`/rename ${id} ${t}`)
+  if (t !== "") await command(`/rename ${id} ${t}`)
 }
 
-function menuAct(fn: () => unknown): void {
-  menuFor.value = ""
-  void fn()
+function menuItems(r: SessionRow): { label: string; act: string; danger?: boolean }[] {
+  const items: { label: string; act: string; danger?: boolean }[] = [
+    { label: "Rename", act: "rename" },
+    { label: "Fork", act: "fork" },
+    { label: "Export", act: "export" },
+  ]
+  if (!r.archived) items.push({ label: "Archive", act: "archive" })
+  items.push({ label: "Delete…", act: "delete", danger: true })
+  return items
+}
+
+function onMenu(r: SessionRow, act: string): void {
+  if (act === "rename") startRename(r)
+  else if (act === "fork") void fork(r.id)
+  else if (act === "export") void download(`/api/sessions/${r.id}/export`, `session-${r.id}.jsonl`)
+  else if (act === "archive") void command("/archive " + r.id)
+  else if (act === "delete") void command("/delete " + r.id)
 }
 
 let timer: ReturnType<typeof setTimeout> | undefined
@@ -200,20 +333,40 @@ watch(search, () => {
   clearTimeout(timer)
   timer = setTimeout(() => {
     offset.value = 0
+    syncRoute()
     void load()
   }, 250)
 })
+watch(source, (s) => {
+  if (s === "cron") kind.value = ""
+})
 watch([fullText, source, kind, archived], () => {
   offset.value = 0
+  syncRoute()
   void load()
 })
 
 function page(delta: number): void {
   offset.value = Math.max(0, offset.value + delta)
+  syncRoute()
   void load()
 }
 
-onMounted(load)
+const filtered = computed(
+  () =>
+    search.value.trim() !== "" || source.value !== "" || kind.value !== "chat" || archived.value,
+)
+
+function clearFilters(): void {
+  search.value = ""
+  source.value = ""
+  kind.value = "chat"
+  archived.value = false
+  offset.value = 0
+  syncRoute()
+  void load()
+}
+
 onBeforeUnmount(() => clearTimeout(timer))
 </script>
 
@@ -221,6 +374,7 @@ onBeforeUnmount(() => clearTimeout(timer))
   <div class="page">
     <div class="page-h">
       <h1 class="t-20">Sessions</h1>
+      <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
       <button class="btn btn-primary" type="button" @click="newSession">+ New session</button>
     </div>
 
@@ -248,13 +402,15 @@ onBeforeUnmount(() => clearTimeout(timer))
       </select>
       <div class="seg">
         <button type="button" :class="{ 'is-on': !archived }" @click="archived = false">
-          Active
+          Active · {{ activeTotal }}
         </button>
         <button type="button" :class="{ 'is-on': archived }" @click="archived = true">
-          Archived
+          Archived · {{ archivedTotal }}
         </button>
       </div>
     </div>
+
+    <p v-if="searchError" class="t-12 c-bad search-err" role="alert">{{ searchError }}</p>
 
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
@@ -262,167 +418,176 @@ onBeforeUnmount(() => clearTimeout(timer))
       state="error"
       :text="errorText"
       action="Retry"
-      @retry="load"
+      @action="refresh"
     />
     <template v-else>
-      <div v-if="hits.length > 0" class="card">
-        <div class="card-h"><h3>Message hits</h3></div>
-        <router-link
-          v-for="h in hits"
-          :key="h.session_id + ':' + h.message_id"
-          class="li"
-          :to="{
-            name: 'transcript',
-            params: { id: h.session_id },
-            query: { message: String(h.message_id) },
-          }"
-        >
-          <span class="grow"
-            ><b>{{ h.title }}</b> <span class="c-2">{{ h.snippet }}</span></span
+      <template v-if="searching">
+        <div v-if="hits.length > 0" class="card hits">
+          <div class="card-h">
+            <h2 class="h">{{ hits.length }} hits</h2>
+          </div>
+          <router-link
+            v-for="h in hits"
+            :key="h.session_id + ':' + h.message_id"
+            class="li"
+            :to="{
+              name: 'transcript',
+              params: { id: h.session_id },
+              query: { message: String(h.message_id) },
+            }"
           >
-          <span class="c-3 t-12">{{ when(h.date) }}</span>
-        </router-link>
-      </div>
-
-      <StateBlock
-        v-if="tableRows.length === 0"
-        state="empty"
-        text="No sessions match the filters."
-      />
+            <span class="grow"
+              ><b>{{ h.title }}</b>
+              <span class="c-2"
+                ><template v-for="(p, i) in markParts(h.snippet)" :key="i"
+                  ><mark v-if="p.mark">{{ p.text }}</mark
+                  ><template v-else>{{ p.text }}</template></template
+                ></span
+              ></span
+            >
+            <span class="chip">{{ h.source }}</span>
+            <span class="chip">{{ h.kind }}</span>
+            <span class="c-3 t-12">{{ when(h.date) }}</span>
+          </router-link>
+          <button v-if="hitsMore" class="btn btn-secondary" type="button" @click="loadMoreHits">
+            Load more
+          </button>
+        </div>
+        <StateBlock v-else-if="!searchError" state="empty" text="No messages match the search." />
+      </template>
       <template v-else>
-        <DataTable
-          :columns="columns"
-          :rows="tableRows as unknown as Record<string, unknown>[]"
-          row-key="id"
-        >
-          <template #cell-title="{ row }">
-            <span v-if="(row as unknown as TableRow).child" class="cellrow is-child">
-              <span aria-hidden="true">↳</span>
-              <span class="chip">{{ (row as unknown as TableRow).kind }}</span>
-              <span>{{ (row as unknown as TableRow).title }}</span>
-            </span>
-            <input
-              v-else-if="renaming === (row as unknown as TableRow).id"
-              v-model="renameText"
-              class="input"
-              aria-label="New title"
-              @keydown.enter.prevent="finishRename((row as unknown as TableRow).id)"
-              @keydown.esc.prevent="renaming = ''"
-            />
-            <b v-else>{{ (row as unknown as TableRow).title }}</b>
-          </template>
-          <template #cell-last_active="{ row }">{{
-            when((row as unknown as TableRow).last_active)
-          }}</template>
-          <template #cell-cost_usd="{ row }">{{
-            usd((row as unknown as TableRow).cost_usd)
-          }}</template>
-          <template #cell-actions="{ row }">
-            <template v-for="r in [row as unknown as TableRow]" :key="r.id">
-              <button v-if="r.child" class="btn btn-ghost" type="button" @click="view(r.id)">
-                View
-              </button>
-              <template v-else-if="r.read_only">
-                <button class="btn btn-ghost" type="button" @click="view(r.id)">View</button>
-                <button class="btn btn-secondary" type="button" @click="act('/fork from ' + r.id)">
-                  Fork into dashboard
-                </button>
-                <button
-                  class="btn btn-ghost"
-                  type="button"
-                  @click="download(`/api/sessions/${r.id}/export`, `session-${r.id}.jsonl`)"
-                >
-                  Export
-                </button>
-              </template>
-              <template v-else>
-                <button
-                  v-if="r.id === session.id"
-                  class="btn btn-secondary"
-                  type="button"
-                  @click="router.push({ name: 'chat' })"
-                >
-                  Open
-                </button>
-                <button v-else class="btn btn-secondary" type="button" @click="resume(r.id)">
-                  Resume
-                </button>
-                <span style="position: relative; display: inline-block">
+        <StateBlock
+          v-if="tableRows.length === 0"
+          state="empty"
+          text="No sessions match the filters."
+          :action="filtered ? 'Clear filters' : undefined"
+          @action="clearFilters"
+        />
+        <template v-else>
+          <div :aria-busy="stale || undefined">
+            <DataTable
+              :columns="columns"
+              :rows="tableRows as unknown as Record<string, unknown>[]"
+              row-key="id"
+            >
+              <template #cell-title="{ row }">
+                <span v-if="(row as unknown as TableRow).child" class="cellrow is-child">
+                  <span aria-hidden="true">↳</span>
+                  <span class="chip">{{ (row as unknown as TableRow).kind }}</span>
+                  <span>{{ (row as unknown as TableRow).title }}</span>
+                </span>
+                <input
+                  v-else-if="renaming === (row as unknown as TableRow).id"
+                  v-model="renameText"
+                  v-focus
+                  autofocus
+                  class="input"
+                  aria-label="New title"
+                  @keydown.enter.prevent="finishRename((row as unknown as TableRow).id)"
+                  @keydown.esc.prevent="cancelRename"
+                  @blur="cancelRename"
+                />
+                <span v-else class="cellrow">
+                  <router-link
+                    :to="{ name: 'transcript', params: { id: (row as unknown as TableRow).id } }"
+                    ><b>{{ (row as unknown as TableRow).title }}</b></router-link
+                  >
+                  <span v-if="(row as unknown as TableRow).id === session.id" class="chip chip-acc"
+                    >active</span
+                  >
+                </span>
+                <template v-if="renaming === (row as unknown as TableRow).id">
                   <button
-                    class="btn btn-ghost"
+                    class="btn btn-primary btn-sm"
                     type="button"
-                    aria-label="More actions"
-                    @click="toggleMenu(r.id)"
+                    @mousedown.prevent
+                    @click="finishRename((row as unknown as TableRow).id)"
                   >
-                    ⋯
+                    Save
                   </button>
-                  <div
-                    v-if="menuFor === r.id"
-                    class="menu"
-                    style="position: absolute; right: 0; z-index: 20"
+                  <button
+                    class="btn btn-ghost btn-sm"
+                    type="button"
+                    @mousedown.prevent
+                    @click="cancelRename"
                   >
-                    <button class="menu-item" type="button" @click="startRename(r)">Rename</button>
-                    <button
-                      class="menu-item"
-                      type="button"
-                      @click="menuAct(() => act('/fork from ' + r.id))"
-                    >
-                      Fork
+                    Cancel
+                  </button>
+                </template>
+              </template>
+              <template #cell-started="{ row }">{{
+                when((row as unknown as TableRow).started)
+              }}</template>
+              <template #cell-last_active="{ row }">{{
+                when((row as unknown as TableRow).last_active)
+              }}</template>
+              <template #cell-cost_usd="{ row }">{{
+                usd((row as unknown as TableRow).cost_usd)
+              }}</template>
+              <template #cell-actions="{ row }">
+                <template v-for="r in [row as unknown as TableRow]" :key="r.id">
+                  <button v-if="r.child" class="btn btn-ghost" type="button" @click="view(r.id)">
+                    View
+                  </button>
+                  <template v-else-if="r.read_only">
+                    <button class="btn btn-ghost" type="button" @click="view(r.id)">View</button>
+                    <button class="btn btn-secondary" type="button" @click="fork(r.id)">
+                      Fork into dashboard
                     </button>
                     <button
-                      class="menu-item"
+                      class="btn btn-ghost"
                       type="button"
-                      @click="
-                        menuAct(() =>
-                          download(`/api/sessions/${r.id}/export`, `session-${r.id}.jsonl`),
-                        )
-                      "
+                      @click="download(`/api/sessions/${r.id}/export`, `session-${r.id}.jsonl`)"
                     >
                       Export
                     </button>
+                  </template>
+                  <template v-else>
+                    <template v-if="r.archived">
+                      <button
+                        class="btn btn-secondary"
+                        type="button"
+                        @click="command('/unarchive ' + r.id)"
+                      >
+                        Unarchive
+                      </button>
+                      <button class="btn btn-ghost" type="button" @click="resume(r.id)">
+                        Resume
+                      </button>
+                    </template>
                     <button
-                      v-if="r.archived"
-                      class="menu-item"
+                      v-else-if="r.id === session.id"
+                      class="btn btn-secondary"
                       type="button"
-                      @click="menuAct(() => act('/resume ' + r.id))"
+                      @click="router.push({ name: 'chat' })"
                     >
-                      Restore
+                      Open
                     </button>
-                    <button
-                      v-else
-                      class="menu-item"
-                      type="button"
-                      @click="menuAct(() => act('/archive ' + r.id))"
-                    >
-                      Archive
+                    <button v-else class="btn btn-secondary" type="button" @click="resume(r.id)">
+                      Resume
                     </button>
-                    <button
-                      class="menu-item danger"
-                      type="button"
-                      @click="menuAct(() => act('/delete ' + r.id))"
-                    >
-                      Delete…
-                    </button>
-                  </div>
-                </span>
+                    <RowMenu :items="menuItems(r)" @select="(a) => onMenu(r, a)" />
+                  </template>
+                </template>
               </template>
-            </template>
-          </template>
-        </DataTable>
-        <div class="pager">
-          <span class="grow">{{ range }}</span>
-          <button class="btn btn-ghost" type="button" :disabled="offset === 0" @click="page(-50)">
-            ◀ Prev
-          </button>
-          <button
-            class="btn btn-ghost"
-            type="button"
-            :disabled="offset + rows.length >= total"
-            @click="page(50)"
-          >
-            Next ▶
-          </button>
-        </div>
+            </DataTable>
+          </div>
+          <div class="pager">
+            <span class="grow">{{ range }}</span>
+            <span>{{ pageText }}</span>
+            <button class="btn btn-ghost" type="button" :disabled="offset === 0" @click="page(-50)">
+              ◀ Prev
+            </button>
+            <button
+              class="btn btn-ghost"
+              type="button"
+              :disabled="offset + rows.length >= total"
+              @click="page(50)"
+            >
+              Next ▶
+            </button>
+          </div>
+        </template>
       </template>
     </template>
 

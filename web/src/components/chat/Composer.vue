@@ -5,6 +5,8 @@ import { api, postForm, runCommand } from "../../api/client"
 import type { ReplyView } from "../../api/types.gen"
 import { turn } from "../../stores/turn"
 import { isSecure, toast } from "../../stores/ui"
+import { friendlyError } from "../../lib/errors"
+import HttpsNote from "../HttpsNote.vue"
 import AckChip from "./AckChip.vue"
 import QueueStrip from "./QueueStrip.vue"
 
@@ -24,6 +26,12 @@ const route = useRoute() as ReturnType<typeof useRoute> | undefined
 const router = useRouter() as ReturnType<typeof useRouter> | undefined
 
 const draft = ref("")
+// A reload of a frozen phone page keeps the draft. main.ts does not reload for a new build
+// while a draft waits.
+const KEY_DRAFT = "tether.draft"
+const sendError = ref("")
+// True only when a send failed. A voice error has nothing to send again.
+const canRetry = ref(false)
 const files = ref<Att[]>([])
 const clientId = ref("")
 const commands = ref<Row[]>([])
@@ -56,6 +64,14 @@ watch(matches, () => {
 watch(draft, () => {
   menuClosed.value = false
 })
+watch(draft, (v) => {
+  try {
+    if (v === "") sessionStorage.removeItem(KEY_DRAFT)
+    else sessionStorage.setItem(KEY_DRAFT, v)
+  } catch {
+    // Storage can be blocked. The draft then lives only in memory.
+  }
+})
 
 // Sets the height of the text field from its scroll height, between 1 and 8 lines.
 function grow(): void {
@@ -85,6 +101,8 @@ async function send(): Promise<void> {
   const text = draft.value.trim()
   const atts = files.value
   if ((text === "" && atts.length === 0) || sending.value) return
+  sendError.value = ""
+  canRetry.value = false
   if (!clientId.value) clientId.value = newClientId()
   const id = clientId.value
   draft.value = ""
@@ -110,7 +128,11 @@ async function send(): Promise<void> {
     draft.value = text
     files.value = atts
     emit("failed", payload)
-    toast(e instanceof Error ? e.message : String(e), "error")
+    canRetry.value = true
+    sendError.value = friendlyError(
+      e,
+      atts.length === 0 && isBuiltin(text) ? "/api/command" : "/api/messages",
+    )
   } finally {
     sending.value = false
   }
@@ -176,7 +198,7 @@ async function stopTask(): Promise<void> {
   try {
     emit("reply", await runCommand("/stop"))
   } catch (e) {
-    toast(e instanceof Error ? e.message : String(e), "error")
+    toast(friendlyError(e, "/api/command"), "error")
   }
 }
 
@@ -184,7 +206,7 @@ async function runAck(data: string): Promise<void> {
   try {
     emit("reply", await runCommand(data))
   } catch (e) {
-    toast(e instanceof Error ? e.message : String(e), "error")
+    toast(friendlyError(e, "/api/command"), "error")
   }
 }
 
@@ -245,7 +267,8 @@ async function startRecord(e: PointerEvent): Promise<void> {
     stream?.getTracks().forEach((t) => t.stop())
     stream = null
     recorder = null
-    toast(err instanceof Error ? err.message : String(err), "error")
+    canRetry.value = false
+    sendError.value = friendlyError(err)
   }
 }
 
@@ -291,6 +314,13 @@ onMounted(async () => {
     })
     ro.observe(dock.value)
   }
+  if (draft.value === "" && !route?.query?.draft) {
+    try {
+      draft.value = sessionStorage.getItem(KEY_DRAFT) ?? ""
+    } catch {
+      // Storage can be blocked.
+    }
+  }
   takeDraft()
   try {
     const b = await api<{ commands: Row[]; skills: Row[] }>("GET", "/api/bootstrap")
@@ -317,6 +347,12 @@ onBeforeUnmount(() => {
         <AckChip v-for="a in liveAcks" :key="a.id" :ack="a" @action="runAck" />
       </div>
       <QueueStrip :items="turn.queue" @now="runAck('/now')" />
+      <div v-if="sendError" class="composer-err c-bad t-13" role="alert">
+        <span>{{ sendError }}</span>
+        <button v-if="canRetry" type="button" class="btn btn-secondary btn-sm" @click="send">
+          Send again
+        </button>
+      </div>
       <div class="composer2">
         <div v-if="menuOpen" class="menu slash-pop" role="listbox">
           <button
@@ -353,7 +389,6 @@ onBeforeUnmount(() => {
           @keydown="onKey"
           @input="grow"
         ></textarea>
-        <div v-if="!secure" class="cnote">Needs HTTPS or localhost.</div>
         <div class="cbar">
           <button
             type="button"
@@ -423,7 +458,6 @@ onBeforeUnmount(() => {
               />
             </svg>
           </button>
-          <span v-else class="https-note">Needs HTTPS or localhost.</span>
           <span class="rec-hint">{{ hint }}</span>
           <span class="send-slot">
             <button
@@ -460,6 +494,7 @@ onBeforeUnmount(() => {
           </span>
         </div>
       </div>
+      <HttpsNote v-if="!secure" />
       <input ref="fileIn" type="file" multiple hidden @change="addFiles($event, false)" />
       <input
         ref="photoIn"
@@ -472,3 +507,13 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.composer-err {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 8px;
+}
+</style>

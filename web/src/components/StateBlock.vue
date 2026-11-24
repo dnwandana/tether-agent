@@ -1,10 +1,12 @@
 <script setup lang="ts">
 defineProps<{
   state: "loading" | "empty" | "error"
+  title?: string
   text?: string
+  hint?: string
   action?: string
 }>()
-const emit = defineEmits<{ retry: [] }>()
+const emit = defineEmits<{ action: [] }>()
 </script>
 
 <template>
@@ -36,16 +38,19 @@ const emit = defineEmits<{ retry: [] }>()
         <path d="M4 7h16M4 12h16M4 17h10" />
       </svg>
     </span>
-    <h4>{{ text }}</h4>
-    <button v-if="action" class="btn btn-secondary" type="button" @click="emit('retry')">
+    <p class="state-t">{{ title ?? text }}</p>
+    <p v-if="title && text">{{ text }}</p>
+    <p v-if="hint" class="state-hint">{{ hint }}</p>
+    <button v-if="action" class="btn btn-secondary" type="button" @click="emit('action')">
       {{ action }}
     </button>
   </div>
-  <div v-else class="state state-error">
+  <div v-else class="state state-error" role="alert">
     <span class="ico">!</span>
-    <h4>Could not load</h4>
+    <p class="state-t">{{ title ?? "Could not load" }}</p>
     <span class="cause">{{ text }}</span>
-    <button class="btn btn-secondary" type="button" @click="emit('retry')">
+    <p v-if="hint" class="state-hint">{{ hint }}</p>
+    <button class="btn btn-secondary" type="button" @click="emit('action')">
       {{ action ?? "Retry" }}
     </button>
   </div>

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { openStream, type StreamState } from "./stream"
+import { openStream, retryNow, setFollowLogs, type StreamState } from "./stream"
+import { onReconnected } from "../lib/bus"
 
 function feed() {
   let ctrl!: ReadableStreamDefaultController<Uint8Array>
@@ -32,11 +33,90 @@ beforeEach(() => {
   vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => setTimeout(() => cb(0), 16))
 })
 afterEach(() => {
+  setFollowLogs(false)
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
 describe("openStream", () => {
+  it("emits reconnected after each new connection that follows the first", async () => {
+    openFetch()
+    const rec = vi.fn()
+    const off = onReconnected(rec)
+    const stop = openStream(
+      () => {},
+      () => {},
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(rec).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(45_000) // silence drops the stream
+    await vi.advanceTimersByTimeAsync(1_000) // the retry connects again
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(rec).toHaveBeenCalledTimes(1)
+    off()
+    stop()
+  })
+
+  it("connects at once on retryNow while it waits to reconnect", async () => {
+    fetchMock = vi.fn(async () => {
+      throw new TypeError("network")
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const stop = openStream(
+      () => {},
+      () => {},
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    retryNow()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    stop()
+    retryNow() // no stream: nothing happens
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it("reconnects with follow=logs and emits no reconnected for the switch", async () => {
+    openFetch()
+    const rec = vi.fn()
+    const off = onReconnected(rec)
+    const stop = openStream(
+      () => {},
+      () => {},
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    setFollowLogs(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/events?follow=logs")
+    setFollowLogs(true) // no change: no new connection
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    setFollowLogs(false)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock.mock.calls[2][0]).toBe("/api/events")
+    expect(rec).not.toHaveBeenCalled()
+    off()
+    stop()
+  })
+
+  it("emits reconnected when the follow changes while the stream is offline", async () => {
+    openFetch()
+    const rec = vi.fn()
+    const off = onReconnected(rec)
+    const stop = openStream(
+      () => {},
+      () => {},
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(45_000) // silence drops the stream, a retry is pending
+    setFollowLogs(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(rec).toHaveBeenCalledTimes(1)
+    off()
+    stop()
+  })
+
   it("sends the session header to /api/events", async () => {
     localStorage.setItem("tether.session", "h123")
     openFetch()

@@ -1,23 +1,79 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from "vue"
-import { api, ApiError } from "../api/client"
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue"
+import { api } from "../api/client"
 import type { AccessView, PairingRow } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
+import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
+import { friendlyError } from "../lib/errors"
+import { useLiveData } from "../lib/live"
 import { confirm, toast } from "../stores/ui"
 
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const pending = ref<PairingRow[]>([])
 const approved = ref<PairingRow[]>([])
+const revoked = ref<PairingRow[]>([])
+const pairingOn = ref(true)
+const lockedUntil = ref<string | null>(null)
 const triesLeft = ref<number | null>(null)
+const now = ref(Date.now())
+const clock = setInterval(() => {
+  now.value = Date.now()
+}, 60_000)
+// Updates now at the end of a lockout, so Approve is not disabled for up to 60 s too long.
+let unlock: ReturnType<typeof setTimeout> | null = null
+onBeforeUnmount(() => {
+  clearInterval(clock)
+  if (unlock !== null) clearTimeout(unlock)
+})
+const busyRows = reactive<Record<string, boolean>>({})
+
+// Runs an action of a row once. A second call of the same row waits until the first ends.
+async function guarded(row: PairingRow, fn: () => Promise<void>): Promise<void> {
+  const k = rowKey(row)
+  if (busyRows[k]) return
+  busyRows[k] = true
+  try {
+    await fn()
+  } finally {
+    busyRows[k] = false
+  }
+}
 const codes = reactive<Record<string, string>>({})
+const locked = computed(
+  () => !!lockedUntil.value && new Date(lockedUntil.value).getTime() > now.value,
+)
+
+watch(lockedUntil, (v) => {
+  if (unlock !== null) clearTimeout(unlock)
+  unlock = null
+  if (!v) return
+  const ms = new Date(v).getTime() - Date.now()
+  if (Number.isNaN(ms) || ms <= 0) return
+  unlock = setTimeout(
+    () => {
+      now.value = Date.now()
+    },
+    Math.min(ms, 2_147_483_647) + 50,
+  )
+})
+
+// Returns the local time as HH:MM.
+function hhmm(s: string | null): string {
+  if (!s) return ""
+  return new Date(s).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+}
 
 const pendingColumns = [
   { key: "name", label: "Person" },
   { key: "since", label: "Asked" },
   { key: "expires", label: "Expires" },
   { key: "code", label: "Code" },
+]
+const revokedColumns = [
+  { key: "name", label: "Person" },
+  { key: "since", label: "Since" },
 ]
 const approvedColumns = [
   { key: "name", label: "Person" },
@@ -41,7 +97,7 @@ function when(s: string): string {
 function inMinutes(s: string): string {
   const t = new Date(s).getTime()
   if (Number.isNaN(t)) return "—"
-  return `in ${Math.max(Math.round((t - Date.now()) / 60000), 0)} min`
+  return `in ${Math.max(Math.round((t - now.value) / 60000), 0)} min`
 }
 
 async function load(): Promise<void> {
@@ -49,15 +105,28 @@ async function load(): Promise<void> {
     const v = await api<AccessView>("GET", "/api/pairing")
     pending.value = v.pending ?? []
     approved.value = v.approved ?? []
+    revoked.value = v.revoked ?? []
+    pairingOn.value = v.pairing_on
+    lockedUntil.value = v.locked_until
     triesLeft.value = v.tries_left
     state.value = "ready"
   } catch (e) {
-    errorText.value = e instanceof Error ? e.message : String(e)
+    errorText.value = friendlyError(e)
     state.value = "error"
   }
 }
 
-async function approve(row: PairingRow): Promise<void> {
+const { stale, updatedAt, refresh } = useLiveData(load, {
+  events: ["card.done"],
+  filter: (_n, d) => (d as { kind?: string }).kind === "signin",
+})
+
+function approve(row: PairingRow): Promise<void> {
+  return guarded(row, () => approveRow(row))
+}
+
+async function approveRow(row: PairingRow): Promise<void> {
+  if (locked.value) return
   const code = (codes[rowKey(row)] ?? "").trim()
   if (code.length !== 8) {
     toast("The code has 8 characters.", "error")
@@ -65,17 +134,18 @@ async function approve(row: PairingRow): Promise<void> {
   }
   const ok = await confirm({
     title: `Approve ${row.name}?`,
-    body: "This person becomes an owner. They can chat, approve commands, and change settings.",
+    body: "This person becomes an owner of the agent.",
     confirmLabel: "Approve",
+    danger: true,
   })
   if (!ok) return
   try {
     await api("POST", "/api/pairing/approve", { platform: row.platform, code: code.toUpperCase() })
     toast(`Approved ${row.name}.`)
   } catch (e) {
-    toast(e instanceof ApiError ? e.message : String(e), "error")
+    toast(friendlyError(e), "error")
   }
-  await load()
+  await refresh()
 }
 
 async function revoke(row: PairingRow): Promise<void> {
@@ -88,19 +158,33 @@ async function revoke(row: PairingRow): Promise<void> {
   if (!ok) return
   try {
     await api("POST", "/api/pairing/revoke", { platform: row.platform, user_id: row.user_id })
+    toast(`Revoked ${row.name}.`)
   } catch (e) {
-    toast(e instanceof ApiError ? e.message : String(e), "error")
+    toast(friendlyError(e), "error")
   }
-  await load()
+  await refresh()
 }
 
-onMounted(load)
+function deny(row: PairingRow): Promise<void> {
+  return guarded(row, () => denyRow(row))
+}
+
+async function denyRow(row: PairingRow): Promise<void> {
+  try {
+    await api("POST", "/api/pairing/revoke", { platform: row.platform, user_id: row.user_id })
+    toast(`Denied ${row.name}.`)
+  } catch (e) {
+    toast(friendlyError(e), "error")
+  }
+  await refresh()
+}
 </script>
 
 <template>
   <div class="page">
     <div class="page-h">
       <h1 class="t-20">Access</h1>
+      <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
       <router-link class="link" :to="{ name: 'start' }">Getting started</router-link>
     </div>
     <p class="c-2">
@@ -114,12 +198,18 @@ onMounted(load)
       state="error"
       :text="errorText"
       action="Retry"
-      @retry="load"
+      @action="refresh"
     />
+    <div v-else-if="!pairingOn" class="warn-banner" role="status">
+      Pairing needs Telegram. Set <code>telegram.enabled: true</code>, then restart the gateway.
+    </div>
     <template v-else>
       <div class="section-h">
         <h2>Pending</h2>
         <span class="badge">{{ pending.length }}</span>
+      </div>
+      <div v-if="locked" class="bad-banner" role="status">
+        Pairing is locked until {{ hhmm(lockedUntil) }} after too many wrong codes.
       </div>
       <StateBlock
         v-if="pending.length === 0"
@@ -134,14 +224,36 @@ onMounted(load)
         <template #cell-since="{ row }">{{ when(asRow(row).since) }}</template>
         <template #cell-expires="{ row }">{{ inMinutes(asRow(row).expires) }}</template>
         <template #cell-code="{ row }">
+          <label class="sr" :for="'code-' + rowKey(asRow(row))"
+            >Code of {{ asRow(row).name }}</label
+          >
           <input
+            :id="'code-' + rowKey(asRow(row))"
             v-model="codes[rowKey(asRow(row))]"
             class="input mono"
             maxlength="8"
             placeholder="8-char code"
+            :aria-label="`Code of ${asRow(row).name}`"
+            autocapitalize="characters"
+            autocomplete="off"
+            spellcheck="false"
+            @keydown.enter.prevent="approve(asRow(row))"
           />
-          <button class="btn btn-primary" type="button" @click="approve(asRow(row))">
+          <button
+            class="btn btn-primary"
+            type="button"
+            :disabled="locked || busyRows[rowKey(asRow(row))]"
+            @click="approve(asRow(row))"
+          >
             Approve
+          </button>
+          <button
+            class="btn btn-secondary"
+            type="button"
+            :disabled="busyRows[rowKey(asRow(row))]"
+            @click="deny(asRow(row))"
+          >
+            Deny
           </button>
         </template>
       </DataTable>
@@ -154,7 +266,12 @@ onMounted(load)
       </p>
 
       <div class="section-h"><h2>Approved</h2></div>
-      <DataTable :columns="approvedColumns" :rows="asRows(approved)" row-key="key">
+      <DataTable
+        v-if="approved.length > 0"
+        :columns="approvedColumns"
+        :rows="asRows(approved)"
+        row-key="key"
+      >
         <template #cell-name="{ row }">
           <b>{{ asRow(row).name }}</b>
           <div class="mono c-3 t-12">{{ asRow(row).platform }} · {{ asRow(row).user_id }}</div>
@@ -167,6 +284,19 @@ onMounted(load)
           </button>
         </template>
       </DataTable>
+      <StateBlock v-else state="empty" text="Nobody is approved yet." />
+
+      <section v-if="revoked.length > 0" class="revoked">
+        <h2 class="h">Revoked</h2>
+        <p class="c-3 t-12">They can send /start again.</p>
+        <DataTable :columns="revokedColumns" :rows="asRows(revoked)" row-key="key">
+          <template #cell-name="{ row }">
+            <b>{{ asRow(row).name }}</b>
+            <div class="mono c-3 t-12">{{ asRow(row).platform }} · {{ asRow(row).user_id }}</div>
+          </template>
+          <template #cell-since="{ row }">{{ when(asRow(row).since) }}</template>
+        </DataTable>
+      </section>
     </template>
   </div>
 </template>

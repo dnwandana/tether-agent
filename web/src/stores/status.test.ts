@@ -1,9 +1,29 @@
-import { describe, expect, it } from "vitest"
+import { nextTick } from "vue"
+import { describe, expect, it, vi } from "vitest"
 import { applyStatusEvents, status } from "./status"
 
 describe("status store", () => {
-  it("starts as reconnecting", () => {
-    expect(status.stream).toBe("reconnecting")
+  it("starts as connecting, with no offline time", () => {
+    expect(status.stream).toBe("connecting")
+    expect(status.offlineSince).toBeNull()
+  })
+
+  it("keeps the time that the stream went offline until it opens again", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 10, 23, 9, 0, 0))
+    status.stream = "reconnecting"
+    await nextTick()
+    expect(status.offlineSince).toBe(new Date(2026, 10, 23, 9, 0, 0).getTime())
+    vi.advanceTimersByTime(5_000)
+    status.stream = "connecting"
+    await nextTick()
+    status.stream = "reconnecting"
+    await nextTick()
+    expect(status.offlineSince).toBe(new Date(2026, 10, 23, 9, 0, 0).getTime())
+    status.stream = "open"
+    await nextTick()
+    expect(status.offlineSince).toBeNull()
+    vi.useRealTimers()
   })
 
   it("takes the status from hello and merges a status event", () => {
@@ -49,6 +69,6 @@ describe("status store", () => {
     expect(status.mode).toBe("full")
     expect(status.entry).toBe("primary")
     expect(status.spend24h).toBe(2.1)
-    expect(status.stream).toBe("reconnecting")
+    expect(status.stream).not.toBe("signed-out")
   })
 })

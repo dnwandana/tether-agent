@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue"
+import { ref } from "vue"
 import { useRouter } from "vue-router"
-import { api, ApiError, runCommand } from "../api/client"
-import type { BriefView, HeldView, JobRow, ReplyView } from "../api/types.gen"
+import { api } from "../api/client"
+import type { BriefView, HeldView, JobRow, ReplyView, RunRow } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
 import JobForm from "../components/JobForm.vue"
+import LiveHeader from "../components/LiveHeader.vue"
 import SidePanel from "../components/SidePanel.vue"
 import StateBlock from "../components/StateBlock.vue"
+import { replyKind, useCommand } from "../lib/command"
+import { friendlyError } from "../lib/errors"
+import { lastSeven } from "../lib/jobbars"
+import { useLiveData } from "../lib/live"
 import { confirm, toast } from "../stores/ui"
 
 const router = useRouter()
@@ -16,6 +21,7 @@ const brief = ref<BriefView | null>(null)
 const jobs = ref<JobRow[]>([])
 const held = ref<HeldView[]>([])
 const formOpen = ref(false)
+const formDirty = ref(false)
 
 const columns = [
   { key: "name", label: "Job" },
@@ -29,7 +35,7 @@ const columns = [
 const kindIcon: Record<string, string> = {
   failing: "⚠",
   paused_job: "⏸",
-  bad_schedule: "⏸",
+  bad_schedule: "⚠️",
   held: "🛡",
   goal: "🎯",
   cost: "💸",
@@ -58,13 +64,9 @@ function heldAge(s: string): string {
   return Number.isNaN(t) ? "" : age(Math.floor((Date.now() - t) / 1000))
 }
 
-// Returns one bar class for each of the newest 7 runs. Missing runs are padded at the start.
-function bars(j: JobRow): string[] {
-  const out = (j.last7 ?? [])
-    .slice(-7)
-    .map((st) => (st === "ok" ? "" : st === "error" ? "bad" : "none"))
-  while (out.length < 7) out.unshift("none")
-  return out
+// Returns one bar class for each of the newest 7 runs. JobRow.last7 is oldest first.
+function barsOf(j: JobRow): ("ok" | "bad" | "none")[] {
+  return lastSeven([...(j.last7 ?? [])].reverse().map((status) => ({ status }) as RunRow))
 }
 
 function okCount(j: JobRow): number {
@@ -83,46 +85,36 @@ async function load(): Promise<void> {
     held.value = h
     state.value = "ready"
   } catch (e) {
-    errorText.value = e instanceof Error ? e.message : String(e)
+    errorText.value = friendlyError(e)
     state.value = "error"
   }
 }
 
-async function act(text: string): Promise<void> {
-  try {
-    const r = await runCommand(text)
-    if (!("text" in r) || r.text === undefined) {
-      toast("The command runs. The reply comes later.", "info")
-    } else {
-      const reply = r as ReplyView
-      const button = (reply.buttons ?? []).flat().find((b) => b.data.endsWith("confirm"))
-      if (button) {
-        const [title, ...rest] = reply.text.split("\n")
-        const ok = await confirm({
-          title,
-          body: rest.join("\n").trim(),
-          confirmLabel: button.text,
-          danger: true,
-        })
-        if (ok) await act(button.data)
-        return
-      }
-      toast(reply.text, "ok")
-    }
-  } catch (e) {
-    toast(e instanceof ApiError ? e.message : String(e), "error")
-  }
-  await load()
+const { run } = useCommand()
+const { stale, updatedAt, refresh } = useLiveData(load, { events: ["held", "job.run"] })
+
+async function command(text: string): Promise<void> {
+  await run(text)
+  await refresh()
 }
 
-async function resolveHeld(id: string, action: "post" | "drop"): Promise<void> {
-  try {
-    const r = await api<ReplyView>("POST", `/api/held/${id}`, { action })
-    toast(r.text, "ok")
-  } catch (e) {
-    toast(e instanceof ApiError ? e.message : String(e), "error")
+async function resolveHeld(h: HeldView, action: "post" | "drop"): Promise<void> {
+  if (action === "drop") {
+    const ok = await confirm({
+      title: "Drop this held send?",
+      body: "The text is deleted.",
+      confirmLabel: "❌ Drop",
+      danger: true,
+    })
+    if (!ok) return
   }
-  await load()
+  try {
+    const r = await api<ReplyView>("POST", `/api/held/${h.id}`, { action })
+    toast(r.text, replyKind(r.text), { markdown: true })
+  } catch (e) {
+    toast(friendlyError(e), "error")
+  }
+  await refresh()
 }
 
 // Returns the link of a brief line: the job, else the goal.
@@ -134,16 +126,16 @@ function briefTarget(l: { job_id: string; session_id: string }): Record<string, 
 
 async function saved(): Promise<void> {
   formOpen.value = false
-  await load()
+  formDirty.value = false
+  await refresh()
 }
-
-onMounted(load)
 </script>
 
 <template>
   <div class="page">
     <div class="page-h">
       <h1 class="t-20">Jobs</h1>
+      <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
       <button class="btn btn-secondary" type="button" @click="router.push({ name: 'chat' })">
         Ask in chat
       </button>
@@ -156,14 +148,15 @@ onMounted(load)
       state="error"
       :text="errorText"
       action="Retry"
-      @retry="load"
+      @action="refresh"
     />
-    <template v-else>
+    <div v-else :aria-busy="stale || undefined">
       <div v-if="brief" class="card">
         <div class="card-h">
           <h3>Brief</h3>
           <span class="c-3 t-12">what needs attention · no model call</span>
         </div>
+        <p v-if="brief.lines.length === 0" class="c-3 card-b">Nothing needs your attention.</p>
         <component
           :is="l.job_id || l.session_id ? 'router-link' : 'div'"
           v-for="(l, i) in brief.lines"
@@ -175,19 +168,28 @@ onMounted(load)
           <span class="grow"
             ><b>{{ l.name }}</b> <span class="c-2">{{ l.detail }}</span></span
           >
+          <span v-if="l.count > 1" class="chip chip-plain">×{{ l.count }}</span>
+          <span v-if="l.cost_usd > 0" class="c-2 t-12">{{ usd(l.cost_usd) }}</span>
           <span class="c-3 t-12">{{ age(l.age_seconds) }}</span>
         </component>
         <div class="card-f">
-          <span>Jobs: {{ brief.runs_ok }} of {{ brief.runs_total }} runs OK in 24 h</span
+          <span v-if="brief.history_off">Run history is off.</span>
+          <span v-else>Jobs: {{ brief.runs_ok }} of {{ brief.runs_total }} runs OK in 24 h</span
           ><span class="grow" />
-          <span>Spend in 24 h: ${{ brief.spend_usd.toFixed(4) }}</span>
+          <span
+            >Spend in 24 h: ${{ brief.spend_usd.toFixed(4)
+            }}{{ brief.spend_unpriced ? " · unpriced" : "" }}</span
+          >
         </div>
       </div>
 
       <StateBlock
         v-if="jobs.length === 0"
         state="empty"
-        text="No jobs yet. Ask in chat, or tap + New job."
+        text="No jobs yet."
+        hint="Ask in chat, or add a job here."
+        action="+ New job"
+        @action="formOpen = true"
       />
       <DataTable
         v-else
@@ -212,7 +214,10 @@ onMounted(load)
           <span v-if="(row as unknown as JobRow).history_off" class="c-3">—</span>
           <template v-else>
             <span class="runs7"
-              ><i v-for="(b, n) in bars(row as unknown as JobRow)" :key="n" :class="b"
+              ><i
+                v-for="(b, n) in barsOf(row as unknown as JobRow)"
+                :key="n"
+                :class="b === 'ok' ? '' : b"
             /></span>
             {{ " " }}<span class="c-2 t-12">{{ okCount(row as unknown as JobRow) }}/7 ok</span>
           </template>
@@ -231,7 +236,7 @@ onMounted(load)
               v-if="(row as unknown as JobRow).enabled"
               class="btn btn-secondary btn-sm"
               type="button"
-              @click.stop="act(`/jobs pause ${(row as unknown as JobRow).id}`)"
+              @click.stop="command(`/jobs pause ${(row as unknown as JobRow).id}`)"
             >
               ⏸ Pause
             </button>
@@ -239,7 +244,7 @@ onMounted(load)
               v-else
               class="btn btn-secondary btn-sm"
               type="button"
-              @click.stop="act(`/jobs resume ${(row as unknown as JobRow).id}`)"
+              @click.stop="command(`/jobs resume ${(row as unknown as JobRow).id}`)"
             >
               ▶ Resume
             </button>
@@ -248,7 +253,7 @@ onMounted(load)
               type="button"
               :disabled="!(row as unknown as JobRow).enabled"
               :title="(row as unknown as JobRow).enabled ? undefined : 'Resume the job first'"
-              @click.stop="act(`/jobs run ${(row as unknown as JobRow).id}`)"
+              @click.stop="command(`/jobs run ${(row as unknown as JobRow).id}`)"
             >
               ⚡ Run now
             </button>
@@ -260,20 +265,29 @@ onMounted(load)
         <h2>Held sends</h2>
         <span class="c-3 t-12">The guard held these deliveries. Each lives 24 h.</span>
       </div>
-      <StateBlock v-if="held.length === 0" state="empty" text="No held sends" />
-      <p v-if="held.length === 0" class="c-3 t-12">
-        A delivery that the outbound guard holds shows up here.
-      </p>
+      <StateBlock
+        v-if="held.length === 0"
+        state="empty"
+        text="No held sends."
+        hint="A delivery that the outbound guard holds shows here."
+      />
       <div v-for="h in held" :key="h.id" class="card">
         <div class="card-h">
           <h3>🛡 {{ h.job_name }} → {{ h.target_title }}</h3>
           <span class="c-3 t-12">{{ heldAge(h.created) }}</span>
         </div>
         <div class="card-b">
+          <p>
+            <span class="chip chip-plain">{{ h.kind }}</span>
+            <span v-if="h.sources.length > 0" class="t-12 c-3">
+              Sources: {{ h.sources.join(", ") }}</span
+            >
+          </p>
           <p class="c-2 t-12">{{ h.reason }}</p>
           <div class="cmd">{{ h.text }}</div>
         </div>
         <div class="card-f">
+          <span v-if="!h.can_post" class="t-12 c-3">Telegram is off.</span>
           <span class="grow" />
           <button
             v-for="a in h.actions"
@@ -281,16 +295,28 @@ onMounted(load)
             class="btn btn-sm"
             :class="a.data === 'post' ? 'btn-primary' : 'btn-secondary'"
             type="button"
-            @click="resolveHeld(h.id, a.data === 'drop' ? 'drop' : 'post')"
+            :disabled="a.data === 'post' && !h.can_post"
+            @click="resolveHeld(h, a.data === 'drop' ? 'drop' : 'post')"
           >
             {{ a.text }}
           </button>
         </div>
       </div>
-    </template>
+    </div>
 
-    <SidePanel :open="formOpen" title="New job" @close="formOpen = false">
-      <JobForm v-if="formOpen" :job="null" @saved="saved" @cancel="formOpen = false" />
+    <SidePanel
+      :open="formOpen"
+      title="New job"
+      :dirty="formDirty"
+      @close="((formOpen = false), (formDirty = false))"
+    >
+      <JobForm
+        v-if="formOpen"
+        :job="null"
+        @saved="saved"
+        @cancel="((formOpen = false), (formDirty = false))"
+        @dirty="formDirty = $event"
+      />
     </SidePanel>
   </div>
 </template>

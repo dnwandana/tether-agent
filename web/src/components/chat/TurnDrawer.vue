@@ -99,8 +99,19 @@ function dragEnd(): void {
   if (moved > 70) emit("close")
 }
 
-onMounted(() => window.addEventListener("keydown", onKey))
-onUnmounted(() => window.removeEventListener("keydown", onKey))
+// A side panel on Chat takes the side column, so the drawer closes.
+function onPanelOpen(): void {
+  if (props.open) emit("close")
+}
+
+onMounted(() => {
+  window.addEventListener("keydown", onKey)
+  document.addEventListener("tether:panel-open", onPanelOpen)
+})
+onUnmounted(() => {
+  window.removeEventListener("keydown", onKey)
+  document.removeEventListener("tether:panel-open", onPanelOpen)
+})
 </script>
 
 <template>

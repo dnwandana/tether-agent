@@ -18,7 +18,7 @@ const devices = [
   {
     id: "d1",
     label: "Laptop",
-    browser: "Firefox 133 on Linux",
+    browser: "Mozilla/5.0 (X11; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
     ip: "10.8.0.2",
     created: "2026-11-20T09:12:00Z",
     last_seen: "2026-11-20T10:00:00Z",
@@ -28,7 +28,8 @@ const devices = [
   {
     id: "d2",
     label: "Pixel 8",
-    browser: "Chrome 131 on Android",
+    browser:
+      "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
     ip: "10.8.0.5",
     created: "2026-11-20T07:40:00Z",
     last_seen: "2026-11-20T09:48:00Z",
@@ -71,19 +72,20 @@ describe("DevicesTable", () => {
   it("lists the devices and marks this device", async () => {
     const { w } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/devices")
-    expect(w.text()).toContain("Chrome 131 on Android")
+    expect(w.text()).toContain("Chrome on Android")
+    expect(w.findAll("details")[1].text()).toContain("Chrome/131.0.0.0")
     expect(w.text()).toContain("10.8.0.5")
     expect(w.findAll(".chip").filter((c) => c.text() === "This device")).toHaveLength(1)
   })
 
   it("revokes another device after a confirm", async () => {
     const { w } = await mk()
-    await btns(w, "Revoke")[1].trigger("click")
+    await btns(w, "Sign out")[1].trigger("click")
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Sign out Pixel 8?",
-      body: "Chrome 131 on Android at 10.8.0.5 must ask for access again.",
-      confirmLabel: "Revoke",
+      body: "Chrome on Android at 10.8.0.5 must ask for access again.",
+      confirmLabel: "Sign out",
       danger: true,
     })
     expect(api).toHaveBeenCalledWith("POST", "/api/devices/d2/revoke")
@@ -92,12 +94,12 @@ describe("DevicesTable", () => {
 
   it("signs this device out and goes to the sign-in page", async () => {
     const { w, router } = await mk()
-    await btns(w, "Revoke")[0].trigger("click")
+    await btns(w, "Sign out")[0].trigger("click")
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Sign out Laptop?",
       body: "This is the device you use now. You go to the sign-in screen.",
-      confirmLabel: "Revoke",
+      confirmLabel: "Sign out",
       danger: true,
     })
     expect(api).toHaveBeenCalledWith("POST", "/api/devices/d1/revoke")
@@ -110,11 +112,30 @@ describe("DevicesTable", () => {
     await btns(w, "Sign out all other devices…")[0].trigger("click")
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
-      title: "Sign out 1 other devices?",
+      title: "Sign out 1 other device?",
       body: "Each of them must ask for access again. This device stays signed in.",
       confirmLabel: "Sign out all others",
       danger: true,
     })
     expect(api).toHaveBeenCalledWith("POST", "/api/devices/revoke-others")
+  })
+
+  it("uses the plural for two other devices, and loads again from the error state", async () => {
+    vi.mocked(api).mockImplementation(
+      async (m: string) => (m === "GET" ? [...devices, { ...devices[1], id: "d3" }] : {}) as any,
+    )
+    const { w } = await mk()
+    await btns(w, "Sign out all other devices…")[0].trigger("click")
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Sign out 2 other devices?" }),
+    )
+    vi.mocked(api).mockReset()
+    vi.mocked(api).mockRejectedValueOnce(new Error("HTTP 500"))
+    const e = await mk()
+    vi.mocked(api).mockImplementation(async () => devices as any)
+    e.w.findComponent({ name: "StateBlock" }).vm.$emit("action")
+    await flushPromises()
+    expect(e.w.text()).toContain("10.8.0.5")
   })
 })

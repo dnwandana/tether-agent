@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from "vue"
+import { computed, ref, watch } from "vue"
 import { useRoute } from "vue-router"
 import { ICON } from "../lib/icons"
+import { useOverlay } from "../lib/overlay"
 import { cards } from "../stores/cards"
-import { setTheme } from "../stores/ui"
-import WaitingTray from "./WaitingTray.vue"
+import { prefs, setTheme, ui, type Theme } from "../stores/ui"
 
 // The nav section of a route: a child page marks its parent.
 const PARENT: Record<string, string> = {
@@ -15,18 +15,40 @@ const PARENT: Record<string, string> = {
   ops: "system",
 }
 
-// The pages that the tab bar does not show.
-const MORE: { name: string; label: string }[] = [
-  { name: "sessions", label: "Sessions" },
-  { name: "goals", label: "Goals" },
-  { name: "security", label: "Approvals and security" },
-  { name: "skills", label: "Skills" },
-  { name: "memory", label: "Memory" },
-  { name: "usage", label: "Usage" },
-  { name: "models", label: "Models" },
-  { name: "system", label: "System" },
-  { name: "access", label: "Access" },
-  { name: "start", label: "Getting started" },
+// The pages that the tab bar does not show, in groups with an eyebrow label.
+const GROUPS: { label: string; pages: { name: string; label: string }[] }[] = [
+  {
+    label: "Work",
+    pages: [
+      { name: "sessions", label: "Sessions" },
+      { name: "goals", label: "Goals" },
+    ],
+  },
+  {
+    label: "Agent",
+    pages: [
+      { name: "security", label: "Approvals and security" },
+      { name: "skills", label: "Skills" },
+      { name: "memory", label: "Memory" },
+      { name: "models", label: "Models" },
+    ],
+  },
+  {
+    label: "Host",
+    pages: [
+      { name: "usage", label: "Usage" },
+      { name: "system", label: "System" },
+      { name: "ops", label: "System operations" },
+      { name: "access", label: "Access" },
+      { name: "start", label: "Getting started" },
+    ],
+  },
+]
+
+const THEMES: { value: Theme; label: string; mark: string }[] = [
+  { value: "system", label: "System", mark: "" },
+  { value: "dark", label: "Dark", mark: "🌙 " },
+  { value: "light", label: "Light", mark: "☀️ " },
 ]
 
 const route = useRoute()
@@ -34,8 +56,16 @@ const section = computed(() => {
   const n = String(route.name ?? "")
   return PARENT[n] ?? n
 })
-const trayOpen = ref(false)
+// The current page for the sheet: the route name for ops, else the section.
+const current = computed(() => (route.name === "ops" ? "ops" : section.value))
 const sheetOpen = ref(false)
+const themeOpen = ref(false)
+const sheetEl = ref<HTMLElement | null>(null)
+
+useOverlay(sheetOpen, sheetEl, { onClose: () => (sheetOpen.value = false), modal: true })
+watch(sheetOpen, (on) => {
+  if (!on) themeOpen.value = false
+})
 
 // Sends Ctrl+K to document, so App.vue opens the palette.
 function openPalette(): void {
@@ -43,16 +73,25 @@ function openPalette(): void {
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }))
 }
 
-// Switches between the light and the dark theme.
-function toggleTheme(): void {
-  setTheme(document.documentElement.classList.contains("theme-light") ? "dark" : "light")
+// Sets the theme and closes the sheet.
+function chooseTheme(t: Theme): void {
+  setTheme(t)
   sheetOpen.value = false
+}
+
+function themeLabel(): string {
+  return THEMES.find((t) => t.value === prefs.theme)?.label ?? "System"
 }
 </script>
 
 <template>
   <nav class="tabbar" aria-label="Main">
-    <RouterLink :to="{ name: 'chat' }" class="tab" :class="{ 'is-on': section === 'chat' }">
+    <RouterLink
+      :to="{ name: 'chat' }"
+      class="tab"
+      :class="{ 'is-on': section === 'chat' && !ui.trayOpen }"
+      :aria-current="section === 'chat' ? 'page' : undefined"
+    >
       <svg
         viewBox="0 0 24 24"
         fill="none"
@@ -66,7 +105,12 @@ function toggleTheme(): void {
       </svg>
       <span>Chat</span>
     </RouterLink>
-    <RouterLink :to="{ name: 'jobs' }" class="tab" :class="{ 'is-on': section === 'jobs' }">
+    <RouterLink
+      :to="{ name: 'jobs' }"
+      class="tab"
+      :class="{ 'is-on': section === 'jobs' && !ui.trayOpen }"
+      :aria-current="section === 'jobs' ? 'page' : undefined"
+    >
       <svg
         viewBox="0 0 24 24"
         fill="none"
@@ -80,7 +124,13 @@ function toggleTheme(): void {
       </svg>
       <span>Jobs</span>
     </RouterLink>
-    <button type="button" class="tab" @click="trayOpen = true">
+    <button
+      type="button"
+      class="tab"
+      :class="{ 'is-on': ui.trayOpen }"
+      :aria-expanded="ui.trayOpen"
+      @click="ui.trayOpen = true"
+    >
       <svg
         viewBox="0 0 24 24"
         fill="none"
@@ -90,15 +140,16 @@ function toggleTheme(): void {
         stroke-linejoin="round"
         aria-hidden="true"
       >
-        <path :d="ICON.security" />
+        <path :d="ICON.waiting" />
       </svg>
-      <span>Approvals</span>
+      <span>Waiting</span>
       <span v-if="cards.open.length" class="badge badge-bad">{{ cards.open.length }}</span>
     </button>
     <button
       type="button"
       class="tab"
-      :class="{ 'is-on': section !== 'chat' && section !== 'jobs' }"
+      :class="{ 'is-on': section !== 'chat' && section !== 'jobs' && !ui.trayOpen }"
+      :aria-current="section !== 'chat' && section !== 'jobs' ? 'page' : undefined"
       @click="sheetOpen = true"
     >
       <svg
@@ -115,16 +166,36 @@ function toggleTheme(): void {
       <span>More</span>
     </button>
     <div v-if="sheetOpen" class="ov scrim is-open" @click.self="sheetOpen = false">
-      <div class="dialog" role="dialog" aria-label="More">
+      <div ref="sheetEl" class="dialog" role="dialog" aria-label="More">
         <div class="grabber"></div>
         <div class="list">
-          <RouterLink
-            v-for="p in MORE"
-            :key="p.name"
-            :to="{ name: p.name }"
-            class="li"
-            @click="sheetOpen = false"
-          >
+          <button type="button" class="li" @click="openPalette">⌘ Commands and skills</button>
+          <template v-for="g in GROUPS" :key="g.label">
+            <div class="eyebrow">{{ g.label }}</div>
+            <RouterLink
+              v-for="p in g.pages"
+              :key="p.name"
+              :to="{ name: p.name }"
+              class="li"
+              :class="{ 'is-on': current === p.name }"
+              :aria-current="current === p.name ? 'page' : undefined"
+              @click="sheetOpen = false"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path :d="ICON[p.name]" />
+              </svg>
+              {{ p.label }}
+            </RouterLink>
+          </template>
+          <button type="button" class="li" @click="themeOpen = !themeOpen">
             <svg
               viewBox="0 0 24 24"
               fill="none"
@@ -134,41 +205,31 @@ function toggleTheme(): void {
               stroke-linejoin="round"
               aria-hidden="true"
             >
-              <path :d="ICON[p.name]" />
+              <path :d="ICON.theme" />
             </svg>
-            {{ p.label }}
-          </RouterLink>
-          <button type="button" class="li" @click="openPalette">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.75"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path :d="ICON.search" />
-            </svg>
-            Commands and skills
+            Theme: {{ themeLabel() }} ▸
           </button>
-          <button type="button" class="li" @click="toggleTheme">
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.75"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
+          <template v-if="themeOpen">
+            <button
+              v-for="t in THEMES"
+              :key="t.value"
+              type="button"
+              class="li theme-choice"
+              @click="chooseTheme(t.value)"
             >
-              <path :d="ICON.moon" />
-            </svg>
-            Switch the theme
-          </button>
+              {{ prefs.theme === t.value ? "✓ " : t.mark }}{{ t.label }}
+            </button>
+          </template>
         </div>
       </div>
     </div>
-    <WaitingTray :open="trayOpen" @close="trayOpen = false" />
   </nav>
 </template>
+
+<style scoped>
+.tt .li.is-on {
+  background: var(--nav-on, var(--border));
+  color: var(--text);
+  font-weight: 600;
+}
+</style>

@@ -1,5 +1,5 @@
 import { mount } from "@vue/test-utils"
-import { describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { createMemoryHistory, createRouter } from "vue-router"
 
 const names = [
@@ -52,6 +52,8 @@ async function at(path: string) {
 }
 
 describe("NavRail", () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it("lists the pages in order", async () => {
     const w = await at("/chat")
     expect(w.findAll(".rail-item .truncate").map((x) => x.text())).toEqual([
@@ -84,5 +86,33 @@ describe("NavRail", () => {
     const w = await at("/chat")
     const item = w.findAll(".rail-item").find((x) => x.text().includes("Approvals and security"))!
     expect(item.find(".badge").text()).toBe("2")
+  })
+
+  it("keeps each name as hidden text and a title on a tablet", async () => {
+    vi.stubGlobal("matchMedia", (q: string) => ({
+      matches: q === "(max-width: 1023px)",
+      media: q,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+    const w = await at("/chat")
+    const items = w.findAll(".rail-item")
+    expect(items.map((x) => x.find(".sr").text())).toEqual([
+      "Chat",
+      "Sessions",
+      "Jobs",
+      "Goals",
+      "Approvals and security",
+      "Skills",
+      "Memory",
+      "Usage",
+      "Models",
+      "System",
+      "Access",
+      "Getting started",
+    ])
+    expect(items.map((x) => x.attributes("title"))).toEqual(items.map((x) => x.find(".sr").text()))
+    expect(w.find(".rail-search .sr").text()).toBe("Search")
+    expect(w.find(".rail-search").attributes("title")).toBe("Search (Ctrl K)")
   })
 })

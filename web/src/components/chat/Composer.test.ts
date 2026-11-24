@@ -17,6 +17,9 @@ vi.mock("../../api/client", () => ({
   postForm: vi.fn(async () => ({ ok: true })),
   runCommand: vi.fn(async () => ({ request_id: "r1" })),
 }))
+vi.mock("../../lib/errors", () => ({
+  friendlyError: (e: unknown) => "Mapped: " + (e as Error).message,
+}))
 vi.mock("../../stores/ui", () => ({ isSecure: () => secure.value, toast: vi.fn() }))
 
 import Composer from "./Composer.vue"
@@ -35,6 +38,7 @@ beforeEach(() => {
   vi.mocked(postForm).mockClear()
   vi.mocked(runCommand).mockClear()
   vi.mocked(toast).mockClear()
+  sessionStorage.clear()
   replace.mockClear()
   route.query = {}
   secure.value = true
@@ -74,19 +78,55 @@ describe("Composer", () => {
     expect(w.emitted("sent")).toEqual([[{ text: "hello", files: [] }]])
   })
 
-  it("keeps the draft and the client id after an error", async () => {
+  it("shows a send error above the composer with Send again, and keeps the draft", async () => {
     vi.mocked(postForm).mockRejectedValueOnce(new Error("The gateway is stopping."))
     const { w, ta, el } = await mountIt()
     await ta.setValue("hello")
     await ta.trigger("keydown", { key: "Enter" })
     await flushPromises()
-    expect(toast).toHaveBeenCalledWith("The gateway is stopping.", "error")
+    const line = w.find(".composer-err")
+    expect(line.attributes("role")).toBe("alert")
+    expect(line.text()).toContain("Mapped: The gateway is stopping.")
+    expect(toast).not.toHaveBeenCalled()
     expect(el.value).toBe("hello")
     expect(w.emitted("failed")).toEqual([[{ text: "hello", files: [] }]])
     const first = lastForm().get("client_id")
-    await ta.trigger("keydown", { key: "Enter" })
+    await line
+      .findAll("button")
+      .find((b) => b.text() === "Send again")!
+      .trigger("click")
     await flushPromises()
     expect(lastForm().get("client_id")).toBe(first)
+    expect(w.find(".composer-err").exists()).toBe(false)
+  })
+
+  it("shows a voice error on the same line", async () => {
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      mediaDevices: {
+        getUserMedia: vi.fn(async () => {
+          throw Object.assign(new Error("denied"), { name: "NotAllowedError" })
+        }),
+      },
+    })
+    const { w } = await mountIt()
+    await w.find('[aria-label="Hold to record"]').trigger("pointerdown")
+    await flushPromises()
+    expect(w.find(".composer-err").text()).toContain("Mapped: denied")
+    expect(w.find(".composer-err button").exists()).toBe(false)
+    expect(toast).not.toHaveBeenCalled()
+  })
+
+  it("keeps the draft in sessionStorage over a reload", async () => {
+    const a = await mountIt()
+    await a.ta.setValue("half a thought")
+    expect(sessionStorage.getItem("tether.draft")).toBe("half a thought")
+    a.w.unmount()
+    const b = await mountIt()
+    expect(b.el.value).toBe("half a thought")
+    await b.ta.trigger("keydown", { key: "Enter" })
+    await flushPromises()
+    expect(sessionStorage.getItem("tether.draft")).toBeNull()
   })
 
   it("runs a built-in command and sends a skill as a message", async () => {
@@ -127,16 +167,18 @@ describe("Composer", () => {
     expect(w.find('[aria-label="Send"]').attributes("disabled")).toBeDefined()
   })
 
-  it("hides the voice button on plain HTTP", async () => {
+  it("shows one HTTPS note on plain HTTP and none on HTTPS", async () => {
     secure.value = false
     const a = await mountIt()
     expect(a.w.find('[aria-label="Hold to record"]').exists()).toBe(false)
-    expect(a.w.text()).toContain("Needs HTTPS or localhost.")
+    expect(a.w.findAll(".https-line")).toHaveLength(1)
+    expect(a.w.find(".cnote").exists()).toBe(false)
+    expect(a.w.find(".cbar .https-note").exists()).toBe(false)
     a.w.unmount()
     secure.value = true
     const b = await mountIt()
     expect(b.w.find('[aria-label="Hold to record"]').exists()).toBe(true)
-    expect(b.w.text()).not.toContain("Needs HTTPS or localhost.")
+    expect(b.w.find(".https-line").exists()).toBe(false)
   })
 
   it("attaches files and sends them", async () => {

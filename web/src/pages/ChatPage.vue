@@ -7,7 +7,7 @@ import { cards } from "../stores/cards"
 import { status } from "../stores/status"
 import { notices } from "../stores/notices"
 import { renderMarkdown } from "../lib/markdown"
-import { useAct } from "../lib/act"
+import { useCommand } from "../lib/command"
 import MessageList from "../components/chat/MessageList.vue"
 import ReasoningBlock from "../components/chat/ReasoningBlock.vue"
 import CostFooter from "../components/chat/CostFooter.vue"
@@ -18,6 +18,7 @@ import TurnDrawer from "../components/chat/TurnDrawer.vue"
 import ApprovalCard from "../components/cards/ApprovalCard.vue"
 import ClarifyCard from "../components/cards/ClarifyCard.vue"
 import SecretCard from "../components/cards/SecretCard.vue"
+import RecordLine from "../components/cards/RecordLine.vue"
 
 const MODES: Record<string, string> = {
   "read-only": "👁 Read-only",
@@ -55,6 +56,17 @@ const drawerOpen = ref(false)
 const empty = computed(() => session.messages.length === 0 && !turn.view)
 const modeLabel = computed(() => MODES[status.mode] ?? status.mode)
 const chatCards = computed(() => cards.open.filter((c) => c.kind !== "signin"))
+// The records of the session on the screen, oldest first. A clarify or a secret card has no
+// session, and it comes only from a dashboard turn, so it belongs to this chat.
+const chatRecords = computed(() =>
+  [...cards.answered]
+    .reverse()
+    .filter((r) =>
+      r.session_id !== ""
+        ? r.session_id === session.id
+        : r.kind === "clarify" || r.kind === "secret",
+    ),
+)
 // The live copy of the selected tool, from the running turn when it is there.
 const drawerTool = computed<ToolView | null>(() => {
   const s = selected.value
@@ -87,7 +99,7 @@ function toggleDetails(): void {
 }
 
 // Runs a suggested command as a typed command. A reply with buttons shows as a popover.
-const { act, reply, closeReply } = useAct()
+const { run, reply, closeReply } = useCommand()
 function onDocClick(e: MouseEvent): void {
   if (!reply.value) return
   if ((e.target as Element | null)?.closest?.("[data-pop]")) return
@@ -105,6 +117,7 @@ onUnmounted(() => document.removeEventListener("click", onDocClick))
 <template>
   <div class="chat-wrap">
     <div class="chat-col">
+      <h1 class="sr">Chat</h1>
       <ChatHeader @toggle-details="toggleDetails" />
       <div class="chat-scroll">
         <div v-if="empty" class="empty-chat">
@@ -119,7 +132,7 @@ onUnmounted(() => document.removeEventListener("click", onDocClick))
               type="button"
               class="chip chip-touch"
               data-pop
-              @click="act(c)"
+              @click="run(c)"
             >
               {{ c }}
             </button>
@@ -134,7 +147,7 @@ onUnmounted(() => document.removeEventListener("click", onDocClick))
                 type="button"
                 class="btn btn-secondary btn-sm"
                 :disabled="b.data === '·'"
-                @click="act(b.data)"
+                @click="run(b.data)"
               >
                 {{ b.text }}
               </button>
@@ -166,10 +179,14 @@ onUnmounted(() => document.removeEventListener("click", onDocClick))
           </div>
         </div>
         <div
-          v-if="!empty && ((turn.view?.plan.length ?? 0) > 0 || chatCards.length > 0)"
+          v-if="
+            !empty &&
+            ((turn.view?.plan.length ?? 0) > 0 || chatCards.length > 0 || chatRecords.length > 0)
+          "
           class="transcript tail"
         >
           <PlanCard v-if="turn.view && turn.view.plan.length > 0" :items="turn.view.plan" />
+          <RecordLine v-for="r in chatRecords" :key="'r' + r.id" :record="r" />
           <template v-for="c in chatCards" :key="c.id">
             <ApprovalCard v-if="c.kind === 'approval' || c.kind === 'pin'" :card="c" />
             <ClarifyCard v-else-if="c.kind === 'clarify'" :card="c" />

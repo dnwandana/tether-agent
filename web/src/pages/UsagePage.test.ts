@@ -2,12 +2,31 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 import { mount, flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
+const h = vi.hoisted(() => ({
+  live: null as null | { load: () => Promise<void>; opts?: { events?: string[] } },
+}))
 vi.mock("../api/client", () => ({
   api: vi.fn(),
   runCommand: vi.fn(),
   ApiError: class extends Error {},
 }))
+vi.mock("../lib/errors", () => ({
+  friendlyError: (e: unknown) => (e instanceof Error ? e.message : String(e)),
+}))
+vi.mock("../lib/live", async () => {
+  const actual = await vi.importActual<object>("../lib/live")
+  const { onMounted, ref } = await import("vue")
+  return {
+    ...actual,
+    useLiveData: (load: () => Promise<void>, opts?: any) => {
+      h.live = { load, opts }
+      onMounted(() => void load())
+      return { stale: ref(false), updatedAt: ref(null), refresh: load }
+    },
+  }
+})
 import { api } from "../api/client"
+import { session } from "../stores/session"
 import UsagePage from "./UsagePage.vue"
 
 const Blank = { render: () => null }
@@ -71,10 +90,28 @@ async function mk() {
     ],
   })
   await router.push("/usage")
-  const w = mount(UsagePage, { global: { plugins: [router] } })
+  const w = mount(UsagePage, { global: { plugins: [router], stubs: { LiveHeader: true } } })
   await flushPromises()
   return w
 }
+
+const reply = (d: object, c: object = cron, u: object = usage) =>
+  vi
+    .mocked(api)
+    .mockImplementation(
+      async (_m: string, p: string) =>
+        (p.startsWith("/api/usage/daily") ? d : p.startsWith("/api/usage/cron") ? c : u) as any,
+    )
+const dayRow = (model: string, usd: number) => ({
+  day: "2026-11-19",
+  model,
+  usd,
+  unpriced: false,
+  in: 1,
+  out: 1,
+})
+const d = (day: string) => ({ day, model: "m", usd: 1, unpriced: false, in: 1, out: 1 })
+const btn = (w: any, t: string) => w.findAll("button").find((b: any) => b.text() === t)!
 
 beforeEach(() => {
   window.matchMedia = ((q: string) => ({
@@ -172,6 +209,105 @@ describe("UsagePage", () => {
             : { ...usage, rows: [] }) as any,
     )
     const w = await mk()
-    expect(w.text()).toContain("No model calls in this range.")
+    expect(w.text()).toContain("No usage in this range.")
+    await btn(w, "Show 30 days").trigger("click")
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("GET", "/api/usage?range=30d")
+  })
+
+  it("groups the models after the 5th as Other with six series classes", async () => {
+    reply({
+      range: "30d",
+      days: ["a", "b", "c", "d", "e", "f", "g"].map((m, i) => dayRow(m, 7 - i)),
+    })
+    const w = await mk()
+    expect(w.findAll(".lg").map((l: any) => [l.text(), l.find("i").classes()[0]])).toEqual([
+      ["a", "s1"],
+      ["b", "s2"],
+      ["c", "s3"],
+      ["d", "s4"],
+      ["e", "s5"],
+      ["Other", "s6"],
+    ])
+    expect(w.find(".sbar").findAll("i.s6")).toHaveLength(1)
+  })
+
+  it("puts the dates on the x-axis and makes each bar focusable", async () => {
+    const w = await mk()
+    expect(w.findAll(".axis-x span").map((s: any) => s.text())).toEqual(["Nov 19", "Nov 20"])
+    const bar = w.find(".sbar")
+    expect(bar.attributes("tabindex")).toBe("0")
+    expect(bar.attributes("role")).toBe("img")
+    expect(bar.attributes("aria-label")).toBe("Nov 19: $0.75")
+  })
+
+  it("marks a day with a flagged cron run", async () => {
+    const w = await mk()
+    const bars = w.findAll(".sbar")
+    expect(bars[0].find(".spike").text()).toBe("💸")
+    expect(bars[1].find(".spike").exists()).toBe(false)
+  })
+
+  it("shows the days as a table", async () => {
+    const w = await mk()
+    await btn(w, "View as table").trigger("click")
+    const t = w.find("table.days")
+    expect(t.findAll("th").map((x: any) => x.text())).toEqual([
+      "Day",
+      "Total",
+      "Tokens in · out",
+      "Top model",
+    ])
+    expect(
+      t
+        .findAll("tbody tr")[0]
+        .findAll("td")
+        .map((x: any) => x.text()),
+    ).toEqual(["Nov 19", "$0.75", "2 · 2", "glm-4.6"])
+    expect(w.find(".sbars").exists()).toBe(false)
+  })
+
+  it("groups the range All by week above 60 days and by month above 365 days", async () => {
+    reply({ range: "all", days: [d("2026-09-01"), d("2026-09-02"), d("2026-11-09")] })
+    const w = await mk()
+    await btn(w, "All").trigger("click")
+    await flushPromises()
+    expect(w.findAll(".axis-x span").map((s: any) => s.text())).toEqual(["Aug 31", "Nov 9"])
+    reply({ range: "all", days: [d("2025-01-05"), d("2025-01-20"), d("2026-02-01")] })
+    await btn(w, "7 days").trigger("click")
+    await btn(w, "All").trigger("click")
+    await flushPromises()
+    expect(w.findAll(".axis-x span").map((s: any) => s.text())).toEqual(["Jan 2025", "Feb 2026"])
+  })
+
+  it("hides the chart and the cron card for This session and shows the title", async () => {
+    session.title = "Release prep"
+    const w = await mk()
+    await btn(w, "This session").trigger("click")
+    await flushPromises()
+    expect(w.find(".sbars").exists()).toBe(false)
+    expect(w.text()).not.toContain("Cron cost by job")
+    expect(w.text()).toContain("This session: Release prep")
+    session.title = ""
+  })
+
+  it("lists the flagged runs and adds a total row to the cron table", async () => {
+    const w = await mk()
+    expect(w.find(".flagged").text()).toContain("2026-11-19 · $0.9000 · median $0.3000")
+    const rows = w.findAll(".cron-cost tbody tr")
+    expect(rows[rows.length - 1].text()).toContain("Total · 1 job")
+    expect(rows[rows.length - 1].text()).toContain("$0.3120")
+  })
+
+  it("shows a deleted job as text", async () => {
+    reply(daily, { ...cron, jobs: [{ job_id: "j9", job_name: "", usd: 0.1 }], flagged: [] })
+    const w = await mk()
+    expect(w.find('a[href="/jobs/j9"]').exists()).toBe(false)
+    expect(w.find(".cron-cost").text()).toContain("Deleted job")
+  })
+
+  it("reloads only on a focus and a reconnect", async () => {
+    await mk()
+    expect(h.live!.opts?.events).toBeUndefined()
   })
 })

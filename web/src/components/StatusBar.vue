@@ -7,14 +7,13 @@ const alerted = new Set<string>()
 import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from "vue"
 import { useRouter } from "vue-router"
 import type { Card } from "../api/types.gen"
-import { ICON } from "../lib/icons"
+import { retryNow } from "../api/stream"
+import { useOverlay } from "../lib/overlay"
 import { cards } from "../stores/cards"
 import { status } from "../stores/status"
-import { isSecure, prefs, setTheme } from "../stores/ui"
-import WaitingTray from "./WaitingTray.vue"
+import { isSecure, prefs, setTheme, ui, type Theme } from "../stores/ui"
 
 const router = useRouter()
-const trayOpen = ref(false)
 
 const MODES: Record<string, string> = {
   "read-only": "👁 Read-only",
@@ -23,16 +22,75 @@ const MODES: Record<string, string> = {
 }
 const modeText = computed(() => MODES[status.mode] ?? status.mode)
 const waiting = computed(() => cards.open.length)
-const spend = computed(() => "$" + status.spend24h.toFixed(4) + (status.unpriced ? "+" : ""))
+const spend = computed(() => "$" + status.spend24h.toFixed(2) + (status.unpriced ? "+" : ""))
 // The resolved system theme. A change listener keeps it current, because matchMedia is not reactive.
 const lightMq = globalThis.matchMedia?.("(prefers-color-scheme: light)")
 const systemLight = ref(lightMq?.matches === true)
 function onSystemTheme(): void {
   systemLight.value = lightMq?.matches === true
 }
-const isDark = computed(
-  () => !prefs.theme || prefs.theme === "dark" || (prefs.theme === "system" && !systemLight.value),
+
+const runningList = computed(() => {
+  const parts: string[] = []
+  if (status.running_batches > 0) parts.push(`🔀 ${status.running_batches}`)
+  if (status.running_acp > 0) parts.push(`🤖 ${status.running_acp}`)
+  if (status.running_shell > 0) parts.push(`💻 ${status.running_shell}`)
+  if (status.browser_on) parts.push("🌐")
+  return parts.join(" · ")
+})
+
+// The offline time as m:ss. The timer runs only while the stream is "reconnecting".
+const now = ref(Date.now())
+let tick: ReturnType<typeof setInterval> | null = null
+function stopTick(): void {
+  if (tick) clearInterval(tick)
+  tick = null
+}
+watch(
+  () => status.stream,
+  (s) => {
+    stopTick()
+    if (s === "reconnecting") {
+      now.value = Date.now()
+      tick = setInterval(() => (now.value = Date.now()), 1000)
+    }
+  },
+  { immediate: true },
 )
+const offlineFor = computed(() => {
+  const sec = Math.max(0, Math.floor((now.value - (status.offlineSince ?? now.value)) / 1000))
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`
+})
+
+const menuOpen = ref(false)
+const menuEl = ref<HTMLElement | null>(null)
+useOverlay(menuOpen, menuEl, { onClose: () => (menuOpen.value = false) })
+const canAskNotify = ref(isSecure() && globalThis.Notification?.permission === "default")
+
+// Sets the theme and closes the menu.
+function pickTheme(t: Theme): void {
+  setTheme(t)
+  menuOpen.value = false
+}
+
+// Asks for the notification permission. Only the menu row calls it.
+function askPermission(): void {
+  menuOpen.value = false
+  canAskNotify.value = false
+  try {
+    void globalThis.Notification.requestPermission()
+  } catch {
+    // A browser can block the request.
+  }
+}
+
+// A click outside the data-pop elements closes the menu.
+function onDocClick(e: Event): void {
+  if (!menuOpen.value) return
+  const t = e.target as Element | null
+  if (t?.closest?.("[data-pop]")) return
+  menuOpen.value = false
+}
 
 // Goes to the page with the route name.
 function go(name: string): void {
@@ -42,11 +100,6 @@ function go(name: string): void {
 // Sends Ctrl+K to document, so App.vue opens the palette.
 function openPalette(): void {
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }))
-}
-
-// Switches between the light and the dark theme.
-function toggleTheme(): void {
-  setTheme(document.documentElement.classList.contains("theme-light") ? "dark" : "light")
 }
 
 // Plays a short tone and shows a notification for a new card in a hidden tab.
@@ -99,21 +152,13 @@ watch(
   },
 )
 
-function askPermission(): void {
-  if (isSecure() && globalThis.Notification?.permission === "default") {
-    try {
-      void globalThis.Notification.requestPermission()
-    } catch {
-      // A browser can block the request.
-    }
-  }
-}
 onMounted(() => {
-  document.addEventListener("pointerdown", askPermission, { once: true })
+  document.addEventListener("click", onDocClick)
   lightMq?.addEventListener?.("change", onSystemTheme)
 })
 onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", askPermission)
+  document.removeEventListener("click", onDocClick)
+  stopTick()
   lightMq?.removeEventListener?.("change", onSystemTheme)
 })
 </script>
@@ -159,9 +204,9 @@ onBeforeUnmount(() => {
       class="sb-item hide-phone"
       data-act="tray"
       title="Cards that wait for you"
-      @click="trayOpen = true"
+      @click="ui.trayOpen = true"
     >
-      Waiting<span class="badge" :class="{ 'badge-bad': waiting }">{{ waiting }}</span>
+      Waiting<span v-if="waiting > 0" class="badge badge-bad">{{ waiting }}</span>
     </button>
     <span class="sb-sep"></span>
     <button
@@ -171,7 +216,8 @@ onBeforeUnmount(() => {
       title="Background work"
       @click="go('system')"
     >
-      <span v-if="status.running > 0" class="spin"></span><b>{{ status.running }} running</b>
+      <span v-if="status.running > 0" class="spin"></span><b>{{ status.running }} running</b
+      ><span v-if="runningList" class="sb-hide c-3">· {{ runningList }}</span>
     </button>
     <span class="sb-sep"></span>
     <button type="button" class="sb-item" data-act="usage" @click="go('usage')">
@@ -181,34 +227,83 @@ onBeforeUnmount(() => {
       v-if="status.stream === 'reconnecting'"
       type="button"
       class="sb-item sb-warn"
+      data-act="offline"
       title="The page lost the event stream"
+      @click="retryNow"
     >
-      Reconnecting…
+      Offline {{ offlineFor }} · Try now
     </button>
     <span class="sb-spacer"></span>
     <button type="button" class="sb-item hide-phone" data-act="palette" @click="openPalette">
       Commands <span class="kbd">Ctrl</span><span class="kbd">K</span>
     </button>
-    <button
-      type="button"
-      class="sb-item"
-      title="Theme"
-      aria-label="Switch the theme"
-      @click="toggleTheme"
-    >
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="1.75"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-        style="width: 16px; height: 16px"
+    <span class="sb-menu-wrap">
+      <button
+        type="button"
+        class="sb-item"
+        aria-label="Theme and alerts"
+        title="Theme and alerts"
+        :aria-expanded="menuOpen"
+        data-pop
+        @click="menuOpen = !menuOpen"
       >
-        <path :d="isDark ? ICON.sun : ICON.moon" />
-      </svg>
-    </button>
-    <WaitingTray :open="trayOpen" @close="trayOpen = false" />
+        🎨
+      </button>
+      <div v-if="menuOpen" ref="menuEl" class="menu sb-menu" role="menu" data-pop>
+        <button
+          type="button"
+          class="menu-item"
+          role="menuitemradio"
+          :aria-checked="prefs.theme === 'system'"
+          @click="pickTheme('system')"
+        >
+          {{ prefs.theme === "system" ? "✓ " : "" }}System (now
+          {{ systemLight ? "light" : "dark" }})
+        </button>
+        <button
+          type="button"
+          class="menu-item"
+          role="menuitemradio"
+          :aria-checked="prefs.theme === 'dark'"
+          @click="pickTheme('dark')"
+        >
+          {{ prefs.theme === "dark" ? "✓ " : "" }}🌙 Dark
+        </button>
+        <button
+          type="button"
+          class="menu-item"
+          role="menuitemradio"
+          :aria-checked="prefs.theme === 'light'"
+          @click="pickTheme('light')"
+        >
+          {{ prefs.theme === "light" ? "✓ " : "" }}☀️ Light
+        </button>
+        <button type="button" class="menu-item" role="menuitem" @click="prefs.sound = !prefs.sound">
+          🔔 Sound on a new card: {{ prefs.sound ? "On" : "Off" }}
+        </button>
+        <button
+          v-if="canAskNotify"
+          type="button"
+          class="menu-item"
+          role="menuitem"
+          @click="askPermission"
+        >
+          Turn on notifications…
+        </button>
+      </div>
+    </span>
   </header>
 </template>
+
+<style scoped>
+.sb-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.sb-menu {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 50;
+}
+</style>

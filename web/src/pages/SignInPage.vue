@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
-import { api, ApiError, setSessionHeader } from "../api/client"
+import { api, setSessionHeader } from "../api/client"
 import type { SignInPoll, SignInStart } from "../api/types.gen"
 import SidePanel from "../components/SidePanel.vue"
+import { deviceLabel } from "../lib/browser"
+import { friendlyError } from "../lib/errors"
 import { isSecure, prefs } from "../stores/ui"
 
 type View = "start" | "waiting" | "denied" | "expired" | "code"
@@ -14,35 +16,29 @@ const view = ref<View>("start")
 const requestCode = ref("")
 const code = ref("")
 const errorText = ref("")
+const pollError = ref("")
+const expiresAt = ref(0)
+const left = ref("")
 const busy = ref(false)
 const helpOpen = ref(false)
 const host = location.hostname
 const secure = computed(() => isSecure())
 
 let timer: ReturnType<typeof setInterval> | null = null
+let tick: ReturnType<typeof setInterval> | null = null
 let asking = false
 
-// Makes the device label of a user agent, for example "Chrome on Android". The order of the
-// checks matters: an Android agent also names Linux, and an iPhone agent also names Mac OS X.
-function deviceLabel(ua: string): string {
-  let browser = "Browser"
-  if (ua.includes("Edg/")) browser = "Edge"
-  else if (ua.includes("Firefox/")) browser = "Firefox"
-  else if (ua.includes("Chrome/")) browser = "Chrome"
-  else if (ua.includes("Safari/")) browser = "Safari"
-  let system = "an unknown system"
-  if (ua.includes("Android")) system = "Android"
-  else if (ua.includes("iPhone")) system = "iPhone"
-  else if (ua.includes("iPad")) system = "iPad"
-  else if (ua.includes("Mac OS X")) system = "macOS"
-  else if (ua.includes("Windows")) system = "Windows"
-  else if (ua.includes("Linux")) system = "Linux"
-  return `${browser} on ${system}`
+// Sets left to the time to the end of the request as m:ss.
+function showLeft(): void {
+  const s = Math.max(0, Math.ceil((expiresAt.value - Date.now()) / 1000))
+  left.value = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
 }
 
 function stopPoll(): void {
   if (timer !== null) clearInterval(timer)
   timer = null
+  if (tick !== null) clearInterval(tick)
+  tick = null
 }
 
 // Saves the session header and opens the last page.
@@ -53,6 +49,7 @@ async function finish(header: string): Promise<void> {
 }
 
 async function requestAccess(): Promise<void> {
+  if (busy.value) return
   errorText.value = ""
   busy.value = true
   try {
@@ -60,10 +57,14 @@ async function requestAccess(): Promise<void> {
       label: deviceLabel(navigator.userAgent),
     })
     requestCode.value = r.code
+    pollError.value = ""
+    const t = new Date(r.expires).getTime()
+    expiresAt.value = Number.isNaN(t) ? Date.now() + 5 * 60_000 : t
+    showLeft()
     view.value = "waiting"
     poll(r.id)
   } catch (e) {
-    errorText.value = e instanceof ApiError ? e.message : String(e)
+    errorText.value = friendlyError(e, "/auth/request")
   } finally {
     busy.value = false
   }
@@ -72,19 +73,25 @@ async function requestAccess(): Promise<void> {
 // Asks for the state of the request every 2 s while the view is "waiting".
 function poll(id: string): void {
   stopPoll()
+  tick = setInterval(showLeft, 1000)
   timer = setInterval(async () => {
     if (asking || view.value !== "waiting") return
     asking = true
     try {
       const r = await api<SignInPoll & { header?: string }>("GET", `/auth/request/${id}`)
       if (view.value !== "waiting") return
+      pollError.value = ""
       if (r.state === "allowed") await finish(r.session || r.header || "")
       else if (r.state === "denied" || r.state === "expired") {
         stopPoll()
         view.value = r.state
       }
-    } catch {
+    } catch (e) {
       // The next tick asks again.
+      pollError.value =
+        e instanceof TypeError
+          ? "Cannot reach the gateway. The page tries again."
+          : friendlyError(e, `/auth/request/${id}`)
     } finally {
       asking = false
     }
@@ -97,6 +104,7 @@ function cancel(): void {
 }
 
 async function signInWithCode(): Promise<void> {
+  if (busy.value) return
   errorText.value = ""
   busy.value = true
   try {
@@ -105,10 +113,7 @@ async function signInWithCode(): Promise<void> {
     })
     await finish(r.session || r.header || "")
   } catch (e) {
-    errorText.value =
-      e instanceof ApiError && e.status === 429
-        ? e.message
-        : "The code is not valid, or it expired. Run tether dashboard link again."
+    errorText.value = friendlyError(e, "/auth/signin")
   } finally {
     busy.value = false
   }
@@ -142,7 +147,7 @@ onBeforeUnmount(stopPoll)
         <div class="row" style="margin-bottom: 12px"><b class="t-16">Tether</b></div>
 
         <template v-if="view === 'start'">
-          <h2>Sign in to the dashboard</h2>
+          <h1 class="t-20">Sign in to the dashboard</h1>
           <div v-if="route.query.reason === 'ended'" class="warn-banner">
             Your session ended. Request access again.
           </div>
@@ -173,35 +178,35 @@ onBeforeUnmount(stopPoll)
 
         <template v-else-if="view === 'waiting'">
           <span class="spin" />
-          <h2>Sign-in request sent</h2>
-          <p class="c-2">
-            Check code {{ requestCode }}. Approve it in Telegram, or on a device that is already
-            signed in.
-          </p>
-          <p class="c-3 t-12">The request expires in 5 minutes. This page continues by itself.</p>
+          <h1 class="t-20">Sign-in request sent</h1>
+          <p class="c-2">Check code</p>
+          <p class="check-code mono" aria-live="polite">{{ requestCode }}</p>
+          <p class="c-2">Approve it in Telegram, or on a device that is already signed in.</p>
+          <p class="c-3 t-12">Expires in {{ left }}. This page continues by itself.</p>
+          <p v-if="pollError" class="t-12 c-warn" role="status">{{ pollError }}</p>
           <button class="btn btn-secondary" type="button" @click="cancel">Cancel</button>
         </template>
 
         <template v-else-if="view === 'denied'">
-          <h2>Request denied</h2>
+          <h1 class="t-20">Request denied</h1>
           <p class="c-2">An owner tapped ❌ Deny. Ask them, then try again.</p>
-          <button class="btn btn-primary" type="button" @click="requestAccess">
+          <button class="btn btn-primary" type="button" :disabled="busy" @click="requestAccess">
             Request access again
           </button>
           <p v-if="errorText" class="t-12 c-bad">{{ errorText }}</p>
         </template>
 
         <template v-else-if="view === 'expired'">
-          <h2>Request expired</h2>
+          <h1 class="t-20">Request expired</h1>
           <p class="c-2">Nobody answered in 5 minutes.</p>
-          <button class="btn btn-primary" type="button" @click="requestAccess">
+          <button class="btn btn-primary" type="button" :disabled="busy" @click="requestAccess">
             Request access again
           </button>
           <p v-if="errorText" class="t-12 c-bad">{{ errorText }}</p>
         </template>
 
         <template v-else>
-          <h2>Sign in with a code</h2>
+          <h1 class="t-20">Sign in with a code</h1>
           <p class="c-2">
             On the host, run tether dashboard link. Open the link it prints, or paste its one-time
             code here. The code works once and expires after 5 minutes.
@@ -209,9 +214,10 @@ onBeforeUnmount(stopPoll)
           <input
             v-model="code"
             class="input input-touch mono"
+            aria-label="One-time code"
             autocomplete="one-time-code"
             spellcheck="false"
-            @keydown.enter="signInWithCode"
+            @keydown.enter.prevent="!busy && signInWithCode()"
           />
           <p v-if="errorText" class="t-12 c-bad">{{ errorText }}</p>
           <p>
@@ -248,3 +254,12 @@ onBeforeUnmount(stopPoll)
     </SidePanel>
   </div>
 </template>
+
+<style scoped>
+.check-code {
+  font-size: 32px;
+  line-height: 40px;
+  letter-spacing: 0.08em;
+  margin: 4px 0 8px;
+}
+</style>

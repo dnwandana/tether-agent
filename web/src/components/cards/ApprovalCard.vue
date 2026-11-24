@@ -9,9 +9,12 @@ const props = defineProps<{ card: Card }>()
 function useCountdown(deadline: () => string): {
   text: Ref<string>
   pct: Ref<number>
+  aria: Ref<string>
 } {
   const text = ref("")
   const pct = ref(100)
+  const aria = ref("")
+  let ticks = 0
   let total = 0
   let timer: ReturnType<typeof setInterval> | undefined
   function tick(): void {
@@ -19,12 +22,17 @@ function useCountdown(deadline: () => string): {
     // Go sends the zero time for a card with no deadline. It is before 1970 in Unix time.
     if (!deadline() || Number.isNaN(end) || end < 86_400_000) {
       text.value = ""
+      aria.value = ""
       return
     }
     const left = Math.max(0, end - Date.now())
     if (total === 0) total = Math.max(left, 1)
     const s = Math.ceil(left / 1000)
-    text.value = `⌛ ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
+    const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
+    text.value = `⌛ ${clock}`
+    // A screen reader hears the time on the first tick and on each 15th tick after it.
+    if (ticks % 15 === 0) aria.value = `Time left: ${clock}`
+    ticks++
     pct.value = Math.min(100, (left / total) * 100)
   }
   tick()
@@ -34,7 +42,7 @@ function useCountdown(deadline: () => string): {
   onUnmounted(() => {
     if (timer) clearInterval(timer)
   })
-  return { text, pct }
+  return { text, pct, aria }
 }
 
 // Gives the label of each answer of row 2, in the fixed order of the table.
@@ -51,6 +59,7 @@ const cd = useCountdown(() => props.card.deadline)
 const busy = ref(false)
 const error = ref("")
 const hasDeny = computed(() => props.card.answers.includes("deny"))
+const hasAlways = computed(() => props.card.answers.includes("always"))
 const row2 = computed(() => ROW2.filter((a) => props.card.answers.includes(a)))
 
 // Posts one answer. A failure shows its text under the buttons.
@@ -76,12 +85,16 @@ async function send(answer: string): Promise<void> {
   <div
     :id="'card-' + card.id"
     class="icard icard-approval"
+    role="group"
+    :aria-label="card.header"
     :class="{ 'icard-human': card.human_only }"
   >
     <div class="icard-h">
       <span>{{ card.header }}</span>
       <span v-if="card.child" class="t-12 c-3">· {{ card.child }}</span>
-      <span v-if="cd.text.value" class="cd">{{ cd.text.value }}</span>
+      <span v-if="cd.text.value" class="cd" role="timer" :aria-label="cd.aria.value">{{
+        cd.text.value
+      }}</span>
     </div>
     <div v-if="cd.text.value" class="countdown">
       <span :style="{ width: cd.pct.value + '%' }"></span>
@@ -130,7 +143,7 @@ async function send(answer: string): Promise<void> {
     </div>
     <div class="icard-f">
       <div v-if="hasDeny" class="icard-row">
-        <button class="btn btn-danger" type="button" :disabled="busy" @click="send('deny')">
+        <button class="btn btn-danger-soft" type="button" :disabled="busy" @click="send('deny')">
           ❌ Deny
         </button>
       </div>
@@ -138,7 +151,7 @@ async function send(answer: string): Promise<void> {
         <button
           v-for="a in row2"
           :key="a"
-          class="btn btn-primary"
+          :class="['btn', a === 'always' ? 'btn-quiet' : 'btn-secondary']"
           type="button"
           :disabled="busy"
           @click="send(a)"
@@ -146,6 +159,13 @@ async function send(answer: string): Promise<void> {
           {{ LABELS[a] }}
         </button>
       </div>
+      <p v-if="hasAlways" class="always-hint t-12 c-3">
+        <template v-if="card.workdir">
+          ✅ Always: this exact command in <code>{{ card.workdir }}</code
+          >, from now on.
+        </template>
+        <template v-else>✅ Always: this tool, with any arguments, from now on.</template>
+      </p>
       <div v-if="error" class="t-12 c-bad">{{ error }}</div>
     </div>
   </div>

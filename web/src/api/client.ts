@@ -1,3 +1,4 @@
+import { friendlyError } from "../lib/errors"
 import type { ReplyView } from "./types.gen"
 
 const STORAGE_KEY = "tether.session"
@@ -6,10 +7,13 @@ const SIGNED_OUT_TEXT = "Your session ended. Request access again."
 // ApiError carries the HTTP status and the error text of the server.
 export class ApiError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  // The JSON error sentence of the server, or null.
+  serverText: string | null
+  constructor(status: number, message: string, serverText: string | null = null) {
     super(message)
     this.name = "ApiError"
     this.status = status
+    this.serverText = serverText
   }
 }
 
@@ -49,20 +53,34 @@ async function handle<T>(r: Response, path: string): Promise<T> {
   if (r.status === 401 && path.startsWith("/api/")) {
     setSessionHeader(null)
     for (const f of signedOutHandlers) f()
-    throw new ApiError(401, SIGNED_OUT_TEXT)
+    throw new ApiError(401, SIGNED_OUT_TEXT, null)
   }
   if (!r.ok) {
-    let text = `HTTP ${r.status}`
+    let serverText: string | null = null
     try {
       const body = await r.json()
-      if (body && typeof body.error === "string" && body.error !== "") text = body.error
+      if (body && typeof body.error === "string" && body.error !== "") serverText = body.error
     } catch {
-      // The body is not JSON. Keep the status text.
+      // The body is not JSON. The status table gives the text.
     }
-    throw new ApiError(r.status, text)
+    throw new ApiError(
+      r.status,
+      friendlyError({ status: r.status, serverText, message: "" }, path),
+      serverText,
+    )
   }
   if (r.status === 204) return undefined as T
   return (await r.json()) as T
+}
+
+// Calls fetch. A network failure (a TypeError) becomes an ApiError with status 0.
+async function send(path: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(path, init)
+  } catch (e) {
+    if (e instanceof TypeError) throw new ApiError(0, friendlyError(e, path), null)
+    throw e
+  }
 }
 
 export async function api<T>(method: "GET" | "POST", path: string, body?: unknown): Promise<T> {
@@ -72,7 +90,7 @@ export async function api<T>(method: "GET" | "POST", path: string, body?: unknow
     headers["Content-Type"] = "application/json"
     init.body = JSON.stringify(body)
   }
-  return handle<T>(await fetch(path, init), path)
+  return handle<T>(await send(path, init), path)
 }
 
 export async function postForm<T>(path: string, form: FormData): Promise<T> {
@@ -82,7 +100,7 @@ export async function postForm<T>(path: string, form: FormData): Promise<T> {
     credentials: "same-origin",
     body: form,
   }
-  return handle<T>(await fetch(path, init), path)
+  return handle<T>(await send(path, init), path)
 }
 
 export function runCommand(

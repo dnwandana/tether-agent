@@ -10,6 +10,7 @@ export const session = reactive({
   id: "",
   title: "",
   model: "",
+  entry: "",
   effort: "",
   goalLine: "",
   context: null as { tokens: number; window: number; threshold: number } | null,
@@ -88,6 +89,7 @@ function warn(e: unknown): void {
 function setFields(v: SessionView): void {
   session.title = v.title
   session.model = v.model
+  session.entry = v.entry
   session.effort = v.effort
   session.goalLine = v.goal_line
   session.context = v.context ?? null

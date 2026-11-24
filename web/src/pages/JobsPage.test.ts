@@ -2,13 +2,19 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 import { mount, flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
-vi.mock("../api/client", () => ({
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/client")>()),
   api: vi.fn(),
   runCommand: vi.fn(),
-  ApiError: class extends Error {},
 }))
-vi.mock("../stores/ui", () => ({ toast: vi.fn(), confirm: vi.fn() }))
+vi.mock("../stores/ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../stores/ui")>()),
+  toast: vi.fn(),
+  confirm: vi.fn(),
+}))
 import { api, runCommand } from "../api/client"
+import { confirm } from "../stores/ui"
+import { emitEvents } from "../lib/bus"
 import JobsPage from "./JobsPage.vue"
 
 const Blank = { render: () => null }
@@ -47,7 +53,8 @@ const held = (o: object) => ({
   can_post: true,
   ...o,
 })
-const data: Record<string, unknown> = {
+let data: Record<string, unknown>
+const fresh = (): Record<string, unknown> => ({
   "/api/brief": {
     lines: [
       {
@@ -114,7 +121,7 @@ const data: Record<string, unknown> = {
       actions: [{ text: "✅ Post the full text there", data: "post" }],
     }),
   ],
-}
+})
 
 async function mk() {
   const router = createRouter({
@@ -134,6 +141,8 @@ async function mk() {
 const btns = (w: any, t: string) => w.findAll("button").filter((b: any) => b.text() === t)
 
 beforeEach(() => {
+  data = fresh()
+  vi.mocked(confirm).mockReset().mockResolvedValue(true)
   window.matchMedia = ((q: string) => ({
     matches: false,
     media: q,
@@ -169,7 +178,7 @@ describe("JobsPage", () => {
       "ok",
       "bad",
       "ok",
-      "none",
+      "bad",
     ])
   })
 
@@ -204,5 +213,111 @@ describe("JobsPage", () => {
       open: true,
       title: "New job",
     })
+  })
+
+  it("asks before it drops a held send", async () => {
+    vi.mocked(confirm).mockResolvedValueOnce(false)
+    const w = await mk()
+    await btns(w, "❌ Drop")[0].trigger("click")
+    await flushPromises()
+    expect(confirm).toHaveBeenCalledWith({
+      title: "Drop this held send?",
+      body: "The text is deleted.",
+      confirmLabel: "❌ Drop",
+      danger: true,
+    })
+    expect(api).not.toHaveBeenCalledWith("POST", "/api/held/h1", { action: "drop" })
+  })
+
+  it("disables Post with its reason and shows the kind and the sources", async () => {
+    data["/api/held"] = [
+      held({
+        id: "h3",
+        kind: "hold",
+        job_name: "price-watch",
+        target_title: "Ops chat",
+        sources: ["web_fetch", "browser_read"],
+        can_post: false,
+        actions: [
+          { text: "❌ Drop", data: "drop" },
+          { text: '✅ Send to "Ops chat"', data: "post" },
+        ],
+      }),
+    ]
+    const w = await mk()
+    expect(btns(w, '✅ Send to "Ops chat"')[0].attributes("disabled")).toBeDefined()
+    expect(w.text()).toContain("Telegram is off.")
+    expect(w.text()).toContain("web_fetch, browser_read")
+    expect(w.text()).toContain("hold")
+  })
+
+  it("shows the counts, the costs, and the bad schedule icon in the Brief", async () => {
+    data["/api/brief"] = {
+      ...(data["/api/brief"] as object),
+      lines: [
+        {
+          kind: "bad_schedule",
+          name: "report",
+          detail: "bad schedule",
+          count: 3,
+          age_seconds: 60,
+          cost_usd: 0.12,
+          ratio: 0,
+          job_id: "j4",
+          session_id: "",
+        },
+      ],
+      spend_unpriced: true,
+    }
+    const w = await mk()
+    const line = w.find("a.li")
+    expect(line.text()).toContain("⚠️")
+    expect(line.text()).toContain("×3")
+    expect(line.text()).toContain("$0.1200")
+    expect(w.text()).toContain("unpriced")
+  })
+
+  it("says that nothing needs attention, and that run history is off", async () => {
+    data["/api/brief"] = { ...(data["/api/brief"] as object), lines: [], history_off: true }
+    const w = await mk()
+    expect(w.text()).toContain("Nothing needs your attention.")
+    expect(w.text()).toContain("Run history is off.")
+    expect(w.text()).not.toContain("runs OK in 24 h")
+  })
+
+  it("loads again on the job.run and held events", async () => {
+    await mk()
+    vi.mocked(api).mockClear()
+    emitEvents([{ name: "job.run", data: { job_id: "j1", status: "ok" } }])
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("GET", "/api/jobs")
+    vi.mocked(api).mockClear()
+    emitEvents([{ name: "held", data: { id: "h1" } }])
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("GET", "/api/held")
+  })
+
+  it("shows the empty text with + New job", async () => {
+    data["/api/jobs"] = []
+    const w = await mk()
+    expect(w.text()).toContain("No jobs yet.")
+    w.findAllComponents({ name: "StateBlock" })
+      .find((s) => s.props("action") === "+ New job")!
+      .vm.$emit("action")
+    await flushPromises()
+    expect(w.findComponent({ name: "SidePanel" }).props("open")).toBe(true)
+  })
+
+  it("passes the dirty state of the new-job form to the panel", async () => {
+    const w = await mk()
+    await btns(w, "+ New job")[0].trigger("click")
+    w.findComponent({ name: "JobForm" }).vm.$emit("dirty", true)
+    await flushPromises()
+    expect(
+      w
+        .findAllComponents({ name: "SidePanel" })
+        .find((p) => p.props("open"))!
+        .props("dirty"),
+    ).toBe(true)
   })
 })

@@ -50,6 +50,16 @@
   background: var(--surface-3);
   color: var(--text);
 }
+/* The quietest approve button: no fill, a thin border, and the hover of btn-ghost. */
+.btn-quiet {
+  background: transparent;
+  color: var(--text-2);
+  border-color: var(--border);
+}
+.btn-quiet:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
 .btn-sm {
   height: var(--h-sm);
   padding: 0 10px;
@@ -331,7 +341,7 @@ button.chip:hover {
   border-bottom: 1px solid var(--border);
   min-height: 44px;
 }
-.card-h h3,
+.card-h :is(h1, h2, h3, h4, h5, h6),
 .card-h .h {
   font-size: var(--fs-13);
   line-height: 20px;
@@ -1526,7 +1536,7 @@ button.chip:hover {
   background: var(--surface-inset);
   border: 1px solid var(--border);
   white-space: pre-wrap;
-  word-break: break-all;
+  overflow-wrap: anywhere;
   color: var(--text);
 }
 .rule {
@@ -1761,9 +1771,10 @@ mark,
   color: var(--danger);
   border: 1.5px solid var(--danger);
 }
-.state h4 {
+.state .state-t {
   font-size: var(--fs-14);
   font-weight: 600;
+  color: var(--text);
 }
 .state p {
   font-size: var(--fs-13);
@@ -1857,6 +1868,28 @@ mark,
 }
 .toast .t-ok {
   color: var(--toast-ok, #4cc38a);
+}
+.toast-text {
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+.toast .md p {
+  margin: 0;
+}
+.toast-warn {
+  box-shadow:
+    inset 3px 0 0 var(--warning),
+    var(--shadow-lg);
+}
+.toast-error {
+  box-shadow:
+    inset 3px 0 0 var(--danger),
+    var(--shadow-lg);
+}
+.toast-more {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
 }
 .menu {
   width: 240px;
@@ -1953,6 +1986,11 @@ mark,
   border-color: var(--success);
   color: var(--text-inv);
 }
+.step.is-unknown .n {
+  background: var(--warning-tint);
+  border-color: var(--warning-line);
+  color: var(--warning);
+}
 .step.is-on {
   color: var(--text);
   font-weight: 600;
@@ -1988,35 +2026,6 @@ mark,
 .runs7 i.none {
   background: var(--surface-3);
 }
-.chain {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: stretch;
-  gap: 8px;
-}
-.chain-node {
-  flex: 1 1 180px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.chain-node.is-active {
-  border-color: var(--warning-line);
-  background: var(--warning-tint);
-}
-.chain-node.is-failed {
-  border-color: var(--danger-line);
-}
-.chain-arrow {
-  display: flex;
-  align-items: center;
-  color: var(--text-3);
-  font-family: var(--font-mono);
-}
 .swatch {
   height: 48px;
   border-radius: var(--r-sm);
@@ -2042,6 +2051,16 @@ mark,
 }
 .log .lv-dbg {
   color: var(--text-3);
+}
+.log-view {
+  max-height: 60vh;
+  overflow-y: auto;
+  overflow-x: auto;
+  white-space: pre;
+}
+.log-view.is-wrap {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .md {
   font-size: var(--fs-13);
@@ -2131,18 +2150,6 @@ mark,
   height: 1px;
   background: var(--border);
 }
-.axis-x {
-  display: flex;
-  gap: 6px;
-  padding-left: 44px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-3);
-}
-.axis-x span {
-  flex: 1 1 0;
-  text-align: center;
-}
 
 .statusbar {
   flex: none;
@@ -2181,6 +2188,7 @@ mark,
 }
 .scroll {
   flex: 1 1 auto;
+  min-height: 0;
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
@@ -2250,7 +2258,8 @@ mark,
   gap: 8px;
   flex-wrap: wrap;
 }
-.section-h h2 {
+.section-h :is(h1, h2, h3, h4, h5, h6),
+.section-h .h {
   font-size: var(--fs-16);
   line-height: 24px;
   font-weight: 600;
@@ -2333,6 +2342,33 @@ textarea.input {
 }
 .code-block .m {
   color: var(--warning);
+}
+.file-view {
+  margin: 0;
+  padding: 8px 0;
+  list-style: none;
+  counter-reset: ln;
+  font-size: var(--fs-12);
+  overflow-x: auto;
+}
+.file-view li {
+  counter-increment: ln;
+  display: flex;
+  gap: 12px;
+  padding: 0 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.file-view li::before {
+  content: counter(ln);
+  flex: 0 0 3ch;
+  text-align: right;
+  color: var(--text-3);
+  user-select: none;
+}
+.file-view li.is-hit {
+  background: var(--warning-tint);
+  outline: 1px solid var(--warning-line);
 }
 .term,
 .code .src,
@@ -2581,6 +2617,44 @@ textarea.input {
 .s3 {
   background: var(--warning);
 }
+.s4 {
+  background: var(--success);
+}
+.s5 {
+  background: var(--danger);
+}
+.s6 {
+  background: var(--border-strong);
+}
+.axis-x {
+  display: flex;
+  gap: 4px;
+  padding-left: 44px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.axis-x span {
+  flex: 1 1 0;
+  min-width: 4px;
+  text-align: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.sbar {
+  position: relative;
+}
+.sbar .spike {
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: var(--fs-12);
+}
+.sbar:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
 
 /* overlays */
 .ov {
@@ -2637,22 +2711,15 @@ textarea.input {
   pointer-events: auto;
 }
 .restart {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
-  background: var(--scrim);
-}
-.restart .card {
-  padding: 24px 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  align-items: center;
-  text-align: center;
-  max-width: 360px;
+  gap: 8px 12px;
+  padding: 8px 16px;
+  background: var(--warning-tint);
+  border-bottom: 1px solid var(--warning-line);
+  color: var(--text);
+  font-size: var(--fs-13);
 }
 .palette {
   width: 600px;
@@ -3229,9 +3296,11 @@ td.act a.btn + .btn {
 td.act {
   white-space: nowrap;
 }
-.icard-row .btn,
-.dialog-f .btn {
-  height: var(--h-md);
+@media (min-width: 600px) {
+  .icard-row .btn,
+  .dialog-f .btn {
+    height: var(--h-md);
+  }
 }
 .menu-item {
   gap: 10px;
@@ -3517,6 +3586,37 @@ td.act {
   .aside-h {
     touch-action: none;
   }
+}
+
+/* The side panel slot of the shell. A teleported panel is a flex item of .shell. */
+.aside-slot {
+  display: contents;
+}
+@media (min-width: 1024px) {
+  .aside-slot > .aside {
+    position: static;
+    flex: 0 0 380px;
+    width: 380px;
+    max-width: 380px;
+    min-height: 0;
+    overflow-y: auto;
+    border-left: 1px solid var(--border);
+    transform: none;
+  }
+}
+.discard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-md);
+  background: var(--danger-tint);
+}
+.discard span {
+  margin-right: auto;
+  font-weight: 600;
 }
 
 /* ---------- floating composer ---------- */
@@ -3919,15 +4019,6 @@ ol.steps li {
   .cbar .https-note {
     display: none;
   }
-  .cnote .https-note {
-    flex-direction: row;
-    gap: 4px;
-    white-space: nowrap;
-    padding: 0;
-  }
-  .cnote .https-note .sep {
-    display: inline;
-  }
 }
 /* The device table is a card list below 1024 px. */
 @media (min-width: 600px) and (max-width: 1023px) {
@@ -4127,4 +4218,102 @@ table.rt-cards td code {
    padding, so the last message stays above it. The composer sets --dock-h. */
 .chat-col .transcript {
   padding-bottom: calc(var(--dock-h, 96px) + 24px);
+}
+
+/* Each answer button of a card is a 44 px tap target on a phone. */
+@media (max-width: 599px) {
+  .icard-row .btn {
+    height: var(--h-touch);
+    min-width: 44px;
+    font-size: var(--fs-14);
+  }
+}
+
+.md pre,
+.md table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.li .mono,
+.note-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.chain-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+}
+.chain-step .role {
+  font-size: var(--fs-12);
+  color: var(--text-3);
+}
+.wrap-any {
+  overflow-wrap: anywhere;
+}
+.is-stale {
+  opacity: 0.55;
+}
+.clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-line;
+}
+
+.config-view {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Phone tap targets ---------- */
+@media (max-width: 599px) {
+  .btn,
+  .btn-sm,
+  td.act .btn,
+  .pager .btn,
+  .card-h .btn,
+  .section-h .btn,
+  .card-f .btn,
+  .toast .btn,
+  .icard-row .btn,
+  .dialog-f .btn,
+  .seg button,
+  .tabs a,
+  .tabs button,
+  .menu-item,
+  .sb-item {
+    min-height: 44px;
+  }
+  .icon-btn,
+  .btn-icon {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .check {
+    min-height: 44px;
+    align-items: center;
+  }
+  .input,
+  select {
+    min-height: 44px;
+    font-size: 16px;
+  }
 }

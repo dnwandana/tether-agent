@@ -59,6 +59,12 @@ beforeEach(() => {
 })
 afterEach(() => vi.useRealTimers())
 
+const cls = (w: ReturnType<typeof mount>, label: string) =>
+  w
+    .findAll("button")
+    .find((b) => b.text() === label)!
+    .classes()
+
 describe("ApprovalCard", () => {
   it("shows Deny alone on row 1 and the allowed answers on row 2", () => {
     const w = mount(ApprovalCard, {
@@ -168,10 +174,81 @@ describe("ApprovalCard", () => {
     expect(w.find(".cd").text()).toBe("⌛ 1:29")
     w.unmount()
   })
+
+  it("gives Deny the soft danger weight, the allow answers secondary, and Always the quiet weight", () => {
+    const w = mount(ApprovalCard, {
+      props: {
+        card: card({ command: "rm -rf build/", answers: ["deny", "once", "session", "always"] }),
+      },
+    })
+    expect(cls(w, "❌ Deny")).toContain("btn-danger-soft")
+    expect(cls(w, "✅ Once")).toContain("btn-secondary")
+    expect(cls(w, "✅ Session")).toContain("btn-secondary")
+    expect(cls(w, "✅ Always")).toContain("btn-quiet")
+    expect(w.html()).not.toContain("btn-primary")
+    const send = mount(ApprovalCard, {
+      props: {
+        card: card({ header: "📤 Send on your behalf?", answers: ["deny", "redacted", "once"] }),
+      },
+    })
+    expect(cls(send, "✅ Send redacted")).toContain("btn-secondary")
+    const pin = mount(ApprovalCard, {
+      props: { card: card({ kind: "pin", answers: ["deny", "allow"] }) },
+    })
+    expect(cls(pin, "✅ Allow this program")).toContain("btn-secondary")
+  })
+
+  it("shows the scope of Always for a shell card and for an MCP card", () => {
+    const shell = mount(ApprovalCard, {
+      props: {
+        card: card({
+          command: "make test",
+          workdir: "/home/me/app",
+          answers: ["deny", "once", "always"],
+        }),
+      },
+    })
+    expect(shell.find(".always-hint").text()).toBe(
+      "✅ Always: this exact command in /home/me/app, from now on.",
+    )
+    expect(shell.find(".always-hint code").text()).toBe("/home/me/app")
+    const mcp = mount(ApprovalCard, {
+      props: {
+        card: card({ command: "github.create_issue", answers: ["deny", "once", "always"] }),
+      },
+    })
+    expect(mcp.find(".always-hint").text()).toBe(
+      "✅ Always: this tool, with any arguments, from now on.",
+    )
+    const noAlways = mount(ApprovalCard, { props: { card: card({ answers: ["deny", "once"] }) } })
+    expect(noAlways.find(".always-hint").exists()).toBe(false)
+  })
+
+  it("names the card root as a group with its header", () => {
+    const w = mount(ApprovalCard, { props: { card: card({ answers: ["deny"] }) } })
+    expect(w.find(".icard").attributes("role")).toBe("group")
+    expect(w.find(".icard").attributes("aria-label")).toBe("🛡 Approval needed")
+  })
+
+  it("gives the countdown a timer label that changes every 15 s", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-11-20T10:00:00Z"))
+    const w = mount(ApprovalCard, {
+      props: { card: card({ answers: ["deny", "once"], deadline: "2026-11-20T10:01:30Z" }) },
+    })
+    const timer = () => w.find('[role="timer"]')
+    expect(timer().attributes("aria-label")).toBe("Time left: 1:30")
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(w.find(".cd").text()).toBe("⌛ 1:29")
+    expect(timer().attributes("aria-label")).toBe("Time left: 1:30")
+    await vi.advanceTimersByTimeAsync(14_000)
+    expect(timer().attributes("aria-label")).toBe("Time left: 1:15")
+    w.unmount()
+  })
 })
 
 describe("ClarifyCard", () => {
-  const q = { kind: "clarify", header: "❓ Which branch?" } as const
+  const q = { kind: "clarify", header: "❓ Question", summary: "Which branch?" } as const
 
   it("sends one choice", async () => {
     const w = mount(ClarifyCard, {
@@ -213,6 +290,37 @@ describe("ClarifyCard", () => {
       text: "feature/x",
     })
   })
+
+  it("shows the question as the body text under the header", () => {
+    const w = mount(ClarifyCard, { props: { card: card({ ...q, choices: ["main", "dev"] }) } })
+    expect(w.find(".icard-h").text()).toContain("❓ Question")
+    expect(w.find(".clarify-q").text()).toBe("Which branch?")
+    expect(w.find(".icard").attributes("role")).toBe("group")
+    expect(w.find(".icard").attributes("aria-label")).toBe("❓ Question")
+  })
+
+  it("labels the free-text input Your answer", () => {
+    const w = mount(ClarifyCard, { props: { card: card({ ...q }) } })
+    expect(w.text()).not.toContain("(Reply with a message.)")
+    const input = w.find("input")
+    const label = w.find(`label[for="${input.attributes("id")}"]`)
+    expect(label.text()).toBe("Your answer")
+  })
+
+  it("gives the countdown a timer label that changes every 15 s", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-11-20T10:00:00Z"))
+    const w = mount(ClarifyCard, {
+      props: { card: card({ ...q, deadline: "2026-11-20T10:01:30Z" }) },
+    })
+    const timer = () => w.find('[role="timer"]')
+    expect(timer().attributes("aria-label")).toBe("Time left: 1:30")
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(timer().attributes("aria-label")).toBe("Time left: 1:30")
+    await vi.advanceTimersByTimeAsync(14_000)
+    expect(timer().attributes("aria-label")).toBe("Time left: 1:15")
+    w.unmount()
+  })
 })
 
 describe("SecretCard", () => {
@@ -244,6 +352,18 @@ describe("SecretCard", () => {
     })
     expect((w.find("input").element as HTMLInputElement).value).toBe("")
     expect(JSON.stringify({ ...localStorage })).not.toContain("s3cr3t-value")
+  })
+
+  it("gives Deny the soft danger weight and keeps Save primary", () => {
+    const w = mount(SecretCard, {
+      props: {
+        card: card({ kind: "secret", header: "🔑 Secret needed: PYPI_TOKEN", answers: ["deny"] }),
+      },
+    })
+    expect(cls(w, "❌ Deny")).toContain("btn-danger-soft")
+    expect(cls(w, "Save")).toContain("btn-primary")
+    expect(w.find(".icard").attributes("role")).toBe("group")
+    expect(w.find(".icard").attributes("aria-label")).toBe("🔑 Secret needed: PYPI_TOKEN")
   })
 })
 

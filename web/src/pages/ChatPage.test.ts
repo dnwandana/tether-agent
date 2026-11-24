@@ -50,6 +50,7 @@ const stubs = {
   ApprovalCard: true,
   ClarifyCard: true,
   SecretCard: true,
+  RecordLine: true,
 }
 const mk = () => mount(ChatPage, { global: { stubs }, attachTo: document.body })
 
@@ -72,12 +73,39 @@ beforeEach(() => {
   })
   turn.view = null
   cards.open = []
+  cards.answered = []
   Object.assign(status, { mode: "guarded", model: "glm-4.6" })
 })
 
+const r = (id: string, kind: string, session_id: string) => ({
+  id,
+  kind,
+  header: "✅ Approval allowed · once",
+  preview: "x",
+  session_id,
+  at: "2026-11-23T09:00:00Z",
+})
+
 describe("ChatPage", () => {
-  it("shows the empty state with four suggested commands", () => {
+  it("shows a record for each answered card of this session, and for a dashboard question", () => {
+    session.messages = [{ id: 1, role: "user", text: "hi" } as any]
+    cards.answered = [
+      r("a", "approval", "s1"),
+      r("b", "approval", "s2"),
+      r("q", "clarify", ""),
+      r("k", "secret", ""),
+      r("n", "signin", ""),
+      r("i", "skill", ""),
+    ] as any
     const w = mk()
+    expect(w.findAll("record-line-stub")).toHaveLength(3)
+    w.unmount()
+  })
+
+  it("shows the empty state with four suggested commands", () => {
+    session.id = ""
+    const w = mk()
+    expect(w.find("h1.sr").text()).toBe("Chat")
     expect(w.find(".empty-chat h2").text()).toBe("New session")
     expect(w.text()).toContain(
       "🛡 Guarded · Dashboard · glm-4.6. Ask anything, or try one of these.",
@@ -155,7 +183,13 @@ describe("ChatPage", () => {
     vi.mocked(runCommand).mockResolvedValueOnce({
       request_id: "r",
       text: "Pick a provider.",
-      buttons: [[{ text: "primary", data: "/model primary" }]],
+      buttons: [
+        [
+          { text: "primary", data: "/model primary" },
+          { text: "fallback", data: "/model fallback" },
+          { text: "local", data: "/model local" },
+        ],
+      ],
       edit: false,
     } as any)
     vi.mocked(runCommand).mockResolvedValueOnce({

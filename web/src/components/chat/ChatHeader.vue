@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref } from "vue"
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue"
 import { useRouter } from "vue-router"
-import { useAct } from "../../lib/act"
+import { useCommand } from "../../lib/command"
 import { session } from "../../stores/session"
 import { toast } from "../../stores/ui"
 import { renderMarkdown } from "../../lib/markdown"
@@ -17,12 +17,16 @@ const pop = ref<"menu" | null>(null)
 const promptOpen = ref(false)
 const promptText = ref("")
 
-// An action runs as a typed command. The reply popover and the confirm dialog come from useAct.
-const { act, reply, closeReply } = useAct({
-  onOpen: () => {
-    pop.value = null
-  },
+// An action runs as a typed command. The reply popover and the confirm dialog come from useCommand.
+const { run, reply, closeReply } = useCommand()
+// The menu closes when a reply popover opens.
+watch(reply, (r) => {
+  if (r) pop.value = null
 })
+
+const modelLabel = computed(() =>
+  session.entry ? `${session.model} (${session.entry})` : session.model,
+)
 
 function closePop(): void {
   pop.value = null
@@ -42,7 +46,7 @@ function commitRename(): void {
   if (!editing.value) return
   editing.value = false
   const t = draftTitle.value.trim()
-  if (t !== "" && t !== session.title) void act("/rename " + t)
+  if (t !== "" && t !== session.title) void run("/rename " + t)
 }
 function cancelRename(): void {
   editing.value = false
@@ -59,7 +63,7 @@ function openGoal(): void {
 
 function menuAct(text: string): void {
   pop.value = null
-  void act(text)
+  void run(text)
 }
 
 function openPrompt(): void {
@@ -71,11 +75,11 @@ function savePrompt(): void {
   const t = promptText.value.trim()
   if (t === "") return
   promptOpen.value = false
-  void act("/prompt set " + t)
+  void run("/prompt set " + t)
 }
 function clearPrompt(): void {
   promptOpen.value = false
-  void act("/prompt clear")
+  void run("/prompt clear")
 }
 
 // Downloads a file from an API route. A plain link cannot send the session header.
@@ -142,18 +146,20 @@ onUnmounted(() => {
       @keydown.esc.prevent="cancelRename"
       @blur="commitRename"
     />
+    <span v-else-if="session.id === ''" class="chat-title truncate c-3">New session</span>
     <button
       v-else
       type="button"
       class="chat-title truncate"
+      :class="{ 'c-3': !session.title }"
       title="Rename the session"
       @click="startRename"
     >
-      {{ session.title }}
+      {{ session.title || "New session" }}
     </button>
     <div class="chips">
-      <button type="button" class="chip" @click="act('/model')">model {{ session.model }} ▾</button>
-      <button type="button" class="chip" @click="act('/effort')">
+      <button type="button" class="chip" @click="run('/model')">model {{ modelLabel }} ▾</button>
+      <button type="button" class="chip" @click="run('/effort')">
         effort {{ session.effort || "default" }} ▾
       </button>
       <span v-if="session.context" class="ctx">
@@ -173,13 +179,22 @@ onUnmounted(() => {
             }"
           />
         </span>
-        <button type="button" class="btn btn-ghost btn-sm" @click="act('/compact')">Compact</button>
+        <button type="button" class="btn btn-ghost btn-sm" @click="run('/compact')">Compact</button>
       </span>
       <button v-if="session.goalLine !== ''" type="button" class="chip chip-acc" @click="openGoal">
         {{ session.goalLine }}
       </button>
     </div>
     <span class="grow" />
+    <a
+      class="help-link"
+      href="https://github.com/dnwandana/tether-agent/wiki/Dashboard#pages"
+      target="_blank"
+      rel="noreferrer"
+      title="docs/wiki/Dashboard.md#pages"
+      aria-label="Help for the pages: docs/wiki/Dashboard.md#pages"
+      >?</a
+    >
     <button
       type="button"
       class="btn btn-ghost btn-icon"
@@ -203,14 +218,18 @@ onUnmounted(() => {
       data-pop
       style="position: absolute; right: 16px; top: 100%; z-index: 55"
     >
-      <button type="button" class="menu-item" @click="menuAct('/fork')">Fork</button>
-      <button type="button" class="menu-item" @click="menuAct('/archive')">Archive</button>
-      <button type="button" class="menu-item" @click="exportSession">Export JSONL</button>
+      <template v-if="session.id !== ''">
+        <button type="button" class="menu-item" @click="menuAct('/fork')">Fork</button>
+        <button type="button" class="menu-item" @click="menuAct('/archive')">Archive</button>
+        <button type="button" class="menu-item" @click="exportSession">Export JSONL</button>
+      </template>
       <button type="button" class="menu-item" @click="openPrompt">Custom prompt…</button>
-      <div class="menu-sep" />
-      <button type="button" class="menu-item danger" @click="menuAct('/delete ' + session.id)">
-        Delete…
-      </button>
+      <template v-if="session.id !== ''">
+        <div class="menu-sep" />
+        <button type="button" class="menu-item danger" @click="menuAct('/delete ' + session.id)">
+          Delete…
+        </button>
+      </template>
     </div>
     <div
       v-if="reply"
@@ -241,7 +260,7 @@ onUnmounted(() => {
           type="button"
           class="btn btn-secondary btn-sm"
           :disabled="b.data === '·'"
-          @click="act(b.data)"
+          @click="run(b.data)"
         >
           {{ b.text }}
         </button>
@@ -264,6 +283,18 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.help-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  min-height: 32px;
+  color: var(--text-3);
+  text-decoration: none;
+}
+.help-link:hover {
+  color: var(--text);
+}
 .ctx .meter {
   position: relative;
   overflow: visible;

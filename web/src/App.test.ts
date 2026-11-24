@@ -1,7 +1,8 @@
 import { mount } from "@vue/test-utils"
 import { defineComponent, h } from "vue"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import App from "./App.vue"
+import { cards } from "./stores/cards"
 
 const Palette = defineComponent({
   name: "CommandPalette",
@@ -10,16 +11,18 @@ const Palette = defineComponent({
   setup: (p) => () => h("div", { class: "palette-stub", "data-open": String(p.open) }),
 })
 
-function mountApp(routeName: string) {
+function mountApp(routeName: string, meta: { ownScroll?: boolean } = {}) {
   return mount(App, {
     attachTo: document.body,
     global: {
-      mocks: { $route: { name: routeName } },
+      mocks: { $route: { name: routeName, meta } },
       stubs: {
         StatusBar: { template: '<header class="statusbar-stub" />' },
         NavRail: { template: '<nav class="navrail-stub" />' },
         TabBar: { template: '<nav class="tabbar-stub" />' },
         RouterView: { template: '<div class="routerview-stub" />' },
+        RestartBanner: { template: '<div class="restart-stub" />' },
+        WaitingTray: { template: '<div class="tray-stub" />' },
         ConfirmDialog: true,
         ToastHost: true,
         CommandPalette: Palette,
@@ -37,12 +40,36 @@ afterEach(() => {
 })
 
 describe("App", () => {
-  it("shows the shell on a page", () => {
-    const w = mountApp("chat")
+  it("puts the restart banner under the status bar and hides it on sign-in", () => {
+    let w = mountApp("jobs")
+    expect(w.find(".statusbar-stub + .restart-stub").exists()).toBe(true)
+    w.unmount()
+    w = mountApp("signin")
+    expect(w.find(".restart-stub").exists()).toBe(false)
+  })
+
+  it("has one aside slot in the shell, also on the sign-in page", () => {
+    expect(mountApp("jobs").findAll(".shell > .aside-slot")).toHaveLength(1)
+    expect(mountApp("signin").findAll(".shell > .aside-slot")).toHaveLength(1)
+  })
+
+  it("renders the one tray in the shell", () => {
+    expect(mountApp("jobs").findAll(".tray-stub")).toHaveLength(1)
+    expect(mountApp("signin").find(".tray-stub").exists()).toBe(false)
+  })
+
+  it("puts a page in the scroll box", () => {
+    const w = mountApp("jobs")
     expect(w.find(".statusbar-stub").exists()).toBe(true)
     expect(w.find(".rail-slot .navrail-stub").exists()).toBe(true)
     expect(w.find(".tabbar-stub").exists()).toBe(true)
-    expect(w.find("main.view .routerview-stub").exists()).toBe(true)
+    expect(w.find("main.view > .scroll > .routerview-stub").exists()).toBe(true)
+  })
+
+  it("gives the chat no scroll box", () => {
+    const w = mountApp("chat", { ownScroll: true })
+    expect(w.find("main.view > .routerview-stub").exists()).toBe(true)
+    expect(w.find(".scroll").exists()).toBe(false)
   })
 
   it("hides the shell on the sign-in page", () => {
@@ -51,6 +78,7 @@ describe("App", () => {
     expect(w.find(".navrail-stub").exists()).toBe(false)
     expect(w.find(".tabbar-stub").exists()).toBe(false)
     expect(w.find(".routerview-stub").exists()).toBe(true)
+    expect(w.find("main.view > .scroll > .routerview-stub").exists()).toBe(true)
   })
 
   it("opens the palette on Ctrl+K and closes it on close", async () => {
@@ -74,5 +102,30 @@ describe("App", () => {
     key({ key: "/" })
     await w.vm.$nextTick()
     expect(w.find(".palette-stub").attributes("data-open")).toBe("true")
+  })
+
+  it("announces each new card once in one polite live region", async () => {
+    vi.useFakeTimers()
+    cards.open = []
+    const w = mountApp("jobs")
+    const region = w.find(".announce")
+    expect(region.attributes("aria-live")).toBe("polite")
+    cards.open = [
+      { id: "a1", kind: "approval", command: "rm -rf build/", summary: "" },
+      { id: "q1", kind: "clarify", command: "", summary: "Which branch?" },
+      { id: "k1", kind: "secret", command: "", summary: "", secret_name: "PYPI_TOKEN" },
+    ] as never
+    await w.vm.$nextTick()
+    vi.advanceTimersByTime(50)
+    expect(region.text()).toBe(
+      "Approval needed: rm -rf build/. Question: Which branch?. Secret needed: PYPI_TOKEN",
+    )
+    cards.open = [...cards.open] as never
+    await w.vm.$nextTick()
+    vi.advanceTimersByTime(50)
+    expect(region.text()).toBe(
+      "Approval needed: rm -rf build/. Question: Which branch?. Secret needed: PYPI_TOKEN",
+    )
+    vi.useRealTimers()
   })
 })

@@ -43,6 +43,7 @@ describe("api", () => {
     expect(err).toBeInstanceOf(ApiError)
     expect(err.status).toBe(409)
     expect(err.message).toBe("This card is already answered.")
+    expect(err.serverText).toBe("This card is already answered.")
   })
 
   it("uses the status when the body has no error text", async () => {
@@ -55,7 +56,25 @@ describe("api", () => {
       },
     })
     const err = await api("GET", "/api/usage").catch((e) => e)
-    expect(err.message).toBe("HTTP 502")
+    expect(err.message).toBe("The gateway failed. See the log on System operations.")
+    expect(err.serverText).toBeNull()
+  })
+
+  it("turns a network failure into an ApiError with status 0", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"))
+    const err = await api("GET", "/api/jobs").catch((e) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect(err.status).toBe(0)
+    expect(err.serverText).toBeNull()
+    expect(err.message).toBe("Cannot reach the gateway. Check the network, then try again.")
+    const form = await postForm("/api/messages", new FormData()).catch((e) => e)
+    expect(form.status).toBe(0)
+  })
+
+  it("keeps the fixed text on a 401 of a sign-in path with no JSON body", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 401, statusText: "", json: async () => null })
+    const err = await api("POST", "/auth/signin", { code: "K7QF-2M9X" }).catch((e) => e)
+    expect(err.message).toBe("The code is not valid, or it expired.")
   })
 
   it("ends the session on a 401 of an API path", async () => {

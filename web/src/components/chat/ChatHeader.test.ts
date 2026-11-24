@@ -46,6 +46,7 @@ beforeEach(() => {
     id: "s1",
     title: "Old",
     model: "glm-4.6",
+    entry: "primary",
     effort: "",
     goalLine: "",
     context: null,
@@ -75,7 +76,11 @@ describe("ChatHeader", () => {
 
   it("opens the model picker from the /model reply", async () => {
     vi.mocked(runCommand).mockResolvedValueOnce(
-      reply("Pick a provider.", [[{ text: "primary", data: "/model primary" }]]),
+      reply("Pick a provider.", [
+        [{ text: "primary", data: "/model primary" }],
+        [{ text: "b", data: "/model b" }],
+        [{ text: "c", data: "/model c" }],
+      ]),
     )
     const { w } = await mk()
     await w.findAll("button.chip")[0].trigger("click")
@@ -106,6 +111,7 @@ describe("ChatHeader", () => {
       body: "",
       confirmLabel: "🗑 Delete",
       danger: true,
+      markdown: true,
     })
     expect(runCommand).toHaveBeenLastCalledWith("/delete s1 confirm")
     w.unmount()
@@ -128,6 +134,7 @@ describe("ChatHeader", () => {
           { text: "a", data: "/effort a" },
           { text: "·", data: "·" },
         ],
+        [{ text: "c", data: "/effort c" }],
       ]),
     )
     const { w } = await mk()
@@ -139,7 +146,7 @@ describe("ChatHeader", () => {
     expect(w.find(".popover").exists()).toBe(false)
     await w.findAll("button.chip")[0].trigger("click")
     await flushPromises()
-    expect(toast).toHaveBeenCalledWith("Done.", "ok")
+    expect(vi.mocked(toast).mock.calls.at(-1)!.slice(0, 2)).toEqual(["Done.", "info"])
     w.unmount()
   })
   it("revokes the export URL after a delay, not at once", async () => {
@@ -167,5 +174,44 @@ describe("ChatHeader", () => {
       vi.useRealTimers()
       vi.unstubAllGlobals()
     }
+  })
+
+  it("shows New session for an empty title", async () => {
+    session.title = ""
+    const { w } = await mk()
+    expect(w.find(".chat-title").text()).toBe("New session")
+    expect(w.find(".chat-title").classes()).toContain("c-3")
+    w.unmount()
+  })
+
+  it("shows the model chip as model (entry)", async () => {
+    const { w } = await mk()
+    expect(w.findAll("button.chip")[0].text()).toBe("model glm-4.6 (primary) ▾")
+    session.entry = ""
+    await flushPromises()
+    expect(w.findAll("button.chip")[0].text()).toBe("model glm-4.6 ▾")
+    w.unmount()
+  })
+
+  it("hides the session actions while no session exists", async () => {
+    session.id = ""
+    session.title = ""
+    const { w } = await mk()
+    expect(w.find("button.chat-title").exists()).toBe(false)
+    expect(w.find(".chat-title").text()).toBe("New session")
+    await w.find('button[aria-label="Session menu"]').trigger("click")
+    const items = w.findAll(".menu .menu-item").map((b) => b.text())
+    expect(items).toEqual(["Custom prompt…"])
+    w.unmount()
+  })
+
+  it("links to the Pages help of the wiki", async () => {
+    const { w } = await mk()
+    const a = w.find("a.help-link")
+    expect(a.attributes("href")).toBe(
+      "https://github.com/dnwandana/tether-agent/wiki/Dashboard#pages",
+    )
+    expect(a.attributes("rel")).toBe("noreferrer")
+    w.unmount()
   })
 })

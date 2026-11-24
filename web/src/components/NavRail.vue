@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { useRoute } from "vue-router"
 import { ICON } from "../lib/icons"
 import { cards } from "../stores/cards"
@@ -33,6 +33,15 @@ const section = computed(() => {
   return PARENT[n] ?? n
 })
 
+// The tablet CSS hides .truncate, so the name moves to the .sr class there.
+const media = globalThis.matchMedia?.("(max-width: 1023px)")
+const tablet = ref(media?.matches ?? false)
+function onMedia(e: MediaQueryListEvent): void {
+  tablet.value = e.matches
+}
+onMounted(() => media?.addEventListener("change", onMedia))
+onBeforeUnmount(() => media?.removeEventListener("change", onMedia))
+
 // Sends Ctrl+K to document, so App.vue opens the palette.
 function openPalette(): void {
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }))
@@ -57,7 +66,12 @@ function openPalette(): void {
       </span>
       <span class="bt">Tether</span>
     </div>
-    <button type="button" class="rail-search" @click="openPalette">
+    <button
+      type="button"
+      class="rail-search"
+      :title="tablet ? 'Search (Ctrl K)' : undefined"
+      @click="openPalette"
+    >
       <svg
         viewBox="0 0 24 24"
         fill="none"
@@ -69,7 +83,7 @@ function openPalette(): void {
       >
         <path :d="ICON.search" />
       </svg>
-      <span class="grow">Search</span>
+      <span :class="tablet ? 'sr' : 'grow'">Search</span>
       <span class="kbd">Ctrl K</span>
     </button>
     <RouterLink
@@ -77,6 +91,7 @@ function openPalette(): void {
       :key="p.name"
       :to="{ name: p.name }"
       class="rail-item"
+      :title="tablet ? p.label : undefined"
       :class="{ 'is-on': section === p.name }"
       :aria-current="section === p.name ? 'page' : undefined"
     >
@@ -91,7 +106,7 @@ function openPalette(): void {
       >
         <path :d="ICON[p.name]" />
       </svg>
-      <span class="truncate">{{ p.label }}</span>
+      <span :class="tablet ? 'sr' : 'truncate'">{{ p.label }}</span>
       <span v-if="p.name === 'security' && cards.open.length" class="badge badge-bad">{{
         cards.open.length
       }}</span>
@@ -100,6 +115,7 @@ function openPalette(): void {
       <RouterLink
         :to="{ name: 'start' }"
         class="rail-item"
+        :title="tablet ? 'Getting started' : undefined"
         :class="{ 'is-on': section === 'start' }"
         :aria-current="section === 'start' ? 'page' : undefined"
       >
@@ -114,7 +130,7 @@ function openPalette(): void {
         >
           <path :d="ICON.start" />
         </svg>
-        <span class="truncate">Getting started</span>
+        <span :class="tablet ? 'sr' : 'truncate'">Getting started</span>
       </RouterLink>
     </div>
   </nav>

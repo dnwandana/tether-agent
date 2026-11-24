@@ -2,15 +2,29 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 import { mount, flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
 
-vi.mock("../api/client", () => ({
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/client")>()),
   api: vi.fn(),
   runCommand: vi.fn(),
-  ApiError: class extends Error {},
 }))
-vi.mock("../stores/ui", () => ({ toast: vi.fn(), confirm: vi.fn() }))
+vi.mock("../stores/ui", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../stores/ui")>()),
+  toast: vi.fn(),
+  confirm: vi.fn(),
+}))
 import { api, runCommand } from "../api/client"
 import { confirm } from "../stores/ui"
 import JobDetailPage from "./JobDetailPage.vue"
+import { ApiError } from "../api/client"
+import { emitEvents } from "../lib/bus"
+const notFound = () =>
+  Object.assign(Object.create(ApiError.prototype), {
+    status: 404,
+    serverText: "No job with this id.",
+    message: "No job with this id.",
+  })
+const hhmm = (iso: string) =>
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
 
 const Blank = { render: () => null }
 const run = (id: number) => ({
@@ -60,6 +74,10 @@ const detail = {
   last_output: "",
   last_error: "github: HTTP 401: bad credentials",
   watch_output: "",
+  watch_limit_hit: false,
+  prompt_masked: false,
+  deliver_label: "",
+  fail_limit: 0,
   last7: [run(1), run(2), run(3), run(4), run(5), run(6), run(7)].map((r, i) => ({
     ...r,
     status: i < 4 ? "ok" : "error",
@@ -80,7 +98,9 @@ async function mk() {
     ],
   })
   await router.push("/jobs/j2")
-  const w = mount(JobDetailPage, { global: { plugins: [router], stubs: { JobForm: true } } })
+  const w = mount(JobDetailPage, {
+    global: { plugins: [router], stubs: { JobForm: true } },
+  })
   await flushPromises()
   return { w, router }
 }
@@ -132,8 +152,13 @@ describe("JobDetailPage", () => {
       .findAll("button")
       .filter((b) => b.text() === "Output")[0]
       .trigger("click")
-    expect(w.text()).toContain("HTTP 401")
-    expect(w.find(".cmd").text()).toBe("HTTP 401")
+    expect(
+      w
+        .findAllComponents({ name: "SidePanel" })
+        .find((p) => p.props("open"))!
+        .props("title"),
+    ).toBe("Output of the run at " + hhmm("2026-11-20T07:00:00Z"))
+    expect(w.find(".run-output").text()).toBe("HTTP 401")
   })
 
   it("deletes the job after the confirm of the command", async () => {
@@ -152,15 +177,16 @@ describe("JobDetailPage", () => {
       })
     vi.mocked(confirm).mockResolvedValue(true)
     const { w, router } = await mk()
+    vi.mocked(api).mockImplementation(async (_m: string, p: string) => {
+      if (p === "/api/jobs/j2" && vi.mocked(runCommand).mock.calls.length >= 2) throw notFound()
+      return (p === "/api/jobs/j2" ? detail : [run(1), run(2)]) as any
+    })
     await btn(w, "🗑 Delete…").trigger("click")
     await flushPromises()
     expect(runCommand).toHaveBeenNthCalledWith(1, "/jobs delete j2")
-    expect(confirm).toHaveBeenCalledWith({
-      title: "Delete gh-notify?",
-      body: "The run history goes too.",
-      confirmLabel: "🗑 Delete",
-      danger: true,
-    })
+    expect(confirm).toHaveBeenCalledWith(
+      expect.objectContaining({ title: "Delete gh-notify?", confirmLabel: "🗑 Delete" }),
+    )
     expect(runCommand).toHaveBeenNthCalledWith(2, "/jobs delete j2 confirm")
     expect(router.currentRoute.value.name).toBe("jobs")
   })
@@ -186,5 +212,126 @@ describe("JobDetailPage", () => {
       "⏸ Paused: the schedule 0 9 * * 8 is not valid. Edit the schedule to resume.",
     )
     expect(btn(w, "⚡ Run now").attributes("disabled")).toBeDefined()
+    expect(w.text()).toContain("The schedule is not valid")
+    expect(w.text()).toContain("Resume the job first.")
+  })
+
+  it("shows the script of a no-agent job and the deliver label", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/jobs/j2"
+          ? { ...detail, no_agent: true, script: "disk.sh", deliver_label: "Ops chat" }
+          : [run(1)]) as any,
+    )
+    const { w } = await mk()
+    const def = w.findAll(".card").find((c) => c.text().includes("Definition"))!
+    expect(def.text()).toContain("Script")
+    expect(def.text()).toContain("disk.sh")
+    expect(def.text()).not.toContain("Prompt")
+    expect(def.text()).toContain("Ops chat")
+    expect(def.text()).not.toContain("telegram:123")
+  })
+
+  it("shows the last output, the watch limit, and the failure pause", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/jobs/j2"
+          ? {
+              ...detail,
+              last_output: "3 new issues",
+              watch_limit_hit: true,
+              job: { ...detail.job, enabled: false, pause_reason: "failures" },
+            }
+          : [run(1)]) as any,
+    )
+    const { w } = await mk()
+    expect(w.text()).toContain("3 new issues")
+    expect(w.text()).toContain("The watch limit is reached.")
+    expect(w.text()).toContain("Paused after 3 failures")
+  })
+
+  it("has the Finished and Delivery error columns", async () => {
+    const { w } = await mk()
+    const heads = w.findAll("th").map((t) => t.text())
+    expect(heads).toEqual(expect.arrayContaining(["Finished", "Delivery error"]))
+  })
+
+  it("opens the output as an expanded card on a phone", async () => {
+    window.matchMedia = ((q: string) => ({
+      matches: q.includes("max-width: 599px"),
+      media: q,
+      addEventListener() {},
+      removeEventListener() {},
+    })) as any
+    const { w } = await mk()
+    await w
+      .findAll("button")
+      .filter((b) => b.text() === "Output")[0]
+      .trigger("click")
+    const card = w.find(".run-output-card")
+    expect(card.text()).toContain("Output of the run at " + hhmm("2026-11-20T07:00:00Z"))
+    await card.find("button[aria-label='Close']").trigger("click")
+    expect(w.find(".run-output-card").exists()).toBe(false)
+  })
+
+  it("shows the empty runs with Run now, and the history-off text", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/jobs/j2"
+          ? {
+              ...detail,
+              runs_total: 0,
+              last7: [],
+              job: { ...detail.job, next_run: "2026-11-24T07:00:00Z" },
+            }
+          : []) as any,
+    )
+    vi.mocked(runCommand).mockResolvedValue({
+      request_id: "r",
+      text: "✅ Started.",
+      buttons: [],
+      edit: false,
+    })
+    const { w } = await mk()
+    expect(w.text()).toContain(
+      "No runs yet. The first run is at " + hhmm("2026-11-24T07:00:00Z") + ".",
+    )
+    w.findAllComponents({ name: "StateBlock" })
+      .find((s) => s.props("action") === "⚡ Run now")!
+      .vm.$emit("action")
+    await flushPromises()
+    expect(runCommand).toHaveBeenCalledWith("/jobs run j2")
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p === "/api/jobs/j2"
+          ? { ...detail, job: { ...detail.job, history_off: true } }
+          : []) as any,
+    )
+    const second = await mk()
+    expect(second.w.text()).toContain("Run history is off (cron.run_history is 0).")
+  })
+
+  it("loads again only on the job.run event of this job", async () => {
+    await mk()
+    vi.mocked(api).mockClear()
+    emitEvents([{ name: "job.run", data: { job_id: "j9", status: "ok" } }])
+    await flushPromises()
+    expect(api).not.toHaveBeenCalled()
+    emitEvents([{ name: "job.run", data: { job_id: "j2", status: "ok" } }])
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2")
+  })
+
+  it("keeps the open form mounted on a live reload and passes its dirty state", async () => {
+    const { w } = await mk()
+    await btn(w, "✎ Edit").trigger("click")
+    const form = w.findComponent({ name: "JobForm" })
+    form.vm.$emit("dirty", true)
+    await flushPromises()
+    const panel = w.findAllComponents({ name: "SidePanel" }).find((p) => p.props("open"))!
+    expect(panel.props("dirty")).toBe(true)
+    emitEvents([{ name: "job.run", data: { job_id: "j2", status: "ok" } }])
+    await flushPromises()
+    expect(w.findComponent({ name: "JobForm" }).vm).toBe(form.vm)
   })
 })

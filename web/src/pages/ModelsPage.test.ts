@@ -1,15 +1,48 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { mount, flushPromises } from "@vue/test-utils"
 
+const h = vi.hoisted(() => ({
+  live: null as null | {
+    load: () => Promise<void>
+    opts?: { events?: string[]; filter?: (n: string, d: unknown) => boolean }
+  },
+}))
 vi.mock("../api/client", () => ({
   api: vi.fn(),
   runCommand: vi.fn(),
   ApiError: class extends Error {},
 }))
+vi.mock("../stores/ui", async () => ({
+  ...(await vi.importActual<object>("../stores/ui")),
+  toast: vi.fn(),
+}))
+vi.mock("../lib/errors", () => ({
+  friendlyError: (e: unknown) => (e instanceof Error ? e.message : String(e)),
+}))
+vi.mock("../lib/live", async () => {
+  const actual = await vi.importActual<object>("../lib/live")
+  const { onMounted, ref } = await import("vue")
+  return {
+    ...actual,
+    useLiveData: (load: () => Promise<void>, opts?: any) => {
+      h.live = { load, opts }
+      onMounted(() => void load())
+      return { stale: ref(false), updatedAt: ref(null), refresh: load }
+    },
+  }
+})
 import { api } from "../api/client"
+import { toast } from "../stores/ui"
+import { status } from "../stores/status"
 import ModelsPage from "./ModelsPage.vue"
 
-const local = (h: number, m: number, s = 0) => new Date(2026, 10, 20, h, m, s).toISOString()
+const mk = async () => {
+  const w = mount(ModelsPage, { global: { stubs: { LiveHeader: true } } })
+  await flushPromises()
+  return w
+}
+
+const local = (hr: number, m: number, s = 0) => new Date(2026, 10, 20, hr, m, s).toISOString()
 const zero = "0001-01-01T00:00:00Z"
 const entry = (o: object) => ({
   name: "",
@@ -19,6 +52,7 @@ const entry = (o: object) => ({
   vision: false,
   context_window: 200000,
   effort: "",
+  base_url: "",
   status: "ok",
   cause: "",
   failed_at: zero,
@@ -38,6 +72,7 @@ const view = {
   entries: [
     entry({
       name: "primary",
+      base_url: "https://api.z.ai/api/paas/v4",
       status: "skipped",
       cause: "HTTP 503",
       failed_at: local(14, 2),
@@ -48,7 +83,7 @@ const view = {
   ],
   chain: ["primary", "backup"],
   health: [],
-  roles: [{ role: "goal_judge", key: "goals.judge_provider", value: "backup" }],
+  roles: [{ role: "goal_judge", key: "goals.judge_provider", value: "backup", entry_usable: true }],
 }
 
 beforeEach(() => {
@@ -61,12 +96,13 @@ beforeEach(() => {
     removeEventListener() {},
   })) as any
   vi.mocked(api).mockReset().mockResolvedValue(view)
+  vi.mocked(toast).mockReset()
 })
 afterEach(() => vi.useRealTimers())
 
 describe("ModelsPage", () => {
   it("shows the status of each entry from the Health snapshot", async () => {
-    const w = mount(ModelsPage)
+    const w = mount(ModelsPage, { global: { stubs: { LiveHeader: true } } })
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/models")
     const st = w.findAll(".status")
@@ -87,7 +123,7 @@ describe("ModelsPage", () => {
   })
 
   it("shows the fallback banner and the roles", async () => {
-    const w = mount(ModelsPage)
+    const w = mount(ModelsPage, { global: { stubs: { LiveHeader: true } } })
     await flushPromises()
     expect(w.find(".warn-banner").text()).toBe(
       "⚠ Fallback active. backup (deepseek-chat) answers. primary failed at 14:02: HTTP 503.",
@@ -97,11 +133,102 @@ describe("ModelsPage", () => {
     w.unmount()
   })
 
+  it("keeps the data and shows a toast when a live reload fails", async () => {
+    const w = await mk()
+    expect(w.find(".warn-banner").exists()).toBe(true)
+    vi.mocked(api).mockRejectedValue(new Error("boom"))
+    await h.live!.load()
+    await flushPromises()
+    expect(w.find(".warn-banner").exists()).toBe(true)
+    expect(toast).toHaveBeenCalledWith("boom", "error")
+    w.unmount()
+  })
+
   it("shows no banner when the primary answers", async () => {
     vi.mocked(api).mockResolvedValue({ ...view, fallback: { ...view.fallback, active: false } })
-    const w = mount(ModelsPage)
+    const w = mount(ModelsPage, { global: { stubs: { LiveHeader: true } } })
     await flushPromises()
     expect(w.find(".warn-banner").exists()).toBe(false)
+    w.unmount()
+  })
+
+  it("shows the fallback chain as an ordered strip with the state of each entry", async () => {
+    vi.mocked(api).mockResolvedValue({
+      ...view,
+      health: [
+        {
+          entry: "primary",
+          model: "glm-4.6",
+          cause: "HTTP 503",
+          failed_at: local(14, 2),
+          skip_until: local(14, 3),
+        },
+      ],
+    })
+    const w = await mk()
+    const steps = w.findAll(".chain .chain-step")
+    expect(
+      steps.map((s) => [s.find(".role").text(), s.find(".name").text(), s.find(".state").text()]),
+    ).toEqual([
+      ["Primary", "primary", "⚠ skipped"],
+      ["Fallback 1", "backup", "✓ answers"],
+    ])
+    expect(steps[0].find(".state").classes()).toContain("c-warn")
+    w.unmount()
+  })
+
+  it("shows the last failure of a failed entry", async () => {
+    vi.mocked(api).mockResolvedValue({
+      ...view,
+      entries: [
+        entry({ name: "backup", status: "failed", cause: "HTTP 500", failed_at: local(13, 58) }),
+      ],
+    })
+    const w = await mk()
+    expect(w.find(".status").text()).toBe("⚠ last failed 13:58 · HTTP 500")
+    expect(w.find(".status").classes()).toContain("c-warn")
+    w.unmount()
+  })
+
+  it("shows the base URL of each entry and an unusable role entry", async () => {
+    vi.mocked(api).mockResolvedValue({
+      ...view,
+      roles: [
+        { role: "goal_judge", key: "goals.judge_provider", value: "cheap", entry_usable: false },
+      ],
+    })
+    const w = await mk()
+    expect(w.text()).toContain("https://api.z.ai/api/paas/v4")
+    expect(w.text()).toContain("⚠️ entry unusable")
+    w.unmount()
+  })
+
+  it("loads again when the skip time ends", async () => {
+    const w = await mk()
+    expect(api).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(43000)
+    await flushPromises()
+    expect(api).toHaveBeenCalledTimes(2)
+    w.unmount()
+  })
+
+  it("reloads on a status event only when the fallback or the entry changes", async () => {
+    status.fallback = false
+    status.entry = "primary"
+    const w = await mk()
+    expect(h.live!.opts!.events).toEqual(["status"])
+    const f = h.live!.opts!.filter!
+    expect(f("status", { spend24h: 1.5 })).toBe(false)
+    expect(f("status", { fallback: true })).toBe(true)
+    expect(f("status", { fallback: true })).toBe(false)
+    expect(f("status", { entry: "backup" })).toBe(true)
+    w.unmount()
+  })
+
+  it("shows the empty text with the setup command", async () => {
+    vi.mocked(api).mockResolvedValue({ ...view, entries: [] })
+    const w = await mk()
+    expect(w.text()).toContain("No model entries. Run `tether setup` on the host.")
     w.unmount()
   })
 })

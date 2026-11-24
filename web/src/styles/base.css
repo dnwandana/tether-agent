@@ -14,6 +14,8 @@
 .tt h2,
 .tt h3,
 .tt h4,
+.tt h5,
+.tt h6,
 .tt p,
 .tt ul,
 .tt ol,
@@ -198,13 +200,11 @@ body {
   .cursor,
   .dots i,
   .spin,
-  .skel {
+  .skel,
+  .pulse {
     animation: none !important;
   }
   .aside {
-    transition: none;
-  }
-  .pulse {
-    animation: none;
+    transition: none !important;
   }
 }

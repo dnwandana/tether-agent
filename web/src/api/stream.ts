@@ -1,6 +1,7 @@
 import { sessionHeader } from "./client"
+import { emitEvents } from "../lib/bus"
 
-export type StreamState = "open" | "reconnecting" | "signed-out"
+export type StreamState = "connecting" | "open" | "reconnecting" | "signed-out"
 type Ev = { name: string; data: unknown }
 
 const SILENCE_MS = 45_000
@@ -8,6 +9,9 @@ const FIRST_RETRY_MS = 1_000
 const MAX_RETRY_MS = 10_000
 const STALE_MS = 20_000
 const HIDDEN_FLUSH_MS = 100
+
+let followLogs = false
+let current: { check: () => void; refollow: () => void } | null = null
 
 export function openStream(
   onEvents: (batch: Ev[]) => void,
@@ -26,6 +30,8 @@ export function openStream(
   let lastByte = 0
   let hiddenAt = 0
   let gen = 0
+  let everOpen = false
+  let quiet = false
 
   function setState(s: StreamState) {
     if (closed && s !== "signed-out") return
@@ -62,6 +68,7 @@ export function openStream(
 
   function retry() {
     if (closed || retryTimer) return
+    quiet = false
     setState("reconnecting")
     retryTimer = setTimeout(() => {
       retryTimer = null
@@ -117,7 +124,7 @@ export function openStream(
     if (h) headers["X-Tether-Session"] = h
     let resp: Response
     try {
-      resp = await fetch("/api/events", {
+      resp = await fetch(followLogs ? "/api/events?follow=logs" : "/api/events", {
         headers,
         signal: c.signal,
         credentials: "same-origin",
@@ -139,6 +146,9 @@ export function openStream(
     }
     delay = FIRST_RETRY_MS
     setState("open")
+    if (everOpen && !quiet) emitEvents([{ name: "reconnected", data: null }])
+    everOpen = true
+    quiet = false
     lastByte = Date.now()
     armSilence()
     const rd = resp.body.getReader()
@@ -178,6 +188,17 @@ export function openStream(
     }
   }
 
+  function refollow() {
+    if (closed) return
+    // Only an open stream stays quiet. After an outage the next connect must emit reconnected.
+    quiet = state === "open"
+    stopRead()
+    if (retryTimer) clearTimeout(retryTimer)
+    retryTimer = null
+    delay = FIRST_RETRY_MS
+    connect()
+  }
+
   function onOnline() {
     check()
   }
@@ -195,6 +216,7 @@ export function openStream(
   function close(keepState = false) {
     closed = true
     gen++
+    if (current === me) current = null
     clearTimers()
     stopRead()
     pending = []
@@ -203,8 +225,23 @@ export function openStream(
     void keepState
   }
 
+  const me = { check, refollow }
+  current = me
   window.addEventListener("online", onOnline)
   document.addEventListener("visibilitychange", onVisibility)
   connect()
   return () => close()
+}
+
+// Connects at once when the stream waits to reconnect, or when the stream is stale. It does
+// nothing when no stream is open.
+export function retryNow(): void {
+  current?.check()
+}
+
+// Asks the server for the log events on the main stream. A change reconnects the stream.
+export function setFollowLogs(on: boolean): void {
+  if (followLogs === on) return
+  followLogs = on
+  current?.refollow()
 }

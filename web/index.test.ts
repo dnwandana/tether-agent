@@ -10,7 +10,7 @@ describe("index.html", () => {
     expect(html).toContain('<script type="module" src="/src/main.ts"></script>')
     expect(html).toContain("<title>Tether Agent Dashboard</title>")
     expect(html).toContain("viewport-fit=cover")
-    expect(html).toContain('<html lang="en" class="tt theme-dark">')
+    expect(html).toContain('<html lang="en" class="tt">')
   })
 
   it("has no inline script and no font host", () => {
