@@ -808,3 +808,20 @@ func TestGetChat(t *testing.T) {
 		t.Fatal(got, err)
 	}
 }
+
+func TestForumTopicFields(t *testing.T) {
+	u := decodeUpdate(t, `{"update_id":4,"message":{"message_id":9,"message_thread_id":17585,"is_topic_message":true,
+		"from":{"id":5,"first_name":"U"},"chat":{"id":-100,"type":"supergroup","title":"G","is_forum":true},"text":"hi",
+		"reply_to_message":{"message_id":17585,"chat":{"id":-100},"forum_topic_created":{"name":"Alerts","icon_color":7322096}}}}`)
+	if r := u.Message.ReplyToMessage; r == nil || r.ForumTopicCreated == nil || r.ForumTopicCreated.Name != "Alerts" {
+		t.Fatalf("%+v", u.Message.ReplyToMessage)
+	}
+	if u.Message.Unread != nil {
+		t.Fatalf("unread %v", u.Message.Unread)
+	}
+	u = decodeUpdate(t, `{"update_id":5,"message":{"message_id":10,"message_thread_id":17585,
+		"chat":{"id":-100,"type":"supergroup","is_forum":true},"forum_topic_edited":{"name":"Ops alerts"}}}`)
+	if e := u.Message.ForumTopicEdited; e == nil || e.Name != "Ops alerts" || u.Message.Unread != nil {
+		t.Fatalf("%+v %v", e, u.Message.Unread)
+	}
+}

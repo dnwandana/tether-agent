@@ -1896,3 +1896,85 @@ func TestChannelSendNoSound(t *testing.T) {
 		t.Fatalf("a send without NoSound keeps the sound: %v", c.Body)
 	}
 }
+
+type seenCall struct {
+	chat   Chat
+	thread int
+	topic  string
+	exact  bool
+}
+
+// recordSeen sets a ChatSeen hook on h that records each call.
+func recordSeen(h *tgHarness) func() []seenCall {
+	var mu sync.Mutex
+	var calls []seenCall
+	h.ch.ChatSeen = func(c Chat, thread int, topic string, exact bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, seenCall{c, thread, topic, exact})
+	}
+	return func() []seenCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(calls)
+	}
+}
+
+func TestChatSeenForAuthorizedMessage(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowAllUsers = true })
+	seen := recordSeen(h)
+	m := topic("17585", "first")
+	m.ReplyToMessage = &Message{MessageID: 17585, Chat: m.Chat, ForumTopicCreated: &ForumTopicCreated{Name: "Alerts"}}
+	h.update(m)
+	h.waitIdle()
+	got := seen()
+	if len(got) != 1 || got[0].chat.ID != -100 || got[0].chat.Title != "G" || got[0].thread != 17585 || got[0].topic != "Alerts" || got[0].exact {
+		t.Fatalf("%+v", got)
+	}
+	// A rename is a service message. The gate drops it, but an authorized rename reaches the hook.
+	h.updateJSON(`{"update_id":50,"message":{"message_id":11,"message_thread_id":17585,"is_topic_message":true,
+		"from":{"id":123,"first_name":"Ana"},"chat":{"id":-100,"type":"supergroup","title":"G","is_forum":true},
+		"forum_topic_edited":{"name":"Ops alerts"}}}`)
+	h.waitIdle()
+	if got = seen(); len(got) != 2 || got[1].thread != 17585 || got[1].topic != "Ops alerts" || !got[1].exact {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestChatSeenSkipsUnauthorizedAndDropped(t *testing.T) {
+	// An unpaired user in a DM gets a pairing code and adds no entry.
+	h := harness(t, &tgProv{}, nil)
+	seen := recordSeen(h)
+	h.update(dmText(5, "hello"))
+	h.waitIdle()
+	if got := seen(); len(got) != 0 {
+		t.Fatalf("unpaired: %+v", got)
+	}
+	// The gate drops a group message with no mention.
+	h = harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowAllUsers = true; c.RequireMention = true })
+	seen = recordSeen(h)
+	h.update(group("hello all"))
+	h.waitIdle()
+	if got := seen(); len(got) != 0 {
+		t.Fatalf("dropped: %+v", got)
+	}
+}
+
+func TestChatSeenForCallback(t *testing.T) {
+	h := harness(t, &tgProv{}, func(c *config.TelegramConfig) { c.AllowAllUsers = true })
+	seen := recordSeen(h)
+	// A button on an inline message has no Message: no call and no panic.
+	h.ch.handleUpdate(ctx, h.gw, Update{UpdateID: 60, CallbackQuery: &CallbackQuery{ID: "cb0", From: User{ID: 5}, Data: "x"}})
+	if got := seen(); len(got) != 0 {
+		t.Fatalf("no message: %+v", got)
+	}
+	h.ch.handleUpdate(ctx, h.gw, Update{UpdateID: 61, CallbackQuery: &CallbackQuery{ID: "cb1", From: User{ID: 5},
+		Message: &Message{MessageID: 101, MessageThreadID: 7, Chat: Chat{ID: -100, Type: "supergroup", Title: "G"}}, Data: "x"}})
+	if got := seen(); len(got) != 1 || got[0].chat.Title != "G" || got[0].thread != 7 || got[0].topic != "" {
+		t.Fatalf("callback: %+v", got)
+	}
+	// A nil hook makes no call.
+	h.ch.ChatSeen = nil
+	h.ch.handleUpdate(ctx, h.gw, Update{UpdateID: 62, CallbackQuery: &CallbackQuery{ID: "cb2", From: User{ID: 5},
+		Message: &Message{MessageID: 102, Chat: Chat{ID: -100, Title: "G"}}, Data: "x"}})
+}

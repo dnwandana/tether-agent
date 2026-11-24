@@ -159,6 +159,17 @@ func (u *Update) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// ForumTopicCreated is the service field of a new forum topic.
+type ForumTopicCreated struct {
+	Name string `json:"name"`
+}
+
+// ForumTopicEdited is the service field of a renamed forum topic. Name is empty when only the
+// icon changed.
+type ForumTopicEdited struct {
+	Name string `json:"name"`
+}
+
 // Message is a Telegram message, with only the fields that Tether Agent uses.
 type Message struct {
 	MessageID       int             `json:"message_id"`
@@ -190,6 +201,9 @@ type Message struct {
 	LeftChatMember    *User  `json:"left_chat_member,omitempty"`
 	MigrateToChatID   int64  `json:"migrate_to_chat_id,omitempty"`
 	MigrateFromChatID int64  `json:"migrate_from_chat_id,omitempty"`
+	// ForumTopicCreated and ForumTopicEdited carry the topic name.
+	ForumTopicCreated *ForumTopicCreated `json:"forum_topic_created,omitempty"`
+	ForumTopicEdited  *ForumTopicEdited  `json:"forum_topic_edited,omitempty"`
 
 	// Unread holds the sorted names of the top-level fields of the message that Message
 	// does not read. Only the decoder of Update sets it. It is nil when no name is left.

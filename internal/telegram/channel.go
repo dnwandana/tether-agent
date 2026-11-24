@@ -100,6 +100,12 @@ type Channel struct {
 	// each tap on such a button answer that the card is resolved.
 	HeldCards *HeldCards
 
+	// ChatSeen gets the chat, the thread id, and the topic name of each authorized message and
+	// of each authorized button press that has a message. topic is "" when the update holds no
+	// name. exact is true when the message itself creates or renames the topic. A name from
+	// the message that it replies to can be the old name of a renamed topic. Nil makes no call.
+	ChatSeen func(chat Chat, threadID int, topic string, exact bool)
+
 	// SignInHours is the life of a dashboard session in hours. When it is more than 0, the Allow
 	// button of a sign-in card shows it.
 	SignInHours int
@@ -349,6 +355,10 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		}
 	}()
 	if u.CallbackQuery != nil {
+		if cq := u.CallbackQuery; ch.ChatSeen != nil && cq.Message != nil && ch.callbackAuthorized(ctx, *cq) {
+			name, exact := topicOf(*cq.Message)
+			ch.ChatSeen(cq.Message.Chat, cq.Message.MessageThreadID, name, exact)
+		}
 		if strings.HasPrefix(u.CallbackQuery.Data, cmdPrefix+":") {
 			ch.commandCallback(ctx, gw, *u.CallbackQuery)
 			return
@@ -411,6 +421,13 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 		return
 	}
 	if !d.Accept {
+		// A topic service message has no content, so the gate drops it. An authorized one
+		// still gives the topic name.
+		if ch.ChatSeen != nil && (m.ForumTopicCreated != nil || m.ForumTopicEdited != nil) &&
+			Authorize(ch.Cfg, n, ch.pairApproved(ctx)) == AuthAllow {
+			name, exact := topicOf(m)
+			ch.ChatSeen(m.Chat, m.MessageThreadID, name, exact)
+		}
 		ch.logNotAccepted(ctx, u, m, n, d.Reason)
 		return
 	}
@@ -428,6 +445,10 @@ func (ch *Channel) handleUpdate(ctx context.Context, gw *gateway.Gateway, u Upda
 	case AuthPair:
 		ch.pair(ctx, m, n)
 		return
+	}
+	if ch.ChatSeen != nil {
+		name, exact := topicOf(m)
+		ch.ChatSeen(m.Chat, m.MessageThreadID, name, exact)
 	}
 	text := CanonicalCommand(d.Text)
 	if ch.localCommand(ctx, m, n, text) {
@@ -966,6 +987,23 @@ func (ch *Channel) callbackInbound(ctx context.Context, n Normalized, action str
 		in.UserID = ""
 	}
 	return in
+}
+
+// topicOf returns the topic name that the message m holds: the new name of a rename, the
+// name of a new topic, or the name of the topic service message that m replies to. It returns
+// "" when m holds no name. exact is true for a name from m itself. The service message that
+// m replies to keeps the first name of the topic, also after a rename.
+func topicOf(m Message) (name string, exact bool) {
+	if m.ForumTopicEdited != nil && m.ForumTopicEdited.Name != "" {
+		return m.ForumTopicEdited.Name, true
+	}
+	if m.ForumTopicCreated != nil && m.ForumTopicCreated.Name != "" {
+		return m.ForumTopicCreated.Name, true
+	}
+	if r := m.ReplyToMessage; r != nil && r.ForumTopicCreated != nil {
+		return r.ForumTopicCreated.Name, false
+	}
+	return "", false
 }
 
 // callbackAuthorized reports whether the user who pressed a button may use the bot. A
