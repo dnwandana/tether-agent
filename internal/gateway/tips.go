@@ -25,7 +25,7 @@ var Tips = []Tip{
 	{"/compact makes a long session shorter. The agent keeps a summary of the old messages.", ""},
 	{"/usage 7d shows the tokens and the cost of the last 7 days.", ""},
 	{"/rename gives this session a title, so you can find it later in /sessions.", ""},
-	{"/archive hides a session from the list. /sessions archived shows the hidden sessions again.", ""},
+	{"/archive hides a session from the list. /sessions archived shows the hidden sessions again. /unarchive <id> takes one back.", ""},
 	{"/stop stops the current task. The session stays, and you can continue it.", ""},
 	{"Ask \"remind me every morning at 8 to check my email\" to make a cron job.", ""},
 	{"/sethome sends the cron results to this chat.", "telegram"},

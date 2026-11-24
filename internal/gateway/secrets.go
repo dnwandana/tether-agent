@@ -6,12 +6,13 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/dnwandana/tether-agent/internal/security"
 )
 
 const (
-	secretsHelp       = "See and save the bound secrets: /secrets [set NAME | unpin NAME]"
+	secretsHelp       = "See and save the bound secrets: /secrets [set NAME | unpin NAME [PATH]]"
 	secretsGroupText  = "Send /secrets in a private chat with me."
 	secretsNoneText   = "🔑 No bound secrets. Bind a secret in exec\\_secrets in config.yaml."
 	secretsListHeader = "🔑 Bound secrets"
@@ -31,12 +32,14 @@ type SecretsDeps struct {
 	Pins func(ctx context.Context, name string) ([]security.PinTarget, error)
 	// Unpin removes the allowed programs of a name and returns how many it removed.
 	Unpin func(ctx context.Context, name string) (int64, error)
+	// UnpinPath removes the allowed program at path of a name and returns how many it removed.
+	UnpinPath func(ctx context.Context, name, path string) (int64, error)
 	// Start begins the save of a new value. In Telegram it sends the card and returns at once.
 	Start func(ctx context.Context, c *CommandCtx, name string) error
 }
 
 // SecretsCommand returns the owner-only /secrets command. It lists the bound secrets, starts
-// the save of a new value, and removes the allowed programs of a name.
+// the save of a new value, and removes the allowed programs of a name, or one program.
 func SecretsCommand(d SecretsDeps) Command {
 	return Command{
 		Name:      "secrets",
@@ -63,8 +66,12 @@ func SecretsCommand(d SecretsDeps) Command {
 					c.send(Reply{Text: "⚠️ " + EscapeMarkdown(err.Error())})
 				}
 				return nil
-			case len(f) == 2 && f[0] == "unpin":
-				return secretsUnpin(ctx, c, d, f[1])
+			case len(f) >= 2 && f[0] == "unpin":
+				name, path := secretsSplitUnpin(args)
+				if path == "" {
+					return secretsUnpin(ctx, c, d, name)
+				}
+				return secretsUnpinPath(ctx, c, d, name, path)
 			}
 			c.send(Reply{Text: secretsHelp})
 			return nil
@@ -166,5 +173,40 @@ func secretsUnpin(ctx context.Context, c *CommandCtx, d SecretsDeps, name string
 	default:
 		c.send(Reply{Text: fmt.Sprintf("Removed %d allowed programs of %s. The next use asks again.", n, e)})
 	}
+	return nil
+}
+
+// secretsSplitUnpin splits "unpin NAME PATH" into NAME and PATH. PATH is the rest of the line
+// after NAME, trimmed, so a path with a space stays whole. PATH is empty when the line has none.
+func secretsSplitUnpin(args string) (name, path string) {
+	rest := strings.TrimSpace(args)
+	rest = strings.TrimSpace(strings.TrimPrefix(rest, "unpin"))
+	i := strings.IndexFunc(rest, unicode.IsSpace)
+	if i < 0 {
+		return rest, ""
+	}
+	return rest[:i], strings.TrimSpace(rest[i:])
+}
+
+func secretsUnpinPath(ctx context.Context, c *CommandCtx, d SecretsDeps, name, path string) error {
+	if !secretsIsBound(d, name) {
+		c.send(Reply{Text: secretsNotBound(name)})
+		return nil
+	}
+	var n int64
+	if d.UnpinPath != nil {
+		var err error
+		if n, err = d.UnpinPath(ctx, name, path); err != nil {
+			return err
+		}
+	}
+	e := EscapeMarkdown(name)
+	// A code span shows the path as typed, so only a backtick needs a change.
+	p := strings.ReplaceAll(path, "`", "'")
+	if n == 0 {
+		c.send(Reply{Text: e + " has no allowed program `" + p + "`."})
+		return nil
+	}
+	c.send(Reply{Text: "Removed the allowed program `" + p + "` of " + e + ". The next use asks again."})
 	return nil
 }

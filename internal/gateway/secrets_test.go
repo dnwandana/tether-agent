@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 
 // secretsDeps returns deps with three bound names: GH_TOKEN is set, NPM_TOKEN has no value,
 // and PYPI_TOKEN is set, marked, and pinned.
-func secretsDeps(started *[]string, unpinned *[]string) SecretsDeps {
+func secretsDeps(started, unpinned, unpinnedPaths *[]string) SecretsDeps {
 	mark := time.Date(2026, 11, 18, 12, 31, 0, 0, time.Local)
 	return SecretsDeps{
 		Bound: func() map[string][]string {
@@ -37,6 +38,13 @@ func secretsDeps(started *[]string, unpinned *[]string) SecretsDeps {
 			}
 			return 0, nil
 		},
+		UnpinPath: func(_ context.Context, name, path string) (int64, error) {
+			*unpinnedPaths = append(*unpinnedPaths, name+"|"+path)
+			if name == "PYPI_TOKEN" && path == "/home/user/my tools/twine" {
+				return 1, nil
+			}
+			return 0, nil
+		},
 		Start: func(_ context.Context, _ *CommandCtx, name string) error {
 			*started = append(*started, name)
 			return nil
@@ -45,8 +53,8 @@ func secretsDeps(started *[]string, unpinned *[]string) SecretsDeps {
 }
 
 func TestSecretsList(t *testing.T) {
-	var started, unpinned []string
-	registerTestCommand(t, SecretsCommand(secretsDeps(&started, &unpinned)))
+	var started, unpinned, paths []string
+	registerTestCommand(t, SecretsCommand(secretsDeps(&started, &unpinned, &paths)))
 	c, sent := interactiveCtx(t)
 	run(t, c, "/secrets")
 	want := "🔑 Bound secrets\n" +
@@ -59,14 +67,14 @@ func TestSecretsList(t *testing.T) {
 		t.Fatalf("got:\n%s", r.Text)
 	}
 	cmd := Commands()["secrets"]
-	if cmd.MemberOK || !cmd.WhileBusy || cmd.Help != "See and save the bound secrets: /secrets [set NAME | unpin NAME]" {
+	if cmd.MemberOK || !cmd.WhileBusy || cmd.Help != "See and save the bound secrets: /secrets [set NAME | unpin NAME [PATH]]" {
 		t.Fatalf("%+v", cmd)
 	}
 }
 
 func TestSecretsSetAndUnpin(t *testing.T) {
-	var started, unpinned []string
-	registerTestCommand(t, SecretsCommand(secretsDeps(&started, &unpinned)))
+	var started, unpinned, paths []string
+	registerTestCommand(t, SecretsCommand(secretsDeps(&started, &unpinned, &paths)))
 	c, sent := interactiveCtx(t)
 	run(t, c, "/secrets set PYPI_TOKEN")
 	if len(started) != 1 || started[0] != "PYPI_TOKEN" || len(*sent) != 0 {
@@ -85,14 +93,14 @@ func TestSecretsSetAndUnpin(t *testing.T) {
 		t.Fatal(r.Text)
 	}
 	run(t, c, "/secrets drop")
-	if r := lastSent(t, sent); r.Text != "See and save the bound secrets: /secrets [set NAME | unpin NAME]" {
+	if r := lastSent(t, sent); r.Text != "See and save the bound secrets: /secrets [set NAME | unpin NAME [PATH]]" {
 		t.Fatal(r.Text)
 	}
 }
 
 func TestSecretsRefusedInGroup(t *testing.T) {
-	var started, unpinned []string
-	registerTestCommand(t, SecretsCommand(secretsDeps(&started, &unpinned)))
+	var started, unpinned, paths []string
+	registerTestCommand(t, SecretsCommand(secretsDeps(&started, &unpinned, &paths)))
 	c, sent := interactiveCtx(t)
 	c.Key = "telegram:group:-100"
 	for _, text := range []string{"/secrets", "/secrets set PYPI_TOKEN", "/secrets unpin PYPI_TOKEN"} {
@@ -113,5 +121,32 @@ func TestSecretsNoBoundNames(t *testing.T) {
 	run(t, c, "/secrets")
 	if r := lastSent(t, sent); r.Text != "🔑 No bound secrets. Bind a secret in exec\\_secrets in config.yaml." {
 		t.Fatal(r.Text)
+	}
+}
+
+// /secrets unpin NAME PATH removes one program. PATH is the rest of the line, with its spaces.
+func TestSecretsUnpinPath(t *testing.T) {
+	var started, unpinned, paths []string
+	registerTestCommand(t, SecretsCommand(secretsDeps(&started, &unpinned, &paths)))
+	c, sent := interactiveCtx(t)
+	run(t, c, "/secrets unpin PYPI_TOKEN   /home/user/my tools/twine  ")
+	if r := lastSent(t, sent); r.Text != "Removed the allowed program `/home/user/my tools/twine` of PYPI\\_TOKEN. The next use asks again." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	run(t, c, "/secrets unpin PYPI_TOKEN /usr/bin/uv")
+	if r := lastSent(t, sent); r.Text != "PYPI\\_TOKEN has no allowed program `/usr/bin/uv`." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	run(t, c, "/secrets unpin AWS_KEY /usr/bin/aws")
+	if r := lastSent(t, sent); r.Text != "\"AWS\\_KEY\" is not a bound secret. The owner binds secrets in exec\\_secrets in config.yaml." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	run(t, c, "/secrets unpin PYPI_TOKEN /usr/local/bin/my_tool")
+	if r := lastSent(t, sent); r.Text != "PYPI\\_TOKEN has no allowed program `/usr/local/bin/my_tool`." {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	want := []string{"PYPI_TOKEN|/home/user/my tools/twine", "PYPI_TOKEN|/usr/bin/uv", "PYPI_TOKEN|/usr/local/bin/my_tool"}
+	if !reflect.DeepEqual(paths, want) || len(unpinned) != 0 {
+		t.Fatal(paths, unpinned)
 	}
 }

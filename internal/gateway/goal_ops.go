@@ -40,13 +40,17 @@ var (
 	errNoBarrier    = errors.New("gateway: no wait barrier")
 	errNoSubgoals   = errors.New("gateway: no subgoals")
 	errOpFailed     = errors.New("gateway: the edit failed")
+	errListChanged  = errors.New("gateway: the list changed")
 )
+
+// listChangedText is the reply to a remove with a hash that does not match the item.
+const listChangedText = "⚠️ The list changed. Nothing was removed."
 
 func init() {
 	registerGoalVerb(goals.VerbWait, goalWait)
 	registerGoalVerb(goals.VerbUnwait, goalUnwait)
 	registerGoalVerb(goals.VerbGate, goalGate)
-	Register(Command{Name: "subgoal", Help: "Add a criterion to the goal: /subgoal <text> | remove <n> | clear",
+	Register(Command{Name: "subgoal", Help: "Add a criterion to the goal: /subgoal <text> | remove <n> [<hash8>] | clear",
 		Run: cmdSubgoal, WhileBusy: true})
 }
 
@@ -126,13 +130,29 @@ func cmdSubgoal(ctx context.Context, c *CommandCtx, args string) error {
 		c.send(Reply{Text: "Goals unavailable on this session."})
 		return nil
 	}
-	sc := goals.ParseSubgoal(args)
+	rest, targetID, perr := goals.StripSessionFlag(args)
+	if perr != nil {
+		c.send(Reply{Text: EscapeMarkdown(perr.Error())})
+		return nil
+	}
+	sc := goals.ParseSubgoal(rest)
+	if targetID != "" && sc.Op != "remove" && sc.Op != "clear" {
+		sc, targetID = goals.ParseSubgoal(args), ""
+	}
 	if sc.Usage != "" {
 		c.send(Reply{Text: EscapeMarkdown(sc.Usage)})
 		return nil
 	}
-	sess, err := c.current(ctx)
-	if err != nil {
+	var sess *sessions.Session
+	var err error
+	if targetID != "" {
+		var tc *CommandCtx
+		sess, tc, err = goalTarget(ctx, c, targetID)
+		if err != nil || sess == nil {
+			return err
+		}
+		c = tc
+	} else if sess, err = c.current(ctx); err != nil {
 		return err
 	}
 	rep, err := subgoalOp(ctx, c, sess, sc)
@@ -180,6 +200,10 @@ func subgoalOp(ctx context.Context, c *CommandCtx, sess *sessions.Session, sc go
 			text = sc.Text
 		case "remove":
 			index = sc.Index
+			if sc.Hash != "" && sc.Index >= 1 && sc.Index <= len(st.Subgoals) &&
+				goals.ItemHash(st.Subgoals[sc.Index-1]) != sc.Hash {
+				return errListChanged
+			}
 			text, opErr = st.RemoveSubgoal(sc.Index)
 		case "clear":
 			count = len(st.Subgoals)
@@ -198,6 +222,8 @@ func subgoalOp(ctx context.Context, c *CommandCtx, sess *sessions.Session, sc go
 		return Reply{Text: goals.NoGoalText}, nil
 	case errors.Is(err, errNoSubgoals):
 		return Reply{Text: noSubgoalsToClear}, nil
+	case errors.Is(err, errListChanged):
+		return Reply{Text: listChangedText}, nil
 	case errors.Is(err, errOpFailed):
 		return Reply{Text: "/subgoal " + sc.Op + ": " + EscapeMarkdown(opErr.Error())}, nil
 	case err != nil:
@@ -337,6 +363,10 @@ func goalGate(ctx context.Context, c *CommandCtx, sess *sessions.Session, cmd go
 			return errOpFailed
 		}
 		if cmd.GateOp == "remove" {
+			if cmd.GateHash != "" && cmd.GateIndex >= 1 && cmd.GateIndex <= len(st.Gates) &&
+				goals.ItemHash(st.Gates[cmd.GateIndex-1].Command) != cmd.GateHash {
+				return errListChanged
+			}
 			removed, opErr = st.RemoveGate(cmd.GateIndex)
 			if opErr != nil {
 				return errOpFailed
@@ -347,6 +377,9 @@ func goalGate(ctx context.Context, c *CommandCtx, sess *sessions.Session, cmd go
 		st.ClearGates()
 		return nil
 	})
+	if errors.Is(err, errListChanged) {
+		return Reply{Text: listChangedText}, nil
+	}
 	if errors.Is(err, errOpFailed) {
 		return Reply{Text: "/goal gate " + cmd.GateOp + ": " + EscapeMarkdown(opErr.Error())}, nil
 	}

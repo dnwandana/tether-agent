@@ -26,7 +26,7 @@ func TestTipsAreCopiedFromSpec(t *testing.T) {
 	}
 	for i, want := range map[int]string{
 		0:  "/fork copies this session, so you can try a different idea and keep the original.",
-		8:  "/archive hides a session from the list. /sessions archived shows the hidden sessions again.",
+		8:  "/archive hides a session from the list. /sessions archived shows the hidden sessions again. /unarchive <id> takes one back.",
 		17: "Send /usage all to see the tokens, the cache use, and the cost of all chats since the start.",
 		19: "Run `tether update` in a terminal to install the newest release.",
 		20: "/goal gives the agent a task that can need many turns. The agent works on it until the goal is done.",

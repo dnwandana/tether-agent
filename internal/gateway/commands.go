@@ -81,6 +81,9 @@ type CommandHooks struct {
 	StartGoalTurn func(c goals.Continuation)
 	// DropGoalTurns removes the queued goal turns of the key. Nil does nothing.
 	DropGoalTurns func()
+	// DropGoalTurnsFor removes the queued goal turns of another key. A --session command
+	// uses it for the key that owns the target session. Nil does nothing.
+	DropGoalTurnsFor func(key string)
 	// ArmWake arms the waker of the key for a goal that waits on a barrier. Nil does nothing.
 	ArmWake func(sessionID string, st goals.State)
 }
@@ -93,6 +96,9 @@ type Command struct {
 	// can change the session of the turn must not set it (Hermes). /new and /reset set it,
 	// because they stop the run first.
 	WhileBusy bool
+	// BusyOK lets the command run while the key is busy when it returns true for the
+	// arguments. c.Session is the session of the running turn. Nil means never.
+	BusyOK func(c *CommandCtx, args string) bool
 	// MemberOK lets a member run the command. A command without it is owner-only.
 	MemberOK bool
 	// MemberOwnSession lets a member run the command only in a session of its own, not in a
@@ -111,8 +117,9 @@ func init() {
 		{Name: "resume", Help: "Switch to another session: /resume <id>", Run: cmdResume},
 		{Name: "new", Help: "Start a new session", Run: cmdNew, WhileBusy: true, MemberOK: true, MemberOwnSession: true},
 		{Name: "reset", Help: "Start a new session (the same as /new)", Run: cmdNew, WhileBusy: true, MemberOK: true, MemberOwnSession: true},
-		{Name: "rename", Help: "Rename the current session: /rename <title>", Run: cmdRename},
-		{Name: "archive", Help: "Hide the current session from /sessions", Run: cmdArchive},
+		{Name: "rename", Help: "Rename the current session: /rename <title>", Run: cmdRename, BusyOK: busyOtherSession},
+		{Name: "archive", Help: "Hide the current session from /sessions", Run: cmdArchive, BusyOK: busyOtherSession},
+		{Name: "unarchive", Help: "Show an archived session in /sessions again: /unarchive [<id>]", Run: cmdUnarchive, WhileBusy: true},
 		{Name: "delete", Help: "Delete a session", Run: cmdDelete},
 		{Name: "model", Help: "Change the model of this session: /model [<provider>[:<model>] | <provider> config | clear]", Run: cmdModel},
 		{Name: "effort", Help: "Set the reasoning effort of this session: /effort <level> | default", Run: cmdEffort},
@@ -280,6 +287,14 @@ func (c *CommandCtx) sessionArg(ctx context.Context, args string) (s *sessions.S
 	}
 	s, err = c.ownedOrReply(ctx, fields[0])
 	return s, strings.Join(fields[1:], " "), true, err
+}
+
+// busyOtherSession reports whether args start with the id of a session that is not the
+// session of the running turn. Only the dashboard takes an id, so other sources get false.
+func busyOtherSession(c *CommandCtx, args string) bool {
+	f := strings.Fields(args)
+	return c.Source == "dashboard" && len(f) > 0 && isSessionID(f[0]) &&
+		(c.Session == nil || !strings.EqualFold(f[0], c.Session.ID))
 }
 
 // messageCount returns the number of messages of the session with the id.
@@ -496,6 +511,10 @@ func cmdArchive(ctx context.Context, c *CommandCtx, args string) error {
 			return err
 		}
 	}
+	undo := "/resume " + s.ID
+	if ok {
+		undo = "/unarchive " + s.ID
+	}
 	if err := c.store().Archive(ctx, s.ID); err != nil {
 		return err
 	}
@@ -508,13 +527,40 @@ func cmdArchive(ctx context.Context, c *CommandCtx, args string) error {
 	}
 	text := fmt.Sprintf("🗄 **Archived \"%s\"**\nThe session list does not show it now.", sessionTitle(s.Title))
 	if !c.interactive() {
-		text += fmt.Sprintf("\nSend /resume %s to undo.", s.ID)
+		text += "\nSend " + undo + " to undo."
 	}
-	// Undo runs /resume, and /resume takes the session out of the archive.
+	// Undo of an archive by id runs /unarchive, so the chat does not switch.
+	// Undo of the current session runs /resume, as in Telegram.
 	c.send(Reply{Text: text, Buttons: [][]Button{{
-		{Text: "↩️ Undo", Data: "/resume " + s.ID},
+		{Text: "↩️ Undo", Data: undo},
 		{Text: "🆕 New session", Data: "/new"},
 	}}})
+	return nil
+}
+
+// cmdUnarchive takes a session out of the archive. It never changes the active session,
+// so it runs while the key is busy.
+func cmdUnarchive(ctx context.Context, c *CommandCtx, args string) error {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		r, err := c.listReply(ctx, listArchived, parseListArgs("sessions", "archived"), nowFunc())
+		if err != nil {
+			return err
+		}
+		c.send(r)
+		return nil
+	}
+	s, err := c.ownedOrReply(ctx, fields[0])
+	if err != nil || s == nil {
+		return err
+	}
+	if err := c.store().Unarchive(ctx, s.ID); err != nil {
+		return err
+	}
+	if c.Session != nil && c.Session.ID == s.ID {
+		c.Session.Archived = false
+	}
+	c.send(Reply{Text: fmt.Sprintf("🗄 **Unarchived \"%s\"**", sessionTitle(s.Title))})
 	return nil
 }
 
@@ -1034,7 +1080,7 @@ const helpCLI = "📖 **Commands**\n\n" +
 // has no /sethome and no /exit.
 const helpDashboard = "📖 **Commands**\n\n" +
 	"**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
-	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n" +
+	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/unarchive · show a hidden session again\n" +
 	"/delete · delete a session\n\n" +
 	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +

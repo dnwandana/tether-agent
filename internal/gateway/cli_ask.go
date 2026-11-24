@@ -37,9 +37,6 @@ const approvalPromptRedacted = "[r] send redacted / [o]nce / [d]eny: "
 // cliRetryRedacted asks again after an answer that a send with sensitive data does not permit.
 const cliRetryRedacted = "Type r, o, or d."
 
-// cliSentRedacted is the result line of the "send redacted" answer.
-const cliSentRedacted = "✅ Sent redacted"
-
 // approvalChoices returns the input prompt, the retry line, and the answers that req
 // permits. A request with findings gets the "send redacted" answer and no other. NoSession
 // wins over NoAlways, the same rule as the Telegram keyboard.
@@ -70,22 +67,10 @@ func findingItems(f []security.Finding) string {
 	return strings.Join(items, ", ")
 }
 
-// The input prompt, the retry line, and the result lines of a pin request.
+// The input prompt and the retry line of a pin request.
 const (
 	approvalPromptPin = "[p] allow this program  [d] deny: "
 	cliRetryPin       = "Type p or d."
-	cliPinAllowed     = "✅ Program allowed"
-	cliPinDenied      = "❌ Program denied"
-	cliPinNoAnswer    = "⌛ Program denied · no answer"
-)
-
-// The result lines of the CLI approval question. The Telegram headers have the same words.
-const (
-	cliAllowedOnce    = "✅ Approval allowed · once"
-	cliAllowedSession = "✅ Approval allowed · this session"
-	cliAllowedAlways  = "✅ Approval allowed · always"
-	cliDenied         = "❌ Approval denied"
-	cliNoAnswer       = "⌛ Approval denied · no answer"
 )
 
 // CLIAsk asks the user on the terminal. It is the approval Prompter and the clarify
@@ -125,14 +110,15 @@ func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalReques
 	out := c.out()
 	pin := req.PinName != ""
 	prompt, retry, session, always, redacted := approvalChoices(req)
-	allowed, denied, noAnswer := cliAllowedOnce, cliDenied, cliNoAnswer
+	kind := "approval"
+	result := func(scope string) string { return CardResultHeader(CardResult{Kind: kind, Scope: scope}) }
 	if pin {
 		// A terminal runs ANSI escapes and bidi controls, so clean each line.
 		fmt.Fprintf(out, "%s\n  %s\n  sha256 %s\n  Command: %s\n", security.CleanSummary(PinQuestion(req)),
 			security.CleanSummary(req.PinPath), security.CleanSummary(ShortHash(req.PinHash)),
 			security.CleanSummary(req.Command))
 		prompt, retry = approvalPromptPin, cliRetryPin
-		allowed, denied, noAnswer = cliPinAllowed, cliPinDenied, cliPinNoAnswer
+		kind = "pin"
 	} else {
 		// A terminal runs ANSI escapes and bidi controls, so clean the flagged text too.
 		fmt.Fprintf(out, "%s\n  %s\n  Flagged: %s\n", cliHeader(req),
@@ -153,30 +139,32 @@ func (c *CLIAsk) PromptApproval(ctx context.Context, req security.ApprovalReques
 		switch {
 		case ctx.Err() != nil:
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				fmt.Fprintln(out, "\n"+noAnswer)
+				fmt.Fprintln(out, "\n"+result("timeout"))
+			} else {
+				fmt.Fprintln(out, "\n"+CardResultHeader(CardResult{Stopped: true}))
 			}
 			return security.ScopeTimeout, ctx.Err()
 		case errors.Is(err, io.EOF):
-			fmt.Fprintln(out, "\n"+denied)
+			fmt.Fprintln(out, "\n"+result("deny"))
 			return security.ScopeDeny, nil
 		case err != nil:
 			return security.ScopeDeny, err
 		}
 		switch ans := strings.ToLower(strings.TrimSpace(line)); {
 		case pin && (ans == "p" || ans == "allow"), !pin && (ans == "o" || ans == "once"):
-			fmt.Fprintln(out, allowed)
+			fmt.Fprintln(out, result("once"))
 			return security.ScopeOnce, nil
 		case !pin && redacted && (ans == "r" || ans == "redacted"):
-			fmt.Fprintln(out, cliSentRedacted)
+			fmt.Fprintln(out, result("redacted"))
 			return security.ScopeRedacted, nil
 		case !pin && session && (ans == "s" || ans == "session"):
-			fmt.Fprintln(out, cliAllowedSession)
+			fmt.Fprintln(out, result("session"))
 			return security.ScopeSession, nil
 		case !pin && always && (ans == "a" || ans == "always"):
-			fmt.Fprintln(out, cliAllowedAlways)
+			fmt.Fprintln(out, result("always"))
 			return security.ScopeAlways, nil
 		case ans == "d" || ans == "deny":
-			fmt.Fprintln(out, denied)
+			fmt.Fprintln(out, result("deny"))
 			return security.ScopeDeny, nil
 		}
 		fmt.Fprintln(out, retry)

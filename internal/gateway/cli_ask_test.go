@@ -109,6 +109,23 @@ func TestCLIPromptTimeoutReturnsScopeTimeout(t *testing.T) {
 	}
 }
 
+// A stopped turn prints the stopped line, not the deny line.
+func TestCLIPromptStoppedLine(t *testing.T) {
+	r, w := io.Pipe()
+	defer w.Close()
+	var out bytes.Buffer
+	c := &CLIAsk{In: bufio.NewReader(r), Out: &out}
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(50*time.Millisecond, cancel)
+	got, err := c.PromptApproval(ctx, security.ApprovalRequest{Command: "rm -rf /tmp/x", Description: "recursive delete"})
+	if got != security.ScopeTimeout || !errors.Is(err, context.Canceled) {
+		t.Fatal(got, err)
+	}
+	if !strings.Contains(out.String(), ApprovalPrompt+"\n⏹ No answer · the turn stopped\n") {
+		t.Fatal(out.String())
+	}
+}
+
 func TestCLIAskChoices(t *testing.T) {
 	var out bytes.Buffer
 	c := &CLIAsk{In: bufio.NewReader(strings.NewReader("2\n")), Out: &out}

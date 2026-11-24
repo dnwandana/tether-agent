@@ -1981,7 +1981,7 @@ func TestMemberNewSkipsTheReview(t *testing.T) {
 
 // helpDashboardWant is the exact /help text of the dashboard.
 const helpDashboardWant = "📖 **Commands**\n\n**Sessions**\n/new · start a new session\n/sessions · see and resume sessions\n" +
-	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/delete · delete a session\n\n" +
+	"/rename · change the title\n/fork · copy this session\n/archive · hide this session\n/unarchive · show a hidden session again\n/delete · delete a session\n\n" +
 	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 	"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n" +
@@ -2189,5 +2189,84 @@ func TestRenameArchiveIDOnlyOnDashboard(t *testing.T) {
 	}
 	if o, _ := c.Deps.Store.Get(ctx, other.ID); o.Archived || o.Title != "Old notes" {
 		t.Fatalf("%+v", o)
+	}
+}
+
+// /unarchive <id> clears the archive flag and does not change the active session.
+func TestUnarchiveByID(t *testing.T) {
+	ctx := context.Background()
+	c, sent := dashCtx(t)
+	cur := titled(t, c, "Current", 0)
+	if err := c.Deps.Store.SetActive(ctx, c.Key, cur.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.Session = cur
+	old := titled(t, c, "Old *notes*", 0)
+	if err := c.Deps.Store.Archive(ctx, old.ID); err != nil {
+		t.Fatal(err)
+	}
+	run(t, c, "/unarchive "+old.ID)
+	if r := lastSent(t, sent); r.Text != `🗄 **Unarchived "Old \*notes\*"**` || r.Buttons != nil {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+	if got, _ := c.Deps.Store.Get(ctx, old.ID); got.Archived {
+		t.Fatal("/unarchive must clear the archive flag")
+	}
+	if active(t, c) != cur.ID || c.Session.ID != cur.ID {
+		t.Fatal("/unarchive must not switch the session")
+	}
+	other, _ := c.Deps.Store.Create(ctx, sessions.Session{Key: "telegram:dm:1", Source: "telegram", Title: "Theirs"})
+	run(t, c, "/unarchive "+other.ID)
+	if r := lastSent(t, sent); r.Text != notFoundText(other.ID) {
+		t.Fatalf("got:\n%s", r.Text)
+	}
+}
+
+// /unarchive with no id shows the same list as /sessions archived.
+func TestUnarchiveNoIDListsArchived(t *testing.T) {
+	ctx := context.Background()
+	c, sent := interactiveCtx(t)
+	setNow(t, time.Now())
+	s := titled(t, c, "Plan the Bali trip", 0)
+	if err := c.Deps.Store.Archive(ctx, s.ID); err != nil {
+		t.Fatal(err)
+	}
+	run(t, c, "/sessions archived")
+	want := lastSent(t, sent)
+	run(t, c, "/unarchive")
+	if got := lastSent(t, sent); !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestUnarchiveCommandFlags(t *testing.T) {
+	cmd, ok := Commands()["unarchive"]
+	if !ok || !cmd.WhileBusy || cmd.MemberOK || cmd.MemberOwnSession {
+		t.Fatalf("%+v", cmd)
+	}
+	if n := len("/unarchive " + "0123456789abcdef012"); n > ActionMaxBytes {
+		t.Fatal("the Undo action is too long:", n)
+	}
+}
+
+// The Undo of an archive by id runs /unarchive, so the chat does not switch.
+func TestArchiveByIDUndoUnarchives(t *testing.T) {
+	ctx := context.Background()
+	c, sent := dashCtx(t)
+	cur := titled(t, c, "Current", 0)
+	if err := c.Deps.Store.SetActive(ctx, c.Key, cur.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.Session = cur
+	old := titled(t, c, "Old notes", 0)
+	run(t, c, "/archive "+old.ID)
+	r := lastSent(t, sent)
+	want := [][]Button{{{Text: "↩️ Undo", Data: "/unarchive " + old.ID}, {Text: "🆕 New session", Data: "/new"}}}
+	if !reflect.DeepEqual(r.Buttons, want) {
+		t.Fatalf("%+v", r.Buttons)
+	}
+	run(t, c, r.Buttons[0][0].Data)
+	if got, _ := c.Deps.Store.Get(ctx, old.ID); got.Archived || active(t, c) != cur.ID {
+		t.Fatalf("%+v", got)
 	}
 }

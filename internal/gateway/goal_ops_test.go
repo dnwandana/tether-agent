@@ -229,7 +229,7 @@ func TestGoalGateListRemoveClear(t *testing.T) {
 
 func TestSubgoalCommand(t *testing.T) {
 	cmd, ok := Commands()["subgoal"]
-	if !ok || !cmd.WhileBusy || cmd.Help != "Add a criterion to the goal: /subgoal <text> | remove <n> | clear" {
+	if !ok || !cmd.WhileBusy || cmd.Help != "Add a criterion to the goal: /subgoal <text> | remove <n> [<hash8>] | clear" {
 		t.Fatalf("%+v", cmd)
 	}
 	c, rec := goalCtx(t, false)
@@ -333,5 +333,37 @@ func TestGoalGateAddWritesLogRow(t *testing.T) {
 	}
 	if st := loadGoal(t, c.Deps, c.Session.ID); len(st.Gates) != 1 {
 		t.Fatalf("a refused gate must not be added: %+v", st.Gates)
+	}
+}
+
+// A remove with a hash that does not match the item at <n> removes nothing.
+func TestRemoveByHash(t *testing.T) {
+	resetGateConfirms(t)
+	c, rec := goalCtx(t, false)
+	setGoal(t, c.Deps, c.Session.ID, "ship it")
+	run(t, c, "/subgoal check the logs")
+	run(t, c, "/subgoal run go vet")
+	run(t, c, "/subgoal remove 1 a699785a") // the hash of item 2
+	if got := rec.lastText(t); got != "⚠️ The list changed. Nothing was removed." {
+		t.Fatalf("%q", got)
+	}
+	if st := loadGoal(t, c.Deps, c.Session.ID); len(st.Subgoals) != 2 {
+		t.Fatalf("%+v", st.Subgoals)
+	}
+	run(t, c, "/subgoal remove 1 "+goals.ItemHash("check the logs"))
+	if got := rec.lastText(t); got != "✓ Removed subgoal 1: check the logs" {
+		t.Fatalf("%q", got)
+	}
+	run(t, c, "/goal gate add make test")
+	run(t, c, "/goal gate remove 1 1bb497e3") // the hash of another command
+	if got := rec.lastText(t); got != "⚠️ The list changed. Nothing was removed." {
+		t.Fatalf("%q", got)
+	}
+	if st := loadGoal(t, c.Deps, c.Session.ID); len(st.Gates) != 1 {
+		t.Fatalf("%+v", st.Gates)
+	}
+	run(t, c, "/goal gate remove 1 22cc66aa")
+	if got := rec.lastText(t); got != "✓ Gate removed: $ make test" {
+		t.Fatalf("%q", got)
 	}
 }

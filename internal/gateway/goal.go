@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -46,12 +47,75 @@ func registerGoalVerb(verb string, f goalVerbFunc) {
 	goalVerbs[verb] = f
 }
 
+// goalArgs parses the args of /goal. It takes a --session flag out first. When the verb
+// does not take the flag, it parses the whole text with no id, so a goal text keeps its
+// words.
+func goalArgs(args string) (cmd goals.Command, sessionID string, err error) {
+	rest, id, err := goals.StripSessionFlag(args)
+	if err != nil {
+		return goals.Command{}, "", err
+	}
+	cmd = goals.ParseCommand(rest)
+	if id == "" {
+		return cmd, "", nil
+	}
+	switch {
+	case cmd.Verb == goals.VerbPause, cmd.Verb == goals.VerbClear,
+		cmd.Verb == goals.VerbGate && (cmd.GateOp == "remove" || cmd.GateOp == "clear"):
+		return cmd, id, nil
+	}
+	return goals.ParseCommand(args), "", nil
+}
+
+// goalTarget returns the session that a --session flag names, and a copy of c for the
+// verb. It returns nil and nil after it sent a reply. The copy has no start or wake hook,
+// and its drop hook drops the goal turns of the key that owns the session.
+func goalTarget(ctx context.Context, c *CommandCtx, id string) (*sessions.Session, *CommandCtx, error) {
+	if c.Source != "dashboard" {
+		c.send(Reply{Text: "Usage: --session works only on the dashboard."})
+		return nil, nil, nil
+	}
+	s, err := c.store().Get(ctx, id)
+	if errors.Is(err, sessions.ErrNotFound) {
+		c.send(Reply{Text: notFoundText(id)})
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	switch s.Source {
+	case "cli":
+		c.send(Reply{Text: "This goal runs in tether chat. Change it there."})
+		return nil, nil, nil
+	case "dashboard", "telegram":
+	default:
+		c.send(Reply{Text: notFoundText(id)})
+		return nil, nil, nil
+	}
+	tc := *c
+	tc.Hooks = CommandHooks{}
+	if c.Hooks.DropGoalTurnsFor != nil {
+		drop, key := c.Hooks.DropGoalTurnsFor, s.Key
+		tc.Hooks.DropGoalTurns = func() {
+			// A queued goal turn belongs to the active session of its key.
+			if act, err := c.store().Active(ctx, key); err == nil && act != nil && act.ID == id {
+				drop(key)
+			}
+		}
+	}
+	return s, &tc, nil
+}
+
 func cmdGoal(ctx context.Context, c *CommandCtx, args string) error {
 	if c.Deps.Goals == nil {
 		c.send(Reply{Text: "Goals unavailable on this session."})
 		return nil
 	}
-	cmd := goals.ParseCommand(args)
+	cmd, targetID, perr := goalArgs(args)
+	if perr != nil {
+		c.send(Reply{Text: EscapeMarkdown(perr.Error())})
+		return nil
+	}
 	if cmd.Usage != "" {
 		c.send(Reply{Text: EscapeMarkdown(cmd.Usage)})
 		return nil
@@ -61,8 +125,16 @@ func cmdGoal(ctx context.Context, c *CommandCtx, args string) error {
 		c.send(Reply{Text: "/goal " + cmd.Verb + " is not available."})
 		return nil
 	}
-	sess, err := c.current(ctx)
-	if err != nil {
+	var sess *sessions.Session
+	var err error
+	if targetID != "" {
+		var tc *CommandCtx
+		sess, tc, err = goalTarget(ctx, c, targetID)
+		if err != nil || sess == nil {
+			return err
+		}
+		c = tc
+	} else if sess, err = c.current(ctx); err != nil {
 		return err
 	}
 	// The goal turn that the verb starts waits until the reply is sent, so the reply comes
@@ -246,6 +318,7 @@ func goalSet(ctx context.Context, c *CommandCtx, sess *sessions.Session, cmd goa
 
 // goalPause pauses the goal and removes its barrier and its queued turns.
 func goalPause(ctx context.Context, c *CommandCtx, sess *sessions.Session, _ goals.Command) (Reply, error) {
+	other := c.Session == nil || sess.ID != c.Session.ID
 	st, err := c.Deps.Goals.Update(ctx, sess.ID, func(st *goals.State, exists bool) error {
 		if !exists || st.Status == goals.StatusCleared {
 			return errNoGoalRow
@@ -262,6 +335,9 @@ func goalPause(ctx context.Context, c *CommandCtx, sess *sessions.Session, _ goa
 	}
 	if c.Hooks.DropGoalTurns != nil {
 		c.Hooks.DropGoalTurns()
+	}
+	if other {
+		return Reply{Text: fmt.Sprintf("⏸ Paused the goal of \"%s\".", sessionTitle(sess.Title))}, nil
 	}
 	return Reply{Text: "⏸ Goal paused: " + EscapeMarkdown(st.Goal)}, nil
 }
@@ -299,6 +375,7 @@ func goalResume(ctx context.Context, c *CommandCtx, sess *sessions.Session, _ go
 // goalClear clears an active or paused goal. It removes the queued goal turns also when
 // the session has no goal, like Hermes.
 func goalClear(ctx context.Context, c *CommandCtx, sess *sessions.Session, _ goals.Command) (Reply, error) {
+	other := c.Session == nil || sess.ID != c.Session.ID
 	_, err := c.Deps.Goals.Update(ctx, sess.ID, func(st *goals.State, exists bool) error {
 		if !exists || (st.Status != goals.StatusActive && st.Status != goals.StatusPaused) {
 			return errNoGoalRow
@@ -314,6 +391,9 @@ func goalClear(ctx context.Context, c *CommandCtx, sess *sessions.Session, _ goa
 	}
 	if err != nil {
 		return Reply{}, err
+	}
+	if other {
+		return Reply{Text: fmt.Sprintf("🗑 Cleared the goal of \"%s\".", sessionTitle(sess.Title))}, nil
 	}
 	return Reply{Text: "✓ Goal cleared."}, nil
 }

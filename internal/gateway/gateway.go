@@ -977,8 +977,8 @@ const commandErrorReply = "⚠️ **/%s failed**\n%s. Try again later."
 
 // runCommand runs one slash command for the key of in. The owner check comes first: a
 // member gets a refusal for an owner-only command, before any session, run, or goal step is
-// touched. While the key is busy, a command
-// without WhileBusy gets BusyCommandReply, because it can change the session of the turn
+// touched. While the key is busy, a command without WhileBusy gets BusyCommandReply, unless
+// its BusyOK accepts the arguments. The command can change the session of the turn
 // (Hermes). A new goal text or /goal draft on a busy key gets goalRunningReply. /new and
 // /reset first stop the run of the key and drop its queue.
 // It returns the rest of the command: the turn of /steer on a free key.
@@ -1002,6 +1002,21 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 			sessionID = ks.running.SessionID
 		}
 		g.mu.Unlock()
+		if busy && cmd.BusyOK != nil {
+			running := sessionID
+			if running == "" {
+				if sess, err := g.Deps.Store.Active(ctx, in.Key); err == nil && sess != nil {
+					running = sess.ID
+				}
+			}
+			bc := &CommandCtx{Deps: g.Deps, Key: in.Key, Source: in.Source, Owner: in.Owner, Shared: in.Shared}
+			if running != "" {
+				bc.Session = &sessions.Session{ID: running, Key: in.Key}
+			}
+			if cmd.BusyOK(bc, args) {
+				busy = false
+			}
+		}
 		if busy {
 			text := fmt.Sprintf(BusyCommandReply, cmd.Name)
 			if g.busyGoalActive(ctx, in.Key, sessionID) {
@@ -1014,7 +1029,7 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 	if cmd.Name == "goal" && g.Deps.Goals != nil {
 		// The control verbs run while busy, but a new goal waits for the end of the run
 		// (Hermes).
-		if v := goals.ParseCommand(args).Verb; v == goals.VerbSet || v == goals.VerbDraft {
+		if gc, _, gerr := goalArgs(args); gerr == nil && (gc.Verb == goals.VerbSet || gc.Verb == goals.VerbDraft) {
 			g.mu.Lock()
 			busy := g.key(in.Key).busy
 			g.mu.Unlock()
@@ -1060,11 +1075,12 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 				goalPaused = g.pauseGoalForStop(ctx, in.Key, sess)
 				return g.stopKeepQueue(in.Key)
 			},
-			Now:           func(turn int) (bool, int, bool) { return g.takeOver(in.Key, turn, in.ButtonMsgID) },
-			Steer:         func(text string) { rest = g.steerCommand(ctx, in, newRenderer, r, text) },
-			StartGoalTurn: func(gc goals.Continuation) { g.startGoalTurn(ctx, in, newRenderer, gc) },
-			DropGoalTurns: func() { g.dropGoalTurns(in.Key) },
-			ArmWake:       func(id string, st goals.State) { g.GoalWaker().Arm(in.Key, id, st) },
+			Now:              func(turn int) (bool, int, bool) { return g.takeOver(in.Key, turn, in.ButtonMsgID) },
+			Steer:            func(text string) { rest = g.steerCommand(ctx, in, newRenderer, r, text) },
+			StartGoalTurn:    func(gc goals.Continuation) { g.startGoalTurn(ctx, in, newRenderer, gc) },
+			DropGoalTurns:    func() { g.dropGoalTurns(in.Key) },
+			DropGoalTurnsFor: func(key string) { g.dropGoalTurns(key) },
+			ArmWake:          func(id string, st goals.State) { g.GoalWaker().Arm(in.Key, id, st) },
 		},
 	}
 	if rr, ok := r.(ReplyRenderer); ok {
@@ -1073,7 +1089,7 @@ func (g *Gateway) runCommand(ctx context.Context, in Inbound, newRenderer func()
 	// The draft call can take long, so it runs in the rest. The busy refusal above comes
 	// first, so a draft on a busy key does not come here.
 	if cmd.Name == "goal" && g.Deps.Goals != nil {
-		if gc := goals.ParseCommand(args); gc.Verb == goals.VerbDraft && gc.Usage == "" {
+		if gc, id, err := goalArgs(args); err == nil && id == "" && gc.Verb == goals.VerbDraft && gc.Usage == "" {
 			return g.goalDraftRest(ctx, in, c, r, gc.Text)
 		}
 	}
