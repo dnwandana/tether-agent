@@ -112,13 +112,13 @@ tabs open. Or use a TLS proxy with HTTP/2.
 |---|---|
 | Chat | Talk to the agent, stream the answer, and attach files or voice notes. |
 | Waiting for you | A tray with the open cards. The oldest card shows in full. Deny all, or approve all once. On a phone, the ⏳ Waiting tab opens it. |
-| Sessions | List the sessions of all channels. Read the transcript. Open, rename, fork, archive, unarchive, or export one. |
+| Sessions | List the sessions of all channels. Read the transcript. Open, rename, fork, archive, unarchive, or export one. Child sessions fold under their parent. |
 | Jobs | Show the brief, the cron jobs, their runs, and the held sends. |
 | Goals | Show the goals of all sessions with their state and gates. |
 | Approvals and security | Show the mode of each scope, the Always answers, the approval log, and the signed-in devices. |
 | Skills | Show the installed skills and the catalog. Install, update, or remove a skill. Read the files of a skill. A dangerous skill installs only from a terminal. |
 | Memory | Read, add, edit, and remove memory entries. Search the notes. |
-| Usage | Show the cost and the tokens by day and by model. |
+| Usage | Show the cost and the tokens by day and by model. Point at a bar, or tap it, to see the cost of that day. |
 | Models | Show the provider entries, their health, and the role table. |
 | System | Run the doctor. Show the MCP servers and the running work. |
 | System operations | Show the masked config, make and list backups, show the restore steps, update, restart, and read the log. |
@@ -131,14 +131,17 @@ restarts. The approval log keeps the permanent record.
 The pages update by themselves when the data changes, when the page connects again, and when
 you come back to the tab. Each page header shows the time of the last update and ↻ Refresh.
 
-The theme follows the theme of the system by default. The 🎨 menu in the status bar sets
-System, Dark, or Light.
+The theme follows the theme of the system by default. The theme menu at the right end of the
+status bar sets System, Dark, or Light.
+
+The page shows each time in the time zone of your browser. A job schedule shows in that zone
+too; the tooltip shows the cron expression and the zone of the host.
 
 ## Alerts
 
 While a tab is open on a desktop, the page shows the count in the tab title as
 `(N) Tether Agent Dashboard`. It plays a sound and shows a browser notification when a card
-opens. Turn the sound on or off, and allow notifications, from the 🎨 menu in the status bar. A phone browser freezes a hidden page. On a phone, Telegram stays the alert channel.
+opens. Turn the sound on or off, and allow notifications, from the theme menu in the status bar. A phone browser freezes a hidden page. On a phone, Telegram stays the alert channel.
 
 ## Security
 

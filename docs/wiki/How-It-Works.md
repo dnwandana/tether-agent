@@ -624,7 +624,7 @@ so the second query waits for ever.
 | `turn_markers` | The running turns, so that a restart can continue them. |
 | `goals` | The goal of each session: the text, the status, the turns, the contract, the gates, and the wait. |
 | `acp_sessions` | The ACP session id of each session and coding agent, so that a later `acp_delegate` call can continue it. |
-| `kv` | Small values, for example the Telegram update offset and the home chat. |
+| `kv` | Small values, for example the Telegram update offset, the home chat, and the names of the Telegram chats and topics. |
 
 ## Cost tracking
 
