@@ -73,21 +73,12 @@ func findJob(jobs []cron.Job, arg string) (j cron.Job, n int) {
 	return j, 1
 }
 
+// jobGlyph maps each job state of cron.StateOf to its icon.
+var jobGlyph = map[string]string{"done": "✔", "paused": "⏸", "failing": "⚠", "watch": "👁", "ok": "✅", "pending": "⏳"}
+
 // jobIcon returns the state icon of the job j.
 func jobIcon(j cron.Job) string {
-	switch {
-	case !j.Enabled && j.RepeatLeft == 0:
-		return "✔"
-	case !j.Enabled:
-		return "⏸"
-	case j.FailStreak > 0:
-		return "⚠"
-	case j.Watch:
-		return "👁"
-	case j.LastStatus == "ok":
-		return "✅"
-	}
-	return "⏳"
+	return jobGlyph[cron.StateOf(j)]
 }
 
 // jobsNext returns the "next <time>" text of the job j.
