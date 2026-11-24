@@ -101,6 +101,7 @@ type agent struct {
 	prompts  int                      // the number of session/prompt calls
 	turnStop map[string]chan struct{} // the open turn of each session
 	early    map[string]bool          // a cancel that came before its prompt
+	late     map[string]bool          // a turn that the SDK ended before its cancel came
 }
 
 var (
@@ -128,7 +129,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	a := &agent{s: s, log: f, turnStop: map[string]chan struct{}{}, early: map[string]bool{}}
+	a := &agent{s: s, log: f, turnStop: map[string]chan struct{}{}, early: map[string]bool{},
+		late: map[string]bool{}}
 	a.mode = a.modes()[0]
 	if len(s.Models) > 0 {
 		a.model = s.Models[0]
@@ -346,6 +348,11 @@ func (a *agent) Cancel(_ context.Context, p acpsdk.CancelNotification) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	sid := string(p.SessionId)
+	// Check late first. The next turn can be open when the late cancel comes.
+	if a.late[sid] {
+		delete(a.late, sid)
+		return nil
+	}
 	if ch, ok := a.turnStop[sid]; ok {
 		close(ch)
 		delete(a.turnStop, sid)
@@ -374,6 +381,11 @@ func (a *agent) Prompt(ctx context.Context, p acpsdk.PromptRequest) (acpsdk.Prom
 		a.mu.Lock()
 		if a.turnStop[sid] == stop {
 			delete(a.turnStop, sid)
+			// The SDK cancels ctx before it calls Cancel. When the turn ends first, the
+			// cancel of this turn comes later and must not cancel the next turn.
+			if ctx.Err() != nil {
+				a.late[sid] = true
+			}
 		}
 		a.mu.Unlock()
 	}()
