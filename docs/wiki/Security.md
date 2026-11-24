@@ -394,7 +394,7 @@ These requests have no session answer. They ask each time:
 - a request to leave plan mode
 - a command that matches a dangerous rule, for example `rm -r build`
 
-No answer in `approvals.timeout_s` refuses the action. `/stop` cancels the open requests. The
+No answer in `approvals.timeout_s` refuses the action. `/stop` cancels the open requests. A canceled request shows ⏹ No answer · the turn stopped. The
 [security model](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#coding-agents-acp)
 gives the full list of wrapper programs.
 
@@ -553,6 +553,7 @@ These commands work in a private chat:
 - `/secrets` lists each bound name, its state, and its pins.
 - `/secrets set NAME` saves a new value.
 - `/secrets unpin NAME` deletes the pins of a name.
+- `/secrets unpin NAME PATH` deletes one pin. PATH is the rest of the line.
 
 After a failed command that got a secret, a clear auth failure (a 401, or a 403 with an auth
 word) marks the secret. The mark shows in `/secrets` and in `tether doctor`.
@@ -709,6 +710,11 @@ A session is a cookie plus a header. You can end it with Revoke on the Approvals
 page of the dashboard. You limit the network: use loopback or a VPN address. Set
 `dashboard.tls_cert` and `dashboard.tls_key` for HTTPS. See [Dashboard](Dashboard) and the full rules in
 [docs/SECURITY.md](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md).
+
+"✅ Approve all once…" in the tray skips each human-only card and each 📤 send card with
+findings. Answer such a card on the card. The confirm lists each command as literal text, and
+the focus starts on Cancel. An answered card leaves a one-line record in the chat until the
+gateway restarts. A stopped turn shows ⏹ No answer · the turn stopped.
 
 ## The skill guard
 

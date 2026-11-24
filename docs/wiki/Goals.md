@@ -38,15 +38,25 @@ When the goal text starts with a command word, for example `pause`, put `--` fir
 | `/goal clear` | Ends the goal. `stop` and `done` do the same. |
 | `/goal wait <pid> [reason]` | Parks an active goal until the process with this pid ends. |
 | `/goal unwait` | Removes the wait. An active goal continues at once. |
-| `/goal gate list`, `/goal gate add <command>`, `/goal gate remove <n>`, `/goal gate clear` | Shows or changes the gates. `rm <n>` is the same as `remove <n>`. |
+| `/goal gate list`, `/goal gate add <command>`, `/goal gate remove <n>`, `/goal gate remove <n> <hash8>`, `/goal gate clear` | Shows or changes the gates. `rm <n>` is the same as `remove <n>`. With `<hash8>`, the remove works only when the gate at `<n>` still has that hash. Else the reply is "⚠️ The list changed. Nothing was removed." |
 | `/subgoal <text>` | Adds a criterion to the goal. |
 | `/subgoal` | Lists the criteria. |
-| `/subgoal remove <n>`, `/subgoal clear` | Removes one criterion, or all of them. |
+| `/subgoal remove <n>`, `/subgoal remove <n> <hash8>`, `/subgoal clear` | Removes one criterion, or all of them. With `<hash8>`, the remove works only when the criterion at `<n>` still has that hash. Else the reply is "⚠️ The list changed. Nothing was removed." |
 | `/todo` | Shows the task list of the session. |
 
 `status`, `show`, `pause`, `resume`, `continue`, `unpause`, and `unwait` ignore more words.
 Then the reply adds a note. `clear`, `stop`, and `done` with more words set a new goal, for
 example `/goal clear the old logs`.
+
+`<hash8>` is the first 8 hex characters of the SHA-256 of the raw text of the item. The dashboard
+sends it, so a remove never hits the wrong item after the list changed.
+
+On the dashboard, `--session <id>` acts on the goal of another dashboard or Telegram session. It
+works only directly after `pause`, `clear`, `remove <n> <hash8>`, `gate remove <n> <hash8>`, and
+`gate clear`, and after `/subgoal clear`. It is not more words, so `/goal clear --session <id>`
+clears that goal and does not set a new goal. The flag is never read in the text of a goal, a
+draft, or a subgoal. A Telegram or CLI command with the flag gets a usage error. A goal of a CLI
+session stays view only. To resume, set, draft, or wait, send `/goal` in the chat of the goal.
 
 The status line shows the state, the turns, and the goal:
 

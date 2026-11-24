@@ -407,7 +407,10 @@ background delegation, because the job ends before the children.
 ### The question and the scopes
 
 The gate waits `approvals.timeout_s` seconds for an answer. The default is 600 seconds. No answer
-is a denial.
+is a denial. The result shows `⌛ Approval denied · no answer in N min`, or
+`⌛ Program denied · no answer in N min` for a program pin. A stopped turn cancels the open
+requests. Their result shows `⏹ No answer · the turn stopped` on Telegram, the CLI, and the
+dashboard. A stop never shows as a tap on ❌ Deny.
 
 The approval message shows a one-line summary that the model writes in the `description`
 parameter. The model can write a wrong summary, so the message also shows the command. Telegram
@@ -948,7 +951,8 @@ prompt shows the real path and the sha256 of the program, and of its `#!` interp
 button ✅ Allow this program saves the pin. A new path or a new hash asks again. A run with no
 prompter (cron) withholds the secret. In a group turn, the prompt goes to the private chat of the
 owner, and the group gets `I asked the owner in a private chat.` `/secrets unpin NAME` deletes
-the pins of a name.
+the pins of a name. `/secrets unpin NAME PATH` deletes the pin of one program. PATH is the rest
+of the line, and it must match the pinned path exactly. The next use of that program asks again.
 
 #### Which runs get a bound secret
 
@@ -1918,6 +1922,14 @@ controls of Telegram and the CLI, in a web page. See the wiki page
 - The dashboard is a private target, like the CLI. The outbound scan does not hold its replies.
 - Each turn is an owner turn with the tools of `toolsets.dashboard` (default `[all]`).
 - `/mode` on the dashboard sets the scope `dashboard`. The page cannot change another scope.
+- "✅ Approve all once…" in the tray and a typed `/approve all` on the dashboard skip each
+  human-only card and each 📤 send card with findings. "Once" on a send card with findings sends
+  the text with no redaction, so the owner answers such a card on the card. The confirm of
+  "Approve all once" lists each command as literal text, and the focus starts on Cancel.
+- The server keeps the last 30 answered cards in memory, so the page can show a record of each
+  answer. A record holds the result header and a preview of the command, the tool name, or the
+  question. Both pass through the redactor and are cut at 300 characters. A restart clears the
+  records. The approval log stays the permanent record.
 - The operator limits who can reach the address: loopback, a VPN or Tailscale address, a
   firewall, or a TLS proxy.
 
@@ -2009,11 +2021,17 @@ The rules for files:
 - The server checks the path at each request.
 - The server sends images, audio, and video with their type.
 - The server sends every other file as an attachment with `Content-Security-Policy: sandbox`.
+- `GET /api/skills/{name}/file?path=<rel>` shows a support file of a skill as JSON
+  `{ text, cut }`, never as a file of its own type. It serves only a regular file from the file
+  list of the skill, not a symlink. The resolved path must be inside the resolved skill folder.
+  It refuses a protected path, for example a `.env` in an external skill folder. It redacts the full text first,
+  and then cuts it at 256 KiB, so a cut never splits a secret. A binary file gets 415, and a
+  path that is not in the list gets 404.
 
 Other rules:
 
 - The value of a secret card goes only to `.env`.
-- The page stores only the session header value, the theme, the sound choice, and the last page.
+- In `localStorage`, the page stores only the session header value, the theme, the sound choice, and the last page. In `sessionStorage` of the tab, it keeps the composer draft and the version before a reload.
 - Event text and message text pass through the redactor.
 
 ### HTTPS

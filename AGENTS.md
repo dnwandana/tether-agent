@@ -44,7 +44,15 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
   `delegate_task` batches. Only the gateway role polls Telegram.
 - `internal/dashboard` is one more gateway channel, `dashboard`. It has its own `net/http`
   server, device sessions, an SSE event hub, and JSON routes. `App.AddDashboard` builds it only
-  in the gateway role, and `runGateway` starts the listener. `web/` holds the page (Vue and
+  in the gateway role, and `runGateway` starts the listener.
+  The hub keeps the last 30 answered cards in memory (`Hub.Answered`), newest first, with the
+  header and the preview redacted and cut at 300 characters. It sends them in
+  `Snapshot.Answered` and in each `card.done` event. A restart clears them. The scheduler sends
+  `job.run` through `cron.Scheduler.RunEnd`, and the goal manager sends `goal.state` through
+  `goals.Deps.Changed`. `app` sets both function fields. Each function reads `a.Dashboard` at
+  call time and does nothing when the dashboard is off. So `cron` and `goals` never import
+  `dashboard`. The old `goal` event (`{"line"}`) of the chat goal line does not change.
+  `web/` holds the page (Vue and
   TypeScript). Run `make web` before `make build`, because git keeps only the placeholder
   `internal/dashboard/dist/.keep`. `TestDashboardTypesCurrent` fails when `types.gen.ts` is
   old. `TestDashboardAssetsCurrent` fails with "Run make web" when the built page is older than
@@ -106,7 +114,11 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
      fails until the tool is in one list.
   4. Generate `docs/TOOLS.md` again. `TestGeneratedDocIsCurrent` fails when it is out of date.
 - A change to a struct in an `internal/dashboard/api*.go` file needs
-  `go run ./cmd/tether gen-dashboard-types` and then `make web`.
+  `go run ./cmd/tether gen-dashboard-types` and then `make web`. A named string type with a fixed
+  set of values, for example `dashboard.SetupState`, registers its values with `registerEnum` in
+  `internal/dashboard/gentypes.go`. The generator then writes a string union in `types.gen.ts`,
+  for example `type SetupState = "done" | "open" | "unknown"`. A Go test checks that the
+  constants match the registry.
 - A change in `web/` must pass `make web-lint` (oxlint and Prettier) and `make web-test`.
   `make web-format` fixes the format. Prettier skips `web/src/api/types.gen.ts`, because
   `TestDashboardTypesCurrent` compares it byte for byte with the generator output.

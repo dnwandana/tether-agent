@@ -101,7 +101,7 @@ The server also sends `X-Accel-Buffering: no` on the event stream.
 ## HTTPS and the browser
 
 Voice notes, Copy, and notifications need HTTPS or `localhost`. On plain HTTP, the page hides
-them and shows `Needs HTTPS or localhost.`
+them and shows a note with a link to the HTTPS steps.
 
 A browser opens at most 6 HTTP/1.1 connections to one host for all tabs. On plain HTTP, keep few
 tabs open. Or use a TLS proxy with HTTP/2.
@@ -111,25 +111,34 @@ tabs open. Or use a TLS proxy with HTTP/2.
 | Page | What it does |
 |---|---|
 | Chat | Talk to the agent, stream the answer, and attach files or voice notes. |
-| Waiting for you | A tray with the open cards. Deny all or approve all. |
-| Sessions | List the sessions of all channels. Open, rename, fork, archive, or export one. |
+| Waiting for you | A tray with the open cards. The oldest card shows in full. Deny all, or approve all once. On a phone, the ⏳ Waiting tab opens it. |
+| Sessions | List the sessions of all channels. Read the transcript. Open, rename, fork, archive, unarchive, or export one. |
 | Jobs | Show the brief, the cron jobs, their runs, and the held sends. |
 | Goals | Show the goals of all sessions with their state and gates. |
-| Approvals and security | Show the mode of each scope, the Always grants, the approval log, and the signed-in devices. |
-| Skills | Show the installed skills and the catalog. Install, update, or remove a skill. |
+| Approvals and security | Show the mode of each scope, the Always answers, the approval log, and the signed-in devices. |
+| Skills | Show the installed skills and the catalog. Install, update, or remove a skill. Read the files of a skill. A dangerous skill installs only from a terminal. |
 | Memory | Read, add, edit, and remove memory entries. Search the notes. |
 | Usage | Show the cost and the tokens by day and by model. |
 | Models | Show the provider entries, their health, and the role table. |
 | System | Run the doctor. Show the MCP servers and the running work. |
-| System operations | Show the masked config, make a backup, update, restart, and read the log. |
-| Access | Approve a pairing code. Revoke an approved person. |
+| System operations | Show the masked config, make and list backups, show the restore steps, update, restart, and read the log. |
+| Access | Approve a pairing code. Revoke an approved person. Deny a request. See the revoked people. |
 | Getting started | Show each setup step with its next command. |
+
+An answered card leaves a one-line record in the chat. The record lasts until the gateway
+restarts. The approval log keeps the permanent record.
+
+The pages update by themselves when the data changes, when the page connects again, and when
+you come back to the tab. Each page header shows the time of the last update and ↻ Refresh.
+
+The theme follows the theme of the system by default. The 🎨 menu in the status bar sets
+System, Dark, or Light.
 
 ## Alerts
 
 While a tab is open on a desktop, the page shows the count in the tab title as
 `(N) Tether Agent Dashboard`. It plays a sound and shows a browser notification when a card
-opens. A phone browser freezes a hidden page. On a phone, Telegram stays the alert channel.
+opens. Turn the sound on or off, and allow notifications, from the 🎨 menu in the status bar. A phone browser freezes a hidden page. On a phone, Telegram stays the alert channel.
 
 ## Security
 

@@ -262,7 +262,7 @@ order:
 `/approvals`, `/mode`, `/secrets`, `/jobs`, `/brief`, `/sethome`, `/reload_mcp`, and `/restart`.
 
 Telegram does not permit `-` in a command name, so the menu shows `/reload-mcp` as
-`/reload_mcp`. Both names work. `/start`, `/reset`, `/resume`, and `/subgoal` are not in the
+`/reload_mcp`. Both names work. `/start`, `/reset`, `/resume`, `/unarchive`, and `/subgoal` are not in the
 menu, but they work. See [Commands](Commands) for each command.
 
 After the built-in commands, the menu shows the skill commands in name order, with `_` in place
@@ -428,7 +428,8 @@ agent gives one, the reason for the flag, the command, and these buttons:
 ❌ Deny is alone on the first row. The allow buttons share the second row.
 
 No answer in 10 minutes counts as a denial. `approvals.timeout_s` sets this time. After the answer
-or the timeout, the message shows the result, the summary, and the command in a closed quote.
+or the timeout, the message shows the result, the summary, and the command in a closed quote. A timeout shows ⌛ Approval denied · no answer in N min.
+A stopped turn shows ⏹ No answer · the turn stopped.
 
 A permission request of a coding agent (`acp_delegate`) has no **Always** button. It shows
 these buttons:

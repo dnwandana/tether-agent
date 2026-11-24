@@ -48,7 +48,7 @@ A secret reaches a command only when you bind it. These parts work together:
 - `request_secret` asks you in a private chat for the value of a bound secret that is missing or
   bad. The agent never sees the value.
 - `/secrets` shows the bound names, the pins, and the marks. `/secrets set <name>` saves a value.
-  `/secrets unpin <name>` removes the pins.
+  `/secrets unpin <name>` removes the pins. `/secrets unpin <name> <path>` removes the pin of one program.
 
 See [Security](Security#bound-secrets).
 
