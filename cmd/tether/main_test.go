@@ -1995,6 +1995,21 @@ func TestSetupSteps(t *testing.T) {
 	}
 }
 
+// A legacy providers.fallback entry counts as a fallback entry. An empty agent.fallback list
+// turns the fallback off, also when that entry exists.
+func TestSetupStepsLegacyFallback(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.Provider{"primary": {Model: "m"}, "fallback": {Model: "m2"}}
+	cfg.Agent.Fallback = nil
+	if got := setupSteps(&cfg, nil)[1]; got != (dashboard.SetupStep{Name: "Fallback entries", State: "done"}) {
+		t.Fatalf("legacy fallback entry: %+v", got)
+	}
+	cfg.Agent.Fallback = []string{}
+	if got := setupSteps(&cfg, nil)[1]; got.State != "open" {
+		t.Fatalf("empty agent.fallback: %+v", got)
+	}
+}
+
 func TestGatewayDashboardStart(t *testing.T) {
 	t.Setenv("INVOCATION_ID", "")
 	if on := runGatewayForLog(t, "dashboard:\n  enabled: true\n  listen: 127.0.0.1:0\n"); !strings.Contains(on, "dashboard: on at http://127.0.0.1:0") {

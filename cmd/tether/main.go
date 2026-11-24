@@ -710,7 +710,7 @@ func setupSteps(cfg *config.Config, last []setup.Check) []dashboard.SetupStep {
 	}
 	steps := []dashboard.SetupStep{
 		step("Primary provider", cfg.Providers["primary"].Model != "", "No primary provider.", "tether setup"),
-		step("Fallback entries", len(cfg.Agent.Fallback) > 0, "No fallback entry. A failed primary stops the turns.", "tether setup"),
+		step("Fallback entries", len(cfg.FallbackList()) > 0, "No fallback entry. A failed primary stops the turns.", "tether setup"),
 		step("Telegram", cfg.Telegram.Enabled, "Telegram is off.", "tether setup"),
 	}
 	if last == nil {
