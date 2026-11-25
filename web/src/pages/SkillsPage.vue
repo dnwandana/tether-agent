@@ -429,16 +429,19 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
           @update:page="setPage"
         >
           <template #cell-name="{ row }">
-            <router-link
-              class="font-medium underline-offset-4 hover:underline"
-              :to="{ name: 'skill', params: { name: s(row).name } }"
-              >/{{ s(row).name }}</router-link
-            >
-            <div
-              class="line-clamp-2 whitespace-normal text-xs text-muted-foreground"
-              :title="s(row).description"
-            >
-              {{ s(row).description }}
+            <!-- One box: a phone card puts the children of a cell in one row. -->
+            <div class="min-w-0">
+              <router-link
+                class="font-medium underline-offset-4 hover:underline"
+                :to="{ name: 'skill', params: { name: s(row).name } }"
+                >/{{ s(row).name }}</router-link
+              >
+              <div
+                class="line-clamp-2 whitespace-normal text-xs text-muted-foreground"
+                :title="s(row).description"
+              >
+                {{ s(row).description }}
+              </div>
             </div>
           </template>
           <template #cell-trust="{ row }">
@@ -553,12 +556,15 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
           @update:page="setPage"
         >
           <template #cell-name="{ row }">
-            <b>/{{ c(row).name }}</b>
-            <div
-              class="line-clamp-2 whitespace-normal text-xs text-muted-foreground"
-              :title="c(row).description"
-            >
-              {{ c(row).description }}
+            <!-- One box: a phone card puts the children of a cell in one row. -->
+            <div class="min-w-0">
+              <b>/{{ c(row).name }}</b>
+              <div
+                class="line-clamp-2 whitespace-normal text-xs text-muted-foreground"
+                :title="c(row).description"
+              >
+                {{ c(row).description }}
+              </div>
             </div>
           </template>
           <template #cell-url="{ row }"

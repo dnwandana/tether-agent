@@ -579,4 +579,14 @@ describe("SkillsPage", () => {
     const cols = container.querySelectorAll("colgroup col")
     expect((cols[cols.length - 1] as HTMLElement).style.width).toBe("16rem")
   })
+
+  it("keeps the name and the description in one box of the cell", async () => {
+    await mk()
+    const row = rowOf("release-notes")
+    const name = within(row).getByText("/release-notes")
+    const nameCell = name.closest("td")!
+    // A phone card lays out the children of a cell in one row. One child keeps the name wide.
+    expect(nameCell.children).toHaveLength(1)
+    expect(nameCell.children[0].contains(name)).toBe(true)
+  })
 })
