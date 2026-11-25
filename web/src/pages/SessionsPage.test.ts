@@ -14,7 +14,15 @@ vi.mock("../stores/ui", async (importOriginal) => ({
   toast: vi.fn(),
   confirm: vi.fn(),
 }))
-import { confirm, toast } from "../stores/ui"
+const box = vi.hoisted(() => ({ width: 2000 }))
+vi.mock("@vueuse/core", async (importOriginal) => {
+  const { ref } = await import("vue")
+  return {
+    ...(await importOriginal<typeof import("@vueuse/core")>()),
+    useElementSize: () => ({ width: ref(box.width), height: ref(0), stop: () => {} }),
+  }
+})
+import { confirm, listLink, toast } from "../stores/ui"
 import { api, runCommand } from "../api/client"
 import { session } from "../stores/session"
 import SessionsPage from "./SessionsPage.vue"
@@ -92,9 +100,24 @@ async function menu(user: ReturnType<typeof userEvent.setup>, rowText: string, l
   await flushPromises()
 }
 const names = (els: HTMLElement[]) => els.map((b) => b.textContent!.trim())
+const prevPage = () =>
+  within(screen.getByRole("navigation", { name: "Sessions pages" })).getByRole("button", {
+    name: "Previous Page",
+  }) as HTMLButtonElement
 const setup = () => userEvent.setup({ pointerEventsCheck: 0 })
+// The header texts of the columns that show. A hidden optional column has the class hidden.
+const shownHeads = () =>
+  screen
+    .getAllByRole("columnheader")
+    .filter((h) => !h.classList.contains("hidden"))
+    .map((h) => h.textContent!.trim())
+const actCol = (c: Element) => {
+  const cols = c.querySelectorAll("colgroup col")
+  return (cols[cols.length - 1] as HTMLElement).style.width
+}
 
 beforeEach(() => {
+  box.width = 2000
   window.matchMedia = ((q: string) => ({
     matches: false,
     media: q,
@@ -117,11 +140,12 @@ describe("SessionsPage", () => {
     await mk()
     expect(api).toHaveBeenCalledWith(
       "GET",
-      "/api/sessions?source=&kind=chat&search=&archived=0&limit=50&offset=0",
+      "/api/sessions?source=&kind=chat&search=&archived=0&limit=20&offset=0",
     )
     expect(screen.getByText("Release notes")).toBeTruthy()
     expect(screen.getByText("Telegram › DM")).toBeTruthy()
-    expect(screen.getByText("1–4 of 4")).toBeTruthy()
+    // The pager hides at 4 rows.
+    expect(screen.queryByRole("navigation", { name: "Sessions pages" })).toBeNull()
   })
 
   it("folds the child rows behind a toggle that stays open across a reload", async () => {
@@ -311,6 +335,9 @@ describe("SessionsPage", () => {
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/rename s1 Release notes v2")
     await menu(user, "Release notes", "Rename")
+    // The menu gives the focus back to its trigger after a tick, and the field then takes it
+    // again. Wait until the focus stays on the field, so that Escape goes to the field.
+    await new Promise((r) => setTimeout(r, 20))
     await waitFor(() =>
       expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "New title" })),
     )
@@ -347,7 +374,6 @@ describe("SessionsPage", () => {
     ])
     expect(screen.getByRole("button", { name: "Active · 4" })).toBeTruthy()
     expect(screen.getByRole("button", { name: "Archived · 4" })).toBeTruthy()
-    expect(screen.getByText("Page 1 of 1")).toBeTruthy()
     first.unmount()
     cleanup()
     await mk("/sessions?kind=")
@@ -369,8 +395,13 @@ describe("SessionsPage", () => {
   it("cuts a long title with the full title in the tooltip", async () => {
     await mk()
     const a = screen.getByRole("link", { name: "Release notes" })
+    expect(a.classList.contains("block")).toBe(true)
     expect(a.classList.contains("truncate")).toBe(true)
     expect(a.getAttribute("title")).toBe("Release notes")
+    const wrap = a.parentElement!
+    expect(wrap.classList.contains("flex")).toBe(true)
+    expect(wrap.classList.contains("min-w-0")).toBe(true)
+    expect(within(wrap).getByText("active").getAttribute("data-slot")).toBe("badge")
   })
 
   it("styles the filter selects as inputs", async () => {
@@ -395,6 +426,7 @@ describe("SessionsPage", () => {
     const bdi = within(rowOf("Photos")).getByText("Telegram › DM")
     expect(bdi.tagName).toBe("BDI")
     expect(bdi.getAttribute("title")).toBe("Telegram › DM")
+    expect(bdi.classList.contains("block")).toBe(true)
     expect(bdi.classList.contains("truncate")).toBe(true)
   })
 
@@ -533,11 +565,19 @@ describe("SessionsPage", () => {
 
   it("reads the filters from the route query and writes them back", async () => {
     const user = setup()
+    vi.mocked(api).mockResolvedValue({ ...page, total: 86 })
     const { router } = await mk("/sessions?q=flaky&src=telegram&kind=&arch=1&off=50")
     expect(api).toHaveBeenCalledWith(
       "GET",
-      "/api/sessions?source=telegram&kind=&search=flaky&archived=1&limit=50&offset=50",
+      "/api/sessions?source=telegram&kind=&search=flaky&archived=1&limit=20&offset=40",
     )
+    expect(router.currentRoute.value.query).toEqual({
+      q: "flaky",
+      src: "telegram",
+      kind: "",
+      arch: "1",
+      page: "3",
+    })
     await user.selectOptions(screen.getByRole("combobox", { name: "Source" }), "cli")
     await flushPromises()
     expect(router.currentRoute.value.query).toEqual({ q: "flaky", src: "cli", kind: "", arch: "1" })
@@ -560,7 +600,7 @@ describe("SessionsPage", () => {
     const first = deferred<unknown>()
     let n = 0
     vi.mocked(api).mockImplementation(async (_m: string, p: string) => {
-      if (!p.includes("limit=50")) return page as any
+      if (!p.includes("limit=20")) return page as any
       n++
       if (n === 1) return first.p as any
       return { total: 1, rows: [row({ id: "t1", title: "From Telegram" })] } as any
@@ -585,8 +625,195 @@ describe("SessionsPage", () => {
     expect(api).toHaveBeenCalledWith(
       "GET",
       expect.stringContaining(
-        "/api/sessions?source=&kind=chat&search=&archived=0&limit=50&offset=0",
+        "/api/sessions?source=&kind=chat&search=&archived=0&limit=20&offset=0",
       ),
     )
+  })
+
+  it("pages on the server and keeps the size in the browser", async () => {
+    const user = setup()
+    vi.mocked(api).mockResolvedValue({ ...page, total: 86 })
+    const { router } = await mk()
+    expect(screen.getByText("1–20 of 86")).toBeTruthy()
+    const nav = screen.getByRole("navigation", { name: "Sessions pages" })
+    await user.click(within(nav).getByRole("button", { name: "Next Page" }))
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith(
+      "GET",
+      "/api/sessions?source=&kind=chat&search=&archived=0&limit=20&offset=20",
+    )
+    expect(router.currentRoute.value.query).toEqual({ page: "2" })
+    expect(screen.getByText("21–40 of 86")).toBeTruthy()
+    expect(listLink("sessions")).toEqual({ name: "sessions", query: { page: "2" } })
+    await user.selectOptions(screen.getByRole("combobox", { name: "Rows per page" }), "50")
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith(
+      "GET",
+      "/api/sessions?source=&kind=chat&search=&archived=0&limit=50&offset=0",
+    )
+    expect(localStorage.getItem("tether.rows.sessions")).toBe("50")
+    expect(router.currentRoute.value.query).toEqual({})
+  })
+
+  it("reads the stored size before the first load", async () => {
+    localStorage.setItem("tether.rows.sessions", "50")
+    await mk()
+    expect(api).toHaveBeenCalledWith(
+      "GET",
+      "/api/sessions?source=&kind=chat&search=&archived=0&limit=50&offset=0",
+    )
+  })
+
+  it("disables the pager while a page loads", async () => {
+    const user = setup()
+    const next = deferred<unknown>()
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p.includes("limit=20&offset=20") ? next.p : { ...page, total: 86 }) as any,
+    )
+    await mk()
+    const nav = screen.getByRole("navigation", { name: "Sessions pages" })
+    await user.click(within(nav).getByRole("button", { name: "Next Page" }))
+    await flushPromises()
+    expect(prevPage().disabled).toBe(true)
+    next.resolve({ ...page, total: 86 })
+    await flushPromises()
+    expect(prevPage().disabled).toBe(false)
+  })
+
+  it("loads the last page for a page beyond the end", async () => {
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p.includes("offset=1960")
+          ? { total: 3, rows: [] }
+          : { total: 3, rows: page.rows.slice(0, 3) }) as any,
+    )
+    const { router } = await mk("/sessions?page=99")
+    expect(api).toHaveBeenCalledWith(
+      "GET",
+      "/api/sessions?source=&kind=chat&search=&archived=0&limit=20&offset=1960",
+    )
+    expect(api).toHaveBeenCalledWith(
+      "GET",
+      "/api/sessions?source=&kind=chat&search=&archived=0&limit=20&offset=0",
+    )
+    expect(screen.getByText("Release notes")).toBeTruthy()
+    expect(screen.queryByText("No sessions match the filters.")).toBeNull()
+    expect(router.currentRoute.value.query).toEqual({})
+  })
+
+  it("drops the page from the address when the list is empty", async () => {
+    vi.mocked(api).mockImplementation(async () => ({ total: 0, rows: [] }) as any)
+    const { router } = await mk("/sessions?page=3")
+    expect(router.currentRoute.value.query).toEqual({})
+  })
+
+  it("goes to the page before when the last row of the last page goes away", async () => {
+    const user = setup()
+    let count = 21
+    vi.mocked(api).mockImplementation(async (_m: string, p: string) => {
+      if (p.includes("limit=1&")) return { total: 0, rows: [] } as any
+      const off = Number(new URLSearchParams(p.split("?")[1]).get("offset"))
+      const all = Array.from({ length: count }, (_, i) =>
+        row({ id: `r${i + 1}`, title: `Chat ${i + 1}` }),
+      )
+      return { total: count, rows: all.slice(off, off + 20) } as any
+    })
+    vi.mocked(runCommand).mockImplementation(async () => {
+      count = 20
+      return { request_id: "r", text: "✅ Done.", buttons: [], edit: false }
+    })
+    const { router } = await mk("/sessions?page=2")
+    expect(screen.getByText("Chat 21")).toBeTruthy()
+    await menu(user, "Chat 21", "Archive")
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({})
+    expect(screen.getByText("Chat 1")).toBeTruthy()
+    expect(screen.queryByText("No sessions match the filters.")).toBeNull()
+  })
+
+  it("goes to page 1 when a filter changes", async () => {
+    const user = setup()
+    vi.mocked(api).mockResolvedValue({ ...page, total: 86 })
+    const { router } = await mk("/sessions?page=3")
+    expect(api).toHaveBeenCalledWith(
+      "GET",
+      "/api/sessions?source=&kind=chat&search=&archived=0&limit=20&offset=40",
+    )
+    await user.selectOptions(screen.getByRole("combobox", { name: "Source" }), "cli")
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith(
+      "GET",
+      "/api/sessions?source=cli&kind=chat&search=&archived=0&limit=20&offset=0",
+    )
+    expect(router.currentRoute.value.query).toEqual({ src: "cli" })
+  })
+
+  it("loads page 1 when the route drops the page key", async () => {
+    vi.mocked(api).mockResolvedValue({ ...page, total: 86 })
+    const { router } = await mk("/sessions?page=3")
+    vi.mocked(api).mockClear()
+    await router.push("/sessions")
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith(
+      "GET",
+      "/api/sessions?source=&kind=chat&search=&archived=0&limit=20&offset=0",
+    )
+  })
+
+  it("hides Started and Messages in a 1024 px window and shows all at 1280 px", async () => {
+    box.width = 704
+    const first = await mk()
+    expect(shownHeads()).toEqual(["Session", "Source", "Last active", "Cost", ""])
+    first.unmount()
+    cleanup()
+    box.width = 960
+    await mk()
+    expect(shownHeads()).toEqual([
+      "Session",
+      "Source",
+      "Started",
+      "Last active",
+      "Messages",
+      "Cost",
+      "",
+    ])
+  })
+
+  it("makes Kind optional when the filter shows it", async () => {
+    box.width = 704
+    await mk("/sessions?kind=")
+    expect(shownHeads()).not.toContain("Kind")
+  })
+
+  it("gives the actions column a rem width that fits the buttons of the filter", async () => {
+    const first = await mk()
+    expect(actCol(first.container)).toBe("8.5rem")
+    first.unmount()
+    cleanup()
+    const second = await mk("/sessions?arch=1")
+    expect(actCol(second.container)).toBe("14.5rem")
+  })
+
+  it("keeps Save and Cancel in one wrapping box with the title field", async () => {
+    const user = setup()
+    await mk()
+    await menu(user, "Release notes", "Rename")
+    const wrap = screen.getByRole("textbox", { name: "New title" }).parentElement!
+    expect(wrap.classList.contains("flex")).toBe(true)
+    expect(wrap.classList.contains("min-w-0")).toBe(true)
+    expect(wrap.classList.contains("flex-wrap")).toBe(true)
+    expect(within(wrap).getByRole("button", { name: "Save" })).toBeTruthy()
+    expect(within(wrap).getByRole("button", { name: "Cancel" })).toBeTruthy()
+  })
+
+  it("cuts a long child label", async () => {
+    const user = setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "▸ 1 child session" }))
+    const label = within(rowOf("subagent run")).getByText("subagent run")
+    expect(label.classList.contains("truncate")).toBe(true)
+    expect(label.classList.contains("min-w-0")).toBe(true)
+    expect(label.parentElement!.classList.contains("min-w-0")).toBe(true)
   })
 })

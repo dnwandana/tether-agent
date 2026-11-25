@@ -18,6 +18,7 @@ vi.mock("../stores/ui", async (importOriginal) => ({
 import { api, runCommand } from "../api/client"
 import TranscriptPage from "./TranscriptPage.vue"
 import { fullTime, shortTime } from "../lib/time"
+import { rememberListQuery } from "../stores/ui"
 
 const scrollToMessage = vi.fn(() => true)
 vi.mock("@/components/ui/message-scroller", async (orig) => ({
@@ -446,5 +447,37 @@ describe("TranscriptPage", () => {
     const started = screen.getByText(shortTime("2026-11-19T09:00:00Z"))
     expect(started.getAttribute("title")).toBe(fullTime("2026-11-19T09:00:00Z"))
     expect(started.classList.contains("whitespace-nowrap")).toBe(true)
+  })
+
+  it("stacks the parts of each message in one column", async () => {
+    const { c } = await mk()
+    const assistant = item(c, 12).querySelectorAll('[data-slot="message-content"]')
+    expect(assistant).toHaveLength(1)
+    const col = within(assistant[0] as HTMLElement)
+    expect(col.getByText("Tether")).toBeTruthy()
+    expect(col.getByRole("button", { name: /Reasoning\s*812 tokens/ })).toBeTruthy()
+    expect(col.getByText("Runs() had no offset.")).toBeTruthy()
+    expect(assistant[0].querySelector("time")).not.toBeNull()
+    expect(assistant[0].textContent).toContain("$0.0061+")
+    expect(assistant[0].textContent).toContain("655 out")
+
+    const user = item(c, 11).querySelectorAll('[data-slot="message-content"]')
+    expect(user).toHaveLength(1)
+    const ucol = within(user[0] as HTMLElement)
+    expect(ucol.getByText("You")).toBeTruthy()
+    expect(ucol.getByText("Find the flaky test.")).toBeTruthy()
+    expect(user[0].querySelector("time")).not.toBeNull()
+  })
+
+  it("links back to the session list with its last query", async () => {
+    rememberListQuery("sessions", { src: "cli", page: "2" })
+    try {
+      await mk()
+      expect(screen.getByRole("link", { name: "‹ Sessions" }).getAttribute("href")).toBe(
+        "/sessions?src=cli&page=2",
+      )
+    } finally {
+      rememberListQuery("sessions", {})
+    }
   })
 })

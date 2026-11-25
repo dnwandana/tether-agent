@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue"
-import { useRoute, useRouter } from "vue-router"
+import { useRoute, useRouter, type LocationQuery } from "vue-router"
 import { api } from "../api/client"
 import type { SearchHitView, SessionPage, SessionRow } from "../api/types.gen"
 import { Badge } from "@/components/ui/badge"
@@ -13,6 +13,7 @@ import { NativeSelect } from "@/components/ui/native-select"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { cn } from "@/lib/utils"
 import DataTable from "../components/DataTable.vue"
+import type { Column } from "../lib/table"
 import LiveHeader from "../components/LiveHeader.vue"
 import RowMenu from "../components/RowMenu.vue"
 import StateBlock from "../components/StateBlock.vue"
@@ -21,7 +22,8 @@ import { useCommand } from "../lib/command"
 import { useLiveData } from "../lib/live"
 import { fullTime, shortTime } from "../lib/time"
 import { session } from "../stores/session"
-import { toast, type ToastKind } from "../stores/ui"
+import { clampPage, parsePage, readSize, writeSize, type PageSize } from "../lib/pager"
+import { rememberListQuery, toast, type ToastKind } from "../stores/ui"
 
 type TableRow = SessionRow & { child?: boolean; actions?: string; toggle?: boolean; count?: number }
 
@@ -34,13 +36,22 @@ const total = ref(0)
 const hits = ref<SearchHitView[]>([])
 const q0 = route.query
 const str = (v: unknown): string => (typeof v === "string" ? v : "")
-const off0 = Number(str(q0.off))
 const search = ref(str(q0.q))
 const fullText = ref(false)
 const source = ref(str(q0.src))
 const kind = ref(typeof q0.kind === "string" ? q0.kind : "chat")
 const archived = ref(str(q0.arch) === "1")
-const offset = ref(Number.isInteger(off0) && off0 >= 0 ? off0 : 0)
+// The page reads the stored size before its first load, because DataTable mounts after it.
+const size = ref<PageSize>(readSize("sessions"))
+// True from the request of a list page to its reply. It disables the pager.
+const loading = ref(false)
+// An old link has ?off=N. It opens the page that holds row N.
+function firstPage(): number {
+  if (q0.page !== undefined) return parsePage(q0.page)
+  const off = Number(str(q0.off))
+  return Number.isInteger(off) && off >= 0 ? Math.floor(off / size.value) + 1 : 1
+}
+const pageNo = ref(firstPage())
 const hitsMore = ref(false)
 const searchError = ref("")
 const activeTotal = ref(0)
@@ -48,21 +59,30 @@ const archivedTotal = ref(0)
 const renaming = ref("")
 const renameText = ref("")
 
-const allColumns = [
-  { key: "title", label: "Session" },
-  { key: "kind", label: "Kind" },
-  { key: "source_label", label: "Source" },
-  { key: "started", label: "Started" },
-  { key: "last_active", label: "Last active" },
-  { key: "messages", label: "Messages", align: "right" as const },
-  { key: "cost_usd", label: "Cost", align: "right" as const },
-  { key: "actions", label: "" },
-]
+// The actions column fits the widest button set of the rows of the filter. Archived rows show
+// Unarchive, Resume, and ⋯. The other rows show one button and ⋯.
+const ACT_WIDTH = "8.5rem"
+const ACT_WIDTH_ARCHIVED = "14.5rem"
 
 // The Kind column says nothing while the filter shows only chats.
-const columns = computed(() =>
-  kind.value === "chat" ? allColumns.filter((c) => c.key !== "kind") : allColumns,
-)
+const columns = computed<Column[]>(() => {
+  const all: Column[] = [
+    { key: "title", label: "Session", type: "text" },
+    { key: "kind", label: "Kind", type: "badge", optional: true },
+    { key: "source_label", label: "Source", type: "text" },
+    { key: "started", label: "Started", type: "date", optional: true },
+    { key: "last_active", label: "Last active", type: "date" },
+    { key: "messages", label: "Messages", type: "num", align: "right", optional: true },
+    { key: "cost_usd", label: "Cost", type: "num", align: "right" },
+    {
+      key: "actions",
+      label: "",
+      type: "act",
+      width: archived.value ? ACT_WIDTH_ARCHIVED : ACT_WIDTH,
+    },
+  ]
+  return kind.value === "chat" ? all.filter((c) => c.key !== "kind") : all
+})
 
 function usd(n: number): string {
   return "$" + n.toFixed(4)
@@ -95,13 +115,28 @@ function routeQuery(): Record<string, string> {
   if (source.value !== "") out.src = source.value
   if (kind.value !== "chat") out.kind = kind.value
   if (archived.value) out.arch = "1"
-  if (offset.value > 0) out.off = String(offset.value)
+  if (pageNo.value > 1) out.page = String(pageNo.value)
   return out
 }
 
-function syncRoute(): void {
-  void router.replace({ query: routeQuery() })
+// Returns true when the two queries hold the same keys and values.
+function sameQuery(a: Record<string, string>, b: LocationQuery): boolean {
+  const ak = Object.keys(a)
+  const bk = Object.keys(b)
+  return ak.length === bk.length && ak.every((k) => a[k] === b[k])
 }
+
+// Writes the route query only on this route and only when it changes. A write during a
+// navigation to another route cancels that navigation. It also keeps the query for the
+// back link of the transcript.
+function syncRoute(): void {
+  if (route.name !== "sessions") return
+  const q = routeQuery()
+  rememberListQuery("sessions", q)
+  if (sameQuery(q, route.query)) return
+  void router.replace({ query: q })
+}
+syncRoute()
 
 // Builds the search query with the six keys in a fixed order.
 function searchPath(off: number): string {
@@ -141,6 +176,7 @@ async function load(): Promise<void> {
   hits.value = []
   hitsMore.value = false
   searchError.value = ""
+  loading.value = true
   try {
     const res = await api<SessionPage>(
       "GET",
@@ -149,11 +185,23 @@ async function load(): Promise<void> {
         kind: kind.value,
         search: fullText.value ? "" : text,
         archived: archived.value,
-        offset: offset.value,
-        limit: 50,
+        offset: (pageNo.value - 1) * size.value,
+        limit: size.value,
       }),
     )
     if (my !== seq) return
+    // A Remove or a live reload can shrink the list. A page beyond the end loads the last page.
+    const fixed = clampPage(pageNo.value, res.total, size.value)
+    if (res.total > 0 && fixed !== pageNo.value) {
+      pageNo.value = fixed
+      syncRoute()
+      return load()
+    }
+    // An empty list has only page 1, so the address and the back link drop the old page.
+    if (res.total === 0 && pageNo.value > 1) {
+      pageNo.value = 1
+      syncRoute()
+    }
     // The other state needs only its total. A failure keeps the old count.
     let otherTotal: number | null = null
     try {
@@ -182,9 +230,11 @@ async function load(): Promise<void> {
       activeTotal.value = res.total
       if (otherTotal !== null) archivedTotal.value = otherTotal
     }
+    loading.value = false
     state.value = "ready"
   } catch (e) {
     if (my !== seq) return
+    loading.value = false
     errorText.value = friendlyError(e)
     state.value = "error"
   }
@@ -301,15 +351,6 @@ function childLabel(r: TableRow): { chip: string; text: string } {
   return { chip: r.kind, text: r.title || "New session" }
 }
 
-const pageText = computed(
-  () => `Page ${Math.floor(offset.value / 50) + 1} of ${Math.max(1, Math.ceil(total.value / 50))}`,
-)
-
-const range = computed(() => {
-  if (rows.value.length === 0) return "0 of " + total.value
-  return `${offset.value + 1}–${offset.value + rows.value.length} of ${total.value}`
-})
-
 function view(id: string): void {
   router.push({ name: "transcript", params: { id } })
 }
@@ -388,7 +429,7 @@ let timer: ReturnType<typeof setTimeout> | undefined
 watch(search, () => {
   clearTimeout(timer)
   timer = setTimeout(() => {
-    offset.value = 0
+    pageNo.value = 1
     syncRoute()
     void load()
   }, 250)
@@ -397,7 +438,7 @@ watch(source, (s) => {
   if (s === "cron") kind.value = ""
 })
 watch([fullText, source, kind, archived], () => {
-  offset.value = 0
+  pageNo.value = 1
   syncRoute()
   void load()
 })
@@ -405,12 +446,6 @@ watch([fullText, source, kind, archived], () => {
 // A tap on the pressed item sends an empty value. It changes nothing.
 function pickArchived(v: unknown): void {
   if (v === "active" || v === "archived") archived.value = v === "archived"
-}
-
-function page(delta: number): void {
-  offset.value = Math.max(0, offset.value + delta)
-  syncRoute()
-  void load()
 }
 
 const filtered = computed(
@@ -423,10 +458,38 @@ function clearFilters(): void {
   source.value = ""
   kind.value = "chat"
   archived.value = false
-  offset.value = 0
+  pageNo.value = 1
   syncRoute()
   void load()
 }
+
+function setPage(p: number): void {
+  if (p === pageNo.value) return
+  pageNo.value = p
+  syncRoute()
+  void load()
+}
+
+function setSize(n: PageSize): void {
+  writeSize("sessions", n)
+  size.value = n
+  pageNo.value = 1
+  syncRoute()
+  void load()
+}
+
+// A NavRail link to /sessions from ?page=3 shows page 1.
+watch(
+  () => route.query.page,
+  (v) => {
+    if (route.name !== "sessions") return
+    const p = parsePage(v)
+    if (p === pageNo.value) return
+    pageNo.value = p
+    rememberListQuery("sessions", routeQuery())
+    void load()
+  },
+)
 
 onBeforeUnmount(() => clearTimeout(timer))
 </script>
@@ -529,7 +592,7 @@ onBeforeUnmount(() => clearTimeout(timer))
       </template>
       <template v-else>
         <StateBlock
-          v-if="tableRows.length === 0"
+          v-if="total === 0"
           state="empty"
           text="No sessions match the filters."
           :action="filtered ? 'Clear filters' : undefined"
@@ -541,6 +604,14 @@ onBeforeUnmount(() => clearTimeout(timer))
               :columns="columns"
               :rows="tableRows as unknown as Record<string, unknown>[]"
               row-key="id"
+              page-key="sessions"
+              page-label="Sessions"
+              :total="total"
+              :page="pageNo"
+              :size="size"
+              :loading="loading"
+              @update:page="setPage"
+              @update:size="setSize"
             >
               <template #cell-title="{ row }">
                 <Button
@@ -559,39 +630,32 @@ onBeforeUnmount(() => clearTimeout(timer))
                 </Button>
                 <span
                   v-else-if="(row as unknown as TableRow).child"
-                  class="flex items-center gap-1.5 pl-4"
+                  class="flex min-w-0 items-center gap-1.5 pl-4"
                 >
                   <span aria-hidden="true">↳</span>
                   <Badge v-if="childLabel(row as unknown as TableRow).chip" variant="secondary">{{
                     childLabel(row as unknown as TableRow).chip
                   }}</Badge>
-                  <span class="truncate">{{ childLabel(row as unknown as TableRow).text }}</span>
-                </span>
-                <Input
-                  v-else-if="renaming === (row as unknown as TableRow).id"
-                  v-model="renameText"
-                  v-focus
-                  autofocus
-                  aria-label="New title"
-                  @keydown.enter.prevent="finishRename((row as unknown as TableRow).id)"
-                  @keydown.esc.prevent="cancelRename"
-                  @blur="onRenameBlur"
-                />
-                <span v-else class="flex min-w-0 items-center gap-2">
-                  <RouterLink
-                    :class="
-                      cn(
-                        'truncate font-semibold',
-                        !(row as unknown as TableRow).title && 'text-muted-foreground',
-                      )
-                    "
-                    :to="{ name: 'transcript', params: { id: (row as unknown as TableRow).id } }"
-                    :title="(row as unknown as TableRow).title"
-                    >{{ (row as unknown as TableRow).title || "New session" }}</RouterLink
+                  <span
+                    class="min-w-0 truncate"
+                    :title="childLabel(row as unknown as TableRow).text"
+                    >{{ childLabel(row as unknown as TableRow).text }}</span
                   >
-                  <Badge v-if="(row as unknown as TableRow).id === session.id">active</Badge>
                 </span>
-                <template v-if="renaming === (row as unknown as TableRow).id">
+                <span
+                  v-else-if="renaming === (row as unknown as TableRow).id"
+                  class="flex min-w-0 flex-wrap items-center gap-2"
+                >
+                  <Input
+                    v-model="renameText"
+                    v-focus
+                    autofocus
+                    class="min-w-0 flex-1 basis-40"
+                    aria-label="New title"
+                    @keydown.enter.prevent="finishRename((row as unknown as TableRow).id)"
+                    @keydown.esc.prevent="cancelRename"
+                    @blur="onRenameBlur"
+                  />
                   <Button
                     size="sm"
                     type="button"
@@ -609,11 +673,27 @@ onBeforeUnmount(() => clearTimeout(timer))
                   >
                     Cancel
                   </Button>
-                </template>
+                </span>
+                <span v-else class="flex min-w-0 items-center gap-2">
+                  <RouterLink
+                    :class="
+                      cn(
+                        'block min-w-0 truncate font-semibold',
+                        !(row as unknown as TableRow).title && 'text-muted-foreground',
+                      )
+                    "
+                    :to="{ name: 'transcript', params: { id: (row as unknown as TableRow).id } }"
+                    :title="(row as unknown as TableRow).title"
+                    >{{ (row as unknown as TableRow).title || "New session" }}</RouterLink
+                  >
+                  <Badge v-if="(row as unknown as TableRow).id === session.id" class="shrink-0"
+                    >active</Badge
+                  >
+                </span>
               </template>
               <template #cell-source_label="{ row }"
                 ><template v-if="!(row as unknown as TableRow).toggle"
-                  ><bdi class="truncate" :title="(row as unknown as TableRow).source_label">{{
+                  ><bdi class="block truncate" :title="(row as unknown as TableRow).source_label">{{
                     (row as unknown as TableRow).source_label
                   }}</bdi></template
                 ></template
@@ -713,28 +793,6 @@ onBeforeUnmount(() => clearTimeout(timer))
                 </template>
               </template>
             </DataTable>
-          </div>
-          <div class="flex items-center gap-2 text-sm text-muted-foreground">
-            <span class="flex-1">{{ range }}</span>
-            <span>{{ pageText }}</span>
-            <Button
-              variant="ghost"
-              size="sm"
-              type="button"
-              :disabled="offset === 0"
-              @click="page(-50)"
-            >
-              ◀ Prev
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              type="button"
-              :disabled="offset + rows.length >= total"
-              @click="page(50)"
-            >
-              Next ▶
-            </Button>
           </div>
         </template>
       </template>

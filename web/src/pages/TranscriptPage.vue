@@ -16,7 +16,7 @@ import { useLiveData } from "../lib/live"
 import { renderMarkdown } from "../lib/markdown"
 import { fullTime, shortTime } from "../lib/time"
 import { session } from "../stores/session"
-import { toast } from "../stores/ui"
+import { listLink, toast } from "../stores/ui"
 import { cn } from "@/lib/utils"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -266,7 +266,7 @@ watch(
     <div class="flex shrink-0 flex-col gap-3 px-4 pt-4 tab:px-6">
       <router-link
         class="text-sm text-muted-foreground underline-offset-4 hover:underline"
-        :to="{ name: 'sessions' }"
+        :to="listLink('sessions')"
         >‹ Sessions</router-link
       >
 
@@ -409,75 +409,81 @@ watch(
                   >
                 </Collapsible>
                 <Message v-else-if="m.role === 'user'" align="end">
-                  <MessageHeader class="gap-2">
-                    <span>You</span>
-                    <time
-                      class="whitespace-nowrap"
-                      :datetime="m.created"
-                      :title="fullTime(m.created)"
-                      >{{ when(m.created) }}</time
+                  <MessageContent>
+                    <MessageHeader class="gap-2">
+                      <span>You</span>
+                      <time
+                        class="whitespace-nowrap"
+                        :datetime="m.created"
+                        :title="fullTime(m.created)"
+                        >{{ when(m.created) }}</time
+                      >
+                      <Badge v-if="m.id === hitId" variant="secondary">Search hit</Badge>
+                    </MessageHeader>
+                    <Bubble variant="muted" align="end">
+                      <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+                      <BubbleContent class="typeset typeset-chat" v-html="renderMarkdown(m.text)" />
+                    </Bubble>
+                    <Button
+                      v-for="f in m.files"
+                      :key="f.id"
+                      variant="outline"
+                      size="sm"
+                      class="self-end"
+                      @click="download(`/api/files/${f.id}`, f.name)"
                     >
-                    <Badge v-if="m.id === hitId" variant="secondary">Search hit</Badge>
-                  </MessageHeader>
-                  <Bubble variant="muted" align="end">
-                    <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
-                    <BubbleContent class="typeset typeset-chat" v-html="renderMarkdown(m.text)" />
-                  </Bubble>
-                  <Button
-                    v-for="f in m.files"
-                    :key="f.id"
-                    variant="outline"
-                    size="sm"
-                    @click="download(`/api/files/${f.id}`, f.name)"
-                  >
-                    {{ f.name }}
-                  </Button>
+                      {{ f.name }}
+                    </Button>
+                  </MessageContent>
                 </Message>
                 <Message v-else-if="m.role === 'assistant'">
-                  <MessageHeader class="gap-2">
-                    <span>Tether</span>
-                    <time
-                      class="whitespace-nowrap"
-                      :datetime="m.created"
-                      :title="fullTime(m.created)"
-                      >{{ when(m.created) }}</time
+                  <MessageContent>
+                    <MessageHeader class="gap-2">
+                      <span>Tether</span>
+                      <time
+                        class="whitespace-nowrap"
+                        :datetime="m.created"
+                        :title="fullTime(m.created)"
+                        >{{ when(m.created) }}</time
+                      >
+                      <Badge v-if="m.id === hitId" variant="secondary">Search hit</Badge>
+                    </MessageHeader>
+                    <ReasoningBlock :text="m.reasoning" :tokens="m.reasoning_tokens" />
+                    <Trace v-if="m.tools.length > 0">
+                      <TraceCollapsible
+                        v-for="t in m.tools"
+                        :key="t.call"
+                        :open="openTool?.call === t.call"
+                      >
+                        <ToolLine
+                          :tool="t"
+                          :selected="openTool?.call === t.call"
+                          @select="selectTool(t)"
+                        />
+                        <TraceCollapsibleContent>
+                          <template v-if="openTool?.call === t.call">
+                            <pre
+                              class="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
+                              >{{ argsText(openTool.args) }}</pre>
+                            <ToolResult :tool="openTool" />
+                          </template>
+                        </TraceCollapsibleContent>
+                      </TraceCollapsible>
+                    </Trace>
+                    <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+                    <div class="typeset typeset-chat" v-html="renderMarkdown(m.text)" />
+                    <Button
+                      v-for="f in m.files"
+                      :key="f.id"
+                      variant="outline"
+                      size="sm"
+                      class="self-start"
+                      @click="download(`/api/files/${f.id}`, f.name)"
                     >
-                    <Badge v-if="m.id === hitId" variant="secondary">Search hit</Badge>
-                  </MessageHeader>
-                  <ReasoningBlock :text="m.reasoning" :tokens="m.reasoning_tokens" />
-                  <Trace v-if="m.tools.length > 0">
-                    <TraceCollapsible
-                      v-for="t in m.tools"
-                      :key="t.call"
-                      :open="openTool?.call === t.call"
-                    >
-                      <ToolLine
-                        :tool="t"
-                        :selected="openTool?.call === t.call"
-                        @select="selectTool(t)"
-                      />
-                      <TraceCollapsibleContent>
-                        <template v-if="openTool?.call === t.call">
-                          <pre
-                            class="overflow-x-auto rounded-md border bg-muted p-3 font-mono text-xs whitespace-pre-wrap"
-                            >{{ argsText(openTool.args) }}</pre>
-                          <ToolResult :tool="openTool" />
-                        </template>
-                      </TraceCollapsibleContent>
-                    </TraceCollapsible>
-                  </Trace>
-                  <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
-                  <MessageContent class="typeset typeset-chat" v-html="renderMarkdown(m.text)" />
-                  <Button
-                    v-for="f in m.files"
-                    :key="f.id"
-                    variant="outline"
-                    size="sm"
-                    @click="download(`/api/files/${f.id}`, f.name)"
-                  >
-                    {{ f.name }}
-                  </Button>
-                  <CostFooter :cost="costOf(m)" />
+                      {{ f.name }}
+                    </Button>
+                    <CostFooter :cost="costOf(m)" />
+                  </MessageContent>
                 </Message>
               </MessageScrollerItem>
               <MessageScrollerItem v-if="newer" message-id="newer">
