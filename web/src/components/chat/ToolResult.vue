@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue"
+import { TriangleAlertIcon } from "@lucide/vue"
 import type { ToolView } from "../../api/types.gen"
 import { Button } from "@/components/ui/button"
 import {
@@ -104,7 +105,7 @@ const known = computed(
       <Collapsible>
         <CollapsibleTrigger as-child>
           <Button variant="ghost" size="sm" class="w-full min-w-0 justify-start">
-            <span>⚠ Untrusted content</span>
+            <TriangleAlertIcon class="text-warning" /><span>Untrusted content</span>
             <span v-if="str(a.url)" class="truncate font-mono text-xs">{{ str(a.url) }}</span>
           </Button>
         </CollapsibleTrigger>

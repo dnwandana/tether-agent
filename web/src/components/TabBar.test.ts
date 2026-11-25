@@ -120,7 +120,7 @@ describe("TabBar", () => {
       "System operations",
       "Access",
       "Getting started",
-      "Theme: System ▸",
+      "Theme: System",
     ])
     const commands = within(sheet()).getByRole("button", { name: "Commands and skills" })
     expect(svgClass(commands)).toBe(iconClass(ICONS.search))
@@ -146,7 +146,12 @@ describe("TabBar", () => {
     prefs.theme = "system"
     await at("/chat")
     await user.click(tabs()[3])
-    await user.click(within(sheet()).getByRole("button", { name: "Theme: System ▸" }))
+    const theme = within(sheet()).getByRole("button", { name: "Theme: System" })
+    expect(theme.getAttribute("aria-expanded")).toBe("false")
+    expect(theme.querySelector("svg.lucide-chevron-right")).not.toBeNull()
+    await user.click(theme)
+    expect(theme.getAttribute("aria-expanded")).toBe("true")
+    expect(theme.querySelector("svg.lucide-chevron-down")).not.toBeNull()
     const choices = () =>
       within(sheet())
         .getAllByRole("button")
@@ -161,10 +166,12 @@ describe("TabBar", () => {
       iconClass(ICONS.moon),
       iconClass(ICONS.sun),
     ])
-    expect(choices()[0].lastElementChild?.textContent).toBe("✓")
+    expect(choices()[0].querySelector("svg.lucide-check")).not.toBeNull()
+    expect(within(choices()[0]).getByText("current").className).toContain("sr-only")
+    expect(choices()[1].querySelector("svg.lucide-check")).toBeNull()
     expect(choices()[0].getAttribute("aria-pressed")).toBe("true")
     expect(choices()[1].getAttribute("aria-pressed")).toBe("false")
-    expect(sheet().textContent).not.toMatch(/🌙|☀️/)
+    expect(sheet().textContent).not.toMatch(/🌙|☀️|✓|▸/)
     await user.click(choices()[2])
     expect(prefs.theme).toBe("light")
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "More" })).toBeNull())

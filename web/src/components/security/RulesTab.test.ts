@@ -36,6 +36,13 @@ describe("RulesTab", () => {
     expect(card(r, "ACP work folders").textContent).toContain("None.")
   })
 
+  it("marks each human-only rule with the lock icon", () => {
+    const r = mk()
+    const item = within(card(r, "Human-only rules")).getByRole("listitem")
+    expect(item.textContent!.trim()).toBe("password change")
+    expect(item.querySelector("svg.lucide-lock")!.classList).toContain("text-warning")
+  })
+
   it("explains each process mode and cron mode and marks the current one", () => {
     const r = mk()
     const lines = within(card(r, "Process mode")).getAllByRole("listitem")

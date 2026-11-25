@@ -117,7 +117,7 @@ onMounted(load)
   <div class="flex flex-col gap-4">
     <div class="flex flex-wrap items-center justify-between gap-2">
       <p class="text-sm text-muted-foreground">
-        A new device signs in when you tap ✅ Allow in Telegram or on a signed-in device. A sign-in
+        A new device signs in when you tap Allow in Telegram or on a signed-in device. A sign-in
         lasts dashboard.session_hours.
       </p>
       <Button variant="outline" type="button" :disabled="others === 0" @click="revokeOthers">

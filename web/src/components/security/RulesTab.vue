@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed } from "vue"
+import { LockIcon } from "@lucide/vue"
 import type { SecurityFixed } from "../../api/types.gen"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import DataTable from "../DataTable.vue"
+import { GLYPH_TONE_CLASS } from "../../lib/glyphs"
 import type { Column } from "../../lib/table"
+import { cn } from "@/lib/utils"
 
 const props = defineProps<{ fixed: SecurityFixed; processMode: string; cronMode: string }>()
 
@@ -104,7 +107,9 @@ const mcpCols: Column[] = [
       </CardHeader>
       <CardContent>
         <ul v-if="fixed.human_only.length" class="flex flex-col gap-1 text-sm">
-          <li v-for="r in fixed.human_only" :key="r">🔒 {{ r }}</li>
+          <li v-for="r in fixed.human_only" :key="r" class="flex items-center gap-2">
+            <LockIcon :class="cn('size-4 shrink-0', GLYPH_TONE_CLASS.warn)" />{{ r }}
+          </li>
         </ul>
         <p v-else class="text-sm text-muted-foreground">None.</p>
       </CardContent>

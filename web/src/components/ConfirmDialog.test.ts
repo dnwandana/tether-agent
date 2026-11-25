@@ -34,12 +34,12 @@ describe("ConfirmDialog", () => {
     const p = confirm({
       title: "Approve 2 commands once?",
       body: "rm -rf build/\ngo test ./...",
-      confirmLabel: "✅ Approve all once",
+      confirmLabel: "Approve all once",
     })
     const d = await dialog("Approve 2 commands once?")
     expect(d.textContent).toContain("rm -rf build/")
     const buttons = within(d).getAllByRole("button")
-    expect(buttons.map((b) => b.textContent?.trim())).toEqual(["Cancel", "✅ Approve all once"])
+    expect(buttons.map((b) => b.textContent?.trim())).toEqual(["Cancel", "Approve all once"])
     expect(buttons[1].className).toContain("bg-primary")
     await user.click(buttons[1])
     await expect(p).resolves.toBe(true)
@@ -74,7 +74,7 @@ describe("ConfirmDialog", () => {
     const p = confirm({
       title: "Approve 2 commands once?",
       body: "Each command runs one time.",
-      confirmLabel: "✅ Approve all once",
+      confirmLabel: "Approve all once",
       focus: "cancel",
     })
     await dialog("Approve 2 commands once?")
@@ -106,7 +106,7 @@ describe("ConfirmDialog", () => {
     confirm({
       title: "Approve 3 commands once?",
       body: "",
-      confirmLabel: "✅ Approve all once",
+      confirmLabel: "Approve all once",
       items: ["![a](b)", "[](x)", "rm *.log *.tmp"],
     })
     const d = await dialog("Approve 3 commands once?")
@@ -134,19 +134,25 @@ describe("ConfirmDialog", () => {
     expect(d.querySelector("strong")).toBeNull()
   })
 
-  it("renders Markdown in the title and the body of a gateway reply", async () => {
+  it("renders a gateway reply with icons and a label with no mark", async () => {
     render(ConfirmDialog)
     confirm({
-      title: 'Delete **"Old"**?',
-      body: "The session has **12** messages.",
+      title: '🗑 **Delete "Old"?**',
+      body: "This deletes **12** messages. You cannot undo this.",
       confirmLabel: "🗑 Delete",
       danger: true,
       markdown: true,
     })
-    // jsdom puts a space around the inline <strong> in the accessible name, so match with a pattern.
-    const d = await dialog(/^Delete\s*"Old"\s*\?$/)
-    expect(within(d).getByRole("heading").querySelector("strong")?.textContent).toBe('"Old"')
+    const d = await dialog(/Delete\s*"Old"\?/)
+    const head = within(d).getByRole("heading")
+    expect(head.querySelector("strong")?.textContent).toBe('Delete "Old"?')
+    expect(head.querySelector("p")).toBeNull()
+    expect(head.querySelector("svg.glyph")).not.toBeNull()
+    expect(head.textContent).not.toContain("🗑")
     expect(within(d).getByText("12").tagName).toBe("STRONG")
+    const buttons = within(d).getAllByRole("button")
+    expect(buttons.map((b) => b.textContent?.trim())).toEqual(["Cancel", "Delete"])
+    expect(buttons[1].className).toContain("bg-destructive")
   })
 
   it("describes the dialog with the body and keeps Tab inside it", async () => {

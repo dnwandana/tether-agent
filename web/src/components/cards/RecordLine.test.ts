@@ -36,7 +36,12 @@ describe("RecordLine", () => {
   it("shows the header, the preview, the time, and the open mark on one line", () => {
     mk(record("✅ Approval allowed · once"))
     const trigger = screen.getByRole("button")
-    expect(within(trigger).getByText("✅ Approval allowed · once")).toBeTruthy()
+    expect(within(trigger).getByText("Approval allowed · once")).toBeTruthy()
+    expect(trigger.textContent).not.toContain("✅")
+    const title = trigger.querySelector('[data-slot="trace-title"]')!
+    expect(title.querySelector("svg.lucide-circle-check")!.getAttribute("class")).toContain(
+      "text-success",
+    )
     expect(within(trigger).getByText(PREVIEW)).toBeTruthy()
     expect(within(trigger).getByText("09:05")).toBeTruthy()
     expect(trigger.querySelector('[data-slot="trace-icon"] svg')).not.toBeNull()
@@ -53,6 +58,8 @@ describe("RecordLine", () => {
     expect(tone("❌ Approval denied")).toEqual(["bad", "error"])
     expect(tone("⌛ Approval denied · no answer in 5 min")).toEqual(["warn", null])
     expect(tone("⏹ No answer · the turn stopped")).toEqual(["warn", null])
+    expect(tone("✅️ Approval allowed")).toEqual(["ok", null])
+    expect(tone("Approval allowed")).toEqual(["warn", null])
   })
 
   it("opens a read-only view with the full preview and the approval log link", async () => {

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useRoute, useRouter, type LocationQuery } from "vue-router"
 import { api } from "../api/client"
 import type { SearchHitView, SessionPage, SessionRow } from "../api/types.gen"
+import { ChevronDownIcon, ChevronRightIcon, CornerDownRightIcon } from "@lucide/vue"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card"
@@ -60,7 +61,7 @@ const renaming = ref("")
 const renameText = ref("")
 
 // The actions column fits the widest button set of the rows of the filter. Archived rows show
-// Unarchive, Resume, and ⋯. The other rows show one button and ⋯.
+// Unarchive, Resume, and the row menu. The other rows show one button and the row menu.
 const ACT_WIDTH = "8.5rem"
 const ACT_WIDTH_ARCHIVED = "14.5rem"
 
@@ -622,7 +623,8 @@ onBeforeUnmount(() => clearTimeout(timer))
                   :aria-expanded="openKids.has((row as unknown as TableRow).parent_id)"
                   @click="toggleKids((row as unknown as TableRow).parent_id)"
                 >
-                  {{ openKids.has((row as unknown as TableRow).parent_id) ? "▾" : "▸" }}
+                  <ChevronDownIcon v-if="openKids.has((row as unknown as TableRow).parent_id)" />
+                  <ChevronRightIcon v-else />
                   {{ (row as unknown as TableRow).count }}
                   {{
                     (row as unknown as TableRow).count === 1 ? "child session" : "child sessions"
@@ -632,7 +634,7 @@ onBeforeUnmount(() => clearTimeout(timer))
                   v-else-if="(row as unknown as TableRow).child"
                   class="flex min-w-0 items-center gap-1.5 pl-4"
                 >
-                  <span aria-hidden="true">↳</span>
+                  <CornerDownRightIcon class="size-4 shrink-0 text-muted-foreground" />
                   <Badge v-if="childLabel(row as unknown as TableRow).chip" variant="secondary">{{
                     childLabel(row as unknown as TableRow).chip
                   }}</Badge>

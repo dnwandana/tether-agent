@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue"
+import type { Component } from "vue"
+import { CheckIcon, CircleHelpIcon } from "@lucide/vue"
 import { useRouter } from "vue-router"
 import { api } from "../api/client"
 import type { SetupStep } from "../api/types.gen"
@@ -41,15 +43,16 @@ const STEP_TONE: Readonly<Record<StepTone, string>> = {
   on: "bg-primary text-primary-foreground",
 }
 
-// Returns the text and the tone of the mark of a step.
-function mark(s: SetupStep, i: number): { text: string; tone: StepTone } {
+// Returns the icon, the text, and the tone of the mark of a step. A mark with an icon uses the
+// text as its screen-reader word.
+function mark(s: SetupStep, i: number): { icon: Component | null; text: string; tone: StepTone } {
   switch (s.state) {
     case "done":
-      return { text: "✓", tone: "done" }
+      return { icon: CheckIcon, text: "done", tone: "done" }
     case "unknown":
-      return { text: "?", tone: "unknown" }
+      return { icon: CircleHelpIcon, text: "unknown", tone: "unknown" }
     case "open":
-      return { text: String(i + 1), tone: "on" }
+      return { icon: null, text: String(i + 1), tone: "on" }
   }
 }
 
@@ -123,8 +126,13 @@ async function copy(text: string): Promise<void> {
                     STEP_TONE[mark(s, i).tone],
                   )
                 "
-                >{{ mark(s, i).text }}</span
               >
+                <template v-if="mark(s, i).icon">
+                  <component :is="mark(s, i).icon" class="size-3.5" />
+                  <span class="sr-only">{{ mark(s, i).text }}</span>
+                </template>
+                <template v-else>{{ mark(s, i).text }}</template>
+              </span>
               <span class="flex min-w-0 flex-1 flex-col items-start gap-1">
                 <b>{{ s.name }}</b>
                 <span class="text-muted-foreground">{{ s.detail }}</span>

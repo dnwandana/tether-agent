@@ -11,7 +11,8 @@ describe("LiveHeader", () => {
       props: { updatedAt: new Date(2026, 10, 23, 9, 5), stale: false },
     })
     expect(r.container.textContent).toContain("Updated 09:05")
-    const btn = screen.getByRole("button", { name: "↻ Refresh" })
+    const btn = screen.getByRole("button", { name: "Refresh" })
+    expect(btn.querySelector("svg")).toBeNull()
     expect(btn.getAttribute("data-slot")).toBe("button")
     await userEvent.setup().click(btn)
     expect(r.emitted().refresh).toHaveLength(1)

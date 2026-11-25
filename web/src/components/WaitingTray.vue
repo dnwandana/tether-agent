@@ -5,9 +5,29 @@ const firstSeen = new Map<string, number>()
 
 <script setup lang="ts">
 import { createReusableTemplate } from "@vueuse/core"
-import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue"
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CircleHelpIcon,
+  KeyRoundIcon,
+  LockIcon,
+  SendIcon,
+  ShieldIcon,
+} from "@lucide/vue"
+import {
+  type Component,
+  computed,
+  defineComponent,
+  h,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from "vue"
 import { useRouter } from "vue-router"
 import type { Card, CardAnswer } from "../api/types.gen"
+import { splitGlyph } from "../lib/glyphs"
 import { guardOutside } from "../lib/layer"
 import { answerCard, bulkAnswer, cards } from "../stores/cards"
 import { confirm, toast, ui } from "../stores/ui"
@@ -94,25 +114,44 @@ function toggle(id: string): void {
   else opened.add(id)
 }
 
-function isSendWithFindings(c: Card): boolean {
-  return c.header.startsWith("📤") && c.findings.length > 0
+// True for a send card. Go starts its header with the send mark.
+function isSend(c: Card): boolean {
+  return splitGlyph(c.header).glyph?.key === "send"
 }
 
-const humanOnlyCount = computed(
-  () =>
-    list.value.filter((c) => (c.kind === "approval" || c.kind === "pin") && c.human_only).length,
-)
+function isSendWithFindings(c: Card): boolean {
+  return isSend(c) && c.findings.length > 0
+}
 
-function icon(c: Card): string {
-  if (c.kind === "approval" && c.human_only) return "🔒"
-  if (c.header.startsWith("📤")) return "📤"
-  if (c.kind === "approval") return "🛡"
-  if (c.kind === "clarify") return "❓"
-  return "🔑"
+const humanOnlyCount = computed(() => list.value.filter(isHumanOnly).length)
+
+// Tells whether a card is a human-only approval of a command or of a program pin.
+function isHumanOnly(c: Card): boolean {
+  return (c.kind === "approval" || c.kind === "pin") && c.human_only
+}
+
+// Returns the row icon of the card kind.
+function icon(c: Card): Component {
+  if (isHumanOnly(c)) return LockIcon
+  if (isSend(c)) return SendIcon
+  if (c.kind === "approval") return ShieldIcon
+  if (c.kind === "clarify") return CircleHelpIcon
+  return KeyRoundIcon
+}
+
+// Returns the word of the row icon for a screen reader.
+function kindWord(c: Card): string {
+  if (isHumanOnly(c)) return "human-only approval"
+  if (isSend(c)) return "send"
+  if (c.kind === "approval") return "approval"
+  if (c.kind === "clarify") return "question"
+  if (c.kind === "signin") return "sign-in"
+  if (c.kind === "pin") return "program secret"
+  return "secret"
 }
 
 function label(c: Card): string {
-  return c.header.replace(/^\s*\p{Extended_Pictographic}️?\s*/u, "")
+  return splitGlyph(c.header).rest
 }
 
 function detail(c: Card): string {
@@ -177,7 +216,7 @@ const TrayCard = defineComponent({
               disabled: busy.has(c.id),
               onClick: () => answer(c, "deny"),
             },
-            () => "❌ Deny",
+            () => "Deny",
           ),
         ]),
         h("div", { class: "flex flex-wrap gap-2" }, [
@@ -191,7 +230,7 @@ const TrayCard = defineComponent({
               disabled: busy.has(c.id),
               onClick: () => answer(c, "allow"),
             },
-            () => "✅ Allow",
+            () => "Allow",
           ),
         ]),
       ])
@@ -234,14 +273,14 @@ async function approveAll(): Promise<void> {
   }
   const ids = shown.map((c) => c.id)
   let sendLine = ""
-  if (sends === 1) sendLine = "\n1 📤 send with findings stays open. Answer it on its card."
+  if (sends === 1) sendLine = "\n1 send with findings stays open. Answer it on its card."
   else if (sends > 1)
-    sendLine = `\n${sends} 📤 sends with findings stay open. Answer them on their cards.`
+    sendLine = `\n${sends} sends with findings stay open. Answer them on their cards.`
   const ok = await confirm({
     title: `Approve ${plural(ids.length, "command", "commands")} once?`,
     body: "Each answer is “once”. Human-only actions stay open." + sendLine,
     items: shown.map((c) => c.command || c.summary),
-    confirmLabel: "✅ Approve all once",
+    confirmLabel: "Approve all once",
     focus: "cancel",
   })
   if (!ok) return
@@ -275,7 +314,7 @@ function openCard(c: Card): void {
             data-act="deny-all"
             @click="denyAll"
           >
-            ❌ Deny all
+            Deny all
           </Button>
           <Button
             type="button"
@@ -285,12 +324,12 @@ function openCard(c: Card): void {
             data-act="approve-all"
             @click="approveAll"
           >
-            ✅ Approve all once…
+            Approve all once…
           </Button>
         </template>
       </div>
       <p v-if="humanOnlyCount > 0" class="text-muted-foreground text-xs">
-        {{ humanOnlyCount }} 🔒 human-only
+        {{ humanOnlyCount }} human-only
         {{ humanOnlyCount === 1 ? "approval stays" : "approvals stay" }} open.
       </p>
       <div data-slot="tray-body" class="min-h-0 flex-1 overflow-y-auto">
@@ -315,7 +354,11 @@ function openCard(c: Card): void {
             :key="c.id"
             class="flex min-w-0 flex-wrap items-center gap-2 border-t py-1.5"
           >
-            <span>{{ icon(c) }}</span>
+            <span data-slot="row-icon" class="flex shrink-0 items-center">
+              <component :is="icon(c)" class="size-4" /><span class="sr-only">{{
+                kindWord(c)
+              }}</span>
+            </span>
             <span class="grow truncate">{{ detail(c) || label(c) }}</span>
             <span class="text-muted-foreground text-xs">{{ age(c) }}</span>
             <Button
@@ -323,9 +366,11 @@ function openCard(c: Card): void {
               variant="ghost"
               size="sm"
               class="max-tab:min-h-11"
+              :aria-expanded="opened.has(c.id)"
               @click="toggle(c.id)"
             >
-              {{ opened.has(c.id) ? "Hide ▴" : "Show ▾" }}
+              <template v-if="opened.has(c.id)"><ChevronDownIcon />Hide</template>
+              <template v-else><ChevronRightIcon />Show</template>
             </Button>
             <TrayCard v-if="opened.has(c.id)" :card="c" class="w-full" />
           </li>

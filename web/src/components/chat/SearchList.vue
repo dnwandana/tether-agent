@@ -11,6 +11,7 @@ import {
   TraceTitle,
 } from "@/components/ui/trace"
 import { parseSessionSearch, parseWebSearch } from "./parse"
+import { toolIcon } from "../../lib/glyphs"
 
 const props = defineProps<{ kind: "web" | "session"; text: string; query: string }>()
 
@@ -32,7 +33,9 @@ function safe(url: string): boolean {
     <TraceCollapsible default-open>
       <TraceCollapsibleTrigger>
         <TraceLine>
-          <TraceIcon>🔍</TraceIcon>
+          <TraceIcon>
+            <component :is="toolIcon(kind === 'web' ? 'web_search' : 'session_search')" />
+          </TraceIcon>
           <TraceTitle>{{ query }}</TraceTitle>
           <TraceDescription>{{ count }} {{ count === 1 ? "result" : "results" }}</TraceDescription>
         </TraceLine>

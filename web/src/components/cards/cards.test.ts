@@ -73,10 +73,15 @@ describe("ClarifyCard", () => {
     render(ClarifyCard, { props: { card: card({ ...q, choices: ["a", "b", "c"], multi: true }) } })
     const user = userEvent.setup()
     expect(done().hasAttribute("disabled")).toBe(true)
-    await user.click(screen.getByRole("button", { name: "☐ a" }))
-    await user.click(screen.getByRole("button", { name: "☐ b" }))
-    expect(screen.getByRole("button", { name: "✓ a" }).getAttribute("aria-pressed")).toBe("true")
-    expect(screen.getByRole("button", { name: "☐ c" }).getAttribute("aria-pressed")).toBe("false")
+    await user.click(screen.getByRole("button", { name: "a" }))
+    await user.click(screen.getByRole("button", { name: "b" }))
+    const a = screen.getByRole("button", { name: "a" })
+    expect(a.getAttribute("aria-pressed")).toBe("true")
+    expect(a.querySelector("svg.lucide-check")).not.toBeNull()
+    const c = screen.getByRole("button", { name: "c" })
+    expect(c.getAttribute("aria-pressed")).toBe("false")
+    expect(c.querySelector("svg")).toBeNull()
+    expect(c.textContent!.trim()).toBe("c")
     await user.click(done())
     expect(answerCard).toHaveBeenCalledWith("c1", { ...none, choices: ["a", "b"] })
   })
@@ -91,13 +96,14 @@ describe("ClarifyCard", () => {
 
   it("shows the question as the body text under the header", () => {
     const r = render(ClarifyCard, { props: { card: card({ ...q, choices: ["main", "dev"] }) } })
-    expect(r.container.querySelector('[data-slot="item-header"]')!.textContent).toContain(
-      "❓ Question",
-    )
+    const header = r.container.querySelector('[data-slot="item-header"]')!
+    expect(header.textContent).toContain("Question")
+    expect(header.textContent).not.toContain("❓")
+    expect(header.querySelector("svg.lucide-circle-help")).not.toBeNull()
     const question = screen.getByText("Which folder?")
     expect(question.closest('[data-slot="item-content"]')).not.toBeNull()
     expect(question.classList.contains("whitespace-pre-wrap")).toBe(true)
-    const root = screen.getByRole("group", { name: "❓ Question" })
+    const root = screen.getByRole("group", { name: "Question" })
     expect(root.getAttribute("data-slot")).toBe("item")
   })
 
@@ -159,20 +165,21 @@ describe("SecretCard", () => {
         card: card({ kind: "secret", header: "🔑 Secret needed: PYPI_TOKEN", answers: ["deny"] }),
       },
     })
-    expect(screen.getByRole("button", { name: "❌ Deny" }).getAttribute("data-variant")).toBe(
+    expect(screen.getByRole("button", { name: "Deny" }).getAttribute("data-variant")).toBe(
       "outline",
     )
     expect(screen.getByRole("button", { name: "Save" }).getAttribute("data-variant")).toBe(
       "default",
     )
-    const root = screen.getByRole("group", { name: "🔑 Secret needed: PYPI_TOKEN" })
+    const root = screen.getByRole("group", { name: "Secret needed: PYPI_TOKEN" })
     expect(root.getAttribute("data-slot")).toBe("item")
+    expect(root.querySelector('[data-slot="item-header"] svg.lucide-key-round')).not.toBeNull()
     const rows = Array.from(root.querySelectorAll("[data-row]")).map((row) =>
       within(row as HTMLElement)
         .getAllByRole("button")
         .map((b) => b.textContent!.trim()),
     )
-    expect(rows).toEqual([["❌ Deny"], ["Save"]])
+    expect(rows).toEqual([["Deny"], ["Save"]])
     for (const b of within(root).getAllByRole("button"))
       expect(b.classList.contains("max-tab:h-11")).toBe(true)
   })
@@ -195,6 +202,22 @@ describe("card fields and deadline", () => {
     expect(forValue.textContent).toContain("twine check")
     expect(forValue.textContent).not.toBe("x")
     expect(forValue.classList.contains("whitespace-pre-wrap")).toBe(true)
+  })
+
+  it("shows the time that is left as m:ss left", async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date("2026-11-20T10:00:00Z"))
+    for (const [C, k] of [
+      [ClarifyCard, "clarify"],
+      [SecretCard, "secret"],
+    ] as const) {
+      const r = render(C, {
+        props: { card: card({ kind: k, deadline: "2026-11-20T10:01:30Z", answers: ["deny"] }) },
+      })
+      expect(within(r.container).getByRole("timer").textContent!.trim()).toBe("1:30 left")
+      expect(r.container.textContent).not.toContain("⌛")
+      r.unmount()
+    }
   })
 
   it("treats the zero time as no deadline", () => {
@@ -227,7 +250,7 @@ describe("card fields and deadline", () => {
 
   it("denies a secret card", async () => {
     render(SecretCard, { props: { card: card({ kind: "secret", answers: ["deny"] }) } })
-    await userEvent.setup().click(screen.getByRole("button", { name: "❌ Deny" }))
+    await userEvent.setup().click(screen.getByRole("button", { name: "Deny" }))
     await flushPromises()
     expect(answerCard).toHaveBeenCalledWith("c1", { ...none, answer: "deny" })
   })

@@ -24,6 +24,8 @@ describe("TerminalView", () => {
     expect(body(r.container).textContent).toContain("FAIL\tcron")
     expect(body(r.container).textContent).not.toContain("[exit code: 1]")
     expect(foot(r.container).textContent!.trim()).toBe("exit 1")
+    expect(head(r.container).querySelector("svg.lucide-square-terminal")).not.toBeNull()
+    expect(head(r.container).textContent).not.toContain("💻")
   })
 
   it("keeps the default look for exit 0", () => {
@@ -64,6 +66,8 @@ describe("DiffView", () => {
     expect(head(r.container).textContent).toContain("+1")
     expect(head(r.container).textContent).toContain("−1")
     expect(head(r.container).textContent).toContain("patched a.go (1 replacement)")
+    expect(head(r.container).querySelector("svg.lucide-file-diff")).not.toBeNull()
+    expect(head(r.container).textContent).not.toContain("🔧")
   })
 })
 
@@ -82,6 +86,8 @@ describe("CodeView", () => {
     expect(lines).toHaveLength(2)
     expect(lines[0].textContent).toContain("func Runs() {")
     expect(foot(r.container).textContent).toContain("More lines follow from line 312.")
+    expect(head(r.container).querySelector("svg.lucide-file-text")).not.toBeNull()
+    expect(head(r.container).textContent).not.toContain("📖")
   })
 })
 

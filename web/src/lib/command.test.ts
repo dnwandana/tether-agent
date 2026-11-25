@@ -48,6 +48,10 @@ describe("replyKind", () => {
       ['🍴 **Copied to "Trip"**', "ok"],
       ["No goal set.", "info"],
       ["  ✅ Saved with a leading space.", "ok"],
+      ["⌛ No answer in time.", "info"],
+      ["✔ Finished.", "info"],
+      ["↪\uFE0F Steered.", "info"],
+      ["🦄 Unknown start.", "info"],
     ]
     for (const [text, kind] of cases) expect(replyKind(text), text).toBe(kind)
   })
@@ -145,6 +149,15 @@ describe("useCommand", () => {
     await expect(run("/doctor", { result: note, title: "Doctor" })).resolves.toBe("warn")
     expect(note.value).toMatchObject({ title: "Doctor", text: "⚠️ 2 checks warn.", kind: "warn" })
     expect(note.value?.at).toBeInstanceOf(Date)
+    expect(toast).not.toHaveBeenCalled()
+  })
+
+  it("keeps the ok kind in the result note", async () => {
+    vi.mocked(runCommand).mockResolvedValue(reply("✅ Saved."))
+    const note = ref<ResultNoteData | null>(null)
+    const { run } = useCommand()
+    await expect(run("/backup", { result: note, title: "Backup" })).resolves.toBe("ok")
+    expect(note.value).toMatchObject({ title: "Backup", text: "✅ Saved.", kind: "ok" })
     expect(toast).not.toHaveBeenCalled()
   })
 

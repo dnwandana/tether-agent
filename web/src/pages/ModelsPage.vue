@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue"
+import { computed, onBeforeUnmount, ref, type Component } from "vue"
+import { CheckIcon, TriangleAlertIcon, XIcon } from "@lucide/vue"
 import { api } from "../api/client"
 import type { HealthView, ModelEntryRow, ModelsView } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
@@ -20,6 +21,12 @@ const TONE: Readonly<Record<Tone, string>> = {
   ok: "text-success",
   warn: "text-warning",
   bad: "text-destructive",
+}
+// Maps a tone to the icon that goes before the status text.
+const TONE_ICON: Readonly<Record<Tone, Component>> = {
+  ok: CheckIcon,
+  warn: TriangleAlertIcon,
+  bad: XIcon,
 }
 
 const state = ref<"loading" | "ready" | "error">("loading")
@@ -47,16 +54,16 @@ function skipEnd(e: { skip_until: string }): number {
 
 // Gives the status text and its tone from the Health snapshot of one entry.
 function entryStatus(e: ModelEntry, at: number): { text: string; tone: Tone } {
-  if (e.status === "unusable") return { text: `✗ not usable: ${e.cause}`, tone: "bad" }
+  if (e.status === "unusable") return { text: `not usable: ${e.cause}`, tone: "bad" }
   const end = skipEnd(e)
   if (end > at) {
     const sec = Math.ceil((end - at) / 1000)
-    return { text: `⚠ skipped for ${sec} s · ${e.cause} at ${hhmm(e.failed_at)}`, tone: "warn" }
+    return { text: `skipped for ${sec} s · ${e.cause} at ${hhmm(e.failed_at)}`, tone: "warn" }
   }
   if (e.status === "failed") {
-    return { text: `⚠ last failed ${hhmm(e.failed_at)} · ${e.cause}`, tone: "warn" }
+    return { text: `last failed ${hhmm(e.failed_at)} · ${e.cause}`, tone: "warn" }
   }
-  return { text: "✓ answers now", tone: "ok" }
+  return { text: "answers now", tone: "ok" }
 }
 
 function skipRuns(): boolean {
@@ -97,10 +104,10 @@ async function load(): Promise<void> {
 function stepState(name: string, at: number): { text: string; tone: "ok" | "warn" } {
   const hv: HealthView | undefined = (view.value?.health ?? []).find((x) => x.entry === name)
   if (hv) {
-    if (realTime(hv.skip_until) > at) return { text: "⚠ skipped", tone: "warn" }
-    if (realTime(hv.failed_at) > 0) return { text: "⚠ failed", tone: "warn" }
+    if (realTime(hv.skip_until) > at) return { text: "skipped", tone: "warn" }
+    if (realTime(hv.failed_at) > 0) return { text: "failed", tone: "warn" }
   }
-  return { text: "✓ answers", tone: "ok" }
+  return { text: "answers", tone: "ok" }
 }
 
 const chain = computed(() =>
@@ -130,7 +137,7 @@ const banner = computed(() => {
   const f = view.value?.fallback
   if (!f || !f.active) return ""
   const at = hhmm(f.failed_at)
-  return `⚠ Fallback active. ${f.fallback_name} (${f.fallback_model}) answers. ${f.first_name} failed at ${at}: ${f.cause}.`
+  return `Fallback active. ${f.fallback_name} (${f.fallback_model}) answers. ${f.first_name} failed at ${at}: ${f.cause}.`
 })
 
 // Tells whether a chain step or a role uses the entry.
@@ -219,7 +226,9 @@ onBeforeUnmount(stopTimer)
     />
     <template v-else>
       <Alert v-if="banner"
-        ><AlertDescription>{{ banner }}</AlertDescription></Alert
+        ><TriangleAlertIcon class="text-warning" /><AlertDescription>{{
+          banner
+        }}</AlertDescription></Alert
       >
       <h2 id="models-chain-h" class="text-base font-semibold">Fallback chain</h2>
       <ol aria-labelledby="models-chain-h" class="flex flex-wrap items-center gap-2">
@@ -228,7 +237,13 @@ onBeforeUnmount(stopTimer)
           <li class="flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm">
             <span class="font-medium">{{ c.role }}</span>
             <span v-if="!c.same" class="font-mono text-muted-foreground">{{ c.name }}</span>
-            <span :data-tone="c.state.tone" :class="TONE[c.state.tone]">{{ c.state.text }}</span>
+            <span
+              :data-tone="c.state.tone"
+              :class="['inline-flex items-center gap-1', TONE[c.state.tone]]"
+              ><component :is="TONE_ICON[c.state.tone]" class="size-3.5 shrink-0" />{{
+                c.state.text
+              }}</span
+            >
           </li>
         </template>
       </ol>
@@ -252,9 +267,13 @@ onBeforeUnmount(stopTimer)
           ><span class="font-mono wrap-anywhere">{{ value }}</span></template
         >
         <template #cell-status="{ value }">
-          <span :data-tone="st(value).tone" :class="TONE[st(value).tone]">{{
-            st(value).text
-          }}</span>
+          <span
+            :data-tone="st(value).tone"
+            :class="['inline-flex items-center gap-1', TONE[st(value).tone]]"
+            ><component :is="TONE_ICON[st(value).tone]" class="size-3.5 shrink-0" />{{
+              st(value).text
+            }}</span
+          >
         </template>
       </DataTable>
       <h2 class="text-base font-semibold">Roles</h2>
@@ -270,8 +289,11 @@ onBeforeUnmount(stopTimer)
         >
         <template #cell-value="{ value, row }"
           >{{ value
-          }}<span v-if="!usable(row)" data-tone="warn" class="text-warning">
-            ⚠️ entry unusable</span
+          }}<span
+            v-if="!usable(row)"
+            data-tone="warn"
+            class="ml-1 inline-flex items-center gap-1 text-warning"
+            ><TriangleAlertIcon class="size-3.5" />entry unusable</span
           ></template
         >
       </DataTable>

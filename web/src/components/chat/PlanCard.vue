@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue"
+import { computed, type Component } from "vue"
 import type { PlanItem } from "../../api/types.gen"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
@@ -12,15 +12,27 @@ import {
   TraceLine,
   TraceTitle,
 } from "@/components/ui/trace"
+import {
+  CircleCheckIcon,
+  CircleDotIcon,
+  CircleIcon,
+  CircleSlashIcon,
+  ClipboardListIcon,
+} from "@lucide/vue"
+import { GLYPH_TONE_CLASS, type GlyphTone } from "../../lib/glyphs"
 import { cn } from "@/lib/utils"
 
 const props = defineProps<{ items: PlanItem[]; before?: PlanItem[] }>()
 
-const MARK: Record<string, string> = {
-  completed: "[x]",
-  in_progress: "[>]",
-  cancelled: "[~]",
-  pending: "[ ]",
+// Gives the icon, the tone, and the word of each plan item state.
+const MARK: Record<string, { icon: Component; tone: GlyphTone; word: string }> = {
+  completed: { icon: CircleCheckIcon, tone: "ok", word: "done" },
+  in_progress: { icon: CircleDotIcon, tone: "info", word: "in progress" },
+  cancelled: { icon: CircleSlashIcon, tone: "muted", word: "cancelled" },
+  pending: { icon: CircleIcon, tone: "muted", word: "pending" },
+}
+function mark(state: string): { icon: Component; tone: GlyphTone; word: string } {
+  return MARK[state] ?? MARK.pending
 }
 
 const total = computed(() => props.items.length)
@@ -32,7 +44,7 @@ const allClosed = computed(
 const pct = computed(() =>
   total.value === 0 ? 0 : Math.round((doneCount.value / total.value) * 100),
 )
-const header = computed(() => (allClosed.value ? "📋 Plan done" : "📋 Plan"))
+const header = computed(() => (allClosed.value ? "Plan done" : "Plan"))
 const progress = computed(() => `${doneCount.value} of ${total.value} done`)
 const running = computed(() => props.items.some((i) => i.state === "in_progress"))
 
@@ -48,6 +60,7 @@ function changed(i: number): boolean {
     <TraceCollapsible default-open>
       <TraceCollapsibleTrigger>
         <TraceLine :status="running ? 'running' : undefined">
+          <ClipboardListIcon class="size-4 shrink-0" />
           <TraceTitle>{{ header }}</TraceTitle>
           <TraceDescription v-if="!allClosed">{{ progress }}</TraceDescription>
         </TraceLine>
@@ -78,7 +91,12 @@ function changed(i: number): boolean {
                 )
               "
             >
-              <span class="font-mono">{{ MARK[item.state] ?? "[ ]" }}</span>
+              <span data-mark class="inline-flex shrink-0 items-center"
+                ><component
+                  :is="mark(item.state).icon"
+                  :class="cn('size-4', GLYPH_TONE_CLASS[mark(item.state).tone])"
+                /><span class="sr-only">{{ mark(item.state).word }}</span></span
+              >
               <TraceTitle>{{ item.text }}</TraceTitle>
               <Badge v-if="changed(i)" variant="outline">changed</Badge>
             </TraceLine>

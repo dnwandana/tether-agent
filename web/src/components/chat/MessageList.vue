@@ -4,13 +4,14 @@ import type { FileRef, MessageView, ToolView } from "../../api/types.gen"
 import { session, loadMessages } from "../../stores/session"
 import { turn } from "../../stores/turn"
 import { renderMarkdown } from "../../lib/markdown"
+import { ChevronDownIcon, ChevronRightIcon, FoldVerticalIcon, PaperclipIcon } from "@lucide/vue"
 import { cn } from "@/lib/utils"
 import { Attachment, AttachmentMedia, AttachmentTitle } from "@/components/ui/attachment"
 import { Badge } from "@/components/ui/badge"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Marker } from "@/components/ui/marker"
+import { Marker, MarkerIcon } from "@/components/ui/marker"
 import { Message, MessageContent, MessageHeader } from "@/components/ui/message"
 import { MessageScrollerItem } from "@/components/ui/message-scroller"
 import { Spinner } from "@/components/ui/spinner"
@@ -111,10 +112,13 @@ watch(
     :message-id="String(m.id)"
     :scroll-anchor="m.role === 'user' && !steered.has(m.id)"
   >
-    <Collapsible v-if="m.role === 'summary'">
+    <Collapsible v-if="m.role === 'summary'" v-slot="{ open }">
       <Marker variant="separator">
+        <MarkerIcon><FoldVerticalIcon /></MarkerIcon>
         <CollapsibleTrigger as-child>
-          <Button variant="ghost" size="sm">🗜 Compacted summary</Button>
+          <Button variant="ghost" size="sm"
+            >Compacted summary<ChevronDownIcon v-if="open" /><ChevronRightIcon v-else
+          /></Button>
         </CollapsibleTrigger>
       </Marker>
       <CollapsibleContent class="px-3 pt-2 text-sm whitespace-pre-wrap text-muted-foreground">{{
@@ -163,7 +167,9 @@ watch(
           </Attachment>
           <Attachment v-else>
             <AttachmentTitle>
-              <a :href="fileUrl(f)" download>📎 {{ f.name }}</a>
+              <a :href="fileUrl(f)" download class="inline-flex items-center gap-1"
+                ><PaperclipIcon class="size-4 shrink-0" />{{ f.name }}</a
+              >
             </AttachmentTitle>
           </Attachment>
         </template>

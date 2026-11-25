@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue"
+import { EllipsisIcon } from "@lucide/vue"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -32,8 +33,8 @@ function pick(act: string): void {
   <DropdownMenu v-model:open="open">
     <DropdownMenuTrigger as-child>
       <Button ref="trigger" variant="ghost" size="icon" type="button" aria-label="More actions"
-        >⋯</Button
-      >
+        ><EllipsisIcon
+      /></Button>
     </DropdownMenuTrigger>
     <DropdownMenuContent align="end" loop class="min-w-44" @keydown.tab="open = false">
       <DropdownMenuGroup>

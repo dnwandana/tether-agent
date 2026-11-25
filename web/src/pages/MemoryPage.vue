@@ -557,7 +557,7 @@ onBeforeUnmount(() => {
                     type="button"
                     @click="undoRemove"
                   >
-                    ↩️ Undo
+                    Undo
                   </Button>
                 </ItemActions>
               </Item>

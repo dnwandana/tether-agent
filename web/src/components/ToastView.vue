@@ -1,14 +1,34 @@
 <script setup lang="ts">
 import { Button } from "@/components/ui/button"
+import { CircleAlertIcon, CircleCheckIcon, InfoIcon, TriangleAlertIcon, XIcon } from "@lucide/vue"
+import { computed } from "vue"
 import { cn } from "@/lib/utils"
 import { useCommand } from "../lib/command"
-import { renderMarkdown } from "../lib/markdown"
+import { GLYPH_TONE_CLASS, buttonLabel, splitGlyph, toneOfKind } from "../lib/glyphs"
+import { renderSystemText } from "../lib/markdown"
+import ButtonLabel from "./ButtonLabel.vue"
+import GlyphText from "./GlyphText.vue"
 import { closeToast } from "../stores/ui"
 import type { Toast, ToastAction } from "../stores/ui"
 
 const props = defineProps<{ toast: Toast }>()
 
 const { run } = useCommand()
+
+// The icon of each toast kind. ResultNote uses the same icons.
+const KIND_ICON = {
+  ok: CircleCheckIcon,
+  info: InfoIcon,
+  warn: TriangleAlertIcon,
+  error: CircleAlertIcon,
+}
+const tone = computed(() => toneOfKind(props.toast.kind))
+// The plain branch shows page text and error text as typed. A lead glyph with the tone of
+// the kind icon goes away, so the toast shows one icon for one state.
+const plain = computed(() => {
+  const s = splitGlyph(props.toast.text)
+  return s.glyph !== null && s.glyph.tone === tone.value ? s.rest : props.toast.text
+})
 
 function runAction(a: ToastAction): void {
   closeToast(props.toast.id)
@@ -27,27 +47,31 @@ function runAction(a: ToastAction): void {
       )
     "
   >
-    <span v-if="toast.kind === 'ok'" class="text-success" aria-hidden="true">✓</span>
-    <span v-else-if="toast.kind === 'warn'" class="text-warning" aria-hidden="true">⚠</span>
-    <span v-else-if="toast.kind === 'error'" class="text-destructive" aria-hidden="true">⚠</span>
-    <!-- renderMarkdown escapes raw HTML, so v-html is safe here. -->
+    <component
+      :is="KIND_ICON[toast.kind]"
+      :class="cn('mt-0.5 size-4 shrink-0', GLYPH_TONE_CLASS[tone])"
+    />
+    <!-- renderSystemText escapes raw HTML, so v-html is safe here. -->
     <div
       v-if="toast.markdown"
       class="typeset typeset-chat min-w-0 grow"
-      v-html="renderMarkdown(toast.text)"
+      v-html="renderSystemText(toast.text, { lead: 'drop', kind: tone })"
     />
-    <div v-else class="min-w-0 grow break-words">{{ toast.text }}</div>
+    <div v-else class="min-w-0 grow break-words"><GlyphText :text="plain" /></div>
     <div class="flex shrink-0 items-center gap-1">
       <Button
         v-for="a in toast.actions.slice(0, 2)"
         :key="a.data"
         variant="ghost"
         size="sm"
+        :aria-pressed="buttonLabel(a.label).current || undefined"
         @click="runAction(a)"
       >
-        {{ a.label }}
+        <ButtonLabel :text="a.label" />
       </Button>
-      <Button variant="ghost" size="sm" aria-label="Close" @click="closeToast(toast.id)">✕</Button>
+      <Button variant="ghost" size="sm" aria-label="Close" @click="closeToast(toast.id)">
+        <XIcon />
+      </Button>
     </div>
   </div>
 </template>

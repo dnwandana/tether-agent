@@ -9,17 +9,12 @@ import { cards } from "../../stores/cards"
 import { status } from "../../stores/status"
 import { Badge } from "@/components/ui/badge"
 import { Separator } from "@/components/ui/separator"
+import { MODES, toolIcon } from "../../lib/glyphs"
 import PanelFrame from "../PanelFrame.vue"
 import ToolResult from "./ToolResult.vue"
 
 const props = defineProps<{ open: boolean; tool: ToolView | null }>()
 const emit = defineEmits<{ close: [] }>()
-
-const MODES: Record<string, string> = {
-  "read-only": "👁 Read-only",
-  guarded: "🛡 Guarded",
-  full: "⚡ Full",
-}
 
 // The full copy of the selected tool, after "Show all". It is null for another call.
 const full = ref<ToolView | null>(null)
@@ -68,7 +63,8 @@ const duration = computed(() => {
   const ms = props.tool?.duration_ms ?? 0
   return ms > 0 ? (ms / 1000).toFixed(1) + " s" : "—"
 })
-const modeLabel = computed(() => MODES[status.mode] ?? status.mode)
+// The icon and the label of the current mode. An unknown mode shows as typed.
+const mode = computed(() => MODES[status.mode] ?? null)
 const modelLabel = computed(() =>
   status.entry ? `${status.model} (${status.entry})` : status.model,
 )
@@ -99,7 +95,7 @@ onUnmounted(() => {
           Tool call
         </div>
         <div class="flex items-center gap-2">
-          <span>{{ tool.emoji }}</span>
+          <component :is="toolIcon(tool.name)" class="size-4 shrink-0" />
           <b class="font-mono font-semibold">{{ tool.name }}</b>
           <Badge variant="outline" :class="stateClass">{{ stateText }}</Badge>
         </div>
@@ -130,7 +126,12 @@ onUnmounted(() => {
       </div>
       <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
         <dt>Mode</dt>
-        <dd>{{ modeLabel }}</dd>
+        <dd class="flex items-center gap-1">
+          <template v-if="mode"
+            ><component :is="mode.icon" class="size-4" /> {{ mode.label }}</template
+          >
+          <template v-else>{{ status.mode }}</template>
+        </dd>
         <dt>Model</dt>
         <dd>{{ modelLabel }}</dd>
         <dt>Effort</dt>

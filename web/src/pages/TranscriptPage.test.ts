@@ -157,7 +157,13 @@ describe("TranscriptPage", () => {
     const { c } = await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2")
     expect(api).toHaveBeenCalledWith("GET", "/api/sessions/s2/messages?limit=50")
-    expect(screen.getAllByRole("button", { name: /🗜 Compacted/ })).toHaveLength(1)
+    const compacted = screen.getByRole("button", { name: "Compacted · summary" })
+    expect(compacted.querySelector("svg.lucide-chevron-right")).not.toBeNull()
+    expect(
+      compacted.closest('[data-slot="marker"]')!.querySelector("svg.lucide-fold-vertical"),
+    ).not.toBeNull()
+    await userEvent.setup().click(compacted)
+    expect(compacted.querySelector("svg.lucide-chevron-down")).not.toBeNull()
     expect(within(item(c, 10)).getByText("An old question.")).toBeTruthy()
     expect(within(item(c, 11)).getByText("Find the flaky test.")).toBeTruthy()
     expect(screen.getByRole("button", { name: /Reasoning\s*812 tokens/ })).toBeTruthy()
@@ -199,7 +205,8 @@ describe("TranscriptPage", () => {
   it("shows the read-only banner and forks into the dashboard", async () => {
     const user = userEvent.setup()
     await mk()
-    expect(screen.getByText("👁 Read-only. This session belongs to Telegram › DM.")).toBeTruthy()
+    const note = screen.getByText("Read-only. This session belongs to Telegram › DM.")
+    expect(note.closest('[role="alert"]')!.querySelector("svg.lucide-eye")).not.toBeNull()
     await user.click(btn("Fork into dashboard")!)
     expect(runCommand).toHaveBeenCalledWith("/fork from s2")
   })
@@ -337,9 +344,9 @@ describe("TranscriptPage", () => {
     expect(screen.getByRole("link", { name: "subagent run" }).getAttribute("href")).toBe(
       "/sessions/c1",
     )
-    expect(
-      screen.getByRole("link", { name: "↳ child of Release notes" }).getAttribute("href"),
-    ).toBe("/sessions/p1")
+    const parent = screen.getByRole("link", { name: "child of Release notes" })
+    expect(parent.getAttribute("href")).toBe("/sessions/p1")
+    expect(parent.querySelector("svg.lucide-corner-down-right")).not.toBeNull()
   })
 
   it("opens the arguments and the result of a tool call", async () => {
@@ -473,9 +480,12 @@ describe("TranscriptPage", () => {
     rememberListQuery("sessions", { src: "cli", page: "2" })
     try {
       await mk()
-      expect(screen.getByRole("link", { name: "‹ Sessions" }).getAttribute("href")).toBe(
+      expect(screen.getByRole("link", { name: "Sessions" }).getAttribute("href")).toBe(
         "/sessions?src=cli&page=2",
       )
+      expect(
+        screen.getByRole("link", { name: "Sessions" }).querySelector("svg.lucide-chevron-left"),
+      ).not.toBeNull()
     } finally {
       rememberListQuery("sessions", {})
     }

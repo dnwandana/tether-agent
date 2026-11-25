@@ -126,6 +126,14 @@ beforeEach(() => {
 })
 
 describe("GoalDetailPage", () => {
+  it("links back to the goal list with a chevron and the word", async () => {
+    await mk()
+    const back = screen.getByRole("link", { name: "Goals" })
+    expect(back.getAttribute("href")).toBe("/goals")
+    expect(back.querySelector("svg.lucide-chevron-left")).not.toBeNull()
+    expect(back.textContent!.trim()).toBe("Goals")
+  })
+
   it("shows the contract, the subgoals, and the gates", async () => {
     const { container } = await mk()
     const text = container.textContent!
@@ -235,7 +243,7 @@ describe("GoalDetailPage", () => {
     )
     expect(hasBtn("Wait…")).toBe(false)
     expect(hasBtn("Add gate")).toBe(false)
-    await user.click(btn("⏸ Pause"))
+    await user.click(btn("Pause"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal pause --session s1")
     await user.click(screen.getAllByRole("button", { name: "Remove" })[1])
@@ -253,7 +261,7 @@ describe("GoalDetailPage", () => {
     })
     const { container } = await mk()
     expect(container.textContent).toContain("This goal runs in tether chat. Change it there.")
-    for (const t of ["⏸ Pause", "Clear", "Remove"]) expect(hasBtn(t)).toBe(false)
+    for (const t of ["Pause", "Clear", "Remove"]) expect(hasBtn(t)).toBe(false)
   })
 
   it("resumes with a new budget, unwaits a parked goal, and drafts again", async () => {
@@ -265,6 +273,11 @@ describe("GoalDetailPage", () => {
     })
     const { container } = await mk()
     expect(container.textContent).toContain("the CI run must finish")
+    const parkedNote = screen
+      .getAllByRole("alert")
+      .find((a) => a.textContent!.includes("Parked: waits on pid 7."))!
+    expect(parkedNote.textContent).not.toContain("⏸")
+    expect(parkedNote.querySelector("svg.lucide-pause")).not.toBeNull()
     await user.click(btn("Unwait"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal unwait")
@@ -274,7 +287,7 @@ describe("GoalDetailPage", () => {
     cleanup()
     vi.mocked(api).mockResolvedValue({ ...detail, row: { ...detail.row, status: "paused" } })
     await mk()
-    await user.click(btn("▶ Resume (new budget)"))
+    await user.click(btn("Resume (new budget)"))
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal resume")
   })

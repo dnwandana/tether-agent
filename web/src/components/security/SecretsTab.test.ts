@@ -56,12 +56,20 @@ beforeEach(() => {
 })
 
 describe("SecretsTab", () => {
+  it("shows a set secret with a check icon and the word", () => {
+    render(SecretsTab, { props: { secrets: [secrets[0]] } })
+    const chip = screen.getByText("set")
+    expect(chip.getAttribute("data-slot")).toBe("badge")
+    expect(chip.querySelector("svg.lucide-check")!.classList).toContain("text-success")
+  })
+
   it("shows the time of a failed check in the short format, with the full time in the title", () => {
     const at = new Date(new Date().getFullYear(), 10, 20, 9, 12).toISOString()
     render(SecretsTab, { props: { secrets: [{ ...secrets[0], state: "check", failed_at: at }] } })
-    const chip = screen.getByText("✓ set · auth failed Nov 20 09:12")
+    const chip = screen.getByText("set · auth failed Nov 20 09:12")
     expect(chip.getAttribute("data-slot")).toBe("badge")
     expect(chip.getAttribute("title")).toBe(fullTime(at))
+    expect(chip.querySelector("svg.lucide-triangle-alert")).not.toBeNull()
   })
 
   it("shows each pin with its path and a short hash", async () => {
@@ -95,7 +103,7 @@ describe("SecretsTab", () => {
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/secrets set PYPI_TOKEN")
     expect(ui.trayOpen).toBe(true)
-    expect(screen.getByText("Type the value in the 🔑 card in ⏳ Waiting.")).toBeTruthy()
+    expect(screen.getByText("Type the value in a secret card in Waiting.")).toBeTruthy()
   })
 
   it("shows the empty text with no bound secrets", () => {

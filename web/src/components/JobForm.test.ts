@@ -247,7 +247,7 @@ describe("JobForm", () => {
     const w = await mk(job())
     await w.tick("Enabled")
     await w.save()
-    expect(toast).toHaveBeenCalledWith("❌ No such job.", "error")
+    expect(toast).toHaveBeenCalledWith("❌ No such job.", "error", { markdown: true })
     expect(toast).not.toHaveBeenCalledWith("Saved the job.", "ok")
   })
 
@@ -302,7 +302,10 @@ describe("JobForm", () => {
     const w = await mk(job())
     const chips = () =>
       w.q.queryAllByRole("button", { name: /^Remove / }).map((b) => b.textContent!.trim())
-    expect(chips()).toEqual(["github ✕"])
+    expect(chips()).toEqual(["github"])
+    expect(
+      w.q.getByRole("button", { name: "Remove github" }).querySelector("svg.lucide-x"),
+    ).not.toBeNull()
     const search = w.q.getByRole("searchbox", { name: "Search skills" })
     await w.u.type(search, "NOT")
     expect(w.q.getByRole("checkbox", { name: "notes" })).toBeTruthy()

@@ -79,7 +79,7 @@ describe("turn store", () => {
     expect(v.tools).toEqual([
       {
         ...tool,
-        preview: '🔀 [2/3] browser_navigate "https://example.com"',
+        preview: '[2/3] browser_navigate "https://example.com"',
         state: "error",
         duration_ms: 4200,
         text: "FAIL\n[exit code: 1]",
@@ -94,7 +94,7 @@ describe("turn store", () => {
       { name: "tool.start", data: tool },
       { name: "progress", data: { batch: "b1", child: "1/2", tool: "terminal", preview: "" } },
     ])
-    expect(t.turn.view!.tools[0].preview).toBe("🔀 [1/2] terminal")
+    expect(t.turn.view!.tools[0].preview).toBe("[1/2] terminal")
   })
 
   it("keeps the queue and the acks", () => {

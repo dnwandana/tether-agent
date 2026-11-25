@@ -4,31 +4,34 @@ import type { Button, ReplyView } from "../api/types.gen"
 import { confirm, toast, type ToastKind } from "../stores/ui"
 import { onEvent } from "./bus"
 import { friendlyError } from "./errors"
+import { splitGlyph } from "./glyphs"
 
 export type ResultNoteData = {
   title: string
   at: Date
   text: string
-  kind: "info" | "warn" | "error"
+  kind: "ok" | "info" | "warn" | "error"
 }
 
 const FOLLOW_MS = 60_000
 const TEXT_PENDING = "Still running…"
 const TEXT_LOST = "The reply did not come. See the chat or the log."
 
-const ERROR_START = ["❌", "🚫", "⛔", "🔒"]
-const WARN_START = ["⚠", "⏳", "ℹ"]
-const OK_START = ["✅", "✓", "💾", "🗄", "✏", "🔀", "🆕", "↩", "🍴"]
+// The keys of glyphs.json that start a reply of each kind.
+const ERROR_KEYS = ["denied", "refused", "human-only"]
+const WARN_KEYS = ["warning", "waiting", "info"]
+const OK_KEYS = ["ok", "done", "saved", "archived", "renamed", "delegate", "new", "undo", "fork"]
 
-// Reads the kind of a reply from its first characters. An unknown start is never ok.
+// Reads the kind of a reply from the key of its first mark. An unknown start is never ok.
 export function replyKind(text: string): ToastKind {
-  const t = text.replaceAll("️", "").trimStart()
+  const t = text.trimStart()
   const bold = /\*\*(.+?)\*\*/s.exec(t)
   if (bold && bold[1].includes("failed")) return "error"
-  if (ERROR_START.some((p) => t.startsWith(p))) return "error"
+  const key = splitGlyph(t).glyph?.key ?? ""
+  if (ERROR_KEYS.includes(key)) return "error"
   if (t.startsWith("Usage:") || /^\/[a-z][a-z_-]*( [a-z][a-z_-]*)*: /.test(t)) return "error"
-  if (WARN_START.some((p) => t.startsWith(p))) return "warn"
-  if (OK_START.some((p) => t.startsWith(p))) return "ok"
+  if (WARN_KEYS.includes(key)) return "warn"
+  if (OK_KEYS.includes(key)) return "ok"
   return "info"
 }
 
@@ -41,7 +44,7 @@ function show(text: string, kind: ToastKind, opts: RunOpts): void {
       title: opts.title ?? text,
       at: new Date(),
       text,
-      kind: kind === "ok" ? "info" : kind,
+      kind,
     }
     return
   }

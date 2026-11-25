@@ -15,7 +15,7 @@ const time = computed(() => {
 <template>
   <span class="inline-flex items-center gap-2 text-xs text-muted-foreground" :aria-busy="stale">
     <template v-if="updatedAt">Updated {{ time }} · </template>
-    <Button type="button" variant="ghost" size="xs" @click="emit('refresh')">↻ Refresh</Button>
+    <Button type="button" variant="ghost" size="xs" @click="emit('refresh')">Refresh</Button>
     <Button
       as="a"
       variant="ghost"

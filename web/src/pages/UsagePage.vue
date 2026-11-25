@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { CircleDollarSignIcon } from "@lucide/vue"
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -137,7 +138,7 @@ const cronRows = computed(() =>
       name: j.job_name,
       deleted: !j.job_name,
       cost: usd(j.usd) + (j.unpriced ? "+" : ""),
-      flagged: n > 0 ? `💸 ${n}` : "—",
+      flagged: n,
     }
   }),
 )
@@ -148,7 +149,7 @@ const cronTotal = computed(() => {
   return {
     name: `Total · ${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}`,
     cost: usd(jobs.reduce((a, j) => a + j.usd, 0)) + (jobs.some((j) => j.unpriced) ? "+" : ""),
-    flagged: m > 0 ? `💸 ${m}` : "—",
+    flagged: m,
   }
 })
 
@@ -500,13 +501,11 @@ const legend = computed(() => {
                 @pointerenter="openTip(i, $event.currentTarget as HTMLElement)"
                 @click="openTip(i, $event.currentTarget as HTMLElement)"
               >
-                <span
+                <CircleDollarSignIcon
                   v-if="b.spike"
                   data-spike
-                  aria-hidden="true"
-                  class="absolute -top-[18px] left-1/2 -translate-x-1/2 text-xs"
-                  >💸</span
-                >
+                  class="absolute -top-[18px] left-1/2 size-3.5 -translate-x-1/2 text-warning"
+                />
                 <i
                   v-for="p in b.parts"
                   :key="p.model"
@@ -574,13 +573,28 @@ const legend = computed(() => {
                 row.name
               }}</router-link>
             </template>
+            <template #cell-flagged="{ value }"
+              ><span v-if="Number(value) > 0" class="inline-flex items-center gap-1"
+                ><CircleDollarSignIcon class="size-3.5 text-warning" /><span class="sr-only">{{
+                  "cost alert "
+                }}</span
+                >{{ value }}</span
+              ><template v-else>—</template></template
+            >
             <template v-if="cronRows.length" #footer>
               <TableRow>
                 <TableCell
                   ><b>{{ cronTotal.name }}</b></TableCell
                 >
                 <TableCell class="text-right tabular-nums">{{ cronTotal.cost }}</TableCell>
-                <TableCell class="text-right tabular-nums">{{ cronTotal.flagged }}</TableCell>
+                <TableCell class="text-right tabular-nums"
+                  ><span v-if="Number(cronTotal.flagged) > 0" class="inline-flex items-center gap-1"
+                    ><CircleDollarSignIcon class="size-3.5 text-warning" /><span class="sr-only">{{
+                      "cost alert "
+                    }}</span
+                    >{{ cronTotal.flagged }}</span
+                  ><template v-else>—</template></TableCell
+                >
               </TableRow>
             </template>
           </DataTable>

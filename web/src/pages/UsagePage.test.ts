@@ -225,7 +225,15 @@ describe("UsagePage", () => {
     const text = document.body.textContent!
     expect(text).toContain("86%")
     expect(text).toContain("$1.1203+")
-    expect(text).toContain("💸 1")
+    expect(text).not.toContain("💸")
+    const jobRow = bodyRows(cronRegion()).find((r) => r.textContent!.includes("nightly-backup"))!
+    expect(jobRow.querySelector("svg.lucide-circle-dollar-sign")!.classList).toContain(
+      "text-warning",
+    )
+    expect(within(jobRow).getByText("cost alert").classList).toContain("sr-only")
+    expect(jobRow.textContent).toContain("1")
+    // A space keeps the word and the count apart for a screen reader.
+    expect(jobRow.textContent).toMatch(/cost alert 1/)
     expect(
       within(cronRegion()).getByRole("link", { name: "nightly-backup" }).getAttribute("href"),
     ).toBe("/jobs/j1")
@@ -304,7 +312,11 @@ describe("UsagePage", () => {
   it("marks a day with a flagged cron run", async () => {
     await mk()
     const b = bars()
-    expect(b[0].querySelector("[data-spike]")!.textContent).toBe("💸")
+    const spike = b[0].querySelector("[data-spike]")!
+    expect(spike.tagName.toLowerCase()).toBe("svg")
+    expect(spike.classList).toContain("lucide-circle-dollar-sign")
+    expect(spike.classList).toContain("text-warning")
+    expect(spike.getAttribute("aria-hidden")).toBe("true")
     expect(b[1].querySelector("[data-spike]")).toBeNull()
   })
 
@@ -384,6 +396,10 @@ describe("UsagePage", () => {
     const rows = bodyRows(cronRegion())
     expect(rows[rows.length - 1].textContent).toContain("Total · 1 job")
     expect(rows[rows.length - 1].textContent).toContain("$0.3120")
+    const total = rows[rows.length - 1]
+    expect(total.querySelector("svg.lucide-circle-dollar-sign")).not.toBeNull()
+    expect(within(total).getByText("cost alert").classList).toContain("sr-only")
+    expect(total.textContent).toMatch(/cost alert \d/)
   })
 
   it("shows a deleted job as text", async () => {

@@ -12,6 +12,7 @@ const note = (over: Partial<ResultNoteData> = {}): ResultNoteData => ({
   ...over,
 })
 const box = () => document.querySelector<HTMLElement>('[data-slot="alert"]')
+const noteBody = () => box()!.querySelector<HTMLElement>(".typeset.typeset-chat")!
 
 describe("ResultNote", () => {
   it("renders nothing with no note", () => {
@@ -48,12 +49,32 @@ describe("ResultNote", () => {
     expect(box()!.dataset.kind).toBe("warn")
   })
 
-  it("emits close on ✕", async () => {
+  it("emits close on the X button", async () => {
     const user = userEvent.setup()
     const { emitted } = render(ResultNote, { props: { note: note() } })
     const close = screen.getByRole("button", { name: "Close" })
-    expect(close.textContent?.trim()).toBe("✕")
+    expect(close.textContent?.trim()).toBe("")
+    expect(close.querySelector("svg.lucide-x")).not.toBeNull()
     await user.click(close)
     expect(emitted().close).toHaveLength(1)
+  })
+
+  it("shows CircleCheck in the success color for an ok note", () => {
+    render(ResultNote, { props: { note: note({ kind: "ok", text: "✅ Saved." }) } })
+    expect(box()!.dataset.kind).toBe("ok")
+    expect(screen.getByRole("status")).toBe(box())
+    const icon = box()!.querySelector(":scope > svg")!
+    expect(icon.classList).toContain("lucide-circle-check")
+    expect(icon.classList).toContain("text-success")
+  })
+
+  it("drops a lead mark of the same tone from the body and keeps another", () => {
+    const r = render(ResultNote, { props: { note: note({ kind: "ok", text: "✅ Saved." }) } })
+    expect(noteBody().querySelectorAll("svg.glyph")).toHaveLength(0)
+    expect(noteBody().textContent?.trim()).toBe("Saved.")
+    r.unmount()
+    render(ResultNote, { props: { note: note({ kind: "info", text: "⏸ Paused job x" }) } })
+    expect(noteBody().querySelectorAll("svg.glyph")).toHaveLength(1)
+    expect(noteBody().textContent).toContain("Paused job x")
   })
 })

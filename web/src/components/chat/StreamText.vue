@@ -13,8 +13,11 @@ const html = computed(() => renderMarkdown(props.text))
   <MessageContent>
     <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown escapes raw HTML -->
     <div class="typeset typeset-chat" v-html="html" />
-    <span v-if="props.running" aria-hidden="true" class="animate-pulse motion-reduce:animate-none"
-      >▉</span
-    >
+    <span
+      v-if="props.running"
+      data-cursor
+      aria-hidden="true"
+      class="inline-block h-[1em] w-[0.5em] translate-y-[0.15em] animate-pulse bg-foreground motion-reduce:animate-none"
+    />
   </MessageContent>
 </template>

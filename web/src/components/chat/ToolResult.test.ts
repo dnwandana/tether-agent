@@ -86,7 +86,9 @@ describe("ToolResult", () => {
         tool: tool("web_fetch", text, { args: '{"url":"https://keepachangelog.com/en/1.1.0/"}' }),
       },
     })
-    const trigger = screen.getByRole("button", { name: /⚠ Untrusted content/ })
+    const trigger = screen.getByRole("button", { name: /Untrusted content/ })
+    expect(trigger.querySelector("svg.lucide-triangle-alert")).not.toBeNull()
+    expect(trigger.textContent).not.toContain("⚠")
     expect(trigger.textContent).toContain("https://keepachangelog.com/en/1.1.0/")
     expect(trigger.getAttribute("aria-expanded")).toBe("false")
     expect(trigger.closest("[data-untrusted]")).not.toBeNull()

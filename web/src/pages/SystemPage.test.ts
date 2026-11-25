@@ -354,10 +354,38 @@ describe("SystemPage", () => {
 
   it("shows the counts of the doctor in its header and links a page name", async () => {
     await mk()
-    expect(screen.getByText("ran 14:02 · 1 ✓ · 0 ⚠ · 1 ✗")).toBeTruthy()
+    expect(screen.getByText("ran 14:02 · 1 passed · 0 warnings · 1 failed")).toBeTruthy()
     expect(screen.getByRole("link", { name: "the Models page" }).getAttribute("href")).toBe(
       "/models",
     )
+  })
+
+  it("marks each doctor check with an icon and a word, and each runtime title with an icon", async () => {
+    ;(data["/api/doctor"] as any).checks.push({
+      status: "skip",
+      name: "browser",
+      detail: "not set",
+      next: "",
+    })
+    await mk()
+    const checks = within(screen.getByRole("list", { name: "Doctor checks" })).getAllByRole(
+      "listitem",
+    )
+    expect(checks[0].querySelector("svg.lucide-check")!.classList).toContain("text-success")
+    expect(within(checks[0]).getByText("passed").classList).toContain("sr-only")
+    expect(checks[1].querySelector("svg.lucide-x")!.classList).toContain("text-destructive")
+    expect(within(checks[1]).getByText("failed").classList).toContain("sr-only")
+    expect(checks[2].querySelector("svg")).toBeNull()
+    expect(checks[2].textContent).not.toContain("•")
+    for (const [title, icon] of [
+      ["Delegation batches", "lucide-git-branch"],
+      ["ACP sessions", "lucide-bot"],
+      ["Background processes", "lucide-square-terminal"],
+      ["Browser", "lucide-globe"],
+    ]) {
+      const t = screen.getByText(title).closest('[data-slot="card-title"]')!
+      expect(t.querySelector(`svg.${icon}`)).not.toBeNull()
+    }
   })
 
   it("shows an empty doctor with Run doctor", async () => {

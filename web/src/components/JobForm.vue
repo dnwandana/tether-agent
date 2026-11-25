@@ -12,6 +12,7 @@ import { friendlyError } from "../lib/errors"
 import { useDirty } from "../lib/dirty"
 import { shortTime } from "../lib/time"
 import { toast } from "../stores/ui"
+import { XIcon } from "@lucide/vue"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import {
@@ -215,7 +216,8 @@ async function save(): Promise<void> {
         // A reply with no text is an ack that comes later. It counts as ok.
         const text = "text" in r ? r.text : ""
         const kind = replyKind(text)
-        if (kind === "error" || kind === "warn") toast(text, kind)
+        // The reply is Go Markdown with marks, so the toast renders it with its icons.
+        if (kind === "error" || kind === "warn") toast(text, kind, { markdown: true })
         else toast(next ? `Saved the job. Next run: ${next}.` : "Saved the job.", "ok")
       } catch (e) {
         toast(
@@ -370,7 +372,7 @@ onMounted(async () => {
             :aria-label="`Remove ${s}`"
             @click="removeSkill(s)"
           >
-            {{ s }} ✕
+            {{ s }} <XIcon />
           </Button>
         </div>
         <Input

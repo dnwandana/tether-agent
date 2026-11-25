@@ -44,19 +44,19 @@ describe("AppToaster", () => {
   it("dismisses the vue-sonner toast when the store closes it", async () => {
     const dismiss = vi.spyOn(sonner, "dismiss")
     render(AppToaster)
-    toast("⏳ Busy", "warn")
-    await screen.findByText("⏳ Busy")
+    toast("The gateway is busy.", "warn")
+    await screen.findByText("The gateway is busy.")
     const id = toasts[0].id
     closeToast(id)
     await nextTick()
     expect(dismiss).toHaveBeenCalledWith(id)
   })
 
-  it("closes a toast from its ✕ button", async () => {
+  it("closes a toast from its close button", async () => {
     const user = userEvent.setup()
     render(AppToaster)
-    toast("⏳ Busy", "warn")
-    await screen.findByText("⏳ Busy")
+    toast("The gateway is busy.", "warn")
+    await screen.findByText("The gateway is busy.")
     await user.click(screen.getByRole("button", { name: "Close" }))
     expect(toasts).toHaveLength(0)
   })

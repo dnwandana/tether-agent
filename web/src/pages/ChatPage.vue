@@ -6,7 +6,10 @@ import { turn } from "../stores/turn"
 import { cards } from "../stores/cards"
 import { status } from "../stores/status"
 import { notices } from "../stores/notices"
-import { renderMarkdown } from "../lib/markdown"
+import { renderSystemText } from "../lib/markdown"
+import { MODES, buttonLabel } from "../lib/glyphs"
+import { PaperclipIcon } from "@lucide/vue"
+import ButtonLabel from "../components/ButtonLabel.vue"
 import { useCommand } from "../lib/command"
 import MessageList from "../components/chat/MessageList.vue"
 import ReasoningBlock from "../components/chat/ReasoningBlock.vue"
@@ -33,33 +36,32 @@ import { Marker, MarkerContent } from "@/components/ui/marker"
 import { Button } from "@/components/ui/button"
 import { Popover, PopoverAnchor, PopoverContent } from "@/components/ui/popover"
 
-const MODES: Record<string, string> = {
-  "read-only": "👁 Read-only",
-  guarded: "🛡 Guarded",
-  full: "⚡ Full",
-}
 const SUGGESTED = ["/help", "/usage today", "/model", "/jobs"]
 
 // A sent message shows here until the server has saved it. A message that waits in the queue
 // shows in the queue strip instead.
-const pending = ref<{ key: number; text: string; after: number }[]>([])
+type Pending = { key: number; text: string; files: string[]; after: number }
+const pending = ref<Pending[]>([])
 let pendingKey = 0
 const shownPending = computed(() =>
   pending.value.filter((p) => !session.messages.some((m) => m.role === "user" && m.id > p.after)),
 )
-function pendingText(p: { text: string; files: string[] }): string {
-  return p.text || p.files.map((f) => "📎 " + f).join("\n")
+// Returns the match key of a send: its text, else the names of its files.
+function sendKey(p: { text: string; files: string[] }): string {
+  return p.text || p.files.join("\n")
 }
 function onSent(p: { text: string; files: string[] }): void {
   if (p.text.startsWith("/") || turn.view?.running) return
-  const text = pendingText(p)
-  if (text === "") return
-  pending.value = [...shownPending.value, { key: ++pendingKey, text, after: session.lastId }]
+  if (sendKey(p) === "") return
+  const files = p.text ? [] : [...p.files]
+  pending.value = [
+    ...shownPending.value,
+    { key: ++pendingKey, text: p.text, files, after: session.lastId },
+  ]
 }
 // Removes the newest bubble of a send that failed. The retry adds a new bubble.
 function onFailed(p: { text: string; files: string[] }): void {
-  const text = pendingText(p)
-  const i = pending.value.map((x) => x.text).lastIndexOf(text)
+  const i = pending.value.map(sendKey).lastIndexOf(sendKey(p))
   if (i >= 0) pending.value = pending.value.filter((_, j) => j !== i)
 }
 
@@ -67,7 +69,8 @@ const selected = ref<ToolView | null>(null)
 const drawerOpen = ref(false)
 
 const empty = computed(() => session.messages.length === 0 && !turn.view)
-const modeLabel = computed(() => MODES[status.mode] ?? status.mode)
+// The icon and the label of the current mode. An unknown mode shows as typed.
+const mode = computed(() => MODES[status.mode] ?? null)
 const chatCards = computed(() => cards.open.filter((c) => c.kind !== "signin"))
 // The records of the session on the screen, oldest first. A clarify or a secret card has no
 // session, and it comes only from a dashboard turn, so it belongs to this chat.
@@ -139,8 +142,11 @@ onMounted(() => {
                 <div class="flex flex-col items-center gap-3 py-10 text-center">
                   <h2 class="text-xl font-semibold tracking-tight">New session</h2>
                   <p class="text-sm text-muted-foreground">
-                    {{ modeLabel }} · Dashboard · {{ session.model }}. Ask anything, or try one of
-                    these.
+                    <template v-if="mode"
+                      ><component :is="mode.icon" class="inline size-4 align-text-bottom" />
+                      {{ mode.label }}</template
+                    ><template v-else>{{ status.mode }}</template> · Dashboard ·
+                    {{ session.model }}. Ask anything, or try one of these.
                   </p>
                   <Popover :open="reply !== null" @update:open="onReplyOpen">
                     <PopoverAnchor as-child>
@@ -162,8 +168,8 @@ onMounted(() => {
                     </PopoverAnchor>
                     <PopoverContent class="flex w-[min(420px,calc(100vw-32px))] flex-col gap-2">
                       <template v-if="reply">
-                        <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown escapes raw HTML -->
-                        <div class="typeset typeset-chat" v-html="renderMarkdown(reply.text)" />
+                        <!-- eslint-disable-next-line vue/no-v-html -- renderSystemText escapes raw HTML -->
+                        <div class="typeset typeset-chat" v-html="renderSystemText(reply.text)" />
                         <div
                           v-for="(row, i) in reply.buttons"
                           :key="i"
@@ -176,9 +182,10 @@ onMounted(() => {
                             variant="secondary"
                             size="sm"
                             :disabled="b.data === '·'"
+                            :aria-pressed="buttonLabel(b.text).current || undefined"
                             @click="run(b.data)"
                           >
-                            {{ b.text }}
+                            <ButtonLabel :text="b.text" />
                           </Button>
                         </div>
                       </template>
@@ -207,8 +214,8 @@ onMounted(() => {
                 :message-id="'notice-' + i"
               >
                 <Marker>
-                  <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown escapes raw HTML -->
-                  <MarkerContent class="[&_p]:m-0" v-html="renderMarkdown(n.text)" />
+                  <!-- eslint-disable-next-line vue/no-v-html -- renderSystemText escapes raw HTML -->
+                  <MarkerContent class="[&_p]:m-0" v-html="renderSystemText(n.text)" />
                 </Marker>
               </MessageScrollerItem>
               <MessageScrollerItem
@@ -219,7 +226,17 @@ onMounted(() => {
               >
                 <Message align="end" class="opacity-60">
                   <Bubble variant="muted" align="end">
-                    <BubbleContent class="whitespace-pre-wrap">{{ p.text }}</BubbleContent>
+                    <BubbleContent v-if="p.text" class="whitespace-pre-wrap">{{
+                      p.text
+                    }}</BubbleContent>
+                    <BubbleContent v-else>
+                      <ul class="flex flex-col gap-1">
+                        <li v-for="(f, i) in p.files" :key="i" class="flex items-center gap-1.5">
+                          <PaperclipIcon class="size-4 shrink-0" />
+                          <span class="[overflow-wrap:anywhere]">{{ f }}</span>
+                        </li>
+                      </ul>
+                    </BubbleContent>
                   </Bubble>
                 </Message>
               </MessageScrollerItem>

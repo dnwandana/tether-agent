@@ -82,6 +82,12 @@ describe("DevicesTable", () => {
     const marks = q.getAllByText("This device")
     expect(marks).toHaveLength(1)
     expect(marks[0].getAttribute("data-slot")).toBe("badge")
+    expect(
+      q.getByText(
+        /A new device signs in when you tap Allow in Telegram or on a signed-in device\./,
+      ),
+    ).toBeTruthy()
+    expect(r.container.textContent).not.toContain("✅")
   })
 
   it("revokes another device after a confirm", async () => {

@@ -1,5 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from "vue"
+import {
+  ChevronLeftIcon,
+  CircleDollarSignIcon,
+  PauseIcon,
+  ScrollTextIcon,
+  TriangleAlertIcon,
+  XIcon,
+} from "@lucide/vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, ApiError } from "../api/client"
 import type { JobDetail, RunRow } from "../api/types.gen"
@@ -15,7 +23,8 @@ import SidePanel from "../components/SidePanel.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
-import { costText, lastSeven, stateGlyph, type Bar } from "../lib/jobbars"
+import { GLYPH_TONE_CLASS, splitGlyph } from "../lib/glyphs"
+import { costText, lastSeven, stateIcon, type Bar } from "../lib/jobbars"
 import { useLiveData } from "../lib/live"
 import { clampPage, readSize, writeSize, type PageSize } from "../lib/pager"
 import { readableSchedule } from "../lib/schedule"
@@ -27,6 +36,13 @@ import { toast } from "../stores/ui"
 // Returns the schedule text in the browser zone, with the raw text in the title.
 function sched(raw: string): { text: string; title: string } {
   return readableSchedule(raw, host.zone, host.offsetMin, -new Date().getTimezoneOffset())
+}
+
+// Returns a Go text with no known lead mark. The Alert or the column already shows the state.
+// An unknown lead emoji stays, because the last output is often model text.
+function plain(s: string): string {
+  const g = splitGlyph(s)
+  return g.glyph === null ? s : g.rest
 }
 
 const route = useRoute()
@@ -197,8 +213,10 @@ function closeForm(): void {
 
 <template>
   <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
-    <RouterLink class="text-sm text-muted-foreground hover:text-foreground" :to="{ name: 'jobs' }"
-      >‹ Jobs</RouterLink
+    <RouterLink
+      class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+      :to="{ name: 'jobs' }"
+      ><ChevronLeftIcon class="size-4" />Jobs</RouterLink
     >
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
@@ -210,7 +228,12 @@ function closeForm(): void {
     />
     <div v-else-if="detail && j" class="flex flex-col gap-6" :aria-busy="stale || undefined">
       <div class="flex flex-wrap items-center gap-2">
-        <h1 class="text-xl font-semibold tracking-tight">{{ stateGlyph[j.state] }} {{ j.name }}</h1>
+        <h1 class="flex items-center gap-2 text-xl font-semibold tracking-tight">
+          <component
+            :is="stateIcon[j.state].icon"
+            :class="cn('size-5 shrink-0', GLYPH_TONE_CLASS[stateIcon[j.state].tone])"
+          /><span class="sr-only">{{ stateIcon[j.state].word }}</span> {{ j.name }}
+        </h1>
         <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
         <span v-if="done" class="text-muted-foreground">done</span>
         <template v-else>
@@ -220,10 +243,10 @@ function closeForm(): void {
             type="button"
             @click="command(`/jobs pause ${j.id}`)"
           >
-            ⏸ Pause
+            Pause
           </Button>
           <Button v-else variant="secondary" type="button" @click="command(`/jobs resume ${j.id}`)">
-            ▶ Resume
+            Resume
           </Button>
           <Button
             variant="secondary"
@@ -231,21 +254,23 @@ function closeForm(): void {
             :disabled="!j.enabled"
             @click="command(`/jobs run ${j.id}`)"
           >
-            ⚡ Run now
+            Run now
           </Button>
           <span v-if="!j.enabled" class="text-xs text-muted-foreground">Resume the job first.</span>
         </template>
-        <Button variant="secondary" type="button" @click="formOpen = true">✎ Edit</Button>
-        <Button variant="destructive" type="button" @click="del()">🗑 Delete…</Button>
+        <Button variant="secondary" type="button" @click="formOpen = true">Edit</Button>
+        <Button variant="destructive" type="button" @click="del()">Delete…</Button>
       </div>
 
       <Alert v-if="detail.last_error" variant="destructive">
-        <AlertTitle>⚠ Failing · {{ j.fail_streak }} in a row.</AlertTitle>
-        <AlertDescription class="font-mono">{{ detail.last_error }}</AlertDescription>
+        <TriangleAlertIcon />
+        <AlertTitle>Failing · {{ j.fail_streak }} in a row.</AlertTitle>
+        <AlertDescription class="font-mono">{{ plain(detail.last_error) }}</AlertDescription>
       </Alert>
       <Alert v-if="j.pause_reason === 'schedule'" class="text-warning">
+        <PauseIcon />
         <AlertDescription>
-          ⏸ Paused: the schedule {{ j.schedule }} is not valid. Edit the schedule to resume.
+          Paused: the schedule {{ j.schedule }} is not valid. Edit the schedule to resume.
         </AlertDescription>
       </Alert>
 
@@ -347,7 +372,7 @@ function closeForm(): void {
               <dt class="text-muted-foreground">Pause reason</dt>
               <dd class="min-w-0 break-words">{{ pauseText }}</dd>
               <dt class="text-muted-foreground">Last output</dt>
-              <dd class="min-w-0 font-mono break-words">{{ detail.last_output || "—" }}</dd>
+              <dd class="min-w-0 font-mono break-words">{{ plain(detail.last_output) || "—" }}</dd>
               <template v-if="detail.watch_limit_hit"
                 ><dt class="text-muted-foreground">Watch</dt>
                 <dd class="min-w-0 break-words text-warning">
@@ -363,7 +388,9 @@ function closeForm(): void {
         </Card>
       </div>
 
-      <h2 class="text-lg font-semibold">📜 Runs</h2>
+      <h2 class="flex items-center gap-2 text-lg font-semibold">
+        <ScrollTextIcon class="size-4 text-muted-foreground" />Runs
+      </h2>
       <StateBlock
         v-if="j.history_off"
         state="empty"
@@ -373,7 +400,7 @@ function closeForm(): void {
         v-else-if="detail.runs_total === 0"
         state="empty"
         :text="firstRunText"
-        :action="j.enabled ? '⚡ Run now' : undefined"
+        :action="j.enabled ? 'Run now' : undefined"
         @action="command(`/jobs run ${j.id}`)"
       />
       <template v-else>
@@ -409,8 +436,8 @@ function closeForm(): void {
             <span
               v-if="(row as unknown as RunRow).delivery_err"
               class="block truncate font-mono text-destructive"
-              :title="(row as unknown as RunRow).delivery_err"
-              >{{ (row as unknown as RunRow).delivery_err }}</span
+              :title="plain((row as unknown as RunRow).delivery_err)"
+              >{{ plain((row as unknown as RunRow).delivery_err) }}</span
             >
           </template>
           <template #cell-cost="{ row }">
@@ -418,7 +445,12 @@ function closeForm(): void {
               (row as unknown as RunRow).cost_known
                 ? usd((row as unknown as RunRow).cost_usd)
                 : "—"
-            }}{{ (row as unknown as RunRow).cost_flag ? " 💸" : "" }}
+            }}<template v-if="(row as unknown as RunRow).cost_flag"
+              ><CircleDollarSignIcon class="ml-1 inline size-3.5 text-warning" /><span
+                class="sr-only"
+                >cost alert</span
+              ></template
+            >
           </template>
           <template #cell-actions="{ row }">
             <Button
@@ -458,7 +490,7 @@ function closeForm(): void {
             aria-label="Close"
             @click="output = null"
           >
-            ✕
+            <XIcon />
           </Button>
         </CardHeader>
         <CardContent>

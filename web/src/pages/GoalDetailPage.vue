@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
+import { ChevronLeftIcon, PauseIcon } from "@lucide/vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, ApiError } from "../api/client"
 import type { GoalDetail } from "../api/types.gen"
@@ -241,8 +242,10 @@ watch(
 
 <template>
   <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
-    <RouterLink class="text-sm text-muted-foreground hover:text-foreground" :to="{ name: 'goals' }"
-      >‹ Goals</RouterLink
+    <RouterLink
+      class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+      :to="{ name: 'goals' }"
+      ><ChevronLeftIcon class="size-4" />Goals</RouterLink
     >
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
@@ -264,10 +267,10 @@ watch(
         <LiveHeader :updated-at="updatedAt" :stale="stale" @refresh="refresh" />
         <template v-if="own">
           <Button v-if="d.row.status === 'paused'" variant="secondary" @click="resume">
-            ▶ Resume (new budget)
+            Resume (new budget)
           </Button>
           <Button v-else-if="d.row.status === 'active'" variant="secondary" @click="pause">
-            ⏸ Pause
+            Pause
           </Button>
           <Button v-if="parked" variant="secondary" @click="unwait">Unwait</Button>
           <Button variant="secondary" @click="waitOpen = true">Wait…</Button>
@@ -278,7 +281,7 @@ watch(
         </template>
         <template v-else-if="remote">
           <Button v-if="d.row.status === 'active'" variant="secondary" @click="pause">
-            ⏸ Pause
+            Pause
           </Button>
           <Button variant="destructive" @click="clearGoal">Clear</Button>
         </template>
@@ -325,7 +328,8 @@ watch(
         </Card>
       </div>
       <Alert v-if="parked" class="text-warning">
-        <AlertDescription>⏸ Parked: waits on {{ d.row.wait_target }}.</AlertDescription>
+        <PauseIcon />
+        <AlertDescription>Parked: waits on {{ d.row.wait_target }}.</AlertDescription>
       </Alert>
       <div class="grid gap-4 lg:grid-cols-2">
         <Card>

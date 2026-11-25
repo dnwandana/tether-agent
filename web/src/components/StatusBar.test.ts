@@ -113,7 +113,9 @@ describe("StatusBar", () => {
     const t = screen.getByRole("banner").textContent ?? ""
     expect(t).toContain("glm-4.6")
     expect(t).toContain("primary")
-    expect(t).toContain("🛡 Guarded")
+    expect(t).toContain("Guarded")
+    expect(t).not.toContain("🛡")
+    expect(act("security")!.querySelector("svg.lucide-shield")).not.toBeNull()
     expect(t).toContain("· Dashboard")
     expect(t).toContain("2 running")
     expect(t).toContain("$1.84")
@@ -133,10 +135,16 @@ describe("StatusBar", () => {
     cards.open = []
     await mountBar()
     expect(act("models")!.dataset.tone).toBe("warn")
+    const fallback = act("models")!.querySelector("svg.lucide-triangle-alert")!
+    expect(fallback.getAttribute("class")).toContain("text-warning")
+    expect(within(act("models")!).getByText("fallback").className).toContain("sr-only")
+    expect(act("models")!.textContent).not.toContain("⚠")
     expect(act("models")!.textContent).toContain("deepseek-chat")
     expect(act("models")!.textContent).toContain("fallback answers · HTTP 503")
     expect(act("security")!.dataset.tone).toBe("warn")
-    expect(act("security")!.textContent).toContain("⚡ Full")
+    expect(act("security")!.textContent).toContain("Full")
+    expect(act("security")!.textContent).not.toContain("⚡")
+    expect(act("security")!.querySelector("svg.lucide-zap")).not.toBeNull()
     expect(screen.getByRole("banner").textContent).toContain("$1.84+")
     expect(act("offline")).not.toBeNull()
     expect(document.title).toBe("Tether Agent Dashboard")
@@ -220,7 +228,21 @@ describe("StatusBar", () => {
       browser_on: true,
     })
     await mountBar()
-    expect(act("system")!.textContent).toContain("🔀 1 · 🤖 1 · 💻 2 · 🌐")
+    const list = act("system")!.querySelector<HTMLElement>(".max-lg\\:hidden")!
+    expect([...list.querySelectorAll("svg")].map((s) => s.getAttribute("class"))).toEqual([
+      expect.stringContaining("lucide-git-branch"),
+      expect.stringContaining("lucide-bot"),
+      expect.stringContaining("lucide-square-terminal"),
+      expect.stringContaining("lucide-globe"),
+    ])
+    expect([...list.querySelectorAll(".sr-only")].map((s) => s.textContent)).toEqual([
+      "delegation batches",
+      "ACP sessions",
+      "background processes",
+      "browser",
+    ])
+    expect(list.textContent).toContain("2")
+    expect(list.textContent).not.toMatch(/🔀|🤖|💻|🌐/)
     expect(act("system")!.querySelector(".max-lg\\:hidden")).not.toBeNull()
     Object.assign(status, {
       running_batches: 0,
@@ -359,7 +381,7 @@ describe("StatusBar", () => {
     cards.open = [...cards.open, card("a4")] as never
     await flushPromises()
     expect(tone).toHaveBeenCalledTimes(1)
-    expect(shown).toHaveBeenCalledWith("Tether: 🛡 Approval needed", { body: "rm -rf build/" })
+    expect(shown).toHaveBeenCalledWith("Tether: Approval needed", { body: "rm -rf build/" })
   })
   it("closes the audio context after the tone", async () => {
     const closed = vi.fn()

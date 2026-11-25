@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { render, screen } from "@testing-library/vue"
+import { render } from "@testing-library/vue"
 import StreamText from "./StreamText.vue"
 
 const body = (c: Element) => c.querySelector('[data-slot="message-content"]')!
@@ -11,9 +11,12 @@ describe("StreamText", () => {
     expect(md.classList.contains("typeset-chat")).toBe(true)
     expect(md.innerHTML).toContain("<strong>done</strong>")
     expect(md.innerHTML).toContain("&lt;b&gt;x&lt;/b&gt;")
-    const cursor = screen.getByText("▉")
+    const cursor = body(r.container).querySelector<HTMLElement>("[data-cursor]")!
     expect(cursor.getAttribute("aria-hidden")).toBe("true")
-    expect(body(r.container).contains(cursor)).toBe(true)
+    expect(cursor.textContent).toBe("")
+    expect(cursor.className).toContain("bg-foreground")
+    expect(cursor.className).toContain("animate-pulse")
+    expect(cursor.className).toContain("motion-reduce:animate-none")
   })
 
   it("keeps a fenced code block as plain pre text", () => {
@@ -24,7 +27,7 @@ describe("StreamText", () => {
   })
 
   it("has no cursor when the turn ended", () => {
-    render(StreamText, { props: { text: "Done.", running: false } })
-    expect(screen.queryByText("▉")).toBeNull()
+    const r = render(StreamText, { props: { text: "Done.", running: false } })
+    expect(r.container.querySelector("[data-cursor]")).toBeNull()
   })
 })

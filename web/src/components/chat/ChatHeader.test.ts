@@ -142,7 +142,11 @@ describe("ChatHeader", () => {
     session.goalLine = "↻ Goal 8/20: two tests fail"
     const user = userEvent.setup()
     const { router } = await mk()
-    await user.click(screen.getByRole("button", { name: "↻ Goal 8/20: two tests fail" }))
+    const goal = screen.getByRole("button", { name: "Goal 8/20: two tests fail" })
+    expect(goal.getAttribute("title")).toBe("Goal 8/20: two tests fail")
+    expect(goal.querySelector("svg.lucide-refresh-cw")).not.toBeNull()
+    expect(goal.textContent).not.toContain("↻")
+    await user.click(goal)
     await flushPromises()
     expect(router.currentRoute.value.fullPath).toBe("/goals/s1")
   })
@@ -205,10 +209,11 @@ describe("ChatHeader", () => {
 
   it("shows the model chip as model (entry)", async () => {
     await mk()
-    expect(modelChip().textContent!.trim()).toBe("model glm-4.6 (primary) ▾")
+    expect(modelChip().textContent!.trim()).toBe("model glm-4.6 (primary)")
     session.entry = ""
     await flushPromises()
-    expect(modelChip().textContent!.trim()).toBe("model glm-4.6 ▾")
+    expect(modelChip().textContent!.trim()).toBe("model glm-4.6")
+    expect(modelChip().querySelector("svg.lucide-chevron-down")).not.toBeNull()
   })
 
   it("hides the session actions while no session exists", async () => {
@@ -291,7 +296,74 @@ describe("ChatHeader", () => {
     expect(screen.queryByRole("dialog")).toBeNull()
     await user.click(screen.getByRole("button", { name: "Session menu" }))
     await user.click(screen.getByRole("menuitem", { name: "Custom prompt…" }))
-    await user.click(await screen.findByRole("button", { name: "🧹 Use the base prompt" }))
+    await user.click(await screen.findByRole("button", { name: "Use the base prompt" }))
     expect(runCommand).toHaveBeenLastCalledWith("/prompt clear")
+  })
+
+  it("shows the Go marks of a model menu as icons and checks the current entry", async () => {
+    vi.mocked(runCommand).mockResolvedValueOnce(
+      reply("✅ Pick a provider.", [
+        [
+          { text: "✓ ⚠️ old-model", data: "/model old-model" },
+          { text: "gpt-5", data: "/model gpt-5" },
+        ],
+        [{ text: "Next ▶", data: "/model page 2" }],
+      ]),
+    )
+    const user = userEvent.setup()
+    await mk()
+    await user.click(modelChip())
+    await flushPromises()
+    const menu = screen.getByRole("menu")
+    expect(menu.querySelector("svg.glyph")).not.toBeNull()
+    expect(menu.textContent).toContain("Pick a provider.")
+    expect(menu.textContent).not.toMatch(/[✅✓⚠▶]/u)
+    const old = screen.getAllByRole("menuitem").find((i) => i.textContent!.includes("old-model"))!
+    // A menuitem does not take aria-checked, so the current item says "current" to a screen reader.
+    expect(old.hasAttribute("aria-checked")).toBe(false)
+    expect(within(old).getByText("current").classList).toContain("sr-only")
+    expect(old.querySelector("svg.lucide-check")).not.toBeNull()
+    expect(old.querySelector("svg.lucide-triangle-alert")!.classList.contains("text-warning")).toBe(
+      true,
+    )
+    expect(old.textContent).toContain("not usable")
+    expect(screen.getByRole("menuitem", { name: "gpt-5" }).textContent).not.toContain("current")
+    await user.click(screen.getByRole("menuitem", { name: "Next" }))
+    expect(runCommand).toHaveBeenLastCalledWith("/model page 2")
+  })
+
+  it("shows the effort chip with a chevron", async () => {
+    await mk()
+    const chip = screen.getByRole("button", { name: /^effort / })
+    expect(chip.textContent!.trim()).toBe("effort default")
+    expect(chip.querySelector("svg.lucide-chevron-down")).not.toBeNull()
+  })
+
+  it("shows the buttons of a reply popover with the current one pressed", async () => {
+    vi.mocked(runCommand).mockResolvedValueOnce(
+      reply("🛡 **Mode:** Guarded", [
+        [
+          { text: "👁 Read-only", data: "/mode read-only" },
+          { text: "🛡 Guarded ✓", data: "/mode guarded" },
+          { text: "⚡ Full", data: "/mode full" },
+        ],
+      ]),
+    )
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "Old" }))
+    await user.type(screen.getByRole("textbox", { name: "Session title" }), "x{Enter}")
+    await flushPromises()
+    const pop = await screen.findByRole("dialog")
+    expect(pop.querySelector("svg.glyph")).not.toBeNull()
+    expect(pop.textContent).not.toMatch(/[🛡👁⚡✓]/u)
+    const guarded = within(pop).getByRole("button", { name: "Guarded" })
+    expect(guarded.getAttribute("aria-pressed")).toBe("true")
+    expect(guarded.querySelector("svg.lucide-check")).not.toBeNull()
+    expect(
+      within(pop).getByRole("button", { name: "Read-only" }).hasAttribute("aria-pressed"),
+    ).toBe(false)
+    await user.click(within(pop).getByRole("button", { name: "Full" }))
+    expect(runCommand).toHaveBeenLastCalledWith("/mode full")
   })
 })

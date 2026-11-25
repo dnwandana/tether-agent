@@ -176,10 +176,10 @@ describe("GoalsPage", () => {
   it("gives Pause and Clear to dashboard and Telegram rows", async () => {
     const user = setup()
     await mk()
-    await user.click(rowBtn("Ship v0.24", "⏸ Pause")!)
+    await user.click(rowBtn("Ship v0.24", "Pause")!)
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal pause")
-    await user.click(rowBtn("Migrate photos", "⏸ Pause")!)
+    await user.click(rowBtn("Migrate photos", "Pause")!)
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal pause --session s2")
     vi.mocked(confirm).mockResolvedValue(true)
@@ -198,8 +198,21 @@ describe("GoalsPage", () => {
     await user.click(rowBtn("Ship v0.24", "Unwait")!)
     await flushPromises()
     expect(runCommand).toHaveBeenLastCalledWith("/goal unwait")
-    expect(rowBtn("Migrate photos", "▶ Resume")).toBeNull()
+    expect(rowBtn("Migrate photos", "Resume")).toBeNull()
     expect(rowBtn("Migrate photos", "Clear")).not.toBeNull()
+  })
+
+  it("offers Resume on a paused dashboard goal", async () => {
+    const user = setup()
+    vi.mocked(api).mockResolvedValue([{ ...list[0], status: "paused" }, list[1]])
+    await mk()
+    const resume = rowBtn("Ship v0.24", "Resume")
+    expect(resume).not.toBeNull()
+    expect(resume!.textContent!.trim()).toBe("Resume")
+    expect(resume!.querySelector("svg")).toBeNull()
+    await user.click(resume!)
+    await flushPromises()
+    expect(runCommand).toHaveBeenLastCalledWith("/goal resume")
   })
 
   it("shows a CLI goal as view only", async () => {

@@ -14,6 +14,7 @@ vi.mock("../../stores/ui", async (orig) => ({ ...(await orig<object>()), toast: 
 import { api } from "../../api/client"
 import { toast } from "../../stores/ui"
 import { session } from "../../stores/session"
+import { status } from "../../stores/status"
 import TurnDrawer from "./TurnDrawer.vue"
 
 const tool = {
@@ -73,6 +74,18 @@ it("shows the tool call", () => {
   expect(screen.getByText("1.2 s")).toBeTruthy()
   expect(document.querySelector("pre")!.textContent).toBe('{\n  "command": "go test ./..."\n}')
   expect(screen.getByText("done")).toBeTruthy()
+})
+
+it("shows the icon of the tool name and the mode from MODES", () => {
+  status.mode = "guarded"
+  mk({ ...tool, emoji: "📖" })
+  const name = screen.getByText("terminal")
+  expect(name.parentElement!.querySelector("svg.lucide-square-terminal")).not.toBeNull()
+  expect(document.body.textContent).not.toContain("📖")
+  const mode = screen.getByText("Mode").nextElementSibling!
+  expect(mode.textContent!.trim()).toBe("Guarded")
+  expect(mode.querySelector("svg.lucide-shield")).not.toBeNull()
+  status.mode = "odd"
 })
 
 it("shows the hint with no tool", () => {

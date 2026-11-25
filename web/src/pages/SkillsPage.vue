@@ -315,7 +315,7 @@ async function skillAction(name: string, action: Action): Promise<void> {
   if (action === "uninstall") {
     const ok = await confirm({
       title: `Remove /${name}?`,
-      body: "A confirm card follows in ⏳ Waiting.",
+      body: "A confirm card follows in Waiting.",
       confirmLabel: "Remove",
       danger: true,
     })
@@ -332,7 +332,7 @@ async function installAnyway(): Promise<void> {
   const ok = await confirm({
     title: `${verb} /${o.name} anyway?`,
     body:
-      "The skill guard rated it caution. A confirm card follows in ⏳ Waiting." +
+      "The skill guard rated it caution. A confirm card follows in Waiting." +
       (same ? ` It replaces the installed /${o.name} from ${same.source}.` : ""),
     confirmLabel: `${verb} anyway`,
     danger: true,
@@ -389,7 +389,7 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
       </Button>
     </div>
     <div v-if="running?.waiting" class="flex items-center gap-2">
-      <span class="flex-1">Answer the card in ⏳ Waiting.</span>
+      <span class="flex-1">Answer the card in Waiting.</span>
       <Button variant="outline" size="sm" @click="ui.trayOpen = true">Open Waiting</Button>
     </div>
     <Tabs :tabs="tabList" v-model="tabModel" />

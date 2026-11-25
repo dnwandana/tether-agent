@@ -13,8 +13,9 @@ import {
 import { buttonVariants } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { guardOutside, useReturnFocus } from "../lib/layer"
-import { renderMarkdown } from "../lib/markdown"
+import { renderSystemText } from "../lib/markdown"
 import { pendingConfirm } from "../stores/ui"
+import ButtonLabel from "./ButtonLabel.vue"
 
 const cancelBtn = ref<{ $el: HTMLElement } | null>(null)
 const okBtn = ref<{ $el: HTMLElement } | null>(null)
@@ -25,9 +26,6 @@ const { onCloseAutoFocus } = useReturnFocus(open)
 function answer(ok: boolean): void {
   pendingConfirm.resolve?.(ok)
 }
-
-// The title shows inline, so the paragraph wrapper of the Markdown output goes away.
-const inline = (s: string) => renderMarkdown(s).replace(/^<p>([\s\S]*)<\/p>\s*$/, "$1")
 
 // The focus follows the focus option. The default is Cancel for a danger confirm and the confirm
 // button for the others. Reka focuses Cancel one tick after the open event, so wait two ticks.
@@ -68,7 +66,7 @@ watch(
       <AlertDialogHeader>
         <AlertDialogTitle
           v-if="pendingConfirm.opts.markdown"
-          v-html="inline(pendingConfirm.opts.title)"
+          v-html="renderSystemText(pendingConfirm.opts.title, { inline: true })"
         />
         <AlertDialogTitle v-else>{{ pendingConfirm.opts.title }}</AlertDialogTitle>
         <AlertDialogDescription as="div" class="flex flex-col gap-2">
@@ -76,7 +74,7 @@ watch(
             <div
               v-if="pendingConfirm.opts.markdown"
               class="typeset typeset-chat"
-              v-html="renderMarkdown(pendingConfirm.opts.body)"
+              v-html="renderSystemText(pendingConfirm.opts.body)"
             />
             <p v-else class="whitespace-pre-line [overflow-wrap:anywhere]">
               {{ pendingConfirm.opts.body }}
@@ -103,7 +101,7 @@ watch(
           :class="cn(pendingConfirm.opts.danger && buttonVariants({ variant: 'destructive' }))"
           @click="answer(true)"
         >
-          {{ pendingConfirm.opts.confirmLabel }}
+          <ButtonLabel :text="pendingConfirm.opts.confirmLabel" />
         </AlertDialogAction>
       </AlertDialogFooter>
     </AlertDialogContent>

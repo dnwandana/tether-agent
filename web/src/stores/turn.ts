@@ -86,7 +86,7 @@ export function applyTurnEvents(batch: Batch): void {
         for (let i = x.tools.length - 1; i >= 0; i--) {
           if (x.tools[i].state !== "running") continue
           const q = d.preview ? ` "${d.preview}"` : ""
-          x.tools[i] = { ...x.tools[i], preview: `🔀 [${d.child}] ${d.tool}${q}` }
+          x.tools[i] = { ...x.tools[i], preview: `[${d.child}] ${d.tool}${q}` }
           break
         }
         break

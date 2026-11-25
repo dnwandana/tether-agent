@@ -1,12 +1,20 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, postForm, runCommand } from "../../api/client"
 import type { ReplyView } from "../../api/types.gen"
 import { turn } from "../../stores/turn"
 import { isSecure, toast } from "../../stores/ui"
 import { friendlyError } from "../../lib/errors"
-import { ArrowUpIcon, CameraIcon, MicIcon, PaperclipIcon, SquareIcon, XIcon } from "@lucide/vue"
+import {
+  ArrowUpIcon,
+  CameraIcon,
+  ImageIcon,
+  MicIcon,
+  PaperclipIcon,
+  SquareIcon,
+  XIcon,
+} from "@lucide/vue"
 import { Button } from "@/components/ui/button"
 import {
   Attachment,
@@ -28,7 +36,13 @@ import AckChip from "./AckChip.vue"
 import QueueStrip from "./QueueStrip.vue"
 
 type Row = { name: string; description: string }
-type Att = { file: File; label: string; voice: boolean }
+type Att = { file: File; kind: "image" | "file" | "voice" }
+// Gives the chip icon of each file kind.
+const ATT_ICON: Record<Att["kind"], Component> = {
+  image: ImageIcon,
+  file: PaperclipIcon,
+  voice: MicIcon,
+}
 
 const emit = defineEmits<{
   sent: [payload: { text: string; files: string[] }]
@@ -148,7 +162,7 @@ async function send(): Promise<void> {
       form.append("client_id", id)
       form.append("text", text)
       // A voice note goes in the voice part, so the server converts it and writes the text.
-      for (const a of atts) form.append(a.voice ? "voice" : "files", a.file, a.file.name)
+      for (const a of atts) form.append(a.kind === "voice" ? "voice" : "files", a.file, a.file.name)
       await postForm("/api/messages", form)
     }
     clientId.value = ""
@@ -208,8 +222,7 @@ function addFiles(e: Event, photo: boolean): void {
   for (const f of Array.from(input.files ?? [])) {
     files.value.push({
       file: f,
-      label: `${photo || f.type.startsWith("image/") ? "🖼" : "📎"} ${f.name}`,
-      voice: false,
+      kind: photo || f.type.startsWith("image/") ? "image" : "file",
     })
   }
   try {
@@ -280,7 +293,7 @@ async function startRecord(e: PointerEvent): Promise<void> {
       stream?.getTracks().forEach((t) => t.stop())
       stream = null
       recorder = null
-      files.value = [...files.value, { file, label: `🎤 ${file.name}`, voice: true }]
+      files.value = [...files.value, { file, kind: "voice" }]
       void send()
     }
     rec.start()
@@ -314,8 +327,8 @@ function stopRecord(): void {
 const hint = computed(() => {
   if (!recording.value) return ""
   return recMs.value < 200
-    ? "● Recording… release to send"
-    : `● ${(recMs.value / 1000).toFixed(1)} s · release to send`
+    ? "Recording… release to send"
+    : `${(recMs.value / 1000).toFixed(1)} s · release to send`
 })
 
 function takeDraft(): void {
@@ -418,7 +431,11 @@ onBeforeUnmount(() => {
             <AttachmentGroup>
               <Attachment v-for="(a, i) in chips" :key="i" size="sm" :state="chipState">
                 <AttachmentContent>
-                  <AttachmentTitle>{{ a.label }}</AttachmentTitle>
+                  <AttachmentTitle class="flex items-center gap-1"
+                    ><component :is="ATT_ICON[a.kind]" class="size-3.5 shrink-0" /><span>{{
+                      a.file.name
+                    }}</span></AttachmentTitle
+                  >
                 </AttachmentContent>
                 <AttachmentActions>
                   <AttachmentAction
@@ -475,7 +492,14 @@ onBeforeUnmount(() => {
             >
               <MicIcon />
             </InputGroupButton>
-            <span class="text-xs text-destructive">{{ hint }}</span>
+            <span v-if="hint" class="flex items-center gap-1 text-xs text-destructive">
+              <span
+                data-rec-dot
+                aria-hidden="true"
+                class="size-2 shrink-0 rounded-full bg-destructive"
+              />
+              <span>{{ hint }}</span>
+            </span>
             <InputGroupButton
               v-if="busy && empty"
               type="button"

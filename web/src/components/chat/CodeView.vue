@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/code-block"
 import { isSecure } from "../../stores/ui"
 import { parseReadFile, unwrapUntrusted } from "./parse"
+import { toolIcon } from "../../lib/glyphs"
 
 const props = defineProps<{ path: string; text: string }>()
 
@@ -28,7 +29,7 @@ const last = computed(() => res.value.start + res.value.lines.length - 1)
     :class="untrusted ? 'border-dashed border-warning' : undefined"
   >
     <CodeBlockHeader>
-      <span aria-hidden="true">📖</span>
+      <component :is="toolIcon('read_file')" class="size-4 shrink-0" />
       <CodeBlockTitle>{{ path }}</CodeBlockTitle>
       <span v-if="res.lines.length" class="ms-auto shrink-0 text-xs"
         >lines {{ res.start }}–{{ last }}</span

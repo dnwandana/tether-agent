@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/code-block"
 import { isSecure } from "../../stores/ui"
 import { parseDiff } from "./parse"
+import { toolIcon } from "../../lib/glyphs"
 
 const props = defineProps<{ text: string }>()
 
@@ -23,7 +24,7 @@ const col = "inline-block w-8 select-none text-right text-muted-foreground"
 <template>
   <CodeBlock>
     <CodeBlockHeader>
-      <span aria-hidden="true">🔧</span>
+      <component :is="toolIcon('patch')" class="size-4 shrink-0" />
       <CodeBlockTitle>{{ res.summary || res.path }}</CodeBlockTitle>
       <span class="ms-auto text-success">+{{ res.added }}</span>
       <span class="text-destructive">−{{ res.removed }}</span>

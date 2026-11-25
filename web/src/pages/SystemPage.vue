@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from "vue"
+import { computed, onBeforeUnmount, ref, type Component } from "vue"
+import {
+  BotIcon,
+  CheckIcon,
+  GitBranchIcon,
+  GlobeIcon,
+  SquareTerminalIcon,
+  TriangleAlertIcon,
+  XIcon,
+} from "@lucide/vue"
 import { useRouter } from "vue-router"
 import { Button } from "@/components/ui/button"
 import {
@@ -25,6 +34,7 @@ import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
 import { useCommand, type ResultNoteData } from "../lib/command"
 import { followTask, useLiveData } from "../lib/live"
+import { GLYPH_TONE_CLASS } from "../lib/glyphs"
 import { renderMarkdown } from "../lib/markdown"
 import { duration, fullTime, shortTime } from "../lib/time"
 import { confirm, toast } from "../stores/ui"
@@ -74,7 +84,12 @@ const DOT: Readonly<Record<string, string>> = {
   off: "bg-border",
 }
 
-const marks: Record<string, string> = { ok: "✓", warn: "⚠", fail: "✗" }
+// Gives the icon, the color class, and the screen reader word of each doctor status.
+const marks: Record<string, { icon: Component; cls: string; word: string }> = {
+  ok: { icon: CheckIcon, cls: GLYPH_TONE_CLASS.ok, word: "passed" },
+  warn: { icon: TriangleAlertIcon, cls: GLYPH_TONE_CLASS.warn, word: "warning" },
+  fail: { icon: XIcon, cls: GLYPH_TONE_CLASS.bad, word: "failed" },
+}
 
 // Page names that a hint can link to, with the route name of each.
 const pageNames: [string, string][] = [
@@ -349,7 +364,7 @@ onBeforeUnmount(() => {
       <CardHeader>
         <CardTitle>Doctor</CardTitle>
         <CardDescription v-if="hm(doctor?.ran_at ?? '')">{{
-          `ran ${hm(doctor?.ran_at ?? "")} · ${counts().ok} ✓ · ${counts().warn} ⚠ · ${counts().fail} ✗`
+          `ran ${hm(doctor?.ran_at ?? "")} · ${counts().ok} passed · ${counts().warn} ${counts().warn === 1 ? "warning" : "warnings"} · ${counts().fail} failed`
         }}</CardDescription>
         <CardAction v-if="(doctor?.checks ?? []).length || doctorRunning">
           <Button variant="outline" :disabled="doctorRunning" @click="runDoctor">
@@ -386,7 +401,14 @@ onBeforeUnmount(() => {
             :key="i"
             class="flex items-start gap-3 text-sm"
           >
-            <span>{{ marks[c.status] ?? "•" }}</span>
+            <span class="flex size-4 shrink-0 items-center pt-0.5">
+              <template v-if="marks[c.status]"
+                ><component
+                  :is="marks[c.status].icon"
+                  :class="cn('size-4', marks[c.status].cls)"
+                /><span class="sr-only">{{ marks[c.status].word }}</span></template
+              >
+            </span>
             <span class="flex-1">
               <b class="font-mono font-medium">{{ c.name }}</b>
               <span class="text-muted-foreground">{{ c.detail }}</span>
@@ -477,7 +499,11 @@ onBeforeUnmount(() => {
     />
     <div v-else class="grid gap-4 tab:grid-cols-2">
       <Card>
-        <CardHeader><CardTitle>🔀 Delegation batches</CardTitle></CardHeader>
+        <CardHeader
+          ><CardTitle class="flex items-center gap-2"
+            ><GitBranchIcon class="size-4 text-muted-foreground" />Delegation batches</CardTitle
+          ></CardHeader
+        >
         <CardContent class="flex flex-col gap-3 text-sm">
           <div v-for="b in runtime?.batches ?? []" :key="b.id" class="flex flex-col gap-1">
             <div>
@@ -517,7 +543,11 @@ onBeforeUnmount(() => {
         </CardContent>
       </Card>
       <Card>
-        <CardHeader><CardTitle>🤖 ACP sessions</CardTitle></CardHeader>
+        <CardHeader
+          ><CardTitle class="flex items-center gap-2"
+            ><BotIcon class="size-4 text-muted-foreground" />ACP sessions</CardTitle
+          ></CardHeader
+        >
         <CardContent class="flex flex-col gap-3 text-sm">
           <div v-for="a in acps" :key="a.session_id" class="flex flex-col gap-0.5">
             <span
@@ -537,7 +567,12 @@ onBeforeUnmount(() => {
         </CardContent>
       </Card>
       <Card>
-        <CardHeader><CardTitle>💻 Background processes</CardTitle></CardHeader>
+        <CardHeader
+          ><CardTitle class="flex items-center gap-2"
+            ><SquareTerminalIcon class="size-4 text-muted-foreground" />Background
+            processes</CardTitle
+          ></CardHeader
+        >
         <CardContent class="flex flex-col gap-3 text-sm">
           <ul v-if="procs.length" aria-label="Background processes" class="flex flex-col gap-3">
             <li v-for="p in procs" :key="p.pid">
@@ -564,7 +599,11 @@ onBeforeUnmount(() => {
         </CardContent>
       </Card>
       <Card>
-        <CardHeader><CardTitle>🌐 Browser</CardTitle></CardHeader>
+        <CardHeader
+          ><CardTitle class="flex items-center gap-2"
+            ><GlobeIcon class="size-4 text-muted-foreground" />Browser</CardTitle
+          ></CardHeader
+        >
         <CardContent class="text-sm">
           <span v-if="runtime?.browser">running</span>
           <span v-else class="text-muted-foreground">closed</span>

@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, useId, type Ref } from "vue"
+import { ref, computed, onMounted, onUnmounted, useId, type Ref } from "vue"
 import type { Card } from "../../api/types.gen"
 import { answerCard } from "../../stores/cards"
+import { splitGlyph } from "../../lib/glyphs"
+import GlyphText from "../GlyphText.vue"
+import { CheckIcon } from "@lucide/vue"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Item, ItemContent, ItemHeader } from "@/components/ui/item"
@@ -9,8 +12,9 @@ import { Label } from "@/components/ui/label"
 import { Progress } from "@/components/ui/progress"
 
 const props = defineProps<{ card: Card }>()
+const title = computed(() => splitGlyph(props.card.header).rest)
 
-// Returns the text "⌛ m:ss" and the bar width in percent. It ticks once a second and stops on unmount.
+// Returns the text "m:ss left" and the bar width in percent. It ticks once a second and stops on unmount.
 function useCountdown(deadline: () => string): {
   text: Ref<string>
   pct: Ref<number>
@@ -34,7 +38,7 @@ function useCountdown(deadline: () => string): {
     if (total === 0) total = Math.max(left, 1)
     const s = Math.ceil(left / 1000)
     const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
-    text.value = `⌛ ${clock}`
+    text.value = `${clock} left`
     // A screen reader hears the time on the first tick and on each 15th tick after it.
     if (ticks % 15 === 0) aria.value = `Time left: ${clock}`
     ticks++
@@ -103,11 +107,11 @@ function sendText(): void {
     :id="'card-' + card.id"
     variant="outline"
     role="group"
-    :aria-label="card.header"
+    :aria-label="title"
     class="min-w-0 bg-card"
   >
     <ItemHeader>
-      <span>{{ card.header }}</span>
+      <span><GlyphText :text="card.header" /></span>
       <span v-if="card.child" class="text-xs text-muted-foreground">· {{ card.child }}</span>
       <span
         v-if="cd.text.value"
@@ -134,8 +138,7 @@ function sendText(): void {
             :aria-pressed="card.multi ? picked.includes(c) : undefined"
             @click="choose(c)"
           >
-            <template v-if="card.multi">{{ picked.includes(c) ? "✓ " : "☐ " }}</template
-            >{{ c }}
+            <CheckIcon v-if="card.multi && picked.includes(c)" />{{ c }}
           </Button>
         </div>
         <div v-if="card.multi" data-row class="flex flex-wrap gap-2">

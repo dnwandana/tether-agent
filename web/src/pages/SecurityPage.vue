@@ -18,6 +18,7 @@ import ResultNote from "../components/ResultNote.vue"
 import StateBlock from "../components/StateBlock.vue"
 import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
+import { MODES } from "../lib/glyphs"
 import type { Column } from "../lib/table"
 import { fullTime, shortTime } from "../lib/time"
 import { useCommand, type ResultNoteData } from "../lib/command"
@@ -40,11 +41,6 @@ const view = ref<SecurityView | null>(null)
 const state = ref<"loading" | "error" | "ready">("loading")
 const cause = ref("")
 
-const MODE_LABEL: Record<string, string> = {
-  "read-only": "👁 Read-only",
-  guarded: "🛡 Guarded",
-  full: "⚡ Full",
-}
 async function load(): Promise<void> {
   try {
     view.value = await api<SecurityView>("GET", "/api/security")
@@ -75,14 +71,14 @@ async function command(text: string, which: NoteKey, title: string): Promise<voi
 // Sets a mode. The Full mode asks first, and then sends the confirm form of the command.
 async function setMode(m: "read-only" | "guarded" | "full"): Promise<void> {
   if (m !== "full") return command(`/mode ${m}`, "modes", "Mode")
-  const now = MODE_LABEL[view.value?.mode ?? ""] ?? view.value?.mode ?? ""
+  const now = MODES[view.value?.mode ?? ""]?.label ?? view.value?.mode ?? ""
   const ok = await confirm({
-    title: "Set ⚡ Full for the Dashboard?",
+    title: "Set Full for the Dashboard?",
     body:
       `Now: ${now}.\n` +
       "Dangerous commands run with no question in this scope. Human-only rules still ask.\n" +
       "A script can then add a dashboard session.",
-    confirmLabel: "⚡ Set Full",
+    confirmLabel: "Set Full",
     danger: true,
   })
   if (ok) await command("/mode full confirm", "modes", "Mode")
@@ -177,8 +173,13 @@ const tabModel = computed({
                 </div>
               </template>
               <template #cell-mode="{ row }">
-                {{ MODE_LABEL[row.mode as string] ?? row.mode
-                }}<template v-if="shortTime(row.set_at as string)">
+                <span class="inline-flex items-center gap-1.5"
+                  ><component
+                    :is="MODES[row.mode as string].icon"
+                    v-if="MODES[row.mode as string]"
+                    class="size-4 shrink-0"
+                  />{{ MODES[row.mode as string]?.label ?? row.mode }}</span
+                ><template v-if="shortTime(row.set_at as string)">
                   · since {{ shortTime(row.set_at as string) }}</template
                 >
               </template>
@@ -192,12 +193,10 @@ const tabModel = computed({
                   @update:model-value="onMode"
                 >
                   <ToggleGroupItem value="read-only" class="max-tab:h-11">
-                    👁 Read-only
+                    Read-only
                   </ToggleGroupItem>
-                  <ToggleGroupItem value="guarded" class="max-tab:h-11">
-                    🛡 Guarded
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="full" class="max-tab:h-11"> ⚡ Full </ToggleGroupItem>
+                  <ToggleGroupItem value="guarded" class="max-tab:h-11"> Guarded </ToggleGroupItem>
+                  <ToggleGroupItem value="full" class="max-tab:h-11"> Full </ToggleGroupItem>
                 </ToggleGroup>
                 <span v-else class="text-muted-foreground"
                   >View only. Send /mode in that chat.</span
@@ -232,7 +231,7 @@ const tabModel = computed({
               </AlertDescription>
             </Alert>
             <div class="flex flex-wrap items-center gap-3">
-              <span>“✅ Always” answers. Session answers live in memory and are not listed.</span>
+              <span>“Always” answers. Session answers live in memory and are not listed.</span>
               <Button
                 variant="destructive"
                 :disabled="view.grants.length === 0"
@@ -245,7 +244,7 @@ const tabModel = computed({
             <StateBlock
               v-if="view.grants.length === 0"
               state="empty"
-              text="An ✅ Always answer shows here."
+              text="An Always answer shows here."
             />
             <template v-else>
               <DataTable

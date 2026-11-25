@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import type { AnsweredCard } from "../../api/types.gen"
+import { splitGlyph } from "../../lib/glyphs"
+import GlyphText from "../GlyphText.vue"
 import {
   Trace,
   TraceCollapsible,
@@ -15,14 +17,11 @@ const props = defineProps<{ record: AnsweredCard }>()
 
 const TONE = { ok: "text-success", bad: "", warn: "text-warning" } as const
 
-// The mark at the start of the header gives the tone: allowed, denied, or no answer.
+// The glyph key of the header gives the tone: allowed, denied, or no answer.
 const tone = computed<"ok" | "bad" | "warn">(() => {
-  const mark = props.record.header
-    .replace(/\uFE0F/g, "")
-    .trim()
-    .charAt(0)
-  if (mark === "✅") return "ok"
-  if (mark === "❌") return "bad"
+  const key = splitGlyph(props.record.header).glyph?.key
+  if (key === "ok") return "ok"
+  if (key === "denied") return "bad"
   return "warn"
 })
 const time = computed(() => {
@@ -41,7 +40,7 @@ const time = computed(() => {
           :status="tone === 'bad' ? 'error' : undefined"
           :class="TONE[tone]"
         >
-          <TraceTitle class="shrink-0">{{ record.header }}</TraceTitle>
+          <TraceTitle class="shrink-0"><GlyphText :text="record.header" /></TraceTitle>
           <span class="min-w-0 truncate">{{ record.preview }}</span>
           <TraceDescription>{{ time }}</TraceDescription>
         </TraceLine>

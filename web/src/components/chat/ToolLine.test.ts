@@ -21,19 +21,24 @@ const chev = (b: HTMLElement) => {
   return icons[icons.length - 1]
 }
 
+const icon = (b: HTMLElement) => b.querySelector('[data-slot="trace-icon"]')!
+const desc = (b: HTMLElement) => b.querySelector('[data-slot="trace-description"]')!
+
 describe("ToolLine", () => {
-  it("shows a finished line", () => {
-    render(ToolLine, { props: { tool: tool() } })
+  it("shows a finished line with the icon of the tool name", () => {
+    render(ToolLine, { props: { tool: tool({ emoji: "📖" }) } })
     const b = screen.getByRole("button")
     const t = b.textContent!
-    expect(t).toContain("💻")
+    expect(icon(b).querySelector("svg.lucide-square-terminal")).not.toBeNull()
+    expect(t).not.toContain("📖")
     expect(t).toContain("terminal")
     expect(t).toContain('"go test ./..."')
-    expect(b.querySelector('[data-slot="trace-description"]')!.textContent).toContain("3.9 s")
-    expect(t).toContain("✓ done")
+    expect(desc(b).textContent!.replace(/\s+/g, " ").trim()).toBe("3.9 s · done")
+    expect(desc(b).querySelector("svg.lucide-check")!.classList.contains("text-success")).toBe(true)
+    expect(t).not.toMatch(/[✓✗▸▾]/u)
     expect(line(b).getAttribute("data-status")).toBeNull()
     expect(b.getAttribute("aria-expanded")).toBe("false")
-    expect(chev(b).textContent!.trim()).toBe("▸")
+    expect(chev(b).querySelector("svg.lucide-chevron-right")).not.toBeNull()
   })
 
   it("shows the exit code of a failed command", () => {
@@ -44,31 +49,43 @@ describe("ToolLine", () => {
       },
     })
     const b = screen.getByRole("button")
-    expect(b.textContent).toContain("✗ exit 1")
-    expect(b.textContent).toContain("4.2 s")
+    expect(desc(b).textContent!.replace(/\s+/g, " ").trim()).toBe("4.2 s · exit 1")
+    expect(desc(b).querySelector("svg.lucide-x")!.classList.contains("text-destructive")).toBe(true)
     expect(line(b).getAttribute("data-status")).toBe("error")
     expect(b.getAttribute("data-selected")).toBe("true")
     expect(b.getAttribute("aria-expanded")).toBe("true")
-    expect(chev(b).textContent!.trim()).toBe("▾")
+    expect(chev(b).querySelector("svg.lucide-chevron-down")).not.toBeNull()
   })
 
-  it("shows a running line and a plain error", () => {
+  it("shows a running line, a plain error, and the icon of each tool", () => {
     const run = render(ToolLine, { props: { tool: tool({ state: "running", text: "" }) } })
     const rb = run.container.querySelector("button")!
     expect(line(rb).getAttribute("data-status")).toBe("running")
-    expect(rb.textContent).toContain("running")
+    expect(desc(rb).textContent!.trim()).toBe("running")
+    expect(desc(rb).querySelector("svg")).toBeNull()
     run.unmount()
-    render(ToolLine, {
+    const err = render(ToolLine, {
       props: { tool: tool({ name: "web_fetch", emoji: "📄", state: "error", text: "HTTP 404" }) },
     })
-    expect(screen.getByRole("button").textContent).toContain("✗ error")
+    const eb = err.container.querySelector("button")!
+    expect(desc(eb).textContent).toContain("error")
+    expect(desc(eb).querySelector("svg.lucide-x")).not.toBeNull()
+    expect(icon(eb).querySelector("svg.lucide-file-down")).not.toBeNull()
+    err.unmount()
+    const read = render(ToolLine, { props: { tool: tool({ name: "read_file", emoji: "🛠" }) } })
+    expect(
+      icon(read.container.querySelector("button")!).querySelector("svg.lucide-file-text"),
+    ).not.toBeNull()
+    read.unmount()
+    render(ToolLine, { props: { tool: tool({ name: "mystery_tool", emoji: "" }) } })
+    expect(icon(screen.getByRole("button")).querySelector("svg.lucide-wrench")).not.toBeNull()
   })
 
   it("shows the preview of a child tool", () => {
     render(ToolLine, {
-      props: { tool: tool({ preview: "🔀 [1/2] terminal", state: "running", text: "" }) },
+      props: { tool: tool({ preview: "[1/2] terminal", state: "running", text: "" }) },
     })
-    expect(screen.getByRole("button").textContent).toContain('"🔀 [1/2] terminal"')
+    expect(screen.getByRole("button").textContent).toContain('"[1/2] terminal"')
   })
 
   it("emits select and hides todo_list", async () => {

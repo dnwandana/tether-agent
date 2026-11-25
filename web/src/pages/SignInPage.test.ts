@@ -63,6 +63,16 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe("SignInPage", () => {
+  it("shows a back arrow and no mark on Request access instead", async () => {
+    const { user } = await mk()
+    await user.click(btn("Use a code from tether dashboard link"))
+    const back = btn("Request access instead")
+    expect(back.textContent?.trim()).toBe("Request access instead")
+    expect(back.querySelector("svg.lucide-arrow-left")).not.toBeNull()
+    await user.click(back)
+    expect(btn("Request access")).toBeTruthy()
+  })
+
   it("shows the brand mark before the name on the card", async () => {
     await mk()
     const name = screen.getByText("Tether")
@@ -112,6 +122,7 @@ describe("SignInPage", () => {
     vi.advanceTimersByTime(2000)
     await flushPromises()
     expect(h1()).toBe("Request denied")
+    expect(screen.getByText("An owner tapped Deny. Ask them, then try again.")).toBeTruthy()
     vi.mocked(api)
       .mockResolvedValueOnce({ id: "r2", code: "1234", expires: "" })
       .mockResolvedValueOnce({ state: "expired", header: "" })

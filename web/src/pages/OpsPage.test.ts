@@ -334,6 +334,33 @@ describe("OpsPage", () => {
     expect((button("Create backup") as HTMLButtonElement).disabled).toBe(false)
   })
 
+  it("starts each backup warning with the word Warning", async () => {
+    const { user } = await mk()
+    await user.click(button("Create backup"))
+    await flushPromises()
+    h.follow.get("t1")!(
+      task({
+        state: "done",
+        text: "Saved tether-backup-2026-11-20.tar.gz (13002342 bytes).",
+        backup: {
+          size: 13002342,
+          sessions: 2,
+          messages: 10,
+          cron_jobs: 0,
+          replaced: [],
+          warnings: ["the skills folder is missing"],
+          skipped: [],
+        },
+      }),
+    )
+    await flushPromises()
+    expect(notes()[0]).toMatchObject({
+      title: "Backup",
+      kind: "warn",
+      text: "Saved tether-backup-2026-11-20.tar.gz (13002342 bytes).\nSessions: 2 · Messages: 10 · Cron jobs: 0\nWarning: the skills folder is missing",
+    })
+  })
+
   it("shows the error of a failed backup task", async () => {
     const { user } = await mk()
     await user.click(button("Create backup"))

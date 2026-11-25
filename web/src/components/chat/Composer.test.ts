@@ -201,13 +201,55 @@ describe("Composer", () => {
     const { container, ta, emitted } = await mountIt()
     const input = container.querySelector('input[type="file"][multiple]') as HTMLInputElement
     await user.upload(input, new File(["# notes"], "notes.md", { type: "text/markdown" }))
-    expect(chipOf("📎 notes.md")).toBeTruthy()
+    const chip = chipOf("notes.md")
+    expect(chip.querySelector("svg.lucide-paperclip")).not.toBeNull()
+    expect(chip.textContent).not.toContain("📎")
     expect(screen.getByRole("button", { name: "Remove notes.md" })).toBeTruthy()
     ta.focus()
     await user.keyboard("{Enter}")
     await flushPromises()
     expect((lastForm().getAll("files") as File[]).map((f) => f.name)).toEqual(["notes.md"])
     expect(emitted().sent).toEqual([[{ text: "", files: ["notes.md"] }]])
+  })
+
+  it("shows the image icon on the chip of an image", async () => {
+    const user = userEvent.setup()
+    const { container } = await mountIt()
+    const input = container.querySelector('input[type="file"][multiple]') as HTMLInputElement
+    await user.upload(input, new File(["x"], "shot.png", { type: "image/png" }))
+    const chip = chipOf("shot.png")
+    expect(chip.querySelector("svg.lucide-image")).not.toBeNull()
+    expect(chip.textContent).not.toContain("🖼")
+  })
+
+  it("shows a red dot and the recording text while the record button is held", async () => {
+    class FakeRecorder {
+      static isTypeSupported = () => false
+      mimeType = ""
+      state = "inactive"
+      ondataavailable: unknown = null
+      onstop: unknown = null
+      start(): void {
+        this.state = "recording"
+      }
+      stop(): void {
+        this.state = "inactive"
+      }
+    }
+    vi.stubGlobal("MediaRecorder", FakeRecorder)
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      mediaDevices: { getUserMedia: vi.fn(async () => ({ getTracks: () => [] })) },
+    })
+    await mountIt()
+    await fireEvent.pointerDown(screen.getByRole("button", { name: "Hold to record" }))
+    await flushPromises()
+    const text = screen.getByText("Recording… release to send")
+    const dot = text.parentElement!.querySelector<HTMLElement>("[data-rec-dot]")!
+    expect(dot.className).toContain("bg-destructive")
+    expect(dot.className).toContain("rounded-full")
+    expect(dot.getAttribute("aria-hidden")).toBe("true")
+    expect(text.parentElement!.textContent).not.toContain("●")
   })
 
   it("marks the chips as uploading during a send and as error after a failed send", async () => {
@@ -220,10 +262,10 @@ describe("Composer", () => {
     ta.focus()
     await user.keyboard("{Enter}")
     await flushPromises()
-    expect(chipOf("📎 a.txt").dataset.state).toBe("uploading")
+    expect(chipOf("a.txt").dataset.state).toBe("uploading")
     fail(new Error("offline"))
     await flushPromises()
-    expect(chipOf("📎 a.txt").dataset.state).toBe("error")
+    expect(chipOf("a.txt").dataset.state).toBe("error")
     expect(screen.getByRole("button", { name: "Send again" })).toBeTruthy()
   })
 
@@ -235,8 +277,8 @@ describe("Composer", () => {
     turn.queue = [{ kind: "skill", preview: "/release-notes" }]
     const user = userEvent.setup()
     await mountIt()
-    expect(screen.getByText("↪️ Got it.")).toBeTruthy()
-    expect(screen.queryByText("⏸ Paused.")).toBeNull()
+    expect(screen.getByText("Got it.")).toBeTruthy()
+    expect(screen.queryByText("Paused.")).toBeNull()
     await user.click(screen.getByRole("button", { name: /Do this now/ }))
     expect(runCommand).toHaveBeenCalledWith("/now")
   })

@@ -247,7 +247,7 @@ describe("SkillsPage", () => {
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Remove /pr-review?",
-      body: "A confirm card follows in ⏳ Waiting.",
+      body: "A confirm card follows in Waiting.",
       confirmLabel: "Remove",
       danger: true,
     })
@@ -276,7 +276,7 @@ describe("SkillsPage", () => {
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Install /changelog-check anyway?",
-      body: "The skill guard rated it caution. A confirm card follows in ⏳ Waiting.",
+      body: "The skill guard rated it caution. A confirm card follows in Waiting.",
       confirmLabel: "Install anyway",
       danger: true,
     })
@@ -294,7 +294,7 @@ describe("SkillsPage", () => {
     await user.click(btns("Install anyway…")[0])
     await flushPromises()
     expect(vi.mocked(confirm).mock.calls[0][0].body).toBe(
-      "The skill guard rated it caution. A confirm card follows in ⏳ Waiting. It replaces the installed /release-notes from src.",
+      "The skill guard rated it caution. A confirm card follows in Waiting. It replaces the installed /release-notes from src.",
     )
   })
 
@@ -319,7 +319,7 @@ describe("SkillsPage", () => {
     await user.click(btns("Update")[0])
     await flushPromises()
     await end("t1", { waiting: true, subject: "release-notes" })
-    expect(screen.getByText("Answer the card in ⏳ Waiting.")).toBeTruthy()
+    expect(screen.getByText("Answer the card in Waiting.")).toBeTruthy()
     await user.click(btns("Open Waiting")[0])
     expect(ui.trayOpen).toBe(true)
   })

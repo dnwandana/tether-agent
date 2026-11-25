@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { ArrowLeftIcon } from "@lucide/vue"
 import { useRoute, useRouter } from "vue-router"
 import { api, setSessionHeader } from "../api/client"
 import type { SignInPoll, SignInStart } from "../api/types.gen"
@@ -195,7 +196,7 @@ onBeforeUnmount(stopPoll)
 
         <template v-else-if="view === 'denied'">
           <h1 class="text-xl font-semibold tracking-tight">Request denied</h1>
-          <p class="text-muted-foreground">An owner tapped ❌ Deny. Ask them, then try again.</p>
+          <p class="text-muted-foreground">An owner tapped Deny. Ask them, then try again.</p>
           <Button type="button" :disabled="busy" @click="requestAccess">
             Request access again
           </Button>
@@ -228,7 +229,8 @@ onBeforeUnmount(stopPoll)
           <p v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</p>
           <Button type="button" :disabled="busy" @click="signInWithCode">Sign in</Button>
           <Button variant="link" type="button" @click="show('start')">
-            ← Request access instead
+            <ArrowLeftIcon />
+            Request access instead
           </Button>
         </template>
 

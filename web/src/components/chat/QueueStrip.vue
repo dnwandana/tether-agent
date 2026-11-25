@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { QueueItem } from "../../api/types.gen"
+import GlyphText from "@/components/GlyphText.vue"
 import { Button } from "@/components/ui/button"
 import {
   Item,
@@ -25,7 +26,7 @@ const emit = defineEmits<{ now: [] }>()
       </ItemContent>
       <ItemActions>
         <Button type="button" variant="secondary" size="sm" @click="emit('now')">
-          ⚡ Do this now
+          Do this now
         </Button>
       </ItemActions>
     </Item>
@@ -33,7 +34,8 @@ const emit = defineEmits<{ now: [] }>()
       <Item v-for="(it, i) in items" :key="i" as="li" size="sm">
         <ItemMedia>{{ i + 1 }}</ItemMedia>
         <ItemContent>
-          <span class="truncate">{{ it.preview }}</span>
+          <GlyphText v-if="it.kind === 'goal'" :text="it.preview" truncate />
+          <span v-else class="truncate">{{ it.preview }}</span>
         </ItemContent>
       </Item>
     </ol>

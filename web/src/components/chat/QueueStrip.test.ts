@@ -20,10 +20,27 @@ describe("QueueStrip", () => {
       "2/release-notes",
     ])
     expect(screen.getAllByRole("listitem")[0].getAttribute("data-slot")).toBe("item")
-    const now = screen.getByRole("button", { name: "⚡ Do this now" })
+    const now = screen.getByRole("button", { name: "Do this now" })
+    expect(now.textContent!.trim()).toBe("Do this now")
     expect(head.contains(now)).toBe(true)
     await userEvent.setup().click(now)
     expect(r.emitted().now).toHaveLength(1)
+  })
+
+  it("shows the goal line of a goal turn with its icon and keeps a user preview", () => {
+    render(QueueStrip, {
+      props: {
+        items: [
+          { kind: "goal", preview: "↻ Goal 3/20: fix the test" },
+          { kind: "text", preview: "ship it 🚀" },
+        ],
+      },
+    })
+    const rows = screen.getAllByRole("listitem")
+    expect(rows[0].textContent!.replace(/\s+/g, "")).toBe("1Goal3/20:fixthetest")
+    expect(rows[0].querySelector("svg.lucide-refresh-cw")).not.toBeNull()
+    expect(rows[1].textContent).toContain("ship it 🚀")
+    expect(rows[1].querySelector("svg")).toBeNull()
   })
 
   it("shows nothing when the queue is empty", () => {

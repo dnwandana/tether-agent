@@ -17,6 +17,14 @@ import { renderMarkdown } from "../lib/markdown"
 import { fullTime, shortTime } from "../lib/time"
 import { session } from "../stores/session"
 import { listLink, toast } from "../stores/ui"
+import {
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  CornerDownRightIcon,
+  EyeIcon,
+  FoldVerticalIcon,
+} from "@lucide/vue"
 import { cn } from "@/lib/utils"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -24,7 +32,7 @@ import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { Button } from "@/components/ui/button"
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Marker } from "@/components/ui/marker"
+import { Marker, MarkerIcon } from "@/components/ui/marker"
 import { Message, MessageContent, MessageHeader } from "@/components/ui/message"
 import {
   MessageScroller,
@@ -265,9 +273,9 @@ watch(
   <div class="flex min-h-0 min-w-0 flex-1 flex-col">
     <div class="flex shrink-0 flex-col gap-3 px-4 pt-4 tab:px-6">
       <router-link
-        class="text-sm text-muted-foreground underline-offset-4 hover:underline"
+        class="inline-flex items-center gap-1 text-sm text-muted-foreground underline-offset-4 hover:underline"
         :to="listLink('sessions')"
-        >‹ Sessions</router-link
+        ><ChevronLeftIcon class="size-4" />Sessions</router-link
       >
 
       <StateBlock v-if="state === 'loading'" state="loading" />
@@ -287,9 +295,9 @@ watch(
         </div>
         <router-link
           v-if="parentTitle"
-          class="text-sm text-muted-foreground underline underline-offset-4"
+          class="inline-flex items-center gap-1 text-sm text-muted-foreground underline underline-offset-4"
           :to="{ name: 'transcript', params: { id: info.parent_id } }"
-          >↳ child of {{ parentTitle }}</router-link
+          ><CornerDownRightIcon class="size-4" />child of {{ parentTitle }}</router-link
         >
         <div
           v-if="(info.children ?? []).length > 0"
@@ -336,10 +344,9 @@ watch(
         </div>
 
         <Alert v-if="info.read_only">
+          <EyeIcon />
           <AlertDescription class="flex flex-wrap items-center gap-2">
-            <span class="flex-1"
-              >👁 Read-only. This session belongs to {{ info.source_label }}.</span
-            >
+            <span class="flex-1">Read-only. This session belongs to {{ info.source_label }}.</span>
             <Button v-if="info.kind === 'chat'" variant="secondary" @click="fork">
               Fork into dashboard
             </Button>
@@ -397,10 +404,13 @@ watch(
                   )
                 "
               >
-                <Collapsible v-if="m.role === 'summary'">
+                <Collapsible v-if="m.role === 'summary'" v-slot="{ open }">
                   <Marker variant="separator">
+                    <MarkerIcon><FoldVerticalIcon /></MarkerIcon>
                     <CollapsibleTrigger as-child>
-                      <Button variant="ghost" size="sm">🗜 Compacted · summary</Button>
+                      <Button variant="ghost" size="sm"
+                        >Compacted · summary<ChevronDownIcon v-if="open" /><ChevronRightIcon v-else
+                      /></Button>
                     </CollapsibleTrigger>
                   </Marker>
                   <CollapsibleContent

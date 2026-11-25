@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue"
 import { useRoute } from "vue-router"
 import type { Component } from "vue"
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon } from "@lucide/vue"
 import { Badge } from "@/components/ui/badge"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
@@ -181,10 +182,12 @@ function themeLabel(): string {
             variant="ghost"
             data-slot="more-item"
             :class="ROW"
+            :aria-expanded="themeOpen"
             @click="themeOpen = !themeOpen"
           >
             <component :is="ICONS.theme" aria-hidden="true" />
-            Theme: {{ themeLabel() }} ▸
+            Theme: {{ themeLabel() }}
+            <component :is="themeOpen ? ChevronDownIcon : ChevronRightIcon" aria-hidden="true" />
           </Button>
           <template v-if="themeOpen">
             <Button
@@ -198,7 +201,9 @@ function themeLabel(): string {
             >
               <component :is="t.icon" aria-hidden="true" />
               <span class="flex-1 text-left">{{ t.label }}</span>
-              <span v-if="prefs.theme === t.value" aria-hidden="true">✓</span>
+              <span v-if="prefs.theme === t.value" class="flex items-center"
+                ><CheckIcon aria-hidden="true" /><span class="sr-only">current</span></span
+              >
             </Button>
           </template>
         </div>

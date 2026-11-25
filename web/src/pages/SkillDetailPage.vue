@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref } from "vue"
 import { useRoute, useRouter } from "vue-router"
+import { ArrowDownIcon, ChevronLeftIcon } from "@lucide/vue"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -260,7 +261,7 @@ async function skillAction(action: Action): Promise<void> {
   if (action === "uninstall") {
     const ok = await confirm({
       title: `Remove /${n}?`,
-      body: "A confirm card follows in ⏳ Waiting.",
+      body: "A confirm card follows in Waiting.",
       confirmLabel: "Remove",
       danger: true,
     })
@@ -272,7 +273,7 @@ async function skillAction(action: Action): Promise<void> {
 async function updateAnyway(): Promise<void> {
   const ok = await confirm({
     title: `Update /${name.value} anyway?`,
-    body: "The skill guard rated it caution. A confirm card follows in ⏳ Waiting.",
+    body: "The skill guard rated it caution. A confirm card follows in Waiting.",
     confirmLabel: "Update anyway",
     danger: true,
   })
@@ -295,9 +296,9 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
 <template>
   <div class="mx-auto flex w-full max-w-6xl flex-col gap-5 p-4 md:p-6">
     <router-link
-      class="text-sm text-muted-foreground hover:text-foreground"
+      class="inline-flex items-center gap-1 self-start text-sm text-muted-foreground hover:text-foreground"
       :to="listLink('skills')"
-      >‹ Skills</router-link
+      ><ChevronLeftIcon class="size-4" />Skills</router-link
     >
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock
@@ -357,7 +358,7 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
         <Button variant="outline" :disabled="busy" @click="updateAnyway">Update anyway…</Button>
       </div>
       <div v-if="running?.waiting" class="flex items-center gap-2">
-        <span class="flex-1">Answer the card in ⏳ Waiting.</span>
+        <span class="flex-1">Answer the card in Waiting.</span>
         <Button variant="outline" size="sm" @click="ui.trayOpen = true">Open Waiting</Button>
       </div>
 
@@ -405,8 +406,8 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
                 variant="link"
                 class="h-auto self-start p-0"
                 @click="scrollToFindings"
-                >See the findings ↓</Button
-              >
+                >See the findings<ArrowDownIcon
+              /></Button>
               <p v-else class="text-muted-foreground">No findings</p>
             </CardContent>
           </Card>

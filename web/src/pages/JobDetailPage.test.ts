@@ -161,9 +161,16 @@ describe("JobDetailPage", () => {
     await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2")
     expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=0&limit=20")
-    expect(alertWith("⚠ Failing · 3 in a row.").textContent).toContain(
-      "github: HTTP 401: bad credentials",
-    )
+    const failing = alertWith("Failing · 3 in a row.")
+    expect(failing.textContent).toContain("github: HTTP 401: bad credentials")
+    expect(failing.textContent).not.toContain("⚠")
+    expect(failing.querySelector("svg.lucide-triangle-alert")).not.toBeNull()
+    expect(screen.getByRole("button", { name: "Pause" })).toBeTruthy()
+    const back = screen.getByRole("link", { name: "Jobs" })
+    expect(back.getAttribute("href")).toBe("/jobs")
+    expect(back.querySelector("svg.lucide-chevron-left")).not.toBeNull()
+    const runsHead = screen.getByRole("heading", { level: 2, name: "Runs" })
+    expect(runsHead.querySelector("svg.lucide-scroll-text")).not.toBeNull()
     expect(screen.getByText(/4 of 7 OK · \$0\.0192/)).toBeTruthy()
     expect(screen.getByText("1–20 of 38")).toBeTruthy()
     await user.click(screen.getByRole("button", { name: "Next Page" }))
@@ -205,7 +212,7 @@ describe("JobDetailPage", () => {
       if (p === "/api/jobs/j2" && vi.mocked(runCommand).mock.calls.length >= 2) throw notFound()
       return (p === "/api/jobs/j2" ? detail : [run(1), run(2)]) as any
     })
-    await user.click(screen.getByRole("button", { name: "🗑 Delete…" }))
+    await user.click(screen.getByRole("button", { name: "Delete…" }))
     await flushPromises()
     expect(runCommand).toHaveBeenNthCalledWith(1, "/jobs delete j2")
     expect(confirm).toHaveBeenCalledWith(
@@ -232,10 +239,14 @@ describe("JobDetailPage", () => {
           : []) as any,
     )
     await mk()
-    expect(alertWith("⏸ Paused").textContent).toContain(
-      "⏸ Paused: the schedule 0 9 * * 8 is not valid. Edit the schedule to resume.",
+    const paused = alertWith("Paused: the schedule")
+    expect(paused.textContent).toContain(
+      "Paused: the schedule 0 9 * * 8 is not valid. Edit the schedule to resume.",
     )
-    expect((screen.getByRole("button", { name: "⚡ Run now" }) as HTMLButtonElement).disabled).toBe(
+    expect(paused.textContent).not.toContain("⏸")
+    expect(paused.querySelector("svg.lucide-pause")).not.toBeNull()
+    expect(screen.getByRole("button", { name: "Resume" })).toBeTruthy()
+    expect((screen.getByRole("button", { name: "Run now" }) as HTMLButtonElement).disabled).toBe(
       true,
     )
     expect(screen.getByText("The schedule is not valid")).toBeTruthy()
@@ -266,6 +277,12 @@ describe("JobDetailPage", () => {
     expect(screen.getByText("Paused after 3 failures")).toBeTruthy()
   })
 
+  it("keeps an unknown lead emoji of the model text in the last output", async () => {
+    withDetail({ last_output: "🚀 Deployed v1" })
+    await mk()
+    expect(screen.getByText("🚀 Deployed v1")).toBeTruthy()
+  })
+
   it("has the Finished and Delivery error columns", async () => {
     await mk()
     const heads = screen.getAllByRole("columnheader").map((t) => t.textContent!.trim())
@@ -279,7 +296,10 @@ describe("JobDetailPage", () => {
     await user.click(screen.getAllByRole("button", { name: "Output" })[0])
     const card = screen.getByRole("region", { name: outputName })
     expect(card.textContent).toContain(outputName)
-    await user.click(within(card).getByRole("button", { name: "Close" }))
+    const close = within(card).getByRole("button", { name: "Close" })
+    expect(close.querySelector("svg.lucide-x")).not.toBeNull()
+    expect(close.textContent!.trim()).toBe("")
+    await user.click(close)
     expect(screen.queryByRole("region")).toBeNull()
   })
 
@@ -308,7 +328,7 @@ describe("JobDetailPage", () => {
         "No runs yet. The first run is at " + shortTime("2026-11-24T07:00:00Z") + ".",
       ),
     ).toBeTruthy()
-    const runNow = screen.getAllByRole("button", { name: "⚡ Run now" })
+    const runNow = screen.getAllByRole("button", { name: "Run now" })
     await user.click(runNow[runNow.length - 1])
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/jobs run j2")
@@ -338,7 +358,7 @@ describe("JobDetailPage", () => {
   it("keeps the open form mounted on a live reload and passes its dirty state", async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 })
     await mk()
-    await user.click(screen.getByRole("button", { name: "✎ Edit" }))
+    await user.click(screen.getByRole("button", { name: "Edit" }))
     await user.click(screen.getByRole("button", { name: "Make the form dirty" }))
     const dlg = screen.getByRole("dialog", { name: "Edit gh-notify" })
     await user.click(within(dlg).getByRole("button", { name: "Close" }))
@@ -356,7 +376,11 @@ describe("JobDetailPage", () => {
     })
     await mk()
     expect(screen.getByText(/4 of 7 OK · \$0\.0192/)).toBeTruthy()
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("⚠")
+    const h1 = screen.getByRole("heading", { level: 1 })
+    expect(h1.textContent).not.toContain("⚠")
+    expect(h1.querySelector("svg.lucide-triangle-alert")!.classList).toContain("text-warning")
+    expect(within(h1).getByText("failing").classList).toContain("sr-only")
+    expect(h1.textContent).toContain("gh-notify")
     const bars = document.querySelectorAll("[data-bar]")
     expect(bars[bars.length - 1].getAttribute("data-bar")).toBe("stop")
   })
@@ -367,8 +391,35 @@ describe("JobDetailPage", () => {
     expect(screen.getByText(/4 of 7 OK · —/)).toBeTruthy()
     const h1 = screen.getByRole("heading", { level: 1 })
     expect(h1.parentElement!.querySelector('[data-slot="badge"]')).toBeNull()
-    expect(within(h1.parentElement!).getByText("done").classList).toContain("text-muted-foreground")
-    expect(screen.queryByRole("button", { name: "⏸ Pause" })).toBeNull()
+    expect(h1.querySelector("svg.lucide-check")).not.toBeNull()
+    const doneText = within(h1.parentElement!)
+      .getAllByText("done")
+      .find((e) => !e.classList.contains("sr-only"))!
+    expect(doneText.classList).toContain("text-muted-foreground")
+    expect(screen.queryByRole("button", { name: "Pause" })).toBeNull()
+  })
+
+  it("shows the Go text of an error, an output, and a delivery error with no lead mark", async () => {
+    withDetail(
+      {
+        last_error: "⚠ Cron job gh-notify failed: HTTP 401",
+        last_output: "⚠️ Cron job gh-notify is paused.",
+      },
+      [{ ...run(1), delivery_err: "⚠ telegram: chat not found", cost_flag: true }],
+    )
+    await mk()
+    const failing = alertWith("Failing · 3 in a row.")
+    expect(failing.textContent).toContain("Cron job gh-notify failed: HTTP 401")
+    expect(failing.textContent).not.toContain("⚠")
+    expect(screen.getByText("Cron job gh-notify is paused.")).toBeTruthy()
+    const err = screen.getByText("telegram: chat not found")
+    expect(err.getAttribute("title")).toBe("telegram: chat not found")
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent!.includes("telegram: chat not found"))!
+    expect(row.querySelector("svg.lucide-circle-dollar-sign")!.classList).toContain("text-warning")
+    expect(within(row).getByText("cost alert").classList).toContain("sr-only")
+    expect(row.textContent).not.toContain("💸")
   })
 
   it("drops a late reply of an older runs request", async () => {

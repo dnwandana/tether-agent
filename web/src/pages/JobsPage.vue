@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { ref } from "vue"
+import { ref, type Component } from "vue"
+import {
+  CircleDollarSignIcon,
+  PauseIcon,
+  ShieldIcon,
+  TargetIcon,
+  TriangleAlertIcon,
+} from "@lucide/vue"
 import { useRouter } from "vue-router"
 import { api } from "../api/client"
 import type { BriefView, HeldView, JobRow, ReplyView, RunRow } from "../api/types.gen"
@@ -14,6 +21,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { cn } from "@/lib/utils"
+import ButtonLabel from "../components/ButtonLabel.vue"
 import DataTable from "../components/DataTable.vue"
 import JobForm from "../components/JobForm.vue"
 import LiveHeader from "../components/LiveHeader.vue"
@@ -21,7 +29,8 @@ import SidePanel from "../components/SidePanel.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { replyKind, useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
-import { costText, lastSeven, stateGlyph, type Bar } from "../lib/jobbars"
+import { costText, lastSeven, stateIcon, type Bar } from "../lib/jobbars"
+import { GLYPH_TONE_CLASS, type GlyphTone } from "../lib/glyphs"
 import { useLiveData } from "../lib/live"
 import { useRoutePage } from "../lib/routePage"
 import { readableSchedule } from "../lib/schedule"
@@ -49,13 +58,19 @@ const columns: Column[] = [
   { key: "actions", label: "", type: "act", width: "13rem" },
 ]
 
-const kindIcon: Record<string, string> = {
-  failing: "⚠",
-  paused_job: "⏸",
-  bad_schedule: "⚠️",
-  held: "🛡",
-  goal: "🎯",
-  cost: "💸",
+// Gives the icon and the tone of each Brief kind.
+const kindIcon: Record<string, { icon: Component; tone: GlyphTone }> = {
+  failing: { icon: TriangleAlertIcon, tone: "warn" },
+  paused_job: { icon: PauseIcon, tone: "muted" },
+  bad_schedule: { icon: TriangleAlertIcon, tone: "warn" },
+  held: { icon: ShieldIcon, tone: "info" },
+  goal: { icon: TargetIcon, tone: "muted" },
+  cost: { icon: CircleDollarSignIcon, tone: "warn" },
+}
+
+// Returns the icon, the tone, and the word of the state of a job row.
+function stateOf(row: Record<string, unknown>): { icon: Component; tone: GlyphTone; word: string } {
+  return stateIcon[(row as unknown as JobRow).state]
 }
 
 // Returns the schedule text in the browser zone, with the raw text in the title.
@@ -132,7 +147,7 @@ async function resolveHeld(h: HeldView, action: "post" | "drop"): Promise<void> 
     const ok = await confirm({
       title: "Drop this held send?",
       body: "The text is deleted.",
-      confirmLabel: "❌ Drop",
+      confirmLabel: "Drop",
       danger: true,
     })
     if (!ok) return
@@ -168,7 +183,7 @@ async function saved(): Promise<void> {
       <Button variant="secondary" type="button" @click="router.push({ name: 'chat' })">
         Ask in chat
       </Button>
-      <Button type="button" @click="formOpen = true">+ New job</Button>
+      <Button type="button" @click="formOpen = true">New job</Button>
     </div>
 
     <StateBlock v-if="state === 'loading'" state="loading" />
@@ -196,7 +211,12 @@ async function saved(): Promise<void> {
             class="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-muted"
             v-bind="briefTarget(l)"
           >
-            <span aria-hidden="true">{{ kindIcon[l.kind] ?? "•" }}</span>
+            <component
+              :is="kindIcon[l.kind].icon"
+              v-if="kindIcon[l.kind]"
+              :class="cn('size-4 shrink-0', GLYPH_TONE_CLASS[kindIcon[l.kind].tone])"
+            />
+            <span v-else class="size-4 shrink-0" />
             <span class="flex-1"
               ><b>{{ l.name }}</b> <span class="text-muted-foreground">{{ l.detail }}</span></span
             >
@@ -223,7 +243,7 @@ async function saved(): Promise<void> {
         state="empty"
         text="No jobs yet."
         hint="Ask in chat, or add a job here."
-        action="+ New job"
+        action="New job"
         @action="formOpen = true"
       />
       <DataTable
@@ -238,9 +258,11 @@ async function saved(): Promise<void> {
       >
         <template #cell-name="{ row }">
           <div class="flex min-w-0 items-center gap-1">
-            <span aria-hidden="true" class="shrink-0">{{
-              stateGlyph[(row as unknown as JobRow).state]
-            }}</span>
+            <component
+              :is="stateOf(row).icon"
+              :class="cn('size-4 shrink-0', GLYPH_TONE_CLASS[stateOf(row).tone])"
+            />
+            <span class="sr-only">{{ stateOf(row).word }}</span>
             <router-link
               class="min-w-0 truncate font-medium"
               :title="(row as unknown as JobRow).name"
@@ -305,7 +327,7 @@ async function saved(): Promise<void> {
               type="button"
               @click.stop="command(`/jobs pause ${(row as unknown as JobRow).id}`)"
             >
-              ⏸ Pause
+              Pause
             </Button>
             <Button
               v-else
@@ -315,7 +337,7 @@ async function saved(): Promise<void> {
               type="button"
               @click.stop="command(`/jobs resume ${(row as unknown as JobRow).id}`)"
             >
-              ▶ Resume
+              Resume
             </Button>
             <Button
               variant="secondary"
@@ -326,7 +348,7 @@ async function saved(): Promise<void> {
               :title="(row as unknown as JobRow).enabled ? undefined : 'Resume the job first'"
               @click.stop="command(`/jobs run ${(row as unknown as JobRow).id}`)"
             >
-              ⚡ Run now
+              Run now
             </Button>
           </template>
         </template>
@@ -346,7 +368,10 @@ async function saved(): Promise<void> {
       />
       <Card v-for="h in held" :key="h.id">
         <CardHeader>
-          <CardTitle>🛡 {{ h.job_name }} → {{ h.target_title }}</CardTitle>
+          <CardTitle class="flex items-center gap-2"
+            ><ShieldIcon :class="cn('size-4 shrink-0', GLYPH_TONE_CLASS.info)" />{{ h.job_name }} →
+            {{ h.target_title }}</CardTitle
+          >
           <CardDescription>{{ heldAge(h.created) }}</CardDescription>
         </CardHeader>
         <CardContent class="flex flex-col gap-2">
@@ -374,7 +399,7 @@ async function saved(): Promise<void> {
             :disabled="a.data === 'post' && !h.can_post"
             @click="resolveHeld(h, a.data === 'drop' ? 'drop' : 'post')"
           >
-            {{ a.text }}
+            <ButtonLabel :text="a.text" />
           </Button>
         </CardFooter>
       </Card>

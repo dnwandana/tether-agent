@@ -122,13 +122,17 @@ describe("ChatPage", () => {
 
   it("shows the empty state with four suggested commands", () => {
     session.id = ""
+    status.mode = "guarded"
     const { container } = mk()
     const h1 = screen.getByRole("heading", { level: 1, name: "Chat" })
     expect(h1.classList.contains("sr-only")).toBe(true)
     expect(screen.getByRole("heading", { level: 2, name: "New session" })).toBeTruthy()
-    expect(container.textContent).toContain(
-      "🛡 Guarded · Dashboard · glm-4.6. Ask anything, or try one of these.",
+    const line = screen.getByText(/· Dashboard · glm-4\.6\. Ask anything, or try one of these\./)
+    expect(line.textContent!.replace(/\s+/g, " ").trim()).toBe(
+      "Guarded · Dashboard · glm-4.6. Ask anything, or try one of these.",
     )
+    expect(line.querySelector("svg.lucide-shield")).not.toBeNull()
+    expect(container.textContent).not.toContain("🛡")
     const row = screen.getByRole("button", { name: "/help" }).parentElement!
     expect(row.classList.contains("scroll-fade-x")).toBe(true)
     expect(
@@ -137,6 +141,77 @@ describe("ChatPage", () => {
         .map((b) => b.textContent!.trim()),
     ).toEqual(["/help", "/usage today", "/model", "/jobs"])
     expect(items(container).map((e) => e.dataset.messageId)).toEqual(["empty"])
+  })
+
+  it("shows the Go marks of a reply as icons and the current button as pressed", async () => {
+    vi.mocked(runCommand).mockResolvedValueOnce({
+      request_id: "r",
+      text: "✅ Pick a model.",
+      buttons: [
+        [
+          { text: "✓ gpt-5", data: "/model gpt-5" },
+          { text: "glm-4.6", data: "/model glm-4.6" },
+        ],
+        [{ text: "Next ▶", data: "/model page 2" }],
+      ],
+      edit: false,
+    } as any)
+    const user = userEvent.setup({ pointerEventsCheck: 0 })
+    mk()
+    await user.click(screen.getByRole("button", { name: "/model" }))
+    await flushPromises()
+    const pop = screen.getByRole("dialog")
+    expect(pop.querySelector("svg.glyph")).not.toBeNull()
+    expect(pop.textContent).toContain("Pick a model.")
+    expect(pop.textContent).not.toMatch(/[✅✓▶]/u)
+    const cur = within(pop).getByRole("button", { name: "gpt-5" })
+    expect(cur.getAttribute("aria-pressed")).toBe("true")
+    expect(cur.querySelector("svg.lucide-check")).not.toBeNull()
+    expect(within(pop).getByRole("button", { name: "glm-4.6" }).hasAttribute("aria-pressed")).toBe(
+      false,
+    )
+    expect(within(pop).getByRole("button", { name: "Next" })).toBeTruthy()
+  })
+
+  it("shows a known mark of a notice as an icon and keeps an unknown one", () => {
+    session.messages = [{ id: 1, role: "user", text: "hi" } as any]
+    notices.list = [
+      { text: "⏸ Goal paused. Use /goal resume to continue.", at: "2026-11-23T09:00:00Z" },
+      { text: "Build done 🚀", at: "2026-11-23T09:01:00Z" },
+    ] as any
+    const { container } = mk()
+    const rows = items(container).filter((e) => e.dataset.messageId!.startsWith("notice-"))
+    expect(rows[0].querySelector("svg.glyph")).not.toBeNull()
+    expect(rows[0].textContent).toContain("Goal paused. Use /goal resume to continue.")
+    expect(rows[0].textContent).not.toContain("⏸")
+    expect(rows[1].textContent).toContain("Build done 🚀")
+    expect(rows[1].querySelector("svg")).toBeNull()
+  })
+
+  it("shows the files of a pending message as a list with a paperclip icon", async () => {
+    session.messages = [{ id: 1, role: "assistant", text: "hi" } as any]
+    const p = { text: "", files: ["a.txt", "b.png"] }
+    const Composer = defineComponent({
+      emits: ["sent", "failed"],
+      setup:
+        (_, { emit }) =>
+        () =>
+          h("div", [
+            h("button", { onClick: () => emit("sent", p) }, "send"),
+            h("button", { onClick: () => emit("failed", p) }, "fail"),
+          ]),
+    })
+    const user = userEvent.setup()
+    const { container } = mk({ Composer })
+    const pend = () => container.querySelectorAll<HTMLElement>('[data-message-id^="pending-"]')
+    await user.click(screen.getByRole("button", { name: "send" }))
+    expect(pend()).toHaveLength(1)
+    const files = within(pend()[0]).getAllByRole("listitem")
+    expect(files.map((li) => li.textContent!.trim())).toEqual(["a.txt", "b.png"])
+    expect(files.every((li) => li.querySelector("svg.lucide-paperclip") !== null)).toBe(true)
+    expect(pend()[0].textContent).not.toContain("📎")
+    await user.click(screen.getByRole("button", { name: "fail" }))
+    expect(pend()).toHaveLength(0)
   })
 
   it("opens the drawer on a tool line and closes it on a second tap of the same line", async () => {

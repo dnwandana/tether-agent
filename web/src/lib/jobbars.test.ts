@@ -1,6 +1,14 @@
 import { describe, it, expect } from "vitest"
 import type { JobRow, RunRow } from "../api/types.gen"
-import { costText, lastSeven, stateGlyph } from "./jobbars"
+import {
+  CheckIcon,
+  CircleCheckIcon,
+  EyeIcon,
+  HourglassIcon,
+  PauseIcon,
+  TriangleAlertIcon,
+} from "@lucide/vue"
+import { costText, lastSeven, stateIcon } from "./jobbars"
 
 const runs = (...s: string[]) => s.map((status) => ({ status }) as RunRow)
 const j = (o: object) =>
@@ -32,14 +40,14 @@ describe("lastSeven", () => {
     ])
   })
 
-  it("maps each job state to its Telegram glyph", () => {
-    expect(stateGlyph).toEqual({
-      done: "✔",
-      paused: "⏸",
-      failing: "⚠",
-      watch: "👁",
-      ok: "✅",
-      pending: "⏳",
+  it("maps each job state to its icon, tone, and word", () => {
+    expect(stateIcon).toEqual({
+      done: { icon: CheckIcon, tone: "ok", word: "done" },
+      paused: { icon: PauseIcon, tone: "muted", word: "paused" },
+      failing: { icon: TriangleAlertIcon, tone: "warn", word: "failing" },
+      watch: { icon: EyeIcon, tone: "info", word: "watch" },
+      ok: { icon: CircleCheckIcon, tone: "ok", word: "ok" },
+      pending: { icon: HourglassIcon, tone: "muted", word: "pending" },
     })
   })
 

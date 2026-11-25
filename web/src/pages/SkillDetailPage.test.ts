@@ -261,7 +261,7 @@ describe("SkillDetailPage", () => {
     await click(user, "Update anyway…")
     expect(confirm).toHaveBeenCalledWith({
       title: "Update /release-notes anyway?",
-      body: "The skill guard rated it caution. A confirm card follows in ⏳ Waiting.",
+      body: "The skill guard rated it caution. A confirm card follows in Waiting.",
       confirmLabel: "Update anyway",
       danger: true,
     })
@@ -284,7 +284,7 @@ describe("SkillDetailPage", () => {
     expect((btn("Uninstall") as HTMLButtonElement).disabled).toBe(true)
     expect(within(pageTitle().parentElement!).getByText("Running…")).toBeTruthy()
     await end({ waiting: true })
-    expect(screen.getByText("Answer the card in ⏳ Waiting.")).toBeTruthy()
+    expect(screen.getByText("Answer the card in Waiting.")).toBeTruthy()
     await click(user, "Open Waiting")
     expect(ui.trayOpen).toBe(true)
     await end({ state: "done", text: "" })
@@ -297,7 +297,7 @@ describe("SkillDetailPage", () => {
     await vi.waitFor(() => expect(h.follow.has("t1")).toBe(true))
     expect(confirm).toHaveBeenCalledWith({
       title: "Remove /release-notes?",
-      body: "A confirm card follows in ⏳ Waiting.",
+      body: "A confirm card follows in Waiting.",
       confirmLabel: "Remove",
       danger: true,
     })
@@ -521,7 +521,9 @@ describe("SkillDetailPage", () => {
       const scan = region("Guard scan")
       expect(flat(scan)).toContain("4 findings · 1 not scanned")
       expect(flat(scan)).toContain("1 critical, 2 high, 1 medium")
-      await user.click(within(scan).getByRole("button", { name: "See the findings ↓" }))
+      const findingsLink = within(scan).getByRole("button", { name: "See the findings" })
+      expect(findingsLink.querySelector("svg.lucide-arrow-down")).not.toBeNull()
+      await user.click(findingsLink)
       expect(scroll.mock.contexts).toContain(document.getElementById("skill-findings"))
     } finally {
       scroll.mockRestore()
@@ -532,7 +534,7 @@ describe("SkillDetailPage", () => {
     vi.mocked(api).mockResolvedValue(view({ findings: [], unscanned: [] }))
     await mk()
     expect(flat(region("Guard scan"))).toContain("No findings")
-    expect(screen.queryByRole("button", { name: "See the findings ↓" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "See the findings" })).toBeNull()
     expect(screen.queryByRole("table")).toBeNull()
   })
 
@@ -557,9 +559,9 @@ describe("SkillDetailPage", () => {
     rememberListQuery("skills", { tab: "catalog", page: "2" })
     try {
       await mk()
-      expect(screen.getByRole("link", { name: "‹ Skills" }).getAttribute("href")).toBe(
-        "/skills?tab=catalog&page=2",
-      )
+      const back = screen.getByRole("link", { name: "Skills" })
+      expect(back.getAttribute("href")).toBe("/skills?tab=catalog&page=2")
+      expect(back.querySelector("svg.lucide-chevron-left")).not.toBeNull()
     } finally {
       rememberListQuery("skills", {})
     }

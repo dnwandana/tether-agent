@@ -2,13 +2,17 @@
 import { ref, computed, onMounted, onUnmounted, type Ref } from "vue"
 import type { Card } from "../../api/types.gen"
 import { answerCard } from "../../stores/cards"
+import { splitGlyph } from "../../lib/glyphs"
+import GlyphText from "../GlyphText.vue"
+import { TriangleAlertIcon } from "@lucide/vue"
 import { Button } from "@/components/ui/button"
 import { Item, ItemContent, ItemFooter, ItemHeader } from "@/components/ui/item"
 import { Progress } from "@/components/ui/progress"
 
 const props = defineProps<{ card: Card }>()
+const title = computed(() => splitGlyph(props.card.header).rest)
 
-// Returns the text "⌛ m:ss" and the bar width in percent. It ticks once a second and stops on unmount.
+// Returns the text "m:ss left" and the bar width in percent. It ticks once a second and stops on unmount.
 function useCountdown(deadline: () => string): {
   text: Ref<string>
   pct: Ref<number>
@@ -32,7 +36,7 @@ function useCountdown(deadline: () => string): {
     if (total === 0) total = Math.max(left, 1)
     const s = Math.ceil(left / 1000)
     const clock = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`
-    text.value = `⌛ ${clock}`
+    text.value = `${clock} left`
     // A screen reader hears the time on the first tick and on each 15th tick after it.
     if (ticks % 15 === 0) aria.value = `Time left: ${clock}`
     ticks++
@@ -51,11 +55,11 @@ function useCountdown(deadline: () => string): {
 // Gives the label of each answer of row 2, in the fixed order of the table.
 const ROW2 = ["redacted", "once", "session", "always", "allow"] as const
 const LABELS: Record<string, string> = {
-  redacted: "✅ Send redacted",
-  once: "✅ Once",
-  session: "✅ Session",
-  always: "✅ Always",
-  allow: "✅ Allow this program",
+  redacted: "Send redacted",
+  once: "Once",
+  session: "Session",
+  always: "Always",
+  allow: "Allow this program",
 }
 
 const cd = useCountdown(() => props.card.deadline)
@@ -89,12 +93,12 @@ async function send(answer: string): Promise<void> {
     variant="outline"
     :id="'card-' + card.id"
     role="group"
-    :aria-label="card.header"
+    :aria-label="title"
     :data-human-only="card.human_only || undefined"
     class="min-w-0 bg-card data-[human-only=true]:border-warning"
   >
     <ItemHeader>
-      <span class="font-medium">{{ card.header }}</span>
+      <span class="font-medium"><GlyphText :text="card.header" /></span>
       <span v-if="card.child" class="text-xs text-muted-foreground">· {{ card.child }}</span>
       <span
         v-if="cd.text.value"
@@ -134,7 +138,13 @@ async function send(answer: string): Promise<void> {
           <span v-if="card.rule">{{ card.rule }}</span>
           <span v-if="card.description"> {{ card.description }}</span>
         </div>
-        <div v-for="(f, i) in card.findings" :key="i" class="text-xs text-warning">⚠ {{ f }}</div>
+        <div
+          v-for="(f, i) in card.findings"
+          :key="i"
+          class="flex items-start gap-1 text-xs text-warning"
+        >
+          <TriangleAlertIcon class="mt-px size-3.5 shrink-0" /><span>{{ f }}</span>
+        </div>
         <dl
           v-if="card.workdir || card.via || card.secrets.length"
           class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm"
@@ -149,7 +159,9 @@ async function send(answer: string): Promise<void> {
           </template>
           <template v-if="card.secrets.length">
             <dt class="text-muted-foreground">Secrets</dt>
-            <dd class="min-w-0 break-all">{{ card.secrets.join(", ") }}</dd>
+            <dd class="flex min-w-0 flex-col break-all">
+              <GlyphText v-for="(s, i) in card.secrets" :key="i" :text="s" />
+            </dd>
           </template>
         </dl>
       </template>
@@ -166,7 +178,7 @@ async function send(answer: string): Promise<void> {
           class="max-tab:h-11"
           @click="send('deny')"
         >
-          ❌ Deny
+          Deny
         </Button>
       </div>
       <div v-if="row2.length" data-row class="flex flex-wrap gap-2">
@@ -184,10 +196,10 @@ async function send(answer: string): Promise<void> {
       </div>
       <p v-if="hasAlways" data-always-hint class="text-xs text-muted-foreground">
         <template v-if="card.workdir">
-          ✅ Always: this exact command in <code class="font-mono">{{ card.workdir }}</code
+          Always: this exact command in <code class="font-mono">{{ card.workdir }}</code
           >, from now on.
         </template>
-        <template v-else>✅ Always: this tool, with any arguments, from now on.</template>
+        <template v-else>Always: this tool, with any arguments, from now on.</template>
       </p>
       <div v-if="error" role="alert" class="text-xs text-destructive">{{ error }}</div>
     </ItemFooter>

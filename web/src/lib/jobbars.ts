@@ -1,4 +1,15 @@
+import type { Component } from "vue"
+import {
+  CheckIcon,
+  CircleCheckIcon,
+  EyeIcon,
+  HourglassIcon,
+  PauseIcon,
+  TriangleAlertIcon,
+} from "@lucide/vue"
 import type { JobRow, JobState, RunRow } from "../api/types.gen"
+
+import type { GlyphTone } from "./glyphs"
 
 export type Bar = "ok" | "bad" | "stop" | "none"
 
@@ -14,14 +25,14 @@ export function lastSeven(runs: RunRow[]): Bar[] {
   return out
 }
 
-// Gives the Telegram glyph of each job state, so the page and the `/jobs` text agree.
-export const stateGlyph: Record<JobState, string> = {
-  done: "✔",
-  paused: "⏸",
-  failing: "⚠",
-  watch: "👁",
-  ok: "✅",
-  pending: "⏳",
+// Gives the icon, the tone, and the word of each job state. Telegram shows the same states as emoji.
+export const stateIcon: Record<JobState, { icon: Component; tone: GlyphTone; word: string }> = {
+  done: { icon: CheckIcon, tone: "ok", word: "done" },
+  paused: { icon: PauseIcon, tone: "muted", word: "paused" },
+  failing: { icon: TriangleAlertIcon, tone: "warn", word: "failing" },
+  watch: { icon: EyeIcon, tone: "info", word: "watch" },
+  ok: { icon: CircleCheckIcon, tone: "ok", word: "ok" },
+  pending: { icon: HourglassIcon, tone: "muted", word: "pending" },
 }
 
 // Returns the 7-day cost of a job. A dash means that no cost is known. A "+" means that some

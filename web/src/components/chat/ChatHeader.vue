@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue"
 import { useRouter } from "vue-router"
-import { EllipsisIcon } from "@lucide/vue"
+import { ChevronDownIcon, EllipsisIcon } from "@lucide/vue"
 import { useCommand } from "../../lib/command"
 import { guardOutside } from "@/lib/layer"
 import { cn } from "@/lib/utils"
 import { session } from "../../stores/session"
 import { toast } from "../../stores/ui"
-import { renderMarkdown } from "../../lib/markdown"
+import { renderSystemText } from "../../lib/markdown"
+import { buttonLabel, splitGlyph } from "../../lib/glyphs"
+import ButtonLabel from "../ButtonLabel.vue"
+import GlyphText from "../GlyphText.vue"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -83,9 +86,13 @@ function act(text: string): void {
   void run(text)
 }
 
+// Returns the HTML of a Go reply. Its marks show as Lucide icons.
 function html(src: string): string {
-  return renderMarkdown(src)
+  return renderSystemText(src)
 }
+
+// The goal line with no lead mark, for the title of the goal button.
+const goalTitle = computed(() => splitGlyph(session.goalLine).rest)
 
 function startRename(): void {
   draftTitle.value = session.title
@@ -195,7 +202,9 @@ function exportSession(): void {
             @update:open="(o: boolean) => onChip('model', o)"
           >
             <DropdownMenuTrigger as-child>
-              <Button variant="outline" size="sm">model {{ modelLabel }} ▾</Button>
+              <Button variant="outline" size="sm"
+                >model {{ modelLabel }} <ChevronDownIcon
+              /></Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent
               align="start"
@@ -203,7 +212,7 @@ function exportSession(): void {
               class="max-w-[min(420px,calc(100vw-16px))]"
             >
               <template v-if="reply">
-                <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+                <!-- eslint-disable-next-line vue/no-v-html -- renderSystemText output only -->
                 <DropdownMenuLabel class="font-normal" v-html="html(reply.text)" />
                 <template v-for="(row, i) in reply.buttons" :key="i">
                   <DropdownMenuSeparator v-if="i > 0" />
@@ -214,7 +223,8 @@ function exportSession(): void {
                       :disabled="b.data === '·'"
                       @select="run(b.data)"
                     >
-                      {{ b.text }}
+                      <ButtonLabel :text="b.text" />
+                      <span v-if="buttonLabel(b.text).current" class="sr-only">current</span>
                     </DropdownMenuItem>
                   </DropdownMenuGroup>
                 </template>
@@ -228,7 +238,7 @@ function exportSession(): void {
           >
             <DropdownMenuTrigger as-child>
               <Button variant="outline" size="sm">
-                effort {{ session.effort || "default" }} ▾
+                effort {{ session.effort || "default" }} <ChevronDownIcon />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent
@@ -237,7 +247,7 @@ function exportSession(): void {
               class="max-w-[min(420px,calc(100vw-16px))]"
             >
               <template v-if="reply">
-                <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+                <!-- eslint-disable-next-line vue/no-v-html -- renderSystemText output only -->
                 <DropdownMenuLabel class="font-normal" v-html="html(reply.text)" />
                 <template v-for="(row, i) in reply.buttons" :key="i">
                   <DropdownMenuSeparator v-if="i > 0" />
@@ -248,7 +258,8 @@ function exportSession(): void {
                       :disabled="b.data === '·'"
                       @select="run(b.data)"
                     >
-                      {{ b.text }}
+                      <ButtonLabel :text="b.text" />
+                      <span v-if="buttonLabel(b.text).current" class="sr-only">current</span>
                     </DropdownMenuItem>
                   </DropdownMenuGroup>
                 </template>
@@ -297,10 +308,10 @@ function exportSession(): void {
             variant="secondary"
             size="sm"
             class="max-w-full min-w-[min(7rem,100%)]"
-            :title="session.goalLine"
+            :title="goalTitle"
             @click="openGoal"
           >
-            <span class="min-w-0 truncate">{{ session.goalLine }}</span>
+            <GlyphText :text="session.goalLine" truncate />
           </Button>
         </div>
       </PopoverAnchor>
@@ -312,7 +323,7 @@ function exportSession(): void {
         @interact-outside="guardOutside"
       >
         <template v-if="reply">
-          <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown output only -->
+          <!-- eslint-disable-next-line vue/no-v-html -- renderSystemText output only -->
           <div class="text-sm" v-html="html(reply.text)" />
           <div v-for="(row, i) in reply.buttons" :key="i" class="flex flex-wrap gap-1.5">
             <Button
@@ -321,9 +332,10 @@ function exportSession(): void {
               variant="secondary"
               size="sm"
               :disabled="b.data === '·'"
+              :aria-pressed="buttonLabel(b.text).current || undefined"
               @click="run(b.data)"
             >
-              {{ b.text }}
+              <ButtonLabel :text="b.text" />
             </Button>
           </div>
         </template>
@@ -400,7 +412,7 @@ function exportSession(): void {
         </DialogHeader>
         <Textarea v-model="promptText" rows="8" aria-label="Custom prompt" />
         <DialogFooter>
-          <Button variant="secondary" @click="clearPrompt">🧹 Use the base prompt</Button>
+          <Button variant="secondary" @click="clearPrompt">Use the base prompt</Button>
           <Button @click="savePrompt">Save</Button>
         </DialogFooter>
       </DialogContent>

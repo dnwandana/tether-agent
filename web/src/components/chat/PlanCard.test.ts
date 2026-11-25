@@ -8,26 +8,38 @@ const items = [
   { text: "Update the test", state: "pending", parent: 0 },
   { text: "Try a cache", state: "cancelled", parent: -1 },
 ]
-const trigger = () => screen.getByRole("button", { name: /📋 Plan/ })
+const trigger = () => screen.getByRole("button", { name: /Plan/ })
+const markIcon = (r: Element) => r.querySelector("[data-mark] svg")!.getAttribute("class")!
 const rows = () => screen.getAllByRole("listitem")
 
 describe("PlanCard", () => {
   it("shows the items with their marks", () => {
     render(PlanCard, { props: { items } })
     expect(trigger().getAttribute("aria-expanded")).toBe("true")
-    expect(trigger().textContent).toContain("📋 Plan")
+    expect(trigger().textContent).toContain("Plan")
+    expect(trigger().textContent).not.toContain("📋")
+    expect(trigger().querySelector("svg.lucide-clipboard-list")).not.toBeNull()
     expect(trigger().querySelector('[data-slot="trace-description"]')!.textContent!.trim()).toBe(
       "1 of 4 done",
     )
     expect(trigger().querySelector('[data-slot="trace-line"]')!.getAttribute("data-status")).toBe(
       "running",
     )
-    expect(rows().map((r) => r.querySelector(".font-mono")!.textContent!.trim())).toEqual([
-      "[x]",
-      "[>]",
-      "[ ]",
-      "[~]",
+    expect(rows().map((r) => r.querySelector("[data-mark] .sr-only")!.textContent)).toEqual([
+      "done",
+      "in progress",
+      "pending",
+      "cancelled",
     ])
+    expect(markIcon(rows()[0])).toContain("lucide-circle-check")
+    expect(markIcon(rows()[0])).toContain("text-success")
+    expect(markIcon(rows()[1])).toContain("lucide-circle-dot")
+    expect(markIcon(rows()[1])).toContain("text-info")
+    expect(markIcon(rows()[2]).split(" ")).toContain("lucide-circle")
+    expect(markIcon(rows()[2])).toContain("text-muted-foreground")
+    expect(markIcon(rows()[3])).toContain("lucide-circle-slash")
+    expect(markIcon(rows()[3])).toContain("text-muted-foreground")
+    expect(rows().some((r) => /\[[x> ~]\]/.test(r.textContent!))).toBe(false)
     expect(
       rows().map((r) => r.querySelector('[data-slot="trace-title"]')!.textContent!.trim()),
     ).toEqual(items.map((i) => i.text))
@@ -57,7 +69,7 @@ describe("PlanCard", () => {
 
   it("says done when no item is open", () => {
     render(PlanCard, { props: { items: [items[0], items[3]] } })
-    expect(trigger().textContent).toContain("📋 Plan done")
+    expect(trigger().textContent).toContain("Plan done")
     expect(trigger().querySelector('[data-slot="trace-description"]')).toBeNull()
     expect(
       trigger().querySelector('[data-slot="trace-line"]')!.getAttribute("data-status"),

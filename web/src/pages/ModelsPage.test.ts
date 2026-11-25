@@ -111,24 +111,30 @@ describe("ModelsPage", () => {
     expect(api).toHaveBeenCalledWith("GET", "/api/models")
     const rows = bodyRows(entries())
     expect(rows.map((r) => cells(r)[7].textContent?.trim())).toEqual([
-      "⚠ skipped for 42 s · HTTP 503 at 14:02",
-      "✓ answers now",
-      "✗ not usable: no key",
+      "skipped for 42 s · HTTP 503 at 14:02",
+      "answers now",
+      "not usable: no key",
     ])
     expect(rows.map((r) => tone(cells(r)[7]))).toEqual(["warn", "ok", "bad"])
+    const icons = rows.map((r) => cells(r)[7].querySelector("[data-tone] svg")!.classList)
+    expect(icons[0]).toContain("lucide-triangle-alert")
+    expect(icons[1]).toContain("lucide-check")
+    expect(icons[2]).toContain("lucide-x")
     vi.advanceTimersByTime(1000)
     await flushPromises()
     expect(cells(bodyRows(entries())[0])[7].textContent?.trim()).toBe(
-      "⚠ skipped for 41 s · HTTP 503 at 14:02",
+      "skipped for 41 s · HTTP 503 at 14:02",
     )
     unmount()
   })
 
   it("shows the fallback banner and the roles", async () => {
     const { unmount } = await mk()
-    expect(screen.getByRole("alert").textContent?.trim()).toBe(
-      "⚠ Fallback active. backup (deepseek-chat) answers. primary failed at 14:02: HTTP 503.",
+    const banner = screen.getByRole("alert")
+    expect(banner.textContent?.trim()).toBe(
+      "Fallback active. backup (deepseek-chat) answers. primary failed at 14:02: HTTP 503.",
     )
+    expect(banner.querySelector("svg.lucide-triangle-alert")).not.toBeNull()
     expect(screen.getByText("goals.judge_provider")).toBeTruthy()
     expect(screen.getByText("128k")).toBeTruthy()
     unmount()
@@ -173,8 +179,8 @@ describe("ModelsPage", () => {
     expect(within(steps[0]).getByText("Primary")).toBeTruthy()
     expect(within(steps[1]).getByText("Fallback 1")).toBeTruthy()
     expect(steps.map((s) => s.querySelector("[data-tone]")?.textContent?.trim())).toEqual([
-      "⚠ skipped",
-      "✓ answers",
+      "skipped",
+      "answers",
     ])
     expect(steps[0].textContent?.match(/primary/gi)).toHaveLength(1)
     expect(within(steps[1]).getByText("backup")).toBeTruthy()
@@ -246,7 +252,7 @@ describe("ModelsPage", () => {
     })
     const { unmount } = await mk()
     const c = cells(bodyRows(entries())[0])[7]
-    expect(c.textContent?.trim()).toBe("⚠ last failed 13:58 · HTTP 500")
+    expect(c.textContent?.trim()).toBe("last failed 13:58 · HTTP 500")
     expect(tone(c)).toBe("warn")
     unmount()
   })
@@ -260,7 +266,9 @@ describe("ModelsPage", () => {
     })
     const { unmount } = await mk()
     expect(screen.getByText("https://api.z.ai/api/paas/v4")).toBeTruthy()
-    expect(screen.getByText("⚠️ entry unusable").getAttribute("data-tone")).toBe("warn")
+    const unusable = screen.getByText("entry unusable")
+    expect(unusable.getAttribute("data-tone")).toBe("warn")
+    expect(unusable.querySelector("svg.lucide-triangle-alert")).not.toBeNull()
     unmount()
   })
 

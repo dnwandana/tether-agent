@@ -175,7 +175,7 @@ function report(t: TaskView): string {
       `Sessions: ${num(b.sessions)} · Messages: ${num(b.messages)} · Cron jobs: ${num(b.cron_jobs)}`,
     )
     if (b.replaced?.length) lines.push(`Replaced keys: ${b.replaced.join(", ")}`)
-    for (const w of b.warnings ?? []) lines.push(`⚠ ${w}`)
+    for (const w of b.warnings ?? []) lines.push(`Warning: ${w}`)
     if (b.skipped?.length) lines.push(`Skipped: ${b.skipped.join(", ")}`)
   }
   return lines.join("\n")

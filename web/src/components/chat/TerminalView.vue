@@ -9,6 +9,7 @@ import {
   CodeBlockHeader,
   CodeBlockTitle,
 } from "@/components/ui/code-block"
+import { toolIcon } from "../../lib/glyphs"
 import { isSecure } from "../../stores/ui"
 import { parseTerminal } from "./parse"
 
@@ -24,7 +25,7 @@ const copyText = computed(() => res.value.background?.logPath ?? res.value.outpu
 <template>
   <CodeBlock size="sm" :variant="failed ? 'destructive' : 'default'">
     <CodeBlockHeader>
-      <span aria-hidden="true">💻</span>
+      <component :is="toolIcon('terminal')" class="size-4 shrink-0" />
       <CodeBlockTitle>$ {{ props.command }}</CodeBlockTitle>
       <CodeBlockActions v-if="secure">
         <CodeBlockCopyButton :value="copyText" />

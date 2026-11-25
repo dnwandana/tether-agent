@@ -206,7 +206,7 @@ describe("MessageList", () => {
     } as never
     render(Host, { slots: { live: () => h("p", { "data-testid": "live-slot" }, "plan") } })
     expect(screen.getAllByRole("button", { name: /patch/ })).toHaveLength(2)
-    expect(screen.getByText("▉")).toBeTruthy()
+    expect(document.querySelector("[data-cursor]")).not.toBeNull()
     expect(screen.getByTestId("live-slot")).toBeTruthy()
     expect(items().at(-1)!.getAttribute("data-message-id")).toBe("live")
     turn.view = { running: true, text: "", tools: [], plan: [], queue: [] } as never
@@ -260,6 +260,17 @@ describe("MessageList", () => {
     expect(screen.queryByRole("button", { name: "Load older messages" })).toBeNull()
   })
 
+  it("shows a plain file as a link with the paperclip icon", () => {
+    session.messages = [
+      msg(3, "assistant", "Here.", { files: [{ id: "f3", name: "report.pdf", kind: "file" }] }),
+    ] as never
+    render(Host)
+    const link = screen.getByRole("link", { name: "report.pdf" })
+    expect(link.getAttribute("href")).toBe("/api/files/f3")
+    expect(link.querySelector("svg.lucide-paperclip")).not.toBeNull()
+    expect(link.textContent).not.toContain("📎")
+  })
+
   it("shows a closed summary block only for the summary role", async () => {
     session.messages = [
       msg(1, "user", "old question", { compacted: true }),
@@ -268,13 +279,21 @@ describe("MessageList", () => {
       msg(3, "user", "new"),
     ] as never
     const r = render(Host)
-    const folds = screen.getAllByRole("button", { name: "🗜 Compacted summary" })
+    const folds = screen.getAllByRole("button", { name: "Compacted summary" })
     expect(folds).toHaveLength(1)
+    // The fold icon is beside the button; the button holds only the word and the chevron.
+    expect(folds[0].querySelector("svg.lucide-fold-vertical")).toBeNull()
+    expect(
+      folds[0].closest('[data-slot="marker"]')!.querySelector("svg.lucide-fold-vertical"),
+    ).not.toBeNull()
+    expect(folds[0].querySelector("svg.lucide-chevron-right")).not.toBeNull()
+    expect(folds[0].textContent).not.toContain("🗜")
     expect(folds[0].getAttribute("aria-expanded")).toBe("false")
     expect(folds[0].closest('[data-slot="marker"]')!.getAttribute("data-variant")).toBe("separator")
     expect(screen.queryByText("The short summary")).toBeNull()
     await userEvent.setup().click(folds[0])
     expect(screen.getByText("The short summary")).toBeTruthy()
+    expect(folds[0].querySelector("svg.lucide-chevron-down")).not.toBeNull()
     expect(userRows().map((m) => m.textContent!.trim())).toEqual(["old question", "new"])
     expect(r.container.querySelector(".typeset")!.textContent).toContain("old answer")
   })

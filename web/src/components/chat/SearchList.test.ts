@@ -36,6 +36,9 @@ describe("SearchList", () => {
     expect(r.container.querySelector('[data-slot="trace"]')!.hasAttribute("data-untrusted")).toBe(
       true,
     )
+    const icon = trigger.querySelector('[data-slot="trace-icon"]')!
+    expect(icon.querySelector("svg.lucide-search")).not.toBeNull()
+    expect(trigger.textContent).not.toContain("🔍")
   })
 
   it("shows session_search hits with a link to the session", async () => {
@@ -47,5 +50,8 @@ describe("SearchList", () => {
     expect(r.container.textContent).toContain("the runs test is flaky")
     expect(screen.getByRole("button", { name: /flaky/ }).textContent).toContain("1 result")
     expect(r.container.querySelector("[data-untrusted]")).toBeNull()
+    const trigger = screen.getByRole("button", { name: /flaky/ })
+    expect(trigger.querySelector("svg.lucide-history")).not.toBeNull()
+    expect(trigger.textContent).not.toContain("🔍")
   })
 })

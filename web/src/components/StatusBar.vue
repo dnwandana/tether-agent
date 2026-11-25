@@ -23,7 +23,15 @@ import {
 import { Kbd } from "@/components/ui/kbd"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
+import {
+  BotIcon,
+  GitBranchIcon,
+  GlobeIcon,
+  SquareTerminalIcon,
+  TriangleAlertIcon,
+} from "@lucide/vue"
 import { cn } from "@/lib/utils"
+import { GLYPH_TONE_CLASS, MODES, splitGlyph } from "../lib/glyphs"
 import { ICONS } from "../lib/icons"
 import { cards } from "../stores/cards"
 import { status } from "../stores/status"
@@ -31,18 +39,15 @@ import { isSecure, prefs, setTheme, ui, type Theme } from "../stores/ui"
 
 const router = useRouter()
 
-const MODES: Record<string, string> = {
-  "read-only": "👁 Read-only",
-  guarded: "🛡 Guarded",
-  full: "⚡ Full",
-}
 // The rows of the theme menu, with the icon component of each row.
 const THEME_ROWS: { value: Theme; label: string; icon: Component }[] = [
   { value: "system", label: "System", icon: ICONS.monitor },
   { value: "dark", label: "Dark", icon: ICONS.moon },
   { value: "light", label: "Light", icon: ICONS.sun },
 ]
-const modeText = computed(() => MODES[status.mode] ?? status.mode)
+const mode = computed<{ label: string; icon: Component | null }>(
+  () => MODES[status.mode] ?? { label: status.mode, icon: null },
+)
 const waiting = computed(() => cards.open.length)
 const spend = computed(() => "$" + status.spend24h.toFixed(2) + (status.unpriced ? "+" : ""))
 // The full spend text. A phone shows only the amount, so the label keeps the full text.
@@ -55,12 +60,23 @@ function onSystemTheme(): void {
 }
 
 const runningList = computed(() => {
-  const parts: string[] = []
-  if (status.running_batches > 0) parts.push(`🔀 ${status.running_batches}`)
-  if (status.running_acp > 0) parts.push(`🤖 ${status.running_acp}`)
-  if (status.running_shell > 0) parts.push(`💻 ${status.running_shell}`)
-  if (status.browser_on) parts.push("🌐")
-  return parts.join(" · ")
+  const parts: { icon: Component; n: string; word: string }[] = []
+  if (status.running_batches > 0)
+    parts.push({
+      icon: GitBranchIcon,
+      n: String(status.running_batches),
+      word: "delegation batches",
+    })
+  if (status.running_acp > 0)
+    parts.push({ icon: BotIcon, n: String(status.running_acp), word: "ACP sessions" })
+  if (status.running_shell > 0)
+    parts.push({
+      icon: SquareTerminalIcon,
+      n: String(status.running_shell),
+      word: "background processes",
+    })
+  if (status.browser_on) parts.push({ icon: GlobeIcon, n: "", word: "browser" })
+  return parts
 })
 
 // The offline time as m:ss. The timer runs only while the stream is "reconnecting".
@@ -132,7 +148,7 @@ function alertCard(card: Card): void {
   if (isSecure() && globalThis.Notification?.permission === "granted") {
     try {
       // oxlint-disable-next-line no-new -- the notification shows itself, and the page keeps no handle.
-      new globalThis.Notification("Tether: " + card.header, {
+      new globalThis.Notification("Tether: " + splitGlyph(card.header).rest, {
         body: card.command || card.summary || "A card waits for you.",
       })
     } catch {
@@ -180,7 +196,8 @@ onBeforeUnmount(() => {
         title="A fallback entry answers"
         @click="go('models')"
       >
-        <span>⚠</span><b>{{ status.model }}</b
+        <TriangleAlertIcon :class="GLYPH_TONE_CLASS.warn" /><span class="sr-only">fallback</span
+        ><b>{{ status.model }}</b
         ><span class="max-lg:hidden">fallback answers · {{ status.fallback_cause }}</span>
       </Button>
       <Button
@@ -204,7 +221,8 @@ onBeforeUnmount(() => {
         title="Mode of the dashboard scope"
         @click="go('security')"
       >
-        {{ modeText }}<span class="text-muted-foreground max-lg:hidden">· Dashboard</span>
+        <component :is="mode.icon" v-if="mode.icon" />{{ mode.label
+        }}<span class="text-muted-foreground max-lg:hidden">· Dashboard</span>
       </Button>
       <Separator orientation="vertical" class="h-4 max-tab:hidden" />
       <Button
@@ -227,9 +245,17 @@ onBeforeUnmount(() => {
         @click="go('system')"
       >
         <Spinner v-if="status.running > 0" /><b>{{ status.running }} running</b
-        ><span v-if="runningList" class="text-muted-foreground max-lg:hidden"
-          >· {{ runningList }}</span
-        >
+        ><span
+          v-if="runningList.length"
+          class="text-muted-foreground inline-flex items-center gap-1 max-lg:hidden"
+          >·
+          <template v-for="(p, i) in runningList" :key="p.word">
+            <span v-if="i > 0">·</span>
+            <span class="inline-flex items-center gap-0.5"
+              ><component :is="p.icon" />{{ p.n }}<span class="sr-only">{{ p.word }}</span></span
+            >
+          </template>
+        </span>
       </Button>
       <Separator orientation="vertical" class="h-4" />
       <Button

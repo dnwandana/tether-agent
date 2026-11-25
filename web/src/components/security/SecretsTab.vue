@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue"
+import { CheckIcon, TriangleAlertIcon } from "@lucide/vue"
 import type { PinView, SecretView } from "../../api/types.gen"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -9,6 +10,7 @@ import type { Column } from "../../lib/table"
 import ResultNote from "../ResultNote.vue"
 import StateBlock from "../StateBlock.vue"
 import { useCommand, type ResultNoteData } from "../../lib/command"
+import { GLYPH_TONE_CLASS } from "../../lib/glyphs"
 import { fullTime, shortTime } from "../../lib/time"
 import { ui } from "../../stores/ui"
 
@@ -39,7 +41,7 @@ async function setValue(s: SecretView): Promise<void> {
     note.value = {
       title: "Set value",
       at: new Date(),
-      text: "Type the value in the 🔑 card in ⏳ Waiting.",
+      text: "Type the value in a secret card in Waiting.",
       kind: "info",
     }
     ui.trayOpen = true
@@ -69,13 +71,16 @@ async function setValue(s: SecretView): Promise<void> {
       page-label="Secrets"
     >
       <template #cell-state="{ row }">
-        <Badge v-if="row.state === 'set'" variant="secondary">✓ set</Badge>
+        <Badge v-if="row.state === 'set'" variant="secondary"
+          ><CheckIcon :class="GLYPH_TONE_CLASS.ok" />set</Badge
+        >
         <Badge
           v-else-if="row.state === 'check'"
           variant="outline"
           class="text-warning"
           :title="fullTime(row.failed_at as string)"
-          >✓ set · auth failed {{ shortTime(row.failed_at as string) }}</Badge
+          ><TriangleAlertIcon :class="GLYPH_TONE_CLASS.warn" />set · auth failed
+          {{ shortTime(row.failed_at as string) }}</Badge
         >
         <Badge v-else variant="outline" class="text-warning">not set</Badge>
       </template>

@@ -205,6 +205,10 @@ const ruleRows = () => bodyRows().filter((r) => r.textContent!.includes("rule ")
 // Returns the pager of the Always answers.
 const grantPager = () => within(screen.getByRole("navigation", { name: "Always answers pages" }))
 
+// Returns the mode cell of the row that holds the text.
+const modeCell = (text: string) =>
+  within(bodyRows().find((r) => r.textContent!.includes(text))!).getAllByRole("cell")[1]
+
 describe("SecurityPage", () => {
   it("shows one line for each fixed mode and links to the Rules tab", async () => {
     const { user } = await mk("/security", { RulesTab: RulesStub })
@@ -241,15 +245,16 @@ describe("SecurityPage", () => {
     expect(document.body.textContent).toContain("Telegram › Ops › topic 7")
     const group = screen.getByRole("group", { name: "Mode of the Dashboard" })
     expect(within(group).getAllByRole("button")).toHaveLength(3)
-    await user.click(btn("⚡ Full"))
+    await user.click(btn("Full"))
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith(
       expect.objectContaining({
-        title: "Set ⚡ Full for the Dashboard?",
+        title: "Set Full for the Dashboard?",
         body:
-          "Now: 🛡 Guarded.\n" +
+          "Now: Guarded.\n" +
           "Dangerous commands run with no question in this scope. Human-only rules still ask.\n" +
           "A script can then add a dashboard session.",
+        confirmLabel: "Set Full",
         danger: true,
       }),
     )
@@ -257,13 +262,37 @@ describe("SecurityPage", () => {
     expect(runCommand).toHaveBeenCalledWith("/mode full confirm")
   })
 
+  it("shows the mode of each scope with its icon and no mark", async () => {
+    await mk()
+    expect(modeCell("this dashboard").textContent!.trim()).toBe("Guarded")
+    expect(modeCell("this dashboard").querySelector("svg.lucide-shield")).not.toBeNull()
+    expect(modeCell("Telegram › Ops › topic 7").textContent).toContain("Read-only")
+    expect(modeCell("Telegram › Ops › topic 7").querySelector("svg.lucide-eye")).not.toBeNull()
+    const group = screen.getByRole("group", { name: "Mode of the Dashboard" })
+    expect(
+      within(group)
+        .getAllByRole("button")
+        .map((b) => b.textContent!.trim()),
+    ).toEqual(["Read-only", "Guarded", "Full"])
+    expect(group.querySelector("svg")).toBeNull()
+    expect(document.body.textContent).not.toMatch(/[👁🛡⚡]/u)
+  })
+
+  it("names the Always answers with no mark", async () => {
+    await mk("/security?tab=grants")
+    expect(document.body.textContent).toContain(
+      "“Always” answers. Session answers live in memory and are not listed.",
+    )
+    expect(document.body.textContent).not.toContain("✅")
+  })
+
   it("sends nothing when the owner cancels the Full confirm", async () => {
     vi.mocked(confirm).mockResolvedValue(false)
     const { user } = await mk()
-    await user.click(btn("⚡ Full"))
+    await user.click(btn("Full"))
     await flushPromises()
     expect(runCommand).not.toHaveBeenCalled()
-    expect(btn("⚡ Full").getAttribute("aria-pressed")).toBe("false")
+    expect(btn("Full").getAttribute("aria-pressed")).toBe("false")
   })
 
   it("removes grants with the codes of the list and shows the damaged store", async () => {
@@ -309,7 +338,7 @@ describe("SecurityPage", () => {
   it("shows the mode reply in a result note", async () => {
     vi.mocked(runCommand).mockResolvedValueOnce(reply("🧭 **Mode of this topic: read-only**"))
     const { user } = await mk()
-    await user.click(btn("👁 Read-only"))
+    await user.click(btn("Read-only"))
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/mode read-only")
     expect(seen.note.text).toBe("🧭 **Mode of this topic: read-only**")
@@ -370,7 +399,7 @@ describe("SecurityPage", () => {
         (p === "/api/security" ? { ...view, grants: [] } : logPage) as any,
     )
     await mk("/security?tab=grants")
-    expect(screen.getByText("An ✅ Always answer shows here.")).toBeTruthy()
+    expect(screen.getByText("An Always answer shows here.")).toBeTruthy()
   })
 
   it("shows the Remove reply in a result note", async () => {
@@ -388,7 +417,7 @@ describe("SecurityPage", () => {
     await flushPromises()
     expect(runCommand).toHaveBeenCalledWith("/secrets set GITHUB_TOKEN")
     expect(ui.trayOpen).toBe(true)
-    expect(seen.note.text).toBe("Type the value in the 🔑 card in ⏳ Waiting.")
+    expect(seen.note.text).toBe("Type the value in a secret card in Waiting.")
   })
 
   it("loads again when a secret or an approval card closes", async () => {

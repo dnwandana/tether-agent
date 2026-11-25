@@ -218,9 +218,11 @@ describe("JobsPage", () => {
   it("pauses a job with the command and disables Run now on a paused job", async () => {
     const user = userEvent.setup()
     await mk()
-    await user.click(screen.getAllByRole("button", { name: "⏸ Pause" })[0])
+    await user.click(screen.getAllByRole("button", { name: "Pause" })[0])
     expect(runCommand).toHaveBeenCalledWith("/jobs pause j1")
-    const run = screen.getAllByRole("button", { name: "⚡ Run now" }) as HTMLButtonElement[]
+    const run = screen.getAllByRole("button", { name: "Run now" }) as HTMLButtonElement[]
+    expect(screen.getAllByRole("button", { name: "Pause" })[0].querySelector("svg")).toBeNull()
+    expect(screen.getAllByRole("button", { name: "Resume" })[0].querySelector("svg")).toBeNull()
     expect(run[0].disabled).toBe(false)
     expect(run[1].disabled).toBe(true)
   })
@@ -228,12 +230,39 @@ describe("JobsPage", () => {
   it("shows the buttons of each held kind and drops a hold", async () => {
     const user = userEvent.setup()
     await mk()
-    expect(screen.getAllByRole("button", { name: '✅ Send to "Ops chat"' })).toHaveLength(1)
-    expect(screen.getAllByRole("button", { name: "✅ Post the full text there" })).toHaveLength(1)
-    expect(screen.getAllByRole("button", { name: "❌ Drop" })).toHaveLength(1)
-    await user.click(screen.getByRole("button", { name: "❌ Drop" }))
+    expect(screen.getAllByRole("button", { name: 'Send to "Ops chat"' })).toHaveLength(1)
+    expect(screen.getAllByRole("button", { name: "Post the full text there" })).toHaveLength(1)
+    expect(screen.getAllByRole("button", { name: "Drop" })).toHaveLength(1)
+    const title = screen.getByText("price-watch → Ops chat")
+    expect(title.querySelector("svg.lucide-shield")).not.toBeNull()
+    expect(title.textContent).not.toContain("🛡")
+    await user.click(screen.getByRole("button", { name: "Drop" }))
     await flushPromises()
     expect(api).toHaveBeenCalledWith("POST", "/api/held/h1", { action: "drop" })
+  })
+
+  it("shows the icon of each brief kind and no mark for an unknown kind", async () => {
+    const brief = data["/api/brief"] as { lines: object[] }
+    brief.lines.push({
+      kind: "other",
+      name: "misc",
+      detail: "x",
+      count: 0,
+      age_seconds: 60,
+      cost_usd: 0,
+      ratio: 0,
+      job_id: "j1",
+      session_id: "",
+    })
+    await mk()
+    const failing = screen.getByRole("link", { name: /gh-notify/ })
+    expect(failing.querySelector("svg.lucide-triangle-alert")).not.toBeNull()
+    expect(
+      screen.getByRole("link", { name: /ship it/ }).querySelector("svg.lucide-target"),
+    ).not.toBeNull()
+    const misc = screen.getByRole("link", { name: /misc/ })
+    expect(misc.querySelector("svg")).toBeNull()
+    expect(misc.textContent).not.toContain("•")
   })
 
   it("links the brief lines to the job and the goal", async () => {
@@ -245,7 +274,7 @@ describe("JobsPage", () => {
   it("opens the job form in a side panel", async () => {
     const user = userEvent.setup()
     await mk()
-    await user.click(screen.getByRole("button", { name: "+ New job" }))
+    await user.click(screen.getByRole("button", { name: "New job" }))
     const dlg = screen
       .getByRole("button", { name: "Make the form dirty" })
       .closest('[role="dialog"]')
@@ -256,12 +285,12 @@ describe("JobsPage", () => {
     const user = userEvent.setup()
     vi.mocked(confirm).mockResolvedValueOnce(false)
     await mk()
-    await user.click(screen.getByRole("button", { name: "❌ Drop" }))
+    await user.click(screen.getByRole("button", { name: "Drop" }))
     await flushPromises()
     expect(confirm).toHaveBeenCalledWith({
       title: "Drop this held send?",
       body: "The text is deleted.",
-      confirmLabel: "❌ Drop",
+      confirmLabel: "Drop",
       danger: true,
     })
     expect(api).not.toHaveBeenCalledWith("POST", "/api/held/h1", { action: "drop" })
@@ -283,7 +312,7 @@ describe("JobsPage", () => {
       }),
     ]
     const { container } = await mk()
-    const post = screen.getByRole("button", { name: '✅ Send to "Ops chat"' }) as HTMLButtonElement
+    const post = screen.getByRole("button", { name: 'Send to "Ops chat"' }) as HTMLButtonElement
     expect(post.disabled).toBe(true)
     expect(container.textContent).toContain("Telegram is off.")
     expect(container.textContent).toContain("web_fetch, browser_read")
@@ -310,7 +339,10 @@ describe("JobsPage", () => {
     }
     const { container } = await mk()
     const line = screen.getByRole("link", { name: /bad schedule/ })
-    expect(line.textContent).toContain("⚠️")
+    expect(line.querySelector("svg.lucide-triangle-alert")!.getAttribute("class")).toContain(
+      "text-warning",
+    )
+    expect(line.textContent).not.toContain("⚠")
     expect(line.textContent).toContain("×3")
     expect(line.textContent).toContain("$0.1200")
     expect(container.textContent).toContain("unpriced")
@@ -336,12 +368,12 @@ describe("JobsPage", () => {
     expect(api).toHaveBeenCalledWith("GET", "/api/held")
   })
 
-  it("shows the empty text with + New job", async () => {
+  it("shows the empty text with New job", async () => {
     const user = userEvent.setup()
     data["/api/jobs"] = []
     await mk()
     expect(screen.getByText("No jobs yet.")).toBeTruthy()
-    await user.click(screen.getAllByRole("button", { name: "+ New job" })[1])
+    await user.click(screen.getAllByRole("button", { name: "New job" })[1])
     await flushPromises()
     expect(screen.getByRole("button", { name: "Make the form dirty" })).toBeTruthy()
     expect(mounts).toBe(1)
@@ -350,14 +382,14 @@ describe("JobsPage", () => {
   it("passes the dirty state of the new-job form to the panel", async () => {
     const user = userEvent.setup()
     await mk()
-    await user.click(screen.getByRole("button", { name: "+ New job" }))
+    await user.click(screen.getByRole("button", { name: "New job" }))
     await user.click(screen.getByRole("button", { name: "Make the form dirty" }))
     const dlg = screen.getByRole("dialog", { name: "New job" })
     await user.click(within(dlg).getByRole("button", { name: "Close" }))
     expect(await screen.findByText("Discard the changes?")).toBeTruthy()
   })
 
-  it("shows No runs, the state glyph, done as muted text, and the 7-day cost", async () => {
+  it("shows No runs, the state icon, done as muted text, and the 7-day cost", async () => {
     data["/api/jobs"] = [
       job({ id: "j5", name: "fresh", icon: "", state: "pending", last7: [] }),
       job({ id: "j6", name: "gone", icon: "", state: "done", enabled: false }),
@@ -367,12 +399,21 @@ describe("JobsPage", () => {
     await mk()
     expect(screen.getAllByRole("columnheader").map((t) => t.textContent)).toContain("Cost · 7 d")
     expect(rowOf("fresh").textContent).toContain("No runs")
-    expect(rowOf("fresh").textContent).toContain("⏳")
+    expect(rowOf("fresh").querySelector("svg.lucide-hourglass")).not.toBeNull()
     expect(rowOf("fresh").querySelector("[data-runs7]")).toBeNull()
     expect(rowOf("gone").querySelector('[data-slot="badge"]')).toBeNull()
-    expect(within(rowOf("gone")).getByText("done").className).toContain("text-muted-foreground")
+    const doneText = within(rowOf("gone"))
+      .getAllByText("done")
+      .find((e) => !e.classList.contains("sr-only"))!
+    expect(doneText.className).toContain("text-muted-foreground")
     expect(within(rowOf("gone")).queryAllByRole("button")).toHaveLength(0)
-    expect(rowOf("cheap").textContent).toContain("⚠")
+    expect(
+      rowOf("cheap").querySelector("svg.lucide-triangle-alert")!.getAttribute("class"),
+    ).toContain("text-warning")
+    expect(rowOf("cheap").textContent).not.toContain("⚠")
+    // The state icon has no word beside it, so a screen reader reads its sr-only word.
+    expect(within(rowOf("cheap")).getByText("failing").className).toContain("sr-only")
+    expect(within(rowOf("fresh")).getByText("pending").className).toContain("sr-only")
     expect(rowOf("cheap").textContent).toContain("$0.0102+")
     expect(rowOf("script").textContent).toContain("—")
   })
@@ -391,7 +432,8 @@ describe("JobsPage", () => {
     expect(link.getAttribute("title")).toBe("daily-digest")
     const box = link.parentElement!
     expect(box.classList).toContain("gap-1")
-    expect(box.textContent).toContain("✅")
+    expect(box.querySelector("svg.lucide-circle-check")).not.toBeNull()
+    expect(box.textContent).not.toContain("✅")
     expect(within(box).getByText("watch")).toBeTruthy()
   })
 

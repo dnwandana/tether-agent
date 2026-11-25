@@ -19,7 +19,8 @@ describe("RowMenu", () => {
   it("opens a popover outside the table and emits the action", async () => {
     const user = setup()
     const { container, emitted } = render(RowMenu, { props: { items } })
-    expect(trigger().textContent?.trim()).toBe("⋯")
+    expect(trigger().textContent?.trim()).toBe("")
+    expect(trigger().querySelector("svg.lucide-ellipsis")).not.toBeNull()
     expect(trigger().getAttribute("aria-expanded")).toBe("false")
     await user.click(trigger())
     expect(trigger().getAttribute("aria-expanded")).toBe("true")

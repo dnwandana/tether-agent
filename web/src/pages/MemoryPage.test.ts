@@ -327,8 +327,8 @@ describe("MemoryPage", () => {
       danger: true,
       items: ["The owner deploys with `make release`."],
     })
-    await vi.waitFor(() => expect(btns("↩️ Undo")).toHaveLength(1))
-    await user.click(btns("↩️ Undo")[0]!)
+    await vi.waitFor(() => expect(btns("Undo")).toHaveLength(1))
+    await user.click(btns("Undo")[0]!)
     await vi.waitFor(() =>
       expect(api).toHaveBeenCalledWith("POST", "/api/memory", {
         action: "add",
@@ -395,7 +395,7 @@ describe("MemoryPage", () => {
     const { user } = await mk()
     await user.click(within(itemOf("«GH_TOKEN»")).getByRole("button", { name: "Remove" }))
     await flushPromises()
-    expect(btns("↩️ Undo")).toHaveLength(0)
+    expect(btns("Undo")).toHaveLength(0)
   })
 
   it("shows the meter in the danger color at the limit, with the percent", async () => {

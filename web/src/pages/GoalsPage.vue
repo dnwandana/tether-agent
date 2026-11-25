@@ -233,7 +233,7 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
               class="max-tab:min-h-11"
               @click="command('/goal resume')"
             >
-              ▶ Resume
+              Resume
             </Button>
             <Button
               v-if="g.can_resume && chipState(g) === 'parked'"
@@ -251,7 +251,7 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
               class="max-tab:min-h-11"
               @click="command(goalCmd(g, 'pause'))"
             >
-              ⏸ Pause
+              Pause
             </Button>
             <Button
               v-if="g.can_stop"

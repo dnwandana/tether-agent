@@ -1,7 +1,7 @@
 <template>
   <Alert v-if="on" role="status" aria-live="polite" class="rounded-none border-x-0 border-t-0">
     <RefreshCwIcon />
-    <AlertTitle>♻️ The gateway restarts.</AlertTitle>
+    <AlertTitle>The gateway restarts.</AlertTitle>
     <AlertDescription>
       <span class="text-muted-foreground">{{ progress }}</span>
       <template v-if="late">

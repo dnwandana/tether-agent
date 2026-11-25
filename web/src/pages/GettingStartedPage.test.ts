@@ -97,16 +97,21 @@ beforeEach(() => {
 })
 
 describe("GettingStartedPage", () => {
-  it("shows a done step with ✓, an open step with its command, and an unknown step with ?", async () => {
+  it("shows a done step with a check icon, an open step with its command, and an unknown step with a help icon", async () => {
     await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/setup")
     expect(markOf(rows()[0]).getAttribute("data-tone")).toBe("done")
-    expect(markOf(rows()[0]).textContent?.trim()).toBe("✓")
+    expect(markOf(rows()[0]).querySelector("svg.lucide-check")).not.toBeNull()
+    expect(markOf(rows()[0]).querySelector(".sr-only")?.textContent).toBe("done")
+    expect(markOf(rows()[0]).textContent?.trim()).toBe("done")
     expect(rows()[0].querySelector("code")).toBeNull()
     expect(markOf(rows()[1]).textContent?.trim()).toBe("2")
+    expect(markOf(rows()[1]).querySelector("svg")).toBeNull()
     expect(rows()[1].querySelector("code")?.textContent).toBe("tether setup")
     expect(markOf(rows()[3]).getAttribute("data-tone")).toBe("unknown")
-    expect(markOf(rows()[3]).textContent?.trim()).toBe("?")
+    expect(markOf(rows()[3]).querySelector("svg.lucide-circle-question-mark")).not.toBeNull()
+    expect(markOf(rows()[3]).querySelector(".sr-only")?.textContent).toBe("unknown")
+    expect(markOf(rows()[3]).textContent?.trim()).toBe("unknown")
     expect(rows()[3].textContent).toContain("Run the doctor on the System page.")
     expect(rows()[3].querySelector("code")).toBeNull()
     expect(within(rows()[3]).queryAllByRole("button")).toHaveLength(0)

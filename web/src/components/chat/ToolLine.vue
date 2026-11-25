@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { ToolView } from "../../api/types.gen"
+import { CheckIcon, ChevronDownIcon, ChevronRightIcon, XIcon } from "@lucide/vue"
+import { toolIcon } from "../../lib/glyphs"
 import { TraceDescription, TraceIcon, TraceLine, TraceTitle } from "@/components/ui/trace"
 
 const props = defineProps<{ tool: ToolView; selected?: boolean }>()
@@ -10,15 +12,13 @@ function seconds(ms: number): string {
   return (ms / 1000).toFixed(1) + " s"
 }
 
-// Returns the state text: "✓ done", "✗ exit N", or "✗ error".
-function stateText(t: ToolView): string {
-  if (t.state === "running") return "running"
-  if (t.state === "error") {
-    const all = [...t.text.matchAll(/^\[exit code: (-?\d+)\]$/gm)]
-    if (all.length > 0) return "✗ exit " + all[all.length - 1][1]
-    return "✗ error"
-  }
-  return "✓ done"
+// Returns the state of a finished call: ok is false for an error, and word is "done",
+// "exit N", or "error".
+function stateOf(t: ToolView): { ok: boolean; word: string } {
+  if (t.state !== "error") return { ok: true, word: "done" }
+  const all = [...t.text.matchAll(/^\[exit code: (-?\d+)\]$/gm)]
+  if (all.length > 0) return { ok: false, word: "exit " + all[all.length - 1][1] }
+  return { ok: false, word: "error" }
 }
 </script>
 
@@ -40,17 +40,23 @@ function stateText(t: ToolView): string {
             : undefined
       "
     >
-      <TraceIcon>{{ props.tool.emoji || "🛠" }}</TraceIcon>
+      <TraceIcon><component :is="toolIcon(props.tool.name)" /></TraceIcon>
       <TraceTitle>
         {{ props.tool.name }}
         <template v-if="props.tool.preview !== ''"> "{{ props.tool.preview }}"</template>
       </TraceTitle>
-      <TraceDescription>{{
-        props.tool.state === "running"
-          ? stateText(props.tool)
-          : seconds(props.tool.duration_ms) + " · " + stateText(props.tool)
-      }}</TraceDescription>
-      <TraceIcon v-if="props.tool.text !== ''">{{ props.selected ? "▾" : "▸" }}</TraceIcon>
+      <TraceDescription>
+        <template v-if="props.tool.state === 'running'">running</template>
+        <template v-else>
+          {{ seconds(props.tool.duration_ms) }} ·
+          <CheckIcon v-if="stateOf(props.tool).ok" class="inline size-3 text-success" />
+          <XIcon v-else class="inline size-3 text-destructive" />
+          {{ stateOf(props.tool).word }}
+        </template>
+      </TraceDescription>
+      <TraceIcon v-if="props.tool.text !== ''">
+        <ChevronDownIcon v-if="props.selected" /><ChevronRightIcon v-else />
+      </TraceIcon>
     </TraceLine>
   </button>
 </template>

@@ -133,7 +133,8 @@ beforeEach(() => {
   session.id = "s1"
 })
 
-const kidRows = () => screen.queryAllByRole("row").filter((r) => r.textContent!.includes("↳"))
+const kidRows = () =>
+  screen.queryAllByRole("row").filter((r) => r.querySelector("svg.lucide-corner-down-right"))
 
 describe("SessionsPage", () => {
   it("loads the first page with all filter keys", async () => {
@@ -152,18 +153,20 @@ describe("SessionsPage", () => {
     const user = setup()
     await mk()
     expect(screen.queryByText("subagent run")).toBeNull()
-    const t = screen.getByRole("button", { name: "▸ 1 child session" })
+    const t = screen.getByRole("button", { name: "1 child session" })
     expect(t.getAttribute("aria-expanded")).toBe("false")
+    expect(t.querySelector("svg.lucide-chevron-right")).not.toBeNull()
     await user.click(t)
     const child = rowOf("subagent run")
-    expect(child.textContent).toContain("↳")
+    expect(child.querySelector("svg.lucide-corner-down-right")).not.toBeNull()
     expect(within(child).getByText("subagent").getAttribute("data-slot")).toBe("badge")
-    const t2 = screen.getByRole("button", { name: "▾ 1 child session" })
+    const t2 = screen.getByRole("button", { name: "1 child session" })
     expect(t2.getAttribute("aria-expanded")).toBe("true")
-    await user.click(screen.getByRole("button", { name: "↻ Refresh" }))
+    expect(t2.querySelector("svg.lucide-chevron-down")).not.toBeNull()
+    await user.click(screen.getByRole("button", { name: "Refresh" }))
     await flushPromises()
     expect(screen.getByText("subagent run")).toBeTruthy()
-    await user.click(screen.getByRole("button", { name: "▾ 1 child session" }))
+    await user.click(screen.getByRole("button", { name: "1 child session" }))
     expect(screen.queryByText("subagent run")).toBeNull()
   })
 
@@ -191,7 +194,7 @@ describe("SessionsPage", () => {
       ],
     })
     await mk()
-    await user.click(screen.getByRole("button", { name: "▸ 2 child sessions" }))
+    await user.click(screen.getByRole("button", { name: "2 child sessions" }))
     const kids = kidRows()
     expect(kids).toHaveLength(2)
     expect(within(kids[0]).getByText("Background review")).toBeTruthy()
@@ -202,7 +205,7 @@ describe("SessionsPage", () => {
   it("gives the toggle row no dates, no cost, and no buttons", async () => {
     await mk()
     const toggleRow = rowOf("1 child session")
-    expect(names(within(toggleRow).getAllByRole("button"))).toEqual(["▸ 1 child session"])
+    expect(names(within(toggleRow).getAllByRole("button"))).toEqual(["1 child session"])
     expect(toggleRow.textContent).not.toContain("—")
     expect(toggleRow.textContent).not.toContain("$")
   })
@@ -810,7 +813,7 @@ describe("SessionsPage", () => {
   it("cuts a long child label", async () => {
     const user = setup()
     await mk()
-    await user.click(screen.getByRole("button", { name: "▸ 1 child session" }))
+    await user.click(screen.getByRole("button", { name: "1 child session" }))
     const label = within(rowOf("subagent run")).getByText("subagent run")
     expect(label.classList.contains("truncate")).toBe(true)
     expect(label.classList.contains("min-w-0")).toBe(true)

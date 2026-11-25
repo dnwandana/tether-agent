@@ -48,7 +48,8 @@ describe("RestartBanner", () => {
     await fire({ reason: "restart", elapsed_s: 12, drain_s: 180, turns: 2, goals: 1 })
     expect(banner()!.getAttribute("data-slot")).toBe("alert")
     expect(banner()!.getAttribute("aria-live")).toBe("polite")
-    expect(banner()!.textContent).toContain("♻️ The gateway restarts.")
+    expect(banner()!.textContent).toContain("The gateway restarts.")
+    expect(banner()!.textContent).not.toContain("♻")
     expect(banner()!.textContent).toContain(
       "12 s of 180 s · 2 turns run · 1 goal resumes after the start",
     )
