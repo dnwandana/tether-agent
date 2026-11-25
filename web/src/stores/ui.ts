@@ -1,4 +1,5 @@
 import { reactive, ref, watch } from "vue"
+import type { LocationQueryRaw, RouteLocationRaw } from "vue-router"
 
 export type ToastKind = "ok" | "info" | "warn" | "error"
 export type ToastAction = { label: string; data: string }
@@ -206,3 +207,17 @@ export function confirm(opts: ConfirmOpts): Promise<boolean> {
 // The open flag of the one WaitingTray in App.vue. The status bar, the tab bar, and the palette set it.
 // updateReady shows the banner "A new version is ready · Reload".
 export const ui = reactive({ trayOpen: false, updateReady: false })
+
+// The last query of each list page, by route name. A back link uses it to return to the same
+// page and tab. It lasts until the page reloads.
+const listQueries = new Map<string, LocationQueryRaw>()
+
+// Saves a copy of the query that a list page wrote to the route.
+export function rememberListQuery(name: string, query: LocationQueryRaw): void {
+  listQueries.set(name, { ...query })
+}
+
+// Returns the link to a list page with its last query, or with no query.
+export function listLink(name: string): RouteLocationRaw {
+  return { name, query: { ...listQueries.get(name) } }
+}

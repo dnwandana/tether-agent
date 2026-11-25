@@ -243,4 +243,33 @@ describe("router", () => {
     mod.restorePendingScroll()
     expect(box.scrollTop).toBe(250)
   })
+
+  it("keeps the box position when only the query changes", async () => {
+    localStorage.setItem("tether.session", "h1")
+    const r = await load()
+    const box = document.createElement("div")
+    box.className = "scroll"
+    document.body.appendChild(box)
+    await r.push("/sessions")
+    box.scrollTop = 250
+    await r.replace("/sessions?page=2")
+    await new Promise((res) => setTimeout(res, 0))
+    expect(box.scrollTop).toBe(250)
+    await r.push("/jobs")
+    await new Promise((res) => setTimeout(res, 0))
+    expect(box.scrollTop).toBe(0)
+  })
+
+  it("puts the box at the top when a param changes", async () => {
+    localStorage.setItem("tether.session", "h1")
+    const r = await load()
+    const box = document.createElement("div")
+    box.className = "scroll"
+    document.body.appendChild(box)
+    await r.push("/jobs/a")
+    box.scrollTop = 250
+    await r.push("/jobs/b")
+    await new Promise((res) => setTimeout(res, 0))
+    expect(box.scrollTop).toBe(0)
+  })
 })

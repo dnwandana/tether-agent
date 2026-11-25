@@ -100,8 +100,9 @@ export const router = createRouter({
   history: createWebHistory(),
   routes,
   // The router scrolls the .scroll box, not the window. It always returns false.
+  // A change of only the query keeps the scroll position.
   // A hash like #card-<id> scrolls to the element with that id.
-  scrollBehavior(to, _from, saved) {
+  scrollBehavior(to, from, saved) {
     if (to.hash) {
       let el: HTMLElement | null = null
       try {
@@ -118,8 +119,10 @@ export const router = createRouter({
       const pos = historyPosition()
       pendingTop = pos === null ? null : (positions.get(pos) ?? null)
     } else {
+      // A change of only the query, for example a page of a table, keeps the scroll position.
+      // DataTable scrolls the top of the table into view on a page change.
       const box = scrollBox()
-      if (box) box.scrollTop = 0
+      if (box && to.path !== from.path) box.scrollTop = 0
       pendingTop = null
     }
     return false

@@ -288,3 +288,28 @@ describe("theme-color", () => {
     expect(meta.getAttribute("content")).toBe("#ffffff")
   })
 })
+
+describe("list query memory", () => {
+  it("gives an empty query for a list with no remembered query", () => {
+    expect(ui.listLink("sessions")).toEqual({ name: "sessions", query: {} })
+  })
+
+  it("gives the last remembered query of each list", () => {
+    ui.rememberListQuery("sessions", { page: "3", archived: "1" })
+    ui.rememberListQuery("skills", { tab: "catalog" })
+    expect(ui.listLink("sessions")).toEqual({
+      name: "sessions",
+      query: { page: "3", archived: "1" },
+    })
+    ui.rememberListQuery("sessions", {})
+    expect(ui.listLink("sessions")).toEqual({ name: "sessions", query: {} })
+    expect(ui.listLink("skills")).toEqual({ name: "skills", query: { tab: "catalog" } })
+  })
+
+  it("keeps a copy of the query", () => {
+    const q: Record<string, string> = { page: "2" }
+    ui.rememberListQuery("jobs", q)
+    q.page = "9"
+    expect(ui.listLink("jobs")).toEqual({ name: "jobs", query: { page: "2" } })
+  })
+})
