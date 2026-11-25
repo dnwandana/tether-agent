@@ -131,6 +131,8 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
   `text-muted-foreground`. Do not use a Tailwind palette class such as `bg-blue-500`.
 - The component and page tests of `web/` find elements by role, label, and text, with
   `@testing-library/vue`.
+- Each `DataTable` passes a `pageKey` and a `pageLabel`, and gives each column a `type`. The
+  pager and the fixed column widths come from `DataTable`. Do not write a pager in a page.
 - `web/src/styles/app.css` keeps the classes `.scroll`, `.aside-slot`, `.announce`, and `.pulse`,
   because code outside the templates reads them.
 - A new config key goes into the structs and `Default()` in `internal/config/config.go`. Add

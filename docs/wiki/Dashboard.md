@@ -133,6 +133,10 @@ restarts. The approval log keeps the permanent record.
 The pages update by themselves when the data changes, when the page connects again, and when
 you come back to the tab. Each page header shows the time of the last update and ↻ Refresh.
 
+A long table shows 20 rows on each page. Choose 10, 20, 50, or 100 in Rows per page. Each table
+keeps its choice in this browser. The Sessions, Skills, Jobs, Goals, and Memory pages keep the
+page number in the address, so Refresh and the ‹ back links keep it.
+
 The theme follows the theme of the system by default. The theme menu at the right end of the
 status bar sets System, Dark, or Light.
 

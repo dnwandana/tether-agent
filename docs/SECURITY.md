@@ -2031,7 +2031,7 @@ The rules for files:
 Other rules:
 
 - The value of a secret card goes only to `.env`.
-- In `localStorage`, the page stores only the session header value, the theme, the sound choice, and the last page. In `sessionStorage` of the tab, it keeps the composer draft and the version before a reload.
+- In `localStorage`, the page stores only the session header value, the theme, the sound choice, the last page, and the rows per page of each table. In `sessionStorage` of the tab, it keeps the composer draft and the version before a reload.
 - Event text and message text pass through the redactor.
 
 ### HTTPS
