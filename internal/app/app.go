@@ -76,6 +76,9 @@ type Options struct {
 	TelegramBaseURL string
 	// Version is the version of the binary. The coding agents get it in clientInfo. Empty uses "dev".
 	Version string
+	// ProviderSleep replaces the wait of the provider chain before a retry. Nil uses the
+	// real timer. Tests set it.
+	ProviderSleep func(ctx context.Context, d time.Duration) error
 }
 
 // App holds the shared parts of one process.
@@ -97,8 +100,12 @@ type App struct {
 	// Handles holds the handles of the credentials that terminal results printed. The agent and
 	// the terminal tool share it.
 	Handles *security.Handles
-	// HTTP is the shared client of the providers and the price sources.
+	// HTTP is the shared client of the model cache, the price sources, and the media tools.
+	// It has no timeout, because a media endpoint can need more time.
 	HTTP *http.Client
+	// provHTTP is the client of the provider adapters. Its transport stops a call that gets
+	// no response headers in provider.HeaderTimeout.
+	provHTTP *http.Client
 	// Models keeps the model lists for /model. It makes no call until the first
 	// /model <entry>.
 	Models *provider.ModelCache
@@ -261,8 +268,12 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	a.Models = provider.NewModelCache(a.HTTP)
 	a.Models.TTL = time.Duration(a.Cfg.Provider.ModelCacheTTLS) * time.Second
 	a.Models.ListTimeout = time.Duration(a.Cfg.Provider.ModelListTimeoutS) * time.Second
-	if a.Set, err = provider.FromConfig(a.Cfg, a.HTTP, a.Log); err != nil {
+	a.provHTTP = newProviderClient()
+	if a.Set, err = provider.FromConfig(a.Cfg, a.provHTTP, a.Log); err != nil {
 		return nil, err
+	}
+	if opts.ProviderSleep != nil {
+		a.Set.Health.Sleep = opts.ProviderSleep
 	}
 	a.Prov, a.Providers = a.Set.Default, a.Set.All
 	for _, name := range slices.Sorted(maps.Keys(a.Cfg.Providers)) {
@@ -404,7 +415,8 @@ func (a *App) goalDeps() goals.Deps {
 			GateTimeoutS:   a.Cfg.Goals.GateTimeoutS,
 			GateMaxRetries: a.Cfg.Goals.GateMaxRetries,
 		},
-		// A goal retry waits as long as the chain skips a failed entry.
+		// A goal retry waits as long as the chain skips an entry after a short failure. A quota
+		// skip lasts until the reset time, so the retry turn then goes to the next entry.
 		RetryDelay:  time.Duration(a.Cfg.Provider.FailureSkipS) * time.Second,
 		Sessions:    a.Store,
 		Cfg:         func() config.GoalsConfig { return a.Cfg.Goals },
@@ -1687,4 +1699,13 @@ func NewNamedRedactor(dotenv map[string]string) *security.Redactor {
 		}
 	}
 	return r
+}
+
+// newProviderClient returns the client of the provider adapters. Its transport is a clone of
+// http.DefaultTransport with the header timeout, so a server that never sends headers does
+// not block a turn. The clone makes no network call.
+func newProviderClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = provider.HeaderTimeout
+	return &http.Client{Transport: tr}
 }
