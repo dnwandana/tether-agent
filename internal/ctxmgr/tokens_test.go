@@ -69,9 +69,27 @@ func TestEstimateFixedCountsSystemAndSchemas(t *testing.T) {
 	}
 }
 
-func TestOverThreshold50(t *testing.T) {
-	if OverThreshold(64000, 128000, 0.50) || !OverThreshold(64001, 128000, 0.50) {
-		t.Fatal()
+func TestTrigger(t *testing.T) {
+	for _, tc := range []struct {
+		window    int
+		threshold float64
+		capTokens int
+		want      int
+	}{
+		{128000, 0.50, 0, 64000},
+		{256000, 0.50, 200000, 128000},
+		{400000, 0.50, 200000, 200000},
+		{400000, 0.80, 200000, 200000},
+		{1_000_000, 0.50, 200000, 200000},
+		{1_000_000, 0.50, 600000, 500000},
+		{1_000_000, 0.50, 0, 500000},
+	} {
+		if got := Trigger(tc.window, tc.threshold, tc.capTokens); got != tc.want {
+			t.Errorf("Trigger(%d, %g, %d) = %d, want %d", tc.window, tc.threshold, tc.capTokens, got, tc.want)
+		}
+	}
+	if OverTrigger(64000, 64000) || !OverTrigger(64001, 64000) {
+		t.Fatal("OverTrigger must be true only above the trigger")
 	}
 }
 

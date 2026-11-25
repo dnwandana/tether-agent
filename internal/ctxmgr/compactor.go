@@ -66,9 +66,14 @@ var ErrCompactionFailed = errors.New("compaction failed")
 
 // ErrCompactionStopped is the error of Maybe in the automatic check where
 // context.compact_max_ineffective compactions in a row (2 when the key is 0) left the view
-// over the threshold. Automatic compaction then stops until the view is under the
-// threshold again.
+// over the compaction trigger. Automatic compaction then stops until the view is under the
+// compaction trigger again.
 var ErrCompactionStopped = errors.New("automatic compaction stopped")
+
+// ErrCompactionCapStopped is also wrapped by the stop error when context.compact_at_tokens
+// was the lower trigger. The session then waits for the ratio trigger until a check finds
+// the view at or under the cap.
+var ErrCompactionCapStopped = errors.New("ctxmgr: automatic compaction left the view over context.compact_at_tokens")
 
 // SummaryPrompt is the system prompt of the summary call. It follows the
 // structure of the Hermes context compressor.
@@ -149,27 +154,30 @@ type Compactor struct {
 	mu       sync.Mutex
 	failures map[string]int
 	thrash   map[string]*thrashState
+	capStop  map[string]bool // the sessions in a cap stop
 }
 
 // maxIneffective is the number of compactions in a row that leave the view over the
-// threshold before the automatic check stops. Hermes agent/context_compressor.py uses the
+// compaction trigger before the automatic check stops. Hermes agent/context_compressor.py uses the
 // same limit. It is the fallback when context.compact_max_ineffective is 0.
 const maxIneffective = 2
 
 // thrashState is the anti-thrash state of one session. The system prompt and the tool
 // schemas are a floor that a compaction cannot make smaller. When that floor and the
-// protected messages are over the threshold, each round compacts again and makes one more
+// protected messages are over the compaction trigger, each round compacts again and makes one more
 // summary call.
 type thrashState struct {
 	verify  bool // a compaction ran, and the next check judges it
-	strikes int  // the compactions in a row that left the view over the threshold
+	strikes int  // the compactions in a row that left the view over the compaction trigger
 }
 
 // allowAuto records the result over of an automatic check of the session. It reports
 // whether the check can compact. stopped is true only in the check where the strikes reach
 // the limit, so the caller tells the user one time for each stop. A view under the
-// threshold clears the state.
-func (c *Compactor) allowAuto(sessionID string, over bool) (allow, stopped bool) {
+// compaction trigger clears the state. capped is true when context.compact_at_tokens is the
+// trigger of this check. A stop with capped true starts a cap stop, and the session then
+// uses the ratio trigger with a new strike count.
+func (c *Compactor) allowAuto(sessionID string, over, capped bool) (allow, stopped bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !over {
@@ -186,12 +194,36 @@ func (c *Compactor) allowAuto(sessionID string, over bool) (allow, stopped bool)
 		st.strikes++
 		if st.strikes == limit {
 			stopped = true
-			c.logger().Warn(fmt.Sprintf("compaction did not bring the view under the threshold %s in a row; "+
-				"automatic compaction stops until the view is under the threshold again. The system prompt "+
+			if capped {
+				if c.capStop == nil {
+					c.capStop = map[string]bool{}
+				}
+				c.capStop[sessionID] = true
+				delete(c.thrash, sessionID)
+				c.logger().Warn(fmt.Sprintf("compaction did not bring the view under context.compact_at_tokens %s in a row; "+
+					"automatic compaction now waits for context.compact_threshold of the context window. "+
+					"A larger context.compact_at_tokens stops this warning", timesText(limit)), "session", sessionID)
+				return false, true
+			}
+			c.logger().Warn(fmt.Sprintf("compaction did not bring the view under the compaction trigger %s in a row; "+
+				"automatic compaction stops until the view is under the compaction trigger again. The system prompt "+
 				"and the tool schemas can be too large for the context window", timesText(limit)), "session", sessionID)
 		}
 	}
 	return st.strikes < limit, stopped
+}
+
+// TriggerFor returns the trigger of the next automatic check of the session. It is the ratio
+// trigger while the session is in a cap stop, else the lower of the ratio trigger and
+// Cfg.CompactAtTokens.
+func (c *Compactor) TriggerFor(sessionID string, window int) int {
+	c.mu.Lock()
+	stopped := c.capStop[sessionID]
+	c.mu.Unlock()
+	if stopped {
+		return Trigger(window, c.Cfg.CompactThreshold, 0)
+	}
+	return Trigger(window, c.Cfg.CompactThreshold, c.Cfg.CompactAtTokens)
 }
 
 // compactedNow marks that a compaction of the session ran, so the next check judges it. A
@@ -210,12 +242,14 @@ func (c *Compactor) compactedNow(sessionID string, force bool) {
 	st.verify = true
 }
 
-// Maybe compacts the session when its model view is above Cfg.CompactThreshold of window,
-// or when force is true. It uses prov for the summary. compacted is true when a compaction
+// Maybe compacts the session when its model view is above the compaction trigger, or when
+// force is true. The trigger comes from TriggerFor: Cfg.CompactThreshold of window, or
+// Cfg.CompactAtTokens when that value is lower. It uses prov for the summary. compacted is true when a compaction
 // ran. A failed summary call returns false and a nil error, and the next call tries again.
 // At the failure number context.compact_max_failures in a row (3 when the key is 0), the
 // error wraps ErrCompactionFailed, so the caller can tell the user. In the automatic check
-// that stops automatic compaction, the error wraps ErrCompactionStopped.
+// that stops automatic compaction, the error wraps ErrCompactionStopped. When the cap was the
+// lower trigger, the stop error also wraps ErrCompactionCapStopped.
 func (c *Compactor) Maybe(ctx context.Context, s *sessions.Session, prov provider.Provider, window int, force bool) (compacted bool, err error) {
 	stored, err := c.Store.Messages(ctx, s.ID)
 	if err != nil {
@@ -247,14 +281,23 @@ func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, pr
 		return Result{}, nil, err
 	}
 	view := BuildStoredView(stored, comps)
-	trigger := int(c.Cfg.CompactThreshold * float64(window))
 	last, at := lastPrompt(stored, comps)
 	before := ViewSize(last, at, fixed, view)
+	if !force && c.Cfg.CompactAtTokens > 0 && !OverTrigger(before, c.Cfg.CompactAtTokens) {
+		c.mu.Lock()
+		delete(c.capStop, s.ID)
+		c.mu.Unlock()
+	}
+	trigger := c.TriggerFor(s.ID, window)
 	if !force {
-		over := OverThreshold(before, window, c.Cfg.CompactThreshold)
-		allow, stopped := c.allowAuto(s.ID, over)
+		capped := trigger < Trigger(window, c.Cfg.CompactThreshold, 0)
+		over := OverTrigger(before, trigger)
+		allow, stopped := c.allowAuto(s.ID, over, capped)
+		if stopped && capped {
+			return Result{}, comps, fmt.Errorf("%w: %w: %d compactions in a row", ErrCompactionStopped, ErrCompactionCapStopped, c.IneffectiveLimit())
+		}
 		if stopped {
-			return Result{}, comps, fmt.Errorf("%w: %d compactions in a row left the view over the threshold", ErrCompactionStopped, c.IneffectiveLimit())
+			return Result{}, comps, fmt.Errorf("%w: %d compactions in a row left the view over the compaction trigger", ErrCompactionStopped, c.IneffectiveLimit())
 		}
 		if !allow || !over {
 			return Result{}, comps, nil
@@ -493,7 +536,7 @@ func loadCompactions(ctx context.Context, d *db.DB, sessionID, query string) ([]
 }
 
 // StoredSize returns the size in tokens of the model view of stored with the compaction
-// comps. It is the size that MaybeStoredView compares with the threshold. fixed is the
+// comps. It is the size that MaybeStoredView compares with the compaction trigger. fixed is the
 // estimate of the system prompt and the tool schemas (EstimateFixed), or 0.
 func StoredSize(stored []sessions.StoredMessage, comps []Compaction, fixed int) int {
 	view := BuildStoredView(stored, comps)

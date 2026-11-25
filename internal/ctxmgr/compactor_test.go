@@ -878,7 +878,7 @@ func TestCompactionMaxIneffectiveFromConfig(t *testing.T) {
 	if did, err := check(); did || !errors.Is(err, ErrCompactionStopped) {
 		t.Fatal("one strike must stop the automatic compaction with a limit of 1", did, err)
 	}
-	if !strings.Contains(logs.String(), "under the threshold one time in a row") {
+	if !strings.Contains(logs.String(), "under the compaction trigger one time in a row") {
 		t.Fatal(logs.String())
 	}
 	if did, err := check(); did || err != nil {
@@ -900,5 +900,124 @@ func TestTimesText(t *testing.T) {
 		if got := timesText(n); got != want {
 			t.Errorf("timesText(%d) = %q, want %q", n, got, want)
 		}
+	}
+}
+
+// checkAt runs one automatic check of the session with a window of 1,000,000 tokens. The
+// fixed part makes the view size exactly size tokens.
+func checkAt(t *testing.T, c *Compactor, sess *sessions.Session, fp *fakeSummarizer, size int) (did bool, err error) {
+	t.Helper()
+	stored, err := c.Store.Messages(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	comps, err := LatestCompaction(ctx, c.DB, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixed := size - StoredSize(stored, comps, 0)
+	if fixed < 0 {
+		t.Fatalf("the messages alone are over %d tokens", size)
+	}
+	res, _, err := c.MaybeStoredView(ctx, sess, fp, 1_000_000, false, stored, fixed)
+	return res.Replaced > 0, err
+}
+
+// With a window of 1,000,000 and the threshold 0.5, the ratio trigger is 500000. A lower cap
+// moves the trigger. A higher cap and a cap of 0 have no effect.
+func TestCompactionCapTrigger(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		capTokens int
+		at        int // the largest size that does not compact
+	}{
+		{"cap 200000", 200000, 200000},
+		{"cap above the ratio trigger", 600000, 500000},
+		{"cap 0", 0, 500000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, sess, fp := compactorWithSession(t, 80)
+			c.Cfg.CompactAtTokens = tc.capTokens
+			if got := c.TriggerFor(sess.ID, 1_000_000); got != tc.at {
+				t.Fatalf("TriggerFor = %d, want %d", got, tc.at)
+			}
+			if did, err := checkAt(t, c, sess, fp, tc.at); did || err != nil {
+				t.Fatal("a view at the trigger must not compact", did, err)
+			}
+			if did, err := checkAt(t, c, sess, fp, tc.at+1); !did || err != nil {
+				t.Fatal("a view just above the trigger must compact", did, err)
+			}
+		})
+	}
+}
+
+// The summary target follows the cap. The floor of 50000 applies only in config.Load, so
+// the test sets Cfg directly.
+func TestCompactionSummaryTargetFollowsTheCap(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	c.Cfg.CompactAtTokens = 20000
+	if did, err := checkAt(t, c, sess, fp, 20001); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	req := fp.requests[0]
+	if !strings.Contains(req.Messages[0].Content, "Target about 4000 tokens.") || req.MaxTokens != 5200 {
+		t.Fatalf("max tokens %d, want 5200 and the target 4000", req.MaxTokens)
+	}
+}
+
+// A session that is at 490000 tokens on a window of about 1M compacts at the next
+// automatic check with the default config.
+func TestCompactionDefaultCapCompactsALargeSession(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	if c.Cfg.CompactAtTokens != 200000 {
+		t.Fatal("the default cap must be 200000:", c.Cfg.CompactAtTokens)
+	}
+	if did, err := checkAt(t, c, sess, fp, 490000); !did || err != nil {
+		t.Fatal("the next automatic check must compact", did, err)
+	}
+}
+
+// After the stop under the cap, the session falls back to the ratio trigger with its own
+// strike count. A check that finds the view at or under the cap clears the fall back.
+func TestCompactionCapStopFallsBackToTheRatio(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	c.Cfg.CompactAtTokens = 200000
+	var logs bytes.Buffer
+	c.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	next := 80
+	more := func() {
+		appendPlain(t, c.Store, sess.ID, next, 40)
+		next += 40
+	}
+	// 300000 tokens is over the cap and under the ratio trigger of 500000.
+	if did, err := checkAt(t, c, sess, fp, 300000); !did || err != nil {
+		t.Fatal("the first compaction must run", did, err)
+	}
+	more()
+	if did, err := checkAt(t, c, sess, fp, 300000); !did || err != nil {
+		t.Fatal("one strike must not stop the compaction", did, err)
+	}
+	did, err := checkAt(t, c, sess, fp, 300000)
+	if did || !errors.Is(err, ErrCompactionCapStopped) || !errors.Is(err, ErrCompactionStopped) {
+		t.Fatal("two strikes under the cap must stop with ErrCompactionCapStopped and ErrCompactionStopped", did, err)
+	}
+	if !strings.Contains(logs.String(), "automatic compaction now waits for context.compact_threshold of the context window") {
+		t.Fatal(logs.String())
+	}
+	if got := c.TriggerFor(sess.ID, 1_000_000); got != 500000 {
+		t.Fatalf("after the cap stop, TriggerFor = %d, want the ratio trigger 500000", got)
+	}
+	if did, err := checkAt(t, c, sess, fp, 490000); did || err != nil {
+		t.Fatal("under the ratio trigger, no compaction", did, err)
+	}
+	more()
+	if did, err := checkAt(t, c, sess, fp, 500001); !did || err != nil {
+		t.Fatal("compaction must run again at the ratio trigger", did, err)
+	}
+	if did, err := checkAt(t, c, sess, fp, 200000); did || err != nil {
+		t.Fatal("a view at the cap must not compact", did, err)
+	}
+	if got := c.TriggerFor(sess.ID, 1_000_000); got != 200000 {
+		t.Fatalf("a view at the cap must clear the fall back: TriggerFor = %d, want 200000", got)
 	}
 }

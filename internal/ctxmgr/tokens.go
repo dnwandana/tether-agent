@@ -68,7 +68,17 @@ func ViewSize(lastPromptTokens int, lastPromptAtMessage int64, fixed int, view [
 	return lastPromptTokens + EstimateChars(newer)
 }
 
-// OverThreshold reports whether size is above threshold × window.
-func OverThreshold(size, window int, threshold float64) bool {
-	return float64(size) > threshold*float64(window)
+// Trigger returns the compaction trigger in tokens: threshold × window, or capTokens when
+// capTokens is more than 0 and lower.
+func Trigger(window int, threshold float64, capTokens int) int {
+	t := int(threshold * float64(window))
+	if capTokens > 0 && capTokens < t {
+		return capTokens
+	}
+	return t
+}
+
+// OverTrigger reports whether size is above trigger.
+func OverTrigger(size, trigger int) bool {
+	return size > trigger
 }
