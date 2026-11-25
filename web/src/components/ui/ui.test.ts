@@ -30,6 +30,7 @@ const FOLDERS = [
   "message",
   "message-scroller",
   "native-select",
+  "pagination",
   "popover",
   "progress",
   "scroll-area",
@@ -75,7 +76,7 @@ describe("components/ui", () => {
   it("has the hand-written components.json", () => {
     const cfg = JSON.parse(readFileSync(join(uiDir, "..", "..", "..", "components.json"), "utf8"))
     expect(cfg).toMatchObject({
-      style: "new-york-v4",
+      style: "new-york",
       typescript: true,
       tailwind: { config: "", css: "src/styles/app.css", baseColor: "gray", cssVariables: true },
       aliases: {
