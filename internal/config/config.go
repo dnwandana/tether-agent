@@ -81,7 +81,8 @@ const (
 
 // ProviderConfig sets the limits that apply to all entries of providers.
 type ProviderConfig struct {
-	// FailureSkipS is the time in seconds that the chain skips a failed entry.
+	// FailureSkipS is the time in seconds that the chain skips a failed entry. A used-up plan
+	// quota skips the entry until its reset time instead.
 	FailureSkipS int `yaml:"failure_skip_s"`
 	// AnthropicMaxTokens is the max_tokens value of an anthropic call that sets no value.
 	AnthropicMaxTokens int `yaml:"anthropic_max_tokens"`
@@ -129,7 +130,11 @@ func (c *Config) FallbackList() []string {
 
 // ContextConfig sets the compaction and the tool output limits.
 type ContextConfig struct {
-	CompactThreshold   float64 `yaml:"compact_threshold"`
+	CompactThreshold float64 `yaml:"compact_threshold"`
+	// CompactAtTokens is the context size in tokens at which compaction also starts. The
+	// compaction trigger is the lower of this value and CompactThreshold of the context
+	// window. 0 turns the cap off.
+	CompactAtTokens    int     `yaml:"compact_at_tokens"`
 	ProtectFirstN      int     `yaml:"protect_first_n"`
 	ProtectLastN       int     `yaml:"protect_last_n"`
 	SummaryTargetRatio float64 `yaml:"summary_target_ratio"`
@@ -142,7 +147,7 @@ type ContextConfig struct {
 	SummaryMaxTokens int `yaml:"summary_max_tokens"`
 	// CompactMaxFailures is the number of failed compactions in a row before the user is told.
 	CompactMaxFailures int `yaml:"compact_max_failures"`
-	// CompactMaxIneffective is the number of compactions in a row that leave the context over the threshold.
+	// CompactMaxIneffective is the number of compactions in a row that leave the context over the compaction trigger.
 	CompactMaxIneffective int `yaml:"compact_max_ineffective"`
 	// CompactNotice sends a notice to the user after each automatic compaction.
 	CompactNotice bool `yaml:"compact_notice"`
@@ -685,6 +690,7 @@ func Default() Config {
 		},
 		Context: ContextConfig{
 			CompactThreshold:      0.50,
+			CompactAtTokens:       200000,
 			ProtectFirstN:         3,
 			ProtectLastN:          20,
 			SummaryTargetRatio:    0.20,

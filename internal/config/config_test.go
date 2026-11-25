@@ -182,6 +182,7 @@ func TestNewKeyDefaults(t *testing.T) {
 	eq(t, c.Context.SummaryMaxTokens, 12000)
 	eq(t, c.Context.CompactMaxFailures, 3)
 	eq(t, c.Context.CompactMaxIneffective, 2)
+	eq(t, c.Context.CompactAtTokens, 200000)
 	eq(t, c.Context.CompactNotice, true)
 	eq(t, c.Memory.EntryMaxChars, 4000)
 	eq(t, c.Memory.LockWaitS, 30)

@@ -956,3 +956,23 @@ func TestWindowEmptyContainsNothing(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateCompactAtTokens checks the range of context.compact_at_tokens: 0 turns the
+// cap off, and another value must be from 50000 to 2147483647.
+func TestValidateCompactAtTokens(t *testing.T) {
+	for _, v := range []int{0, 50000, math.MaxInt32} {
+		c := validBase()
+		c.Context.CompactAtTokens = v
+		if err := c.Validate(); err != nil {
+			t.Errorf("context.compact_at_tokens = %d must be valid: %v", v, err)
+		}
+	}
+	for _, v := range []int{1, 49999, -1} {
+		c := validBase()
+		c.Context.CompactAtTokens = v
+		want := fmt.Sprintf("config: context.compact_at_tokens is %d. Use 0 to turn off the cap, or a value from 50000 to 2147483647.", v)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("context.compact_at_tokens = %d: got %v, want %q", v, err, want)
+		}
+	}
+}

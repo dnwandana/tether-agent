@@ -588,6 +588,10 @@ func (c *Config) checkLimits() []error {
 	add(orderedInt("context.summary_min_tokens", c.Context.SummaryMinTokens, "context.summary_max_tokens", c.Context.SummaryMaxTokens))
 	add(intRange("context.compact_max_failures", c.Context.CompactMaxFailures, 1, i32))
 	add(intRange("context.compact_max_ineffective", c.Context.CompactMaxIneffective, 1, i32))
+	if v := c.Context.CompactAtTokens; v != 0 && (v < 50000 || v > i32) {
+		//lint:ignore ST1005 the text is a fixed user message with full sentences.
+		add(fmt.Errorf("config: context.compact_at_tokens is %d. Use 0 to turn off the cap, or a value from 50000 to %d.", v, i32))
+	}
 	add(intRange("goals.judge_max_tokens", c.Goals.JudgeMaxTokens, 256, i32))
 	add(intRange("goals.judge_max_parse_failures", c.Goals.JudgeMaxParseFailures, 1, i32))
 	add(intRange("goals.judge_max_transport_failures", c.Goals.JudgeMaxTransportFailures, 1, i32))

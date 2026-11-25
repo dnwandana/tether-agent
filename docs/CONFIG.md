@@ -116,7 +116,7 @@ These keys apply to all entries of `providers`.
 
 | Key | Default | Effect |
 |---|---|---|
-| `provider.failure_skip_s` | `60` | The time in seconds that the chain skips an entry after the entry fails before the first byte. The minimum is 1. The maximum is 2592000. |
+| `provider.failure_skip_s` | `60` | The time in seconds that the chain skips an entry after the entry fails before the first byte. A used-up plan quota skips the entry until its reset time instead. The minimum is 1. The maximum is 2592000. |
 | `provider.anthropic_max_tokens` | `8192` | The `max_tokens` value of a call to an `anthropic` entry when the call sets no value. A value above the output limit of the model gives HTTP 400 on each call. The chain then skips the entry and uses the fallback. The minimum is 1. |
 | `provider.model_cache_ttl_s` | `3600` | The time in seconds that `/model` keeps the model list of an entry. The minimum is 1. The maximum is 2592000. |
 | `provider.model_list_timeout_s` | `10` | The time limit of one model list call of `/model`, in seconds. `tether setup` does not use it. The minimum is 1. The maximum is 2592000. |
@@ -141,7 +141,8 @@ These keys apply to all entries of `providers`.
 
 | Key | Default | Effect |
 |---|---|---|
-| `context.compact_threshold` | `0.5` | Compaction starts when the context is above this part of the context window. |
+| `context.compact_threshold` | `0.5` | Compaction starts when the context is above this part of the context window, or above `context.compact_at_tokens`. |
+| `context.compact_at_tokens` | `200000` | Compaction also starts when the context is above this number of tokens. `0` turns the cap off. Another value must be from 50000 to 2147483647. |
 | `context.protect_first_n` | `3` | Compaction keeps this number of messages at the start of the conversation. |
 | `context.protect_last_n` | `20` | Compaction keeps this number of messages at the end of the conversation. |
 | `context.summary_target_ratio` | `0.2` | The target size of the compaction summary, as a part of the trigger size. |
@@ -151,7 +152,7 @@ These keys apply to all entries of `providers`.
 | `context.summary_min_tokens` | `2000` | The lowest token budget of a compaction summary. It must not be more than `context.summary_max_tokens`. The minimum is 100. |
 | `context.summary_max_tokens` | `12000` | The highest token budget of a compaction summary. The minimum is 100. |
 | `context.compact_max_failures` | `3` | After this number of failed compactions in a row, the program tells the user. The minimum is 1. |
-| `context.compact_max_ineffective` | `2` | After this number of compactions in a row that leave the context over the threshold, the automatic compaction stops until the context is under the threshold again, and the program tells the user. The minimum is 1. |
+| `context.compact_max_ineffective` | `2` | After this number of compactions in a row that leave the context over the compaction trigger, the automatic compaction stops until the context is under the trigger again, and the program tells the user. When `context.compact_at_tokens` was the lower trigger, automatic compaction then waits for `context.compact_threshold` of the context window. The minimum is 1. |
 | `context.compact_notice` | `true` | After each automatic compaction, the program sends a notice with the number of replaced messages and the context size before and after. `false` stops this notice. The failure notice and the stop warning still go out. |
 
 ## sessions
