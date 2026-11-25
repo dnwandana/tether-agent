@@ -10,6 +10,7 @@ describe("vite config", () => {
     expect(config.build?.emptyOutDir).toBe(true)
     expect(config.build?.assetsDir).toBe("assets")
     expect(config.build?.sourcemap).toBe(false)
+    expect(config.build?.chunkSizeWarningLimit).toBe(600)
   })
 
   it("runs the tests in jsdom", () => {

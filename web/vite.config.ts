@@ -1,5 +1,5 @@
 import { resolve } from "node:path"
-import type { UserConfig } from "vitest/config"
+import type { ViteUserConfig } from "vitest/config"
 
 // Vitest loads this file again inside the jsdom test, where esbuild stops with a realm error.
 // Only Vite needs the Vue plugin, so the plugin loads only when no DOM exists.
@@ -25,6 +25,8 @@ const config = {
     target: "es2022",
     modulePreload: { polyfill: false },
     reportCompressedSize: false,
+    // TestDashboardFirstLoadSize in internal/dashboard holds the real size budget (200 KB gzip).
+    chunkSizeWarningLimit: 600,
   },
   server: {
     proxy: {
@@ -38,6 +40,6 @@ const config = {
     include: ["**/*.test.ts"],
     exclude: ["node_modules/**"],
   },
-} satisfies UserConfig
+} satisfies ViteUserConfig
 
 export default config

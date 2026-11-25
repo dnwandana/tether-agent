@@ -62,8 +62,8 @@ if (typeof window !== "undefined") {
     }
   }
 
-  // Reka UI v2.11.0, src/Drawer/Drawer.snap.test.ts:117-135. jsdom 26 has no PointerEvent and no
-  // pointer capture methods.
+  // Reka UI v2.11.0, src/Drawer/Drawer.snap.test.ts:117-135. jsdom 29 has PointerEvent, so the
+  // first guard does nothing there. jsdom 29 has no pointer capture methods.
   if (typeof globalThis.PointerEvent === "undefined") {
     globalThis.PointerEvent = class PointerEvent extends MouseEvent {
       readonly pointerId: number

@@ -57,8 +57,6 @@ test-race:
 web:
 	rm -rf internal/dashboard/dist
 	npm --prefix web ci
-	@# npm 11 can skip the install script of esbuild. The rebuild is harmless when the binary exists.
-	npm --prefix web rebuild esbuild
 	npm --prefix web run build
 	node web/scripts/compress.mjs internal/dashboard/dist
 	CGO_ENABLED=0 go run ./cmd/tether gen-dashboard-hash
