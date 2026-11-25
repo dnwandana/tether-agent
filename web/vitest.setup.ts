@@ -83,5 +83,10 @@ if (typeof window !== "undefined") {
   if (!Element.prototype.hasPointerCapture) Element.prototype.hasPointerCapture = () => false
 
   // Portal content stays on document.body unless each test unmounts its component.
-  afterEach(cleanup)
+  // One memory Storage serves each test file, so a stored value would leak into the next test.
+  afterEach(() => {
+    cleanup()
+    localStorage.clear()
+    sessionStorage.clear()
+  })
 }
