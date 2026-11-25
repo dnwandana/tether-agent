@@ -77,6 +77,8 @@ const search = () => screen.getByRole("searchbox", { name: "Search the previews"
 // Returns the body rows. Row 0 of the table is the header row.
 const bodyRows = () => screen.getAllByRole("row").slice(1)
 const cells = (i: number) => within(bodyRows()[i]).getAllByRole("cell")
+// Returns the pager of the approval log.
+const pager = () => within(screen.getByRole("navigation", { name: "Approval log pages" }))
 
 beforeEach(() => {
   window.matchMedia = ((q: string) => ({
@@ -92,8 +94,9 @@ describe("ApprovalLog", () => {
   it("reads the first page with all filter keys and pages it", async () => {
     const { user } = await mk()
     expect(api).toHaveBeenCalledWith("GET", base + "scope=&decision=&source=&q=&offset=0&limit=20")
-    expect(screen.getByText("1–2 of 412")).toBeTruthy()
-    await user.click(screen.getByRole("button", { name: "Next ▶" }))
+    expect(screen.getByText("1–20 of 412")).toBeTruthy()
+    expect(screen.queryByText("1–2 of 412")).toBeNull()
+    await user.click(pager().getByRole("button", { name: "Next Page" }))
     expect(api).toHaveBeenLastCalledWith(
       "GET",
       base + "scope=&decision=&source=&q=&offset=20&limit=20",
@@ -234,20 +237,29 @@ describe("ApprovalLog", () => {
     expect(screen.getByText("send_message")).toBeTruthy()
   })
 
-  it("disables the pager while a page loads and drops an old reply", async () => {
+  it("disables the pager while a page loads, drops an old reply, and goes to page 1 on a filter", async () => {
     let release!: (v: unknown) => void
     const { user, r } = await mk()
     vi.mocked(api).mockImplementationOnce(() => new Promise((res) => (release = res)) as any)
-    await user.click(screen.getByRole("button", { name: "Next ▶" }))
-    expect(screen.getByRole("button", { name: "Next ▶" }).hasAttribute("disabled")).toBe(true)
-    expect(screen.getByRole("button", { name: "◀ Prev" }).hasAttribute("disabled")).toBe(true)
+    await user.click(pager().getByRole("button", { name: "Next Page" }))
+    expect(pager().getByRole("button", { name: "Next Page" }).hasAttribute("disabled")).toBe(true)
+    expect(pager().getByRole("button", { name: "Previous Page" }).hasAttribute("disabled")).toBe(
+      true,
+    )
     vi.mocked(api).mockResolvedValueOnce({ ...logPage, rows: [entry({ preview: "newest" })] })
     await user.selectOptions(decisionSel(), "blocked")
     await flushPromises()
+    expect(api).toHaveBeenLastCalledWith(
+      "GET",
+      base + "scope=&decision=blocked&source=&q=&offset=0&limit=20",
+    )
     release({ ...logPage, offset: 20, rows: [entry({ preview: "old page" })] })
     await flushPromises()
     expect(r.container.textContent).toContain("newest")
     expect(r.container.textContent).not.toContain("old page")
+    expect(pager().getByRole("button", { name: "Page 1" }).getAttribute("aria-current")).toBe(
+      "page",
+    )
   })
 
   it("shows the empty text with Show all scopes", async () => {
@@ -260,5 +272,42 @@ describe("ApprovalLog", () => {
       "GET",
       base + "scope=&decision=&source=&q=&offset=0&limit=20",
     )
+  })
+
+  it("reads the stored size and keeps a new size", async () => {
+    localStorage.setItem("tether.rows.approval-log", "50")
+    const { user } = await mk()
+    expect(api).toHaveBeenCalledWith("GET", base + "scope=&decision=&source=&q=&offset=0&limit=50")
+    await user.selectOptions(screen.getByRole("combobox", { name: "Rows per page" }), "100")
+    await flushPromises()
+    expect(api).toHaveBeenLastCalledWith(
+      "GET",
+      base + "scope=&decision=&source=&q=&offset=0&limit=100",
+    )
+    expect(localStorage.getItem("tether.rows.approval-log")).toBe("100")
+  })
+
+  it("moves to the last page when the total shrinks", async () => {
+    const { user } = await mk()
+    vi.mocked(api).mockImplementation(
+      async (_m: string, p: string) =>
+        (p.includes("offset=20")
+          ? { total: 15, offset: 20, limit: 20, rows: [] }
+          : { ...logPage, total: 15 }) as any,
+    )
+    await user.click(pager().getByRole("button", { name: "Next Page" }))
+    await flushPromises()
+    expect(api).toHaveBeenLastCalledWith(
+      "GET",
+      base + "scope=&decision=&source=&q=&offset=0&limit=20",
+    )
+    expect(screen.queryByText("No approvals in this scope.")).toBeNull()
+    expect(screen.getByText("1–15 of 15")).toBeTruthy()
+  })
+
+  it("lets the preview wrap in its cell", async () => {
+    await mk()
+    const preview = screen.getByText("rm -rf build/")
+    expect(preview.closest("td")!.classList.contains("whitespace-normal")).toBe(true)
   })
 })

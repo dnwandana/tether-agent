@@ -160,14 +160,14 @@ describe("JobDetailPage", () => {
     const user = userEvent.setup()
     await mk()
     expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2")
-    expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=0&limit=10")
+    expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=0&limit=20")
     expect(alertWith("⚠ Failing · 3 in a row.").textContent).toContain(
       "github: HTTP 401: bad credentials",
     )
     expect(screen.getByText(/4 of 7 OK · \$0\.0192/)).toBeTruthy()
-    expect(screen.getByText(/1–2 of\s+38/)).toBeTruthy()
-    await user.click(screen.getByRole("button", { name: "Next ▶" }))
-    expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=10&limit=10")
+    expect(screen.getByText("1–20 of 38")).toBeTruthy()
+    await user.click(screen.getByRole("button", { name: "Next Page" }))
+    expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=20&limit=20")
   })
 
   it("shows the fail streak with the limit and survives null lists", async () => {
@@ -369,5 +369,61 @@ describe("JobDetailPage", () => {
     expect(h1.parentElement!.querySelector('[data-slot="badge"]')).toBeNull()
     expect(within(h1.parentElement!).getByText("done").classList).toContain("text-muted-foreground")
     expect(screen.queryByRole("button", { name: "⏸ Pause" })).toBeNull()
+  })
+
+  it("drops a late reply of an older runs request", async () => {
+    const user = userEvent.setup()
+    const { container } = await mk()
+    let release!: (v: unknown) => void
+    vi.mocked(api).mockImplementationOnce(() => new Promise((res) => (release = res)) as any)
+    await user.click(screen.getByRole("button", { name: "Next Page" }))
+    withDetail({}, [{ ...run(41), duration_ms: 9900 }])
+    emitEvents([{ name: "job.run", data: { job_id: "j2", status: "ok" } }])
+    await flushPromises()
+    release([{ ...run(21), duration_ms: 7700 }])
+    await flushPromises()
+    expect(container.textContent).toContain("9.9 s")
+    expect(container.textContent).not.toContain("7.7 s")
+  })
+
+  it("moves to the last page of runs when the total shrinks", async () => {
+    const user = userEvent.setup()
+    await mk()
+    await user.click(screen.getByRole("button", { name: "Next Page" }))
+    await flushPromises()
+    withDetail({ runs_total: 15 }, [run(1), run(2)])
+    vi.mocked(api).mockClear()
+    emitEvents([{ name: "job.run", data: { job_id: "j2", status: "ok" } }])
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=0&limit=20")
+    expect(api).not.toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=20&limit=20")
+    expect(screen.getByText("1–15 of 15")).toBeTruthy()
+    expect(screen.queryByText(/No runs yet/)).toBeNull()
+  })
+
+  it("loads the page before when a page of runs comes back empty", async () => {
+    const user = userEvent.setup()
+    await mk()
+    vi.mocked(api).mockImplementation(async (_m: string, p: string) => {
+      if (p.includes("/runs?offset=20")) return [] as any
+      if (p.includes("/runs?")) return [run(1), run(2)] as any
+      return { ...detail, runs_total: 25 } as any
+    })
+    vi.mocked(api).mockClear()
+    await user.click(screen.getByRole("button", { name: "Next Page" }))
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=0&limit=20")
+    expect(screen.queryByText("Nothing to show.")).toBeNull()
+  })
+
+  it("reads the stored size of the runs and keeps a new size", async () => {
+    localStorage.setItem("tether.rows.job-runs", "50")
+    const user = userEvent.setup()
+    await mk()
+    expect(api).toHaveBeenCalledWith("GET", "/api/jobs/j2/runs?offset=0&limit=50")
+    await user.selectOptions(screen.getByRole("combobox", { name: "Rows per page" }), "10")
+    await flushPromises()
+    expect(api).toHaveBeenLastCalledWith("GET", "/api/jobs/j2/runs?offset=0&limit=10")
+    expect(localStorage.getItem("tether.rows.job-runs")).toBe("10")
   })
 })

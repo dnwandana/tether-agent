@@ -143,7 +143,7 @@ const JobForm = defineComponent({
   },
 })
 
-async function mk() {
+async function mk(path = "/jobs") {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -153,10 +153,10 @@ async function mk() {
       { path: "/goals/:session", name: "goal", component: Blank },
     ],
   })
-  await router.push("/jobs")
+  await router.push(path)
   const r = render(JobsPage, { global: { plugins: [router], stubs: { JobForm } } })
   await flushPromises()
-  return r
+  return { ...r, router }
 }
 const rowOf = (text: string) =>
   screen.getAllByRole("row").find((r) => r.textContent!.includes(text))!
@@ -384,10 +384,27 @@ describe("JobsPage", () => {
     )
   })
 
-  it("puts a space between the job icon, the name, and the watch chip", async () => {
+  it("keeps the job icon, the name, and the watch chip in one row with a gap", async () => {
     data["/api/jobs"] = [job({ id: "j9", name: "daily-digest", watch: true })]
     await mk()
-    const cell = within(rowOf("daily-digest")).getAllByRole("cell")[0]
-    expect(cell.textContent!.replace(/\s+/g, " ").trim()).toBe("✅ daily-digest watch")
+    const link = screen.getByRole("link", { name: "daily-digest" })
+    expect(link.getAttribute("title")).toBe("daily-digest")
+    const box = link.parentElement!
+    expect(box.classList).toContain("gap-1")
+    expect(box.textContent).toContain("✅")
+    expect(within(box).getByText("watch")).toBeTruthy()
+  })
+
+  it("opens the page of the route and writes a new page to the route", async () => {
+    const user = userEvent.setup()
+    data["/api/jobs"] = Array.from({ length: 25 }, (_, i) => job({ id: "j" + i, name: "job-" + i }))
+    const { router } = await mk("/jobs?page=2")
+    expect(screen.getByText("21–25 of 25")).toBeTruthy()
+    expect(screen.getByRole("link", { name: "job-24" })).toBeTruthy()
+    expect(screen.queryByRole("link", { name: "job-0" })).toBeNull()
+    await user.click(screen.getByRole("button", { name: "Previous Page" }))
+    await flushPromises()
+    expect(router.currentRoute.value.query.page).toBeUndefined()
+    expect(screen.getByRole("link", { name: "job-0" })).toBeTruthy()
   })
 })

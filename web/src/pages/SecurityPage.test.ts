@@ -202,6 +202,8 @@ const line = (t: string) =>
   screen.getByText((_, el) => el?.tagName === "P" && el.textContent?.trim() === t)
 // The rows of the grant list that the paging test made.
 const ruleRows = () => bodyRows().filter((r) => r.textContent!.includes("rule "))
+// Returns the pager of the Always answers.
+const grantPager = () => within(screen.getByRole("navigation", { name: "Always answers pages" }))
 
 describe("SecurityPage", () => {
   it("shows one line for each fixed mode and links to the Rules tab", async () => {
@@ -327,7 +329,7 @@ describe("SecurityPage", () => {
     const { user } = await mk()
     await tab(user, "Always answers")
     expect(ruleRows()).toHaveLength(20)
-    await user.click(btn("Next ▶"))
+    await user.click(grantPager().getByRole("button", { name: "Next Page" }))
     await flushPromises()
     expect(ruleRows()).toHaveLength(5)
   })
@@ -352,11 +354,14 @@ describe("SecurityPage", () => {
       return reply("✅ Removed 1 Always answer.")
     })
     const { user } = await mk("/security?tab=grants")
-    await user.click(btn("Next ▶"))
+    await user.click(grantPager().getByRole("button", { name: "Next Page" }))
     await user.click(btn("Remove"))
     await flushPromises()
     expect(document.body.textContent).toContain("1–20 of 20")
     expect(document.body.textContent).not.toContain("21–20")
+    expect(grantPager().getByRole("button", { name: "Page 1" }).getAttribute("aria-current")).toBe(
+      "page",
+    )
   })
 
   it("shows the empty text of the Always answers", async () => {
@@ -404,5 +409,18 @@ describe("SecurityPage", () => {
         ".page-h, .page-stack, .chip, .seg, .btn, .bad-banner, .pager, .fixed-modes, .c-3, .t-12",
       ),
     ).toBeNull()
+  })
+
+  it("lets the mode buttons and the grant rule wrap, and puts Remove at the right edge", async () => {
+    const { user } = await mk()
+    const group = screen.getByRole("group", { name: "Mode of the Dashboard" })
+    expect(group.closest("td")!.classList.contains("whitespace-normal")).toBe(true)
+    await tab(user, "Always answers")
+    const rule = screen.getByText("Push to a remote").closest("td")!
+    expect(rule.classList.contains("whitespace-normal")).toBe(true)
+    expect(btn("Remove").closest("td")!.classList.contains("text-right")).toBe(true)
+    expect(screen.getByText("git push origin main").getAttribute("title")).toBe(
+      "git push origin main",
+    )
   })
 })

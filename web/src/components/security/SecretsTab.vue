@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import DataTable from "../DataTable.vue"
+import type { Column } from "../../lib/table"
 import ResultNote from "../ResultNote.vue"
 import StateBlock from "../StateBlock.vue"
 import { useCommand, type ResultNoteData } from "../../lib/command"
@@ -17,12 +18,12 @@ const emit = defineEmits<{ changed: [] }>()
 const { run } = useCommand()
 const note = ref<ResultNoteData | null>(null)
 
-const cols = [
-  { key: "name", label: "Name" },
-  { key: "state", label: "State" },
-  { key: "commands", label: "Bound to" },
-  { key: "pins", label: "Allowed programs" },
-  { key: "actions", label: "", align: "right" as const },
+const cols: Column[] = [
+  { key: "name", label: "Name", type: "text" },
+  { key: "state", label: "State", type: "badge", width: "14rem" },
+  { key: "commands", label: "Bound to", type: "text" },
+  { key: "pins", label: "Allowed programs", type: "block" },
+  { key: "actions", label: "", type: "act", width: "8rem" },
 ]
 
 // Removes one allowed program of a name. The path is the rest of the line.
@@ -64,6 +65,8 @@ async function setValue(s: SecretView): Promise<void> {
       :columns="cols"
       :rows="secrets as unknown as Record<string, unknown>[]"
       row-key="name"
+      page-key="secrets"
+      page-label="Secrets"
     >
       <template #cell-state="{ row }">
         <Badge v-if="row.state === 'set'" variant="secondary">✓ set</Badge>

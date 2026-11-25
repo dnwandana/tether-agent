@@ -17,7 +17,9 @@ import { useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
 import { costText, lastSeven, stateGlyph, type Bar } from "../lib/jobbars"
 import { useLiveData } from "../lib/live"
+import { clampPage, readSize, writeSize, type PageSize } from "../lib/pager"
 import { readableSchedule } from "../lib/schedule"
+import type { Column } from "../lib/table"
 import { fullTime, shortTime } from "../lib/time"
 import { host } from "../stores/host"
 import { toast } from "../stores/ui"
@@ -27,7 +29,6 @@ function sched(raw: string): { text: string; title: string } {
   return readableSchedule(raw, host.zone, host.offsetMin, -new Date().getTimezoneOffset())
 }
 
-const PAGE = 10
 const route = useRoute()
 const router = useRouter()
 const id = computed(() => String(route.params.id))
@@ -36,22 +37,26 @@ const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const detail = ref<JobDetail | null>(null)
 const runs = ref<RunRow[]>([])
-const offset = ref(0)
+const page = ref(1)
+const size = ref<PageSize>(readSize("job-runs"))
+const loading = ref(false)
+// Counts the runs requests. Only the reply of the newest request changes the runs.
+let seq = 0
 const output = ref<RunRow | null>(null)
 const formOpen = ref(false)
 const formDirty = ref(false)
 const deleting = ref(false)
 const phone = ref(false)
 
-const columns = [
-  { key: "started", label: "Started" },
-  { key: "finished", label: "Finished" },
-  { key: "duration", label: "Duration" },
-  { key: "status", label: "Status" },
-  { key: "delivery", label: "Delivery" },
-  { key: "delivery_err", label: "Delivery error" },
-  { key: "cost", label: "Cost" },
-  { key: "actions", label: "" },
+const columns: Column[] = [
+  { key: "started", label: "Started", type: "date" },
+  { key: "finished", label: "Finished", type: "date", optional: true },
+  { key: "duration", label: "Duration", type: "num" },
+  { key: "status", label: "Status", type: "badge" },
+  { key: "delivery", label: "Delivery", type: "text", optional: true },
+  { key: "delivery_err", label: "Delivery error", type: "text" },
+  { key: "cost", label: "Cost", type: "num" },
+  { key: "actions", label: "", type: "act", width: "11rem" },
 ]
 
 const j = computed(() => detail.value?.job)
@@ -107,23 +112,32 @@ function showOutput(r: RunRow): void {
   output.value = r
 }
 
-async function loadRuns(o: number): Promise<void> {
+// Reads one page of runs. The page is clamped to the last page of runs_total. A reply of an
+// older request is dropped. An empty page after page 1 means that the history got smaller
+// after the detail request, so the page before loads.
+async function loadRuns(want: number): Promise<void> {
+  const p = clampPage(want, detail.value?.runs_total ?? 0, size.value)
+  const my = ++seq
+  page.value = p
+  loading.value = true
   try {
-    runs.value = await api<RunRow[]>("GET", `/api/jobs/${id.value}/runs?offset=${o}&limit=${PAGE}`)
-    offset.value = o
+    const r = await api<RunRow[]>(
+      "GET",
+      `/api/jobs/${id.value}/runs?offset=${(p - 1) * size.value}&limit=${size.value}`,
+    )
+    if (my !== seq) return
+    if (r.length === 0 && p > 1) return loadRuns(p - 1)
+    runs.value = r
   } catch (e) {
-    toast(friendlyError(e), "error")
+    if (my === seq) toast(friendlyError(e), "error")
+  } finally {
+    if (my === seq) loading.value = false
   }
 }
 
 async function load(): Promise<void> {
   try {
     detail.value = await api<JobDetail>("GET", `/api/jobs/${id.value}`)
-    runs.value = await api<RunRow[]>(
-      "GET",
-      `/api/jobs/${id.value}/runs?offset=${offset.value}&limit=${PAGE}`,
-    )
-    state.value = "ready"
   } catch (e) {
     if (deleting.value && e instanceof ApiError && e.status === 404) {
       await router.push({ name: "jobs" })
@@ -131,7 +145,22 @@ async function load(): Promise<void> {
     }
     errorText.value = friendlyError(e)
     state.value = "error"
+    return
   }
+  await loadRuns(page.value)
+  state.value = "ready"
+}
+
+// Reads the page that the pager asks for.
+function goPage(p: number): void {
+  if (p !== page.value) void loadRuns(p)
+}
+
+// Keeps the new size and reads page 1.
+function setSize(n: PageSize): void {
+  size.value = n
+  writeSize("job-runs", n)
+  void loadRuns(1)
 }
 
 const { run } = useCommand()
@@ -341,7 +370,7 @@ function closeForm(): void {
         text="Run history is off (cron.run_history is 0)."
       />
       <StateBlock
-        v-else-if="runs.length === 0 && offset === 0"
+        v-else-if="detail.runs_total === 0"
         state="empty"
         :text="firstRunText"
         :action="j.enabled ? '⚡ Run now' : undefined"
@@ -352,6 +381,14 @@ function closeForm(): void {
           :columns="columns"
           :rows="runs as unknown as Record<string, unknown>[]"
           row-key="id"
+          page-key="job-runs"
+          page-label="Runs"
+          :total="detail.runs_total"
+          :page="page"
+          :size="size"
+          :loading="loading"
+          @update:page="goPage"
+          @update:size="setSize"
         >
           <template #cell-started="{ row }">{{
             when((row as unknown as RunRow).started_at)
@@ -371,7 +408,8 @@ function closeForm(): void {
           <template #cell-delivery_err="{ row }">
             <span
               v-if="(row as unknown as RunRow).delivery_err"
-              class="font-mono text-destructive"
+              class="block truncate font-mono text-destructive"
+              :title="(row as unknown as RunRow).delivery_err"
               >{{ (row as unknown as RunRow).delivery_err }}</span
             >
           </template>
@@ -409,30 +447,6 @@ function closeForm(): void {
             </Button>
           </template>
         </DataTable>
-        <div class="flex items-center gap-2">
-          <span class="flex-1 text-xs text-muted-foreground"
-            >{{ runs.length === 0 ? 0 : offset + 1 }}–{{ offset + runs.length }} of
-            {{ detail.runs_total }}</span
-          >
-          <Button
-            variant="secondary"
-            size="sm"
-            type="button"
-            :disabled="offset === 0"
-            @click="loadRuns(Math.max(0, offset - PAGE))"
-          >
-            ◀ Prev
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            type="button"
-            :disabled="offset + runs.length >= detail.runs_total"
-            @click="loadRuns(offset + PAGE)"
-          >
-            Next ▶
-          </Button>
-        </div>
       </template>
       <Card v-if="output && phone" role="region" :aria-label="outputTitle">
         <CardHeader class="flex items-center justify-between gap-2">

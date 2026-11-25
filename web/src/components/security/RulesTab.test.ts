@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest"
-import { render, within } from "@testing-library/vue"
+import { render, screen, within } from "@testing-library/vue"
 import userEvent from "@testing-library/user-event"
 import RulesTab from "./RulesTab.vue"
 
@@ -73,5 +73,14 @@ describe("RulesTab", () => {
     const r = mk()
     const line = within(card(r, "Process mode")).getAllByRole("listitem")[1]
     expect(line.textContent!.replace(/\s+/g, " ").trim()).toMatch(/^smart now \S/)
+  })
+
+  it("names the pager of the MCP classes", () => {
+    const classes = Object.fromEntries(
+      Array.from({ length: 12 }, (_, i) => ["server" + i, { send: 1 }]),
+    )
+    mk({ ...fixed, mcp_classes: classes })
+    expect(screen.getByRole("navigation", { name: "MCP classes pages" })).toBeTruthy()
+    expect(screen.getByText("1–12 of 12")).toBeTruthy()
   })
 })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue"
+import { computed, ref } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
@@ -18,6 +18,7 @@ import ResultNote from "../components/ResultNote.vue"
 import StateBlock from "../components/StateBlock.vue"
 import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
+import type { Column } from "../lib/table"
 import { fullTime, shortTime } from "../lib/time"
 import { useCommand, type ResultNoteData } from "../lib/command"
 import { useLiveData } from "../lib/live"
@@ -25,7 +26,6 @@ import { confirm } from "../stores/ui"
 
 type Tab = "modes" | "grants" | "log" | "devices" | "secrets" | "rules"
 const TABS: Tab[] = ["modes", "grants", "log", "devices", "secrets", "rules"]
-const PAGE = 20
 
 const route = useRoute()
 const router = useRouter()
@@ -113,32 +113,23 @@ const modeRows = computed(() => {
   for (const m of v.modes) if (m.scope !== "dashboard") rows.push({ ...m, dashboard: false })
   return rows as Record<string, unknown>[]
 })
-const grantOffset = ref(0)
 const grantRows = computed(
   () => (view.value?.grants ?? []).map((g, i) => ({ ...g, idx: i })) as Record<string, unknown>[],
 )
-// Moves the offset to the last page when the rows shrink, for example after a Remove.
-watch(
-  () => grantRows.value.length,
-  (n) => {
-    if (grantOffset.value >= n) grantOffset.value = Math.max(0, Math.floor((n - 1) / PAGE) * PAGE)
-  },
-)
-const grantPage = computed(() => grantRows.value.slice(grantOffset.value, grantOffset.value + PAGE))
-const modeCols = [
-  { key: "scope", label: "Scope" },
-  { key: "mode", label: "Mode" },
-  { key: "actions", label: "", align: "right" as const },
+const modeCols: Column[] = [
+  { key: "scope", label: "Scope", type: "text" },
+  { key: "mode", label: "Mode", type: "text" },
+  { key: "set", label: "", type: "block" },
 ]
-const grantCols = [
-  { key: "rule", label: "Rule" },
-  { key: "preview", label: "Command" },
-  { key: "workdir", label: "Workdir" },
-  { key: "via", label: "Via" },
-  { key: "programs", label: "Programs" },
-  { key: "mcp", label: "MCP" },
-  { key: "created", label: "Added" },
-  { key: "actions", label: "", align: "right" as const },
+const grantCols: Column[] = [
+  { key: "rule", label: "Rule", type: "block" },
+  { key: "preview", label: "Command", type: "text" },
+  { key: "workdir", label: "Workdir", type: "text" },
+  { key: "via", label: "Via", type: "text", optional: true },
+  { key: "programs", label: "Programs", type: "text", optional: true },
+  { key: "mcp", label: "MCP", type: "text", optional: true },
+  { key: "created", label: "Added", type: "date" },
+  { key: "actions", label: "", type: "act", width: "7rem" },
 ]
 const tabs = computed(() => [
   { id: "modes", label: "Modes" },
@@ -168,13 +159,22 @@ const tabModel = computed({
         <template v-else-if="view">
           <!-- Modes -->
           <div v-if="tab === 'modes'" class="flex flex-col gap-4">
-            <DataTable :columns="modeCols" :rows="modeRows" row-key="scope">
+            <DataTable
+              :columns="modeCols"
+              :rows="modeRows"
+              row-key="scope"
+              page-key="modes"
+              page-label="Modes"
+            >
               <template #cell-scope="{ row }">
-                <bdi class="truncate" :title="String(row.scope_label || row.scope)">{{
-                  row.scope_label || row.scope
-                }}</bdi
-                >{{ " " }}
-                <Badge v-if="row.dashboard" variant="secondary">this dashboard</Badge>
+                <div class="flex min-w-0 items-center gap-2">
+                  <bdi class="min-w-0 truncate" :title="String(row.scope_label || row.scope)">{{
+                    row.scope_label || row.scope
+                  }}</bdi>
+                  <Badge v-if="row.dashboard" variant="secondary" class="shrink-0"
+                    >this dashboard</Badge
+                  >
+                </div>
               </template>
               <template #cell-mode="{ row }">
                 {{ MODE_LABEL[row.mode as string] ?? row.mode
@@ -182,7 +182,7 @@ const tabModel = computed({
                   · since {{ shortTime(row.set_at as string) }}</template
                 >
               </template>
-              <template #cell-actions="{ row }">
+              <template #cell-set="{ row }">
                 <ToggleGroup
                   v-if="row.dashboard"
                   type="single"
@@ -248,13 +248,21 @@ const tabModel = computed({
               text="An ✅ Always answer shows here."
             />
             <template v-else>
-              <DataTable :columns="grantCols" :rows="grantPage" row-key="idx">
+              <DataTable
+                :columns="grantCols"
+                :rows="grantRows"
+                row-key="idx"
+                page-key="grants"
+                page-label="Always answers"
+              >
                 <template #cell-rule="{ row }">
                   <b class="font-medium">{{ row.rule }}</b>
                   <div class="text-xs text-muted-foreground">{{ row.description }}</div>
                 </template>
                 <template #cell-preview="{ row }"
-                  ><code class="font-mono text-xs">{{ row.preview }}</code></template
+                  ><code class="block truncate font-mono text-xs" :title="String(row.preview)">{{
+                    row.preview
+                  }}</code></template
                 >
                 <template #cell-programs="{ row }">{{
                   (row.programs as string[]).join(", ")
@@ -277,28 +285,6 @@ const tabModel = computed({
                   </Button>
                 </template>
               </DataTable>
-              <div class="flex items-center gap-2">
-                <span class="flex-1 text-sm text-muted-foreground"
-                  >{{ grantOffset + 1 }}–{{ grantOffset + grantPage.length }} of
-                  {{ grantRows.length }}</span
-                >
-                <Button
-                  variant="outline"
-                  size="sm"
-                  :disabled="grantOffset === 0"
-                  @click="grantOffset = Math.max(0, grantOffset - PAGE)"
-                >
-                  ◀ Prev
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  :disabled="grantOffset + PAGE >= grantRows.length"
-                  @click="grantOffset += PAGE"
-                >
-                  Next ▶
-                </Button>
-              </div>
             </template>
           </div>
 

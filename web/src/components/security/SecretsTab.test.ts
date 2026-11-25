@@ -102,4 +102,14 @@ describe("SecretsTab", () => {
     const r = render(SecretsTab, { props: { secrets: [] } })
     expect(r.container.textContent).toContain("No bound secrets.")
   })
+
+  it("lets the pins wrap, puts Set value at the right edge, and names the pager", () => {
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...secrets[1], name: "TOKEN_" + i }))
+    render(SecretsTab, { props: { secrets: [secrets[0], ...many] } })
+    const pin = screen.getByText("/usr/bin/gh").closest("td")!
+    expect(pin.classList.contains("whitespace-normal")).toBe(true)
+    const set = screen.getAllByRole("button", { name: "Set value…" })[0]
+    expect(set.closest("td")!.classList.contains("text-right")).toBe(true)
+    expect(screen.getByRole("navigation", { name: "Secrets pages" })).toBeTruthy()
+  })
 })

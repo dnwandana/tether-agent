@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import DataTable from "../DataTable.vue"
+import type { Column } from "../../lib/table"
 
 const props = defineProps<{ fixed: SecurityFixed; processMode: string; cronMode: string }>()
 
@@ -37,10 +38,10 @@ const mcpRows = computed(() => {
       })
   return out as Record<string, unknown>[]
 })
-const mcpCols = [
-  { key: "server", label: "Server" },
-  { key: "tool", label: "Tools" },
-  { key: "class", label: "Class" },
+const mcpCols: Column[] = [
+  { key: "server", label: "Server", type: "text" },
+  { key: "tool", label: "Tools", type: "text" },
+  { key: "class", label: "Class", type: "badge" },
 ]
 </script>
 
@@ -113,7 +114,14 @@ const mcpCols = [
         <CardTitle>MCP classes</CardTitle>
       </CardHeader>
       <CardContent>
-        <DataTable v-if="mcpRows.length" :columns="mcpCols" :rows="mcpRows" row-key="key" />
+        <DataTable
+          v-if="mcpRows.length"
+          :columns="mcpCols"
+          :rows="mcpRows"
+          row-key="key"
+          page-key="rules-mcp"
+          page-label="MCP classes"
+        />
         <p v-else class="text-sm text-muted-foreground">None.</p>
       </CardContent>
     </Card>

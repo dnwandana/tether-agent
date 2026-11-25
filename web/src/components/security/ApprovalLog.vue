@@ -5,9 +5,10 @@ import { api } from "../../api/client"
 import type { LogEntry, LogPage } from "../../api/types.gen"
 import { friendlyError } from "../../lib/errors"
 import { useLiveData } from "../../lib/live"
+import { lastPage, readSize, writeSize, type PageSize } from "../../lib/pager"
+import type { Column } from "../../lib/table"
 import { fullTime, shortTime } from "../../lib/time"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -19,7 +20,6 @@ import StateBlock from "../StateBlock.vue"
 const props = defineProps<{ scopes: string[]; scopeLabels: Record<string, string> }>()
 
 const route = useRoute()
-const PAGE = 20
 const DECISION: Record<string, "secondary" | "destructive" | "outline"> = {
   allowed: "secondary",
   denied: "destructive",
@@ -41,18 +41,19 @@ function scopeName(key: string): string {
 const decision = ref("")
 const noAnswer = ref(false)
 const q = ref("")
-const offset = ref(0)
-const page = ref<LogPage | null>(null)
+const log = ref<LogPage | null>(null)
 const state = ref<"loading" | "ready" | "error">("loading")
 const cause = ref("")
 const busy = ref(false)
+const page = ref(1)
+const size = ref<PageSize>(readSize("approval-log"))
 const detail = ref<LogEntry | null>(null)
 
 let seq = 0
 let timer: ReturnType<typeof setTimeout> | undefined
 
 // Returns the request path for one page of the log.
-function path(off: number): string {
+function path(p: number): string {
   return (
     "/api/security/log?" +
     new URLSearchParams({
@@ -60,21 +61,24 @@ function path(off: number): string {
       decision: decision.value,
       source: noAnswer.value ? "timeout" : "",
       q: q.value.trim(),
-      offset: String(off),
-      limit: String(PAGE),
+      offset: String((p - 1) * size.value),
+      limit: String(size.value),
     }).toString()
   )
 }
 
-// Reads one page. A reply of an old request is dropped.
-async function read(off: number): Promise<void> {
+// Reads one page. A reply of an old request is dropped. A page beyond the last page reads
+// the last page.
+async function read(p: number): Promise<void> {
   const my = ++seq
+  page.value = p
   busy.value = true
   try {
-    const r = await api<LogPage>("GET", path(off))
+    const r = await api<LogPage>("GET", path(p))
     if (my !== seq) return
-    page.value = r
-    offset.value = off
+    const last = lastPage(r.total, size.value)
+    if (r.total > 0 && p > last) return read(last)
+    log.value = r
     state.value = "ready"
   } catch (e) {
     if (my !== seq) return
@@ -85,15 +89,27 @@ async function read(off: number): Promise<void> {
   }
 }
 
-useLiveData(() => read(offset.value), {
+// Reads the page that the pager asks for.
+function goPage(p: number): void {
+  if (p !== page.value) void read(p)
+}
+
+// Keeps the new size and reads page 1.
+function setSize(n: PageSize): void {
+  size.value = n
+  writeSize("approval-log", n)
+  void read(1)
+}
+
+useLiveData(() => read(page.value), {
   events: ["card.done"],
   filter: (_n, d) => (d as { kind?: string }).kind === "approval",
 })
 
-watch([scope, decision, noAnswer], () => void read(0))
+watch([scope, decision, noAnswer], () => void read(1))
 watch(q, () => {
   clearTimeout(timer)
-  timer = setTimeout(() => void read(0), 250)
+  timer = setTimeout(() => void read(1), 250)
 })
 
 // Clears the scope filter.
@@ -119,30 +135,29 @@ onBeforeUnmount(() => {
   mql = null
 })
 
-const allCols = [
-  { key: "at", label: "Time" },
-  { key: "scope", label: "Scope" },
-  { key: "tool", label: "Tool" },
-  { key: "rule", label: "Rule" },
-  { key: "decision", label: "Decision" },
-  { key: "answer", label: "Answer" },
-  { key: "preview", label: "Preview" },
+const allCols: Column[] = [
+  { key: "at", label: "Time", type: "date" },
+  { key: "scope", label: "Scope", type: "text", optional: true },
+  { key: "tool", label: "Tool", type: "text" },
+  { key: "rule", label: "Rule", type: "text" },
+  { key: "decision", label: "Decision", type: "badge" },
+  { key: "answer", label: "Answer", type: "badge", optional: true },
+  { key: "preview", label: "Preview", type: "block" },
 ]
-const phoneCols = [
-  { key: "at", label: "Time" },
-  { key: "decision", label: "Decision" },
-  { key: "tool", label: "Tool" },
-  { key: "preview", label: "Preview" },
+const phoneCols: Column[] = [
+  { key: "at", label: "Time", type: "date" },
+  { key: "decision", label: "Decision", type: "badge" },
+  { key: "tool", label: "Tool", type: "text" },
+  { key: "preview", label: "Preview", type: "block" },
 ]
 const cols = computed(() => (phone.value ? phoneCols : allCols))
 const rows = computed(
-  () => (page.value?.rows ?? []).map((r, i) => ({ ...r, idx: i })) as Record<string, unknown>[],
+  () => (log.value?.rows ?? []).map((r, i) => ({ ...r, idx: i })) as Record<string, unknown>[],
 )
-const total = computed(() => page.value?.total ?? 0)
-const to = computed(() => (page.value?.offset ?? 0) + (page.value?.rows.length ?? 0))
+const total = computed(() => log.value?.total ?? 0)
 
 function open(r: Record<string, unknown>): void {
-  detail.value = page.value?.rows[r.idx as number] ?? null
+  detail.value = log.value?.rows[r.idx as number] ?? null
 }
 
 const fields = computed(() => {
@@ -191,17 +206,30 @@ const fields = computed(() => {
       />
       <span class="text-xs text-muted-foreground">Kept 180 days.</span>
     </div>
-    <StateBlock v-if="state === 'loading' && !page" state="loading" />
-    <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @action="read(offset)" />
+    <StateBlock v-if="state === 'loading' && !log" state="loading" />
+    <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @action="read(page)" />
     <StateBlock
-      v-else-if="page && page.rows.length === 0"
+      v-else-if="log && log.total === 0"
       state="empty"
       text="No approvals in this scope."
       :action="scope ? 'Show all scopes' : undefined"
       @action="showAll"
     />
     <template v-else>
-      <DataTable :columns="cols" :rows="rows" row-key="idx" @row-click="open">
+      <DataTable
+        :columns="cols"
+        :rows="rows"
+        row-key="idx"
+        page-key="approval-log"
+        page-label="Approval log"
+        :total="total"
+        :page="page"
+        :size="size"
+        :loading="busy"
+        @update:page="goPage"
+        @update:size="setSize"
+        @row-click="open"
+      >
         <template #cell-at="{ row }"
           ><span class="whitespace-nowrap" :title="fullTime(row.at as string)">{{
             shortTime(row.at as string) || "—"
@@ -213,7 +241,9 @@ const fields = computed(() => {
           }}</bdi></template
         >
         <template #cell-rule="{ row }"
-          ><span :title="row.rule as string">{{ row.rule_description || row.rule }}</span></template
+          ><span class="block truncate" :title="row.rule as string">{{
+            row.rule_description || row.rule
+          }}</span></template
         >
         <template #cell-decision="{ row }">
           <Badge :variant="DECISION[row.decision as string] ?? 'outline'">{{ row.decision }}</Badge>
@@ -222,31 +252,6 @@ const fields = computed(() => {
           ><code class="font-mono text-xs break-all">{{ row.preview }}</code></template
         >
       </DataTable>
-      <div class="flex items-center gap-2 pt-2">
-        <span class="flex-1 text-sm text-muted-foreground"
-          >{{ total === 0 ? "0" : (page?.offset ?? 0) + 1 }}–{{ to }} of {{ total }}</span
-        >
-        <Button
-          variant="outline"
-          size="sm"
-          class="max-tab:h-11"
-          type="button"
-          :disabled="busy || offset === 0"
-          @click="read(Math.max(0, offset - PAGE))"
-        >
-          ◀ Prev
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          class="max-tab:h-11"
-          type="button"
-          :disabled="busy || to >= total"
-          @click="read(offset + PAGE)"
-        >
-          Next ▶
-        </Button>
-      </div>
     </template>
     <SidePanel :open="detail !== null" title="Approval detail" @close="detail = null">
       <dl v-if="detail" class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">

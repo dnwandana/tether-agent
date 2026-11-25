@@ -23,12 +23,15 @@ import { replyKind, useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
 import { costText, lastSeven, stateGlyph, type Bar } from "../lib/jobbars"
 import { useLiveData } from "../lib/live"
+import { useRoutePage } from "../lib/routePage"
 import { readableSchedule } from "../lib/schedule"
+import type { Column } from "../lib/table"
 import { fullTime, shortTime } from "../lib/time"
 import { host } from "../stores/host"
 import { confirm, toast } from "../stores/ui"
 
 const router = useRouter()
+const { page, setPage } = useRoutePage("jobs")
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const brief = ref<BriefView | null>(null)
@@ -37,13 +40,13 @@ const held = ref<HeldView[]>([])
 const formOpen = ref(false)
 const formDirty = ref(false)
 
-const columns = [
-  { key: "name", label: "Job" },
-  { key: "schedule", label: "Schedule" },
-  { key: "next_run", label: "Next run" },
-  { key: "runs7", label: "Last 7" },
-  { key: "cost_7d", label: "Cost · 7 d", align: "right" as const },
-  { key: "actions", label: "" },
+const columns: Column[] = [
+  { key: "name", label: "Job", type: "text" },
+  { key: "schedule", label: "Schedule", type: "text" },
+  { key: "next_run", label: "Next run", type: "date" },
+  { key: "runs7", label: "Last 7", type: "text", width: "9rem", optional: true },
+  { key: "cost_7d", label: "Cost · 7 d", type: "num", optional: true },
+  { key: "actions", label: "", type: "act", width: "13rem" },
 ]
 
 const kindIcon: Record<string, string> = {
@@ -228,22 +231,32 @@ async function saved(): Promise<void> {
         :columns="columns"
         :rows="jobs as unknown as Record<string, unknown>[]"
         row-key="id"
+        page-key="jobs"
+        page-label="Jobs"
+        :page="page"
+        @update:page="setPage"
       >
         <template #cell-name="{ row }">
-          <span aria-hidden="true">{{ stateGlyph[(row as unknown as JobRow).state] }}</span>
-          {{ " "
-          }}<router-link
-            class="font-medium"
-            :to="{ name: 'job', params: { id: (row as unknown as JobRow).id } }"
-            >{{ (row as unknown as JobRow).name }}</router-link
-          >
-          {{ " "
-          }}<Badge v-if="(row as unknown as JobRow).watch" variant="outline" class="text-info"
-            >watch</Badge
-          >
+          <div class="flex min-w-0 items-center gap-1">
+            <span aria-hidden="true" class="shrink-0">{{
+              stateGlyph[(row as unknown as JobRow).state]
+            }}</span>
+            <router-link
+              class="min-w-0 truncate font-medium"
+              :title="(row as unknown as JobRow).name"
+              :to="{ name: 'job', params: { id: (row as unknown as JobRow).id } }"
+              >{{ (row as unknown as JobRow).name }}</router-link
+            >
+            <Badge
+              v-if="(row as unknown as JobRow).watch"
+              variant="outline"
+              class="shrink-0 text-info"
+              >watch</Badge
+            >
+          </div>
         </template>
         <template #cell-schedule="{ row }"
-          ><span :title="sched((row as unknown as JobRow).schedule).title">{{
+          ><span class="block truncate" :title="sched((row as unknown as JobRow).schedule).title">{{
             sched((row as unknown as JobRow).schedule).text
           }}</span></template
         >
