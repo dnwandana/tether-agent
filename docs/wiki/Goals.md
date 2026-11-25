@@ -189,8 +189,10 @@ After the last turn, the goal pauses:
 `/goal resume` gives the goal a new budget.
 
 When a turn fails or gives no answer, it uses no turn. The next goal turn starts after 60 seconds
-(`provider.failure_skip_s`), when the failed provider entry can answer again. The status line is
-"↻ Goal n/max: retry after a failed turn." A second failure in a row pauses the goal.
+(`provider.failure_skip_s`), when the failed provider entry can answer again. After a used-up
+plan quota, the entry can answer again only at the reset time. The retry turn then goes to the
+next entry. The status line is "↻ Goal n/max: retry after a failed turn." A second failure in a
+row pauses the goal.
 
 ## The notices
 

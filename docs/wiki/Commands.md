@@ -172,8 +172,9 @@ message. `/model` does not change `config.yaml`.
   button, the model does not change. The reply is page 1 of the new list with the line
   `The list changed. Select the model again.`
 
-The first entry of the fallback chain gets a wait time of 60 seconds (`provider.failure_skip_s`) after it fails. In that
-time, the replies of `/model` and `/new` change:
+The first entry of the fallback chain gets a wait time of 60 seconds (`provider.failure_skip_s`) after it fails,
+or until the reset time of a used-up plan quota. In that time, the replies of `/model` and `/new`
+change:
 
 - `/model` names the entry that answers now and its model.
 - `/new` shows `Model: <model> (fallback)`, with the model of the entry that answers now.

@@ -109,6 +109,9 @@ one of these failures before the first byte of the answer:
 
 Other errors stop the call. The chain skips an entry that is not usable, for example an entry
 with no API key. The chain skips a failed entry for 60 seconds (`provider.failure_skip_s`).
+Before the chain goes to the next entry, it tries the same entry again on a short error (a 429,
+a 5xx, or a dropped connection). A used-up plan quota goes to the next entry at once, and the
+chain skips the entry until the reset time.
 A turn stays on the entry that answered. `agent.fallback: []` turns off the fallback.
 If the config has no `agent.fallback` key, an entry with the name `fallback` is the list. See
 [The fallback chain](https://github.com/dnwandana/tether-agent/wiki/Providers#the-fallback-chain) in the wiki.

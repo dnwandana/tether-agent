@@ -322,10 +322,14 @@ line.
 
 An agent run that fails before the model answers starts again one time, after 60 seconds.
 A connection error and the HTTP codes 408, 429, and 500 to 599 start the retry. The fallback
-chain tried each provider entry first.
+chain tried each provider entry first, with the retries of each entry.
 
 - There is no retry after a 401, 402, or 403, a billing error, a stop of the gateway,
   `cron.agent_timeout_s`, a failed data script, an empty answer, or a script job.
+- A used-up plan quota gets no retry, because the quota does not clear in 60 seconds. A Z.AI
+  quota code on a 429 or a 5xx, or a `Retry-After` over 60 seconds, tells of a used-up quota.
+  When another entry of the chain failed with an error that starts the retry, for example an
+  HTTP 503, the run still starts again. The second start goes to the next entry.
 - The retry uses the same prompt. It does not run the data script again.
 - When the first start used tools, the prompt of the retry gets the line "An earlier start of
   this run failed after it used tools. Check what it did before you act again."

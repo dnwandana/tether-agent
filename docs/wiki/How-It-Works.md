@@ -61,7 +61,7 @@ flowchart LR
     DASH[dashboard page] -->|POST /api/messages, /api/command| GW
     GW -->|SSE /api/events| DASH
     AG -->|stream| PR[provider.Chain]
-    PR -->|entry fails before first byte| FB[next entry of the chain]
+    PR -->|entry fails before first byte, after its retries| FB[next entry of the chain]
     AG -->|tool calls| TR[tools.Registry]
     TR -->|terminal, execute_code| SG[security gate]
     AG -->|save each message| DB[(state.db)]
@@ -79,7 +79,7 @@ flowchart LR
    read-only chat or topic, the registry refuses the tools that change things.
    See [Security](Security).
 5. The provider streams the answer back to the channel. The fallback chain goes to the next
-   entry only when an entry fails before the first byte. See
+   entry only when an entry fails before the first byte, after its retries. See
    [The provider layer](#the-provider-layer).
 
 The dashboard gets the same turn as an event stream: text deltas, tool lines, cards, and the
@@ -216,31 +216,70 @@ A name occurs only one time in the chain. When `agent.fallback` is absent, an en
 `<name>:<model>` changes the model of the first entry only. The other entries use their own
 models.
 
-The chain goes to the next entry only when a call fails before the first byte of the answer.
-These failures count:
+The chain goes to the next entry only when a call fails before the first byte of the answer,
+after the retries of the entry. These failures count:
 
 - a connection error
 - HTTP 5xx, 429, 401, 402, 403, or 408
 - an HTTP 400 whose body tells of a billing or quota failure
+- no response headers in 300 seconds
 - an unusable entry
 
 Another error goes to you, because a bad request fails on each provider. A cancel also returns
 at once. After the first byte, no other entry gets the call. The log shows each change of entry
 as `provider fallback`. When all entries fail, the error holds the error of each entry.
 
+**Retries.** Before the chain goes to the next entry, it tries the same entry again on a short
+error. A retry runs only before the first byte. The model never sees a retry, and no retry goes
+into the history.
+
+- A connection error, an HTTP 408, 429, or 5xx, and the Z.AI codes for a rate limit or an
+  overload get at most 3 tries on one entry. The waits are 2 to 3 seconds and 4 to 6 seconds.
+- A `Retry-After` of 10 seconds or less replaces the wait. A `Retry-After` from 10 to 60
+  seconds sends the call to the next entry at once, and the chain skips the entry for that
+  time. When no next entry exists, the `Retry-After` replaces the wait.
+- A server that sends no response headers in 300 seconds gets at most 2 tries. When a next
+  entry exists, it gets no retry.
+- An HTTP 401, 402, or 403, and a 400 or 429 with a billing text, go to the next entry at once.
+- When a wait ends after the deadline of the caller, the chain makes no retry. Thus the outbound
+  guard and the judges still reach the next entry in time.
+- Calls at the same time share the wait of an entry, so the retries do not make a rate limit
+  worse.
+
+A wait of more than 10 seconds shows one notice in a chat turn of the owner:
+``⏳ `<entry>` is busy (<cause>). The next try is in <N> s.`` A shorter wait shows nothing. The
+log shows each retry as `provider retry`. See [Retries of one entry](Providers#retries-of-one-entry)
+for the error classes, the Z.AI codes, and the longer schedule of a Z.AI Coding Plan entry.
+
+**Used-up quota.** When the plan quota of an entry is used up, the chain goes to the next entry
+at once, with no retry. A Z.AI quota code or a `Retry-After` over 60 seconds tells of a used-up
+quota. The chain then skips the entry, for all its models, until the reset time. When the reset
+time is not known, the skip is 60 seconds, and it doubles for each quota error in a row, up to 4
+hours. You see one notice for each quota episode, in the first chat turn of the owner that the
+next entry answers:
+
+- ``⚠️ The quota of `<entry>` is used up. It resets at <time>. Until then, the calls go to `<next entry>` (`<model>`).``
+- ``⚠️ The quota of `<entry>` is used up. The reset time is not known. The calls go to `<next entry>` (`<model>`) until `<entry>` works again.``
+
+`<time>` is the reset time in the local time zone, for example `18:40 WIB`. A reset on another
+day adds the date, for example `Wed 26 Nov 18:40 WIB`. A quota episode ends when the entry
+answers again. A restart starts a new episode. With no next entry, the turn fails with the
+error text of the provider, which holds the reset time.
+
 **Wait time.** An entry that fails gets a wait time of 60 seconds (`provider.failure_skip_s`) for
-its model. In that time, the chain skips it. When all entries wait, the chain tries all of them. The
-state is in `provider.Health`:
+its model. A timeout gets a wait time of 60 seconds that doubles for each timeout in a row, up to
+4 hours. In the wait time, the chain skips the entry. When all entries wait, the chain tries all
+of them, except an entry in a quota skip. The state is in `provider.Health`:
 
 - The key of the state is the entry and the model. A failure of a pinned model does not mark the
-  other models of the entry.
+  other models of the entry. A quota skip marks all models of the entry.
 - All sessions share one `Health`, because the state describes a provider, not a session.
 - The state is in memory, so a restart clears it.
 - A call that works clears the failure of its entry.
 
 `/new` and `/model` read this state. In the 60 seconds (`provider.failure_skip_s`) after the first
-entry of the chain failed, they show the entry that serves the calls now. They also show a ⚠️ line
-with the cause.
+entry of the chain failed, or until the reset time of a used-up quota, they show the entry that
+serves the calls now. They also show a ⚠️ line with the cause.
 After the wait time, they show the first entry again. See [Commands](Commands#model-and-effort).
 
 **One turn stays on one entry.** The next call of the turn starts at the entry that served the
@@ -560,14 +599,18 @@ smaller.
 
 - **When:** before each model call, the agent estimates the size of the request. The estimate
   counts the text, the tool call arguments, and the stored reasoning. When the size is more
-  than `context.compact_threshold` (default 0.5) of the context window, compaction
-  starts. `/compact` starts it at once.
+  than `context.compact_threshold` (default 0.5) of the context window, or more than
+  `context.compact_at_tokens` (default 200000), compaction starts. The lower of the two sizes
+  is the compaction trigger. `/compact` starts it at once.
 - **What stays:** the first 3 and the last 20 messages stay as they are. Compaction never splits
   a tool call from its result.
 - **What changes:** the chain of the session writes a structured summary of the messages in
   the middle. The summary has parts such as the active task, the goal, and the constraints. An
   earlier summary goes into the new summary, so early facts are not lost. An open task list of
   `todo_list` goes at the end of the summary.
+- **Time:** the summary call runs inside the turn, before the next model call. Each compaction
+  makes the turn wait about 2 to 3 minutes for the summary. A smaller
+  `context.summary_max_tokens` (default 12000) makes the wait shorter.
 - **Storage:** the stored messages never change. A row in the `compactions` table replaces a
   range of messages with the summary in the view that goes to the model.
 - **Notice:** after each automatic compaction, you see
@@ -576,9 +619,12 @@ smaller.
   job sends no compaction notice.
 - **Failures:** after 3 failures in a row (`context.compact_max_failures`), you see a warning.
 - **No loop:** compaction cannot make the system prompt and the tool schemas smaller. When two
-  compactions in a row (`context.compact_max_ineffective`) leave the request over the threshold,
-  automatic compaction stops, and you see a warning. It starts again when the request is under
-  the threshold. `/compact` still runs.
+  compactions in a row (`context.compact_max_ineffective`) leave the request over the compaction
+  trigger, automatic compaction stops, and you see a warning. It starts again when the request is
+  under the trigger. `/compact` still runs. When `context.compact_at_tokens` was the lower
+  trigger, the session goes back to `context.compact_threshold` of the context window. Automatic
+  compaction then runs again at that size, with its own count. The warning tells you this. A
+  larger `context.compact_at_tokens` stops this warning.
 
 ### Long tool output
 

@@ -144,7 +144,8 @@ OPENROUTER_API_KEY=sk-or-...
 
 A preset entry with no `api_key` reads the key env of the preset, for example
 `ANTHROPIC_API_KEY`. The fallback chain goes to the next entry only when a call fails before the
-first byte of the answer. See [Providers](Providers#the-fallback-chain).
+first byte of the answer, after the retries of the entry. See
+[Providers](Providers#the-fallback-chain).
 
 ## Important keys
 
@@ -161,7 +162,8 @@ These keys are the ones that most users change. The full list is in
 | `agent.vision_provider` | `""` | The provider for `view_image`. `""` uses `primary` when it has `vision: true`. |
 | `agent.restart_drain_timeout_s` | `180` | The maximum time in seconds that a stop or a restart waits for the running turns. |
 | `agent.resume_freshness_s` | `3600` | A turn that a restart or a crash cut continues at the next start when the cut is not older than this time, in seconds. `0` turns off the resume. An active goal also continues only within this time. Else it pauses. `0` pauses each goal. |
-| `context.compact_threshold` | `0.5` | Compaction starts when the context is above this part of the context window. |
+| `context.compact_threshold` | `0.5` | Compaction starts when the context is above this part of the context window, or above `context.compact_at_tokens`. |
+| `context.compact_at_tokens` | `200000` | Compaction also starts when the context is above this number of tokens. `0` turns the cap off. Another value must be from 50000 to 2147483647. |
 | `context.tool_output_max_chars` | `50000` | A longer tool output keeps its head and tail. The full output goes to a spill file. |
 | `memory.review_interval_turns` | `10` | A background memory review starts after this number of user turns. `0` stops the reviews. |
 | `approvals.mode` | `manual` | The approval mode for dangerous commands: `manual`, `smart`, or `off`. |

@@ -416,6 +416,18 @@ The final answer has these rules:
   follows as the answer. See [One turn, step by step](How-It-Works#one-turn-step-by-step).
 - After an automatic compaction, a 🗜 notice shows the number of replaced messages and the
   context size. It is a separate message. See [Compaction](How-It-Works#compaction).
+- When a provider entry is busy and the next try is more than 10 seconds away, a ⏳ notice
+  names the entry, the cause, and the wait. It is a separate message. The text is
+  ``⏳ `<entry>` is busy (<cause>). The next try is in <N> s.``
+- When the plan quota of an entry is used up, a ⚠️ notice names the entry, the reset time, and
+  the entry that answers until then. It comes one time for each quota episode, as a separate
+  message. The text is
+  ``⚠️ The quota of `<entry>` is used up. It resets at <time>. Until then, the calls go to `<next entry>` (`<model>`).``
+  When the reset time is not known, the text is
+  ``⚠️ The quota of `<entry>` is used up. The reset time is not known. The calls go to `<next entry>` (`<model>`) until `<entry>` works again.``
+  See [Fallback chain](How-It-Works#fallback-chain).
+- A cron job and a turn of a group member send neither of these two notices. A pending quota
+  notice waits for the next turn of the owner.
 
 ### Approval buttons
 

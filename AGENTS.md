@@ -76,7 +76,9 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
      model call goes through a `provider.Chain` from `provider.Set.ChainFor`. The chain order
      is the pinned entry, `primary`, and then `agent.fallback`. The chain goes to the next
      entry only on an error that wraps `provider.ErrBeforeFirstByte`. `provider.Health` keeps
-     the failures and skips a failed entry for `provider.failure_skip_s` (default 60 s). All chains
+     the failures and skips a failed entry for `provider.failure_skip_s` (default 60 s). Before
+     it goes to the next entry, the chain tries the same entry again on a Retry class error
+     (`provider.Classify`). A used-up quota skips the entry until its reset time. All chains
      share one `Health`.
 - State: the data dir is `--data-dir`, else `TETHER_HOME`, else `~/.tether`. `state.db` is
   pure-Go SQLite (`modernc.org/sqlite`) with one connection. Do not run a second query while

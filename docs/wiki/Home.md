@@ -16,7 +16,7 @@ adapters of the coding agents.
 | **Fast start** | Startup takes less than 100 ms. A test in the test suite enforces this limit. |
 | **Near-zero idle cost** | A feature that you configure but do not use costs almost nothing. It starts on demand. |
 | **Any model** | 11 presets for known providers, and any endpoint with the `openai`, `anthropic`, or `responses` wire format. See [Providers](Providers). |
-| **Fallback chain** | When a provider entry fails before the first byte, the next entry of the chain takes the call. The order is the entry of the `/model` pin, if the session has a pin, then `primary`, then the entries of `agent.fallback`. See [The fallback chain](Providers#the-fallback-chain). |
+| **Fallback chain** | When a provider entry fails before the first byte and its retries also fail, the next entry of the chain takes the call. The order is the entry of the `/model` pin, if the session has a pin, then `primary`, then the entries of `agent.fallback`. See [The fallback chain](Providers#the-fallback-chain). |
 | **Reasoning effort** | One scale from `none` to `max`. Set a default for each provider entry, or use `/effort` in a session. |
 | **You own the data** | The memory is plain Markdown. All state is in one SQLite file. |
 | **Security you can audit** | An approval gate checks dangerous shell commands. A skill guard scans skills before they install. Secrets stay out of the model context and the logs. |

@@ -317,7 +317,8 @@ The fallback chain has this order:
 3. The entries of `agent.fallback`, in their order.
 
 The agent goes to the next entry only when an entry fails before the first byte of the
-answer. Refer to [The fallback chain](Providers#the-fallback-chain) for the full rules.
+answer, after the retries of the entry. Refer to [The fallback chain](Providers#the-fallback-chain)
+for the full rules.
 
 The wizard shows the current list, for example `The fallback list is: none.` Then it asks
 `Change the fallback list? [y/N]`. Answer no to keep the list.

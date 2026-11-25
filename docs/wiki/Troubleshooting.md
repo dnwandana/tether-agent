@@ -229,11 +229,17 @@ Install Chrome or Chromium so that the browser tools are available.
 
 ### `⚠️ Automatic compaction stopped`
 
-**Cause:** the system prompt, the tool schemas, and the protected messages are over
-`context.compact_threshold` of the context window. Compaction cannot make them smaller.
+**Cause:** the system prompt, the tool schemas, and the protected messages are over the
+compaction trigger: `context.compact_threshold` of the context window, or
+`context.compact_at_tokens`. Compaction cannot make them smaller. When the cap
+`context.compact_at_tokens` was the lower trigger, automatic compaction runs again at
+`context.compact_threshold` of the context window.
+In that case the warning is ``⚠️ Compaction at `context.compact_at_tokens` stopped.``, and
+you do not need to send `/new`.
 
-**Fix:** send `/new`. If it comes again in a new session, use fewer toolsets, or check the
-context window of the model (`providers.<name>.context_window`, see [Providers](Providers)).
+**Fix:** send `/new`. If it comes again in a new session, use fewer toolsets, or set a larger
+`context.compact_at_tokens`, or check the context window of the model
+(`providers.<name>.context_window`, see [Providers](Providers)).
 
 ### The agent does not use a new memory entry
 
@@ -311,8 +317,11 @@ the service.
 > **Caution:** a variable in the process environment wins over the same variable in `.env`.
 > If a shell variable holds an old key, `unset` it or correct it.
 
-An HTTP 401, 402, 403, 408, 429, or 5xx starts the fallback chain. Thus the chat can still
-answer through a fallback provider while the key of the primary provider is bad.
+An HTTP 401, 402, 403, 408, 429, or 5xx starts the fallback chain. A 408, a 429, or a 5xx
+usually gets 2 retries on the same entry first. A billing error, a used-up quota, and a
+`Retry-After` from 10 to 60 seconds go to the next entry with no retry. See
+[Retries of one entry](Providers#retries-of-one-entry). Thus the chat can still answer through
+a fallback provider while the key of the primary provider is bad.
 
 ### `config: providers.<name> needs an API key`
 
@@ -447,9 +456,22 @@ These errors stop the load of the config:
 
 ### The answers come from a fallback provider
 
-**Cause:** an entry of the fallback chain failed before the first byte of an answer. The chain
-then skips that entry for 60 seconds (`provider.failure_skip_s`). After that time, the next call tries the entry again.
+**Cause:** an entry of the fallback chain failed before the first byte of an answer. A
+connection error, an HTTP 408, 429, or 5xx first gets 2 retries on the same entry. When the
+retries also fail, the chain goes to the next entry. It then skips the failed entry for 60
+seconds (`provider.failure_skip_s`). After that time, the next call tries the entry again.
 Possible reasons are a network error, a bad key, an HTTP 429, or an HTTP 5xx from the entry.
+
+A used-up plan quota goes to the next entry at once, with no retry. The chain then skips the
+entry until the reset time of the quota. When the reset time is not known, the skip is 60
+seconds, and it doubles for each quota error in a row, up to 4 hours. The first chat turn that
+the next entry answers shows one of these notices, one time for each quota episode:
+
+- ``⚠️ The quota of `<entry>` is used up. It resets at <time>. Until then, the calls go to `<next entry>` (`<model>`).``
+- ``⚠️ The quota of `<entry>` is used up. The reset time is not known. The calls go to `<next entry>` (`<model>`) until `<entry>` works again.``
+
+A wait of more than 10 seconds before a retry shows this notice:
+``⏳ `<entry>` is busy (<cause>). The next try is in <N> s.``
 
 The signs are these:
 
@@ -457,7 +479,8 @@ The signs are these:
   `the primary failed at that time; see "provider fallback" in the gateway log`.
 - The reply to `/new` shows `Model: <model> (fallback)`.
 - The reply to `/new` or `/model` shows a warning line. The line shows only in the 60 seconds
-  after the failure, so the time is less than `provider.failure_skip_s` ago (default 1 min).
+  after the failure (`provider.failure_skip_s`, default 1 min), or until the reset time of a
+  used-up quota.
 
 The warning line has one of two forms. `<entry>` is the entry that answers now:
 

@@ -365,12 +365,72 @@ These pins put an entry first:
 A name occurs only one time in the chain. A `name:model` pin changes the model only of the first
 entry. Each other entry uses its own `model`.
 
+### Retries of one entry
+
+Before the chain goes to the next entry, it tries the same entry again on a short error. A retry
+runs only before the first byte. The model never sees a retry, and no retry goes into the
+history. A raw call to one entry gets no retry, for example the test call of `tether doctor`.
+
+The chain sorts each error of a try into a class. It checks the rows in this order. The first
+row that matches gives the action.
+
+| Class | Errors | Action |
+|---|---|---|
+| Stop | A cancel, for example `/stop`, or the end of the time limit of the call. | The error goes to you at once. |
+| Timeout | No response headers in 300 seconds. | At most 2 tries on one entry. No retry when a next entry exists. |
+| Quota | On a Z.AI entry: HTTP 429 or 5xx with the code 1308, 1310, or 1316 to 1321. On each entry: a `Retry-After` over 60 seconds. | No retry. The chain goes to the next entry at once, and it skips the entry until the reset time. |
+| Next entry | HTTP 401, 402, or 403. An HTTP 400 or 429 with a billing text. On a Z.AI entry: the codes 1113, 1309, 1311, and 1313 to 1315. | No retry. The chain goes to the next entry at once. The entry waits for 60 seconds (`provider.failure_skip_s`). |
+| Retry | A connection error. HTTP 408, 429, or 500 to 599. On a Z.AI entry: the codes 1302, 1305, 1234, 1200, and 1230. | The chain tries the same entry again. |
+| Next entry | An unusable entry, or an entry with no vision for an image. | The chain goes to the next entry at once. |
+| Stop | Each other error, for example a 400 for a bad request. | The error goes to you at once. |
+
+The schedule of the Retry class follows Hermes Agent:
+
+- One entry gets at most 3 tries: the first try and 2 retries.
+- The wait before retry n is 2 seconds × 2^(n-1), at most 60 seconds, plus a random part of 0
+  to 50%. Thus the waits are 2 to 3 seconds and 4 to 6 seconds.
+- A `Retry-After` or `retry-after-ms` header of 10 seconds or less replaces the wait.
+- A `Retry-After` from 10 to 60 seconds sends the call to the next entry, with no retry. The
+  chain skips the entry for that time. When no next entry exists, the header replaces the wait.
+- A `Retry-After` over 60 seconds is the Quota class. The reset time is now plus the
+  `Retry-After`, at most 4 hours.
+- Before each wait, the chain reads the deadline of the call. When the wait plus 5 seconds ends
+  after the deadline, the chain makes no retry. It goes to the next entry at once. Thus the
+  outbound guard (20 seconds), the `smart` approval judge (30 seconds), and the goal judge (30
+  seconds) still reach the next entry.
+- The first Retry failure of an entry starts a hold until the end of its wait. Another call that
+  starts on that entry in the hold sends no request until the hold ends. Thus calls at the same
+  time do not make a rate limit worse. A hold is not a failure. A call that has a next entry
+  does not wait for a hold over 10 seconds. A Timeout failure starts no hold.
+- `/stop` ends a wait at once.
+
+The chain waits about 6 to 9 seconds in total before the next entry takes the call.
+
+**The 1305 ladder.** When the chain has only one entry, and the error is the Z.AI code 1305
+(temporary overload) on a Z.AI Coding Plan entry, the entry gets 4 more tries after the 3 short
+tries. The waits are 30, 60, 90, and 120 seconds, each with a random part of 0 to 20%. Thus a
+1305 overload can wait up to about 6 minutes. A chain with a fallback entry gets no ladder.
+
+**Z.AI entries.** A Z.AI code counts only on HTTP 429 or 5xx, and only on a Z.AI entry. A Z.AI
+entry has the preset `zai` or `zai-coding`, or a `base_url` with the host `api.z.ai` or
+`open.bigmodel.cn`. A Z.AI Coding Plan entry has the preset `zai-coding`, or a `base_url` path
+that starts with `/api/coding/paas/v4`. On another entry, for example OpenRouter with a Z.AI
+model, a Z.AI code in the body has no effect. The codes come from the
+[Z.AI error codes](https://docs.z.ai/api-reference/api-code).
+
+**What you see.** A wait of more than 10 seconds shows one notice in a chat turn of the owner:
+``⏳ `<entry>` is busy (<cause>). The next try is in <N> s.`` A shorter retry shows nothing. The
+log shows each retry as `provider retry`, with the entry, the model, the try number, the wait,
+and the cause. The header timeout of 300 seconds is a fixed value, not a config key.
+
 ### When the chain goes to the next entry
 
-The chain goes to the next entry only when a call fails **before the first byte** of the answer.
-The first byte is the start of a successful HTTP response. These failures count:
+The chain goes to the next entry only when a call fails **before the first byte** of the answer,
+after the retries of the entry. The first byte is the start of a successful HTTP response. These
+failures count:
 
 - A connection error.
+- A server that sends no headers in 300 seconds.
 - HTTP 5xx.
 - HTTP 429, 401, 402, 403, or 408.
 - An HTTP 400 whose body tells of a billing or a quota failure. The texts are `credit balance`,
@@ -389,7 +449,9 @@ These failures do not go to the next entry:
 
 - An entry that fails gets a wait time of 60 seconds (`provider.failure_skip_s`) for its model. In
   that time, the chain skips it.
-- When all entries wait, the chain tries all of them.
+- A used-up plan quota skips the entry until its reset time, and you get one notice with that
+  time. A `Retry-After` over 60 seconds sets the wait time, up to 4 hours.
+- When all entries wait, the chain tries all of them, except an entry in a quota skip.
 - All sessions share the wait times. They are in memory, so a restart clears them.
 - One turn stays on one entry. The next call of the turn starts at the entry that answered.
 - A new turn starts at the first entry again.
@@ -583,7 +645,8 @@ and `/usage` in `tether chat`) shows it as `—`.
 ## Context window and token count
 
 The agent uses the context window to start compaction. Compaction starts when the context is
-above `context.compact_threshold` of the window. The agent gets the window in this order:
+above `context.compact_threshold` of the window, or above `context.compact_at_tokens` tokens,
+whichever comes first. The agent gets the window in this order:
 
 1. `context_window` of the entry, when it is more than `0`.
 2. The price data of the model.
