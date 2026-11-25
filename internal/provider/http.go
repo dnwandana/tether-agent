@@ -39,10 +39,15 @@ var billingTexts = []string{"credit balance", "spend limit", "insufficient balan
 //   - an HTTP 5xx, 429, 401, 402, 403, or 408
 //   - an HTTP 400 whose body tells of a billing or quota failure
 //
+// A transport error that is a timeout of the response headers also wraps
+// ErrHeaderTimeout. The raw transport error is not wrapped, because its URL
+// can hold a key.
+//
 // Another status gives an error with a short body, because a wrong request
 // fails on each provider. An error for a bad status also wraps an
-// HTTPStatusError that holds the short body. apiKey is removed from the
-// error text and from the body.
+// HTTPStatusError that holds the short body, the wait of Retry-After, the
+// business code of the body, and the reset time of the message text. apiKey
+// is removed from the error text and from the body.
 func postJSON(ctx context.Context, hc *http.Client, name, url string, header http.Header, body any, apiKey string) (*http.Response, error) {
 	if hc == nil {
 		hc = http.DefaultClient
@@ -66,6 +71,9 @@ func postJSON(ctx context.Context, hc *http.Client, name, url string, header htt
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("provider %s: %w", name, ctx.Err())
 		}
+		if isHeaderTimeout(err) {
+			return nil, fmt.Errorf("provider %s: %w: %w: %w: %s", name, ErrBeforeFirstByte, ErrConnection, ErrHeaderTimeout, redact(err.Error(), apiKey))
+		}
 		return nil, fmt.Errorf("provider %s: %w: %w: %s", name, ErrBeforeFirstByte, ErrConnection, redact(err.Error(), apiKey))
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -74,7 +82,14 @@ func postJSON(ctx context.Context, hc *http.Client, name, url string, header htt
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4*maxErrorBody))
 	msg := shortBody(redact(string(b), apiKey))
-	status := &HTTPStatusError{Code: resp.StatusCode, Body: msg}
+	now := time.Now()
+	status := &HTTPStatusError{
+		Code:         resp.StatusCode,
+		Body:         msg,
+		RetryAfter:   parseRetryAfter(resp.Header, now),
+		ProviderCode: parseProviderCode(b),
+		ResetAt:      parseResetAt(string(b), now),
+	}
 	if triggersFallback(resp.StatusCode, string(b)) {
 		return nil, fmt.Errorf("provider %s: %w: %w: %s", name, ErrBeforeFirstByte, status, msg)
 	}

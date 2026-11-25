@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // HTTPStatusError is the HTTP status of a failed provider call.
@@ -12,6 +13,15 @@ type HTTPStatusError struct {
 	// Body is the start of the response body on one line, with the API key
 	// removed.
 	Body string
+	// RetryAfter is the wait from retry-after-ms or Retry-After. It is 0
+	// when the header is absent, bad, zero, or in the past.
+	RetryAfter time.Duration
+	// ProviderCode is the business code from the body, for example 1308.
+	// Classify uses it only on a Z.AI entry.
+	ProviderCode string
+	// ResetAt is the reset time from the message text. It is the zero time
+	// when the time is not known.
+	ResetAt time.Time
 }
 
 // Error returns the status as "HTTP <code>".
