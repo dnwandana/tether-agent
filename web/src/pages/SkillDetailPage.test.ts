@@ -43,7 +43,7 @@ vi.mock("../lib/live", async () => {
   }
 })
 import { api } from "../api/client"
-import { confirm, toast, ui } from "../stores/ui"
+import { confirm, rememberListQuery, toast, ui } from "../stores/ui"
 import SkillDetailPage from "./SkillDetailPage.vue"
 import { fullTime, shortTime } from "../lib/time"
 
@@ -65,6 +65,8 @@ const row = (o: object) => ({
 const view = (o: object = {}, r: object = {}) => ({
   skill: row(r),
   body: "# release-notes\n\n<script>alert(1)</script>",
+  body_cut: false,
+  cron_jobs: [],
   files: ["SKILL.md", "scripts/notes.sh"],
   ref: "v1.4.0",
   installed_at: "2026-11-02T10:00:00Z",
@@ -146,6 +148,8 @@ const headerButtons = () =>
     .queryAllByRole("button")
     .map((b) => b.textContent!.trim())
 const text = () => document.body.textContent!.replace(/\s+/g, " ")
+const region = (name: string) => screen.getByRole("region", { name })
+const flat = (el: HTMLElement) => el.textContent!.replace(/\s+/g, " ")
 const end = async (t: object) => {
   h.follow.get("t1")!(task(t))
   await flushPromises()
@@ -339,6 +343,16 @@ describe("SkillDetailPage", () => {
     expect(router.currentRoute.value.name).toBe("skills")
   })
 
+  it("goes back to the remembered Skills list after an uninstall", async () => {
+    rememberListQuery("skills", { tab: "catalog", page: "2" })
+    const { user, router } = await mk()
+    await click(user, "Uninstall")
+    await end({ state: "done", text: "Removed." })
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ tab: "catalog", page: "2" })
+    rememberListQuery("skills", {})
+  })
+
   it("shows the lost text when the gateway restarted", async () => {
     const { user } = await mk()
     await click(user, "Update")
@@ -398,5 +412,156 @@ describe("SkillDetailPage", () => {
         ".page-h, .back, .chip, .btn, .li, .grid-2, .card-h, .kv, .md, .section-h, .mono, .c-3",
       ),
     ).toBeNull()
+  })
+
+  it("renders SKILL.md as a document with no break for a soft line break", async () => {
+    vi.mocked(api).mockResolvedValue(view({ body: "line one\nline two" }))
+    const { container } = await mk()
+    expect(container.querySelector(".typeset br")).toBeNull()
+    expect(container.querySelector(".typeset")!.textContent).toContain("line one")
+    expect(text()).not.toContain("The text is cut at 256 KiB.")
+  })
+
+  it("says that a long SKILL.md is cut", async () => {
+    vi.mocked(api).mockResolvedValue(view({ body_cut: true }))
+    await mk()
+    expect(flat(region("SKILL.md"))).toContain(
+      "The text is cut at 256 KiB. Open SKILL.md in Files to read it all.",
+    )
+  })
+
+  it("puts the four side cards before SKILL.md", async () => {
+    await mk()
+    const side = screen.getByRole("complementary", { name: "Skill facts" })
+    for (const n of ["Use it", "Guard scan", "Files", "Source"])
+      expect(within(side).getByRole("region", { name: n })).toBeTruthy()
+    const doc = region("SKILL.md")
+    expect(side.compareDocumentPosition(doc) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    for (const c of ["lg:sticky", "lg:col-start-2", "lg:overflow-y-auto"])
+      expect(side.classList.contains(c), c).toBe(true)
+  })
+
+  it("lists the cron jobs that use the skill", async () => {
+    vi.mocked(api).mockResolvedValue(view({ cron_jobs: ['"nightly" (j_12)'] }))
+    await mk()
+    expect(flat(region("Use it"))).toContain('Used by: "nightly" (j_12)')
+  })
+
+  it("says no cron jobs for an empty list", async () => {
+    await mk()
+    expect(flat(region("Use it"))).toContain("Used by: no cron jobs")
+  })
+
+  it("says unknown when the server cannot read the cron jobs", async () => {
+    vi.mocked(api).mockResolvedValue(view({ cron_jobs: null }))
+    await mk()
+    expect(flat(region("Use it"))).toContain("Used by: unknown")
+  })
+
+  it("puts the flagged files first with their finding count", async () => {
+    vi.mocked(api).mockResolvedValue(
+      view({
+        files: ["SKILL.md", "a.md", "scripts/z.sh"],
+        findings: [
+          { ...finding("high"), file: "scripts/z.sh" },
+          { ...finding("medium"), file: "scripts/z.sh" },
+        ],
+      }),
+    )
+    await mk()
+    const files = region("Files")
+    expect(within(files).getByText("Files · 3")).toBeTruthy()
+    expect(
+      within(files)
+        .getAllByRole("button")
+        .map((b) => b.textContent!.trim()),
+    ).toEqual(["scripts/z.sh", "a.md", "SKILL.md"])
+    const count = within(files).getByText("2")
+    expect(tone(count)).toBe("bad")
+    expect(count.getAttribute("title")).toBe("2 findings")
+  })
+
+  it("shows 8 files and then Show all", async () => {
+    const ten = Array.from({ length: 10 }, (_, i) => `f${i}.md`)
+    vi.mocked(api).mockResolvedValue(view({ files: ten, findings: [] }))
+    const { user } = await mk()
+    const files = region("Files")
+    const fileButtons = () =>
+      within(files)
+        .queryAllByRole("button")
+        .filter((b) => b.textContent!.trim().endsWith(".md"))
+    expect(fileButtons()).toHaveLength(8)
+    await user.click(within(files).getByRole("button", { name: "Show all 10" }))
+    await flushPromises()
+    expect(fileButtons()).toHaveLength(10)
+  })
+
+  it("shows the finding count on each flagged file after Show all", async () => {
+    const ten = Array.from({ length: 10 }, (_, i) => `f${i}.md`)
+    vi.mocked(api).mockResolvedValue(
+      view({ files: ten, findings: ten.map((f) => ({ ...finding("high"), file: f })) }),
+    )
+    const { user } = await mk()
+    const files = region("Files")
+    await user.click(within(files).getByRole("button", { name: "Show all 10" }))
+    await flushPromises()
+    expect(within(files).getAllByTitle("1 finding")).toHaveLength(10)
+  })
+
+  it("counts the findings of each severity and scrolls to the findings", async () => {
+    vi.mocked(api).mockResolvedValue(
+      view({
+        findings: [finding("critical"), finding("high"), finding("high"), finding("medium")],
+      }),
+    )
+    // web/vitest.setup.ts gives jsdom a scrollIntoView stub. The spy wraps it.
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView")
+    try {
+      const { user } = await mk()
+      const scan = region("Guard scan")
+      expect(flat(scan)).toContain("4 findings · 1 not scanned")
+      expect(flat(scan)).toContain("1 critical, 2 high, 1 medium")
+      await user.click(within(scan).getByRole("button", { name: "See the findings ↓" }))
+      expect(scroll.mock.contexts).toContain(document.getElementById("skill-findings"))
+    } finally {
+      scroll.mockRestore()
+    }
+  })
+
+  it("shows No findings and no findings table for a clean skill", async () => {
+    vi.mocked(api).mockResolvedValue(view({ findings: [], unscanned: [] }))
+    await mk()
+    expect(flat(region("Guard scan"))).toContain("No findings")
+    expect(screen.queryByRole("button", { name: "See the findings ↓" })).toBeNull()
+    expect(screen.queryByRole("table")).toBeNull()
+  })
+
+  it("pages the findings table", async () => {
+    vi.mocked(api).mockResolvedValue(
+      view({ findings: Array.from({ length: 11 }, () => finding("medium")) }),
+    )
+    await mk()
+    expect(screen.getByRole("navigation", { name: "Guard findings pages" })).toBeTruthy()
+  })
+
+  it("shows the status chips in the header", async () => {
+    vi.mocked(api).mockResolvedValue(view({}, { check: "modified locally", update: true }))
+    await mk()
+    const header = within(pageTitle().parentElement!)
+    expect(tone(header.getByText("update available"))).toBe("info")
+    expect(tone(header.getByText("modified locally"))).toBe("warn")
+    expect(headerButtons()).toEqual(["Update", "Uninstall"])
+  })
+
+  it("links back to the skill list with its last query", async () => {
+    rememberListQuery("skills", { tab: "catalog", page: "2" })
+    try {
+      await mk()
+      expect(screen.getByRole("link", { name: "‹ Skills" }).getAttribute("href")).toBe(
+        "/skills?tab=catalog&page=2",
+      )
+    } finally {
+      rememberListQuery("skills", {})
+    }
   })
 })

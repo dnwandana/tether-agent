@@ -20,19 +20,22 @@ import StateBlock from "../components/StateBlock.vue"
 import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
 import { followTask, useLiveData } from "../lib/live"
+import { useRoutePage } from "../lib/routePage"
+import { TONE, chips, type Tone } from "../lib/skills"
+import type { Column } from "../lib/table"
 import type { ResultNoteData } from "../lib/command"
-import { confirm, isSecure, toast, ui } from "../stores/ui"
+import { confirm, isSecure, rememberListQuery, toast, ui } from "../stores/ui"
 
 type Action = "install" | "update" | "uninstall" | "reset"
 type Running = { id: string; name: string; action: Action | "check"; waiting: boolean }
 type Manual = { name: string; action: "install" | "update"; findings: string }
 
 const stops = new Set<() => void>()
-const PAGE_SIZE = 20
 const LOST = "The gateway restarted. The result of the task is lost."
 
 const route = useRoute()
 const router = useRouter()
+const { page, setPage } = useRoutePage("skills")
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const rows = ref<SkillRow[]>([])
@@ -43,7 +46,6 @@ const search = ref("")
 const installedQuery = ref("")
 const trust = ref<"all" | "trusted" | "community" | "local">("all")
 const inst = ref<"all" | "yes" | "no">("all")
-const page = ref(0)
 const note = ref<ResultNoteData | null>(null)
 const noteId = ref("")
 const running = ref<Running | null>(null)
@@ -62,19 +64,19 @@ const tabModel = computed({
   set: (v: string) => setTab(v === "catalog" ? "catalog" : "installed"),
 })
 
-const columns = [
-  { key: "name", label: "Skill" },
-  { key: "trust", label: "Trust" },
-  { key: "source", label: "Source" },
-  { key: "env", label: "Env" },
-  { key: "status", label: "Status" },
-  { key: "actions", label: "" },
+const columns: Column[] = [
+  { key: "name", label: "Skill", type: "wrap" },
+  { key: "trust", label: "Trust", type: "badge" },
+  { key: "source", label: "Source", type: "text", optional: true },
+  { key: "env", label: "Env", type: "text", optional: true },
+  { key: "status", label: "Status", type: "block" },
+  { key: "actions", label: "", type: "act", width: "16rem" },
 ]
-const catalogColumns = [
-  { key: "name", label: "Skill" },
-  { key: "url", label: "Source" },
-  { key: "checks", label: "Trust" },
-  { key: "actions", label: "" },
+const catalogColumns: Column[] = [
+  { key: "name", label: "Skill", type: "wrap" },
+  { key: "url", label: "Source", type: "text" },
+  { key: "checks", label: "Trust", type: "block" },
+  { key: "actions", label: "", type: "act", width: "6rem" },
 ]
 
 const s = (x: unknown) => x as SkillRow
@@ -105,23 +107,16 @@ const filtered = computed(() => {
     return true
   })
 })
-const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / PAGE_SIZE)))
-const pageRows = computed(() =>
-  filtered.value.slice(page.value * PAGE_SIZE, (page.value + 1) * PAGE_SIZE),
+// A new filter or search text shows its first page.
+watch([search, trust, inst, installedQuery], () => setPage(1))
+// The back link of the skill detail returns to this query.
+watch(
+  () => route.query,
+  (q) => {
+    if (route.name === "skills") rememberListQuery("skills", q)
+  },
+  { immediate: true },
 )
-watch([search, trust, inst], () => {
-  page.value = 0
-})
-
-type Tone = "ok" | "warn" | "bad" | "info" | "plain"
-// The status token of each tone. "plain" keeps the outline badge as it comes.
-const TONE: Record<Tone, string> = {
-  ok: "border-success/40 text-success",
-  warn: "border-warning/40 text-warning",
-  bad: "border-destructive/40 text-destructive",
-  info: "border-info/40 text-info",
-  plain: "",
-}
 
 // Returns the tone of a trust label.
 function trustTone(t: string): Tone {
@@ -135,18 +130,6 @@ function trustTone(t: string): Tone {
 // copy by hand, so "agent-created" shows as "local", like the catalog filter.
 function trustLabel(t: string): string {
   return t === "agent-created" ? "local" : t
-}
-
-// Returns the status chips of one skill as { text, tone } pairs.
-function chips(r: SkillRow): { text: string; tone: Tone }[] {
-  const out: { text: string; tone: Tone }[] = []
-  if (r.update || r.check.includes("update available"))
-    out.push({ text: "update available", tone: "info" })
-  if (r.pinned || r.check.includes("pinned")) out.push({ text: "pinned", tone: "plain" })
-  if (r.check.includes("modified locally")) out.push({ text: "modified locally", tone: "warn" })
-  if (r.check.includes("cannot check")) out.push({ text: "cannot check", tone: "plain" })
-  if (r.check.includes("source changed")) out.push({ text: "source changed", tone: "warn" })
-  return out
 }
 
 function canUpdate(r: SkillRow): boolean {
@@ -440,6 +423,10 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
           :columns="columns"
           :rows="shownRows as unknown as Record<string, unknown>[]"
           row-key="name"
+          page-key="skills-installed"
+          page-label="Installed skills"
+          :page="page"
+          @update:page="setPage"
         >
           <template #cell-name="{ row }">
             <router-link
@@ -447,7 +434,10 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
               :to="{ name: 'skill', params: { name: s(row).name } }"
               >/{{ s(row).name }}</router-link
             >
-            <div class="line-clamp-3 text-xs text-muted-foreground" :title="s(row).description">
+            <div
+              class="line-clamp-2 whitespace-normal text-xs text-muted-foreground"
+              :title="s(row).description"
+            >
               {{ s(row).description }}
             </div>
           </template>
@@ -555,12 +545,19 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
         <DataTable
           v-else
           :columns="catalogColumns"
-          :rows="pageRows as unknown as Record<string, unknown>[]"
+          :rows="filtered as unknown as Record<string, unknown>[]"
           row-key="name"
+          page-key="skills-catalog"
+          page-label="Catalog"
+          :page="page"
+          @update:page="setPage"
         >
           <template #cell-name="{ row }">
             <b>/{{ c(row).name }}</b>
-            <div class="line-clamp-3 text-xs text-muted-foreground" :title="c(row).description">
+            <div
+              class="line-clamp-2 whitespace-normal text-xs text-muted-foreground"
+              :title="c(row).description"
+            >
               {{ c(row).description }}
             </div>
           </template>
@@ -593,13 +590,6 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
             </Button>
           </template>
         </DataTable>
-        <div v-if="filtered.length > PAGE_SIZE" class="flex items-center gap-2">
-          <span class="flex-1 text-sm text-muted-foreground"
-            >Page {{ page + 1 }} of {{ pageCount }}</span
-          >
-          <Button variant="ghost" :disabled="page === 0" @click="page--">◀ Prev</Button>
-          <Button variant="ghost" :disabled="page >= pageCount - 1" @click="page++">Next ▶</Button>
-        </div>
       </template>
     </template>
 

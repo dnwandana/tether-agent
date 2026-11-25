@@ -43,7 +43,7 @@ vi.mock("../lib/live", async () => {
   }
 })
 import { api } from "../api/client"
-import { confirm, isSecure, toast, ui } from "../stores/ui"
+import { confirm, isSecure, listLink, toast, ui } from "../stores/ui"
 import SkillsPage from "./SkillsPage.vue"
 
 const Blank = { render: () => null }
@@ -61,6 +61,8 @@ const skill = (o: object) => ({
   actions: ["update", "uninstall"],
   ...o,
 })
+const many = (n: number) =>
+  Array.from({ length: n }, (_, i) => skill({ name: `k${String(i).padStart(2, "0")}` }))
 const installed = [
   skill({ name: "tether-skills", trust: "builtin", check: "modified locally", actions: ["reset"] }),
   skill({ name: "release-notes", check: "update available", update: true }),
@@ -190,7 +192,7 @@ describe("SkillsPage", () => {
     const row = rowOf("my-notes")
     expect(tone(within(row).getByText("local"))).toBe("info")
     expect(row.textContent).not.toContain("agent-created")
-    expect(within(row).getByTitle(long).classList.contains("line-clamp-3")).toBe(true)
+    expect(within(row).getByTitle(long).classList.contains("line-clamp-2")).toBe(true)
   })
 
   it("shows a catalog source trust agent-created as local and clamps the description", async () => {
@@ -209,7 +211,7 @@ describe("SkillsPage", () => {
     const row = rowOf("own-sync")
     expect(tone(within(row).getByText("local"))).toBe("info")
     expect(row.textContent).not.toContain("agent-created")
-    expect(within(row).getByTitle(long).classList.contains("line-clamp-3")).toBe(true)
+    expect(within(row).getByTitle(long).classList.contains("line-clamp-2")).toBe(true)
   })
 
   it("shows the error text of a failed task in a result note", async () => {
@@ -405,12 +407,17 @@ describe("SkillsPage", () => {
       verdict: "safe",
       source_trust: i < 3 ? "builtin" : "community",
     }))
-    const { user } = await mk("/skills?tab=catalog")
+    const { user, router } = await mk("/skills?tab=catalog")
     expect(bodyRows()).toHaveLength(20)
-    expect(screen.getByText("Page 1 of 2")).toBeTruthy()
-    await user.click(btns("Next ▶")[0])
+    expect(screen.getByText("1–20 of 25")).toBeTruthy()
+    const nav = screen.getByRole("navigation", { name: "Catalog pages" })
+    await user.click(within(nav).getByRole("button", { name: "Next Page" }))
+    await flushPromises()
     expect(bodyRows()).toHaveLength(5)
+    expect(router.currentRoute.value.query).toEqual({ tab: "catalog", page: "2" })
     await user.selectOptions(screen.getByRole("combobox", { name: "Trust" }), "local")
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ tab: "catalog" })
     expect(bodyRows().map((r) => r.querySelector("b")!.textContent)).toEqual([
       "/s00",
       "/s01",
@@ -520,5 +527,56 @@ describe("SkillsPage", () => {
         ".page-h, .li, .btn, .chip, .search, .pager, .pill-note, .clamp-3, .mono, .input",
       ),
     ).toBeNull()
+  })
+
+  it("pages the installed list 20 at a time and keeps the page in the URL", async () => {
+    rowsOf = many(25)
+    const { user, router } = await mk()
+    expect(bodyRows()).toHaveLength(20)
+    expect(screen.getByText("1–20 of 25")).toBeTruthy()
+    const nav = screen.getByRole("navigation", { name: "Installed skills pages" })
+    await user.click(within(nav).getByRole("button", { name: "Page 2" }))
+    await flushPromises()
+    expect(bodyRows()).toHaveLength(5)
+    expect(router.currentRoute.value.query).toEqual({ page: "2" })
+    expect(listLink("skills")).toEqual({ name: "skills", query: { page: "2" } })
+  })
+
+  it("opens the page of the URL", async () => {
+    rowsOf = many(25)
+    await mk("/skills?page=2")
+    expect(bodyRows()).toHaveLength(5)
+    expect(screen.getByText("/k20")).toBeTruthy()
+  })
+
+  it("goes to page 1 when the installed search changes", async () => {
+    rowsOf = many(25)
+    const { user, router } = await mk("/skills?page=2")
+    await user.type(screen.getByRole("searchbox", { name: "Search the installed skills" }), "k2")
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({})
+    // k20 to k24 match "k2".
+    expect(bodyRows()).toHaveLength(5)
+  })
+
+  it("starts the other tab at page 1", async () => {
+    rowsOf = many(25)
+    const { user, router } = await mk("/skills?page=2")
+    await user.click(screen.getByRole("tab", { name: "Catalog" }))
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ tab: "catalog" })
+    expect(listLink("skills")).toEqual({ name: "skills", query: { tab: "catalog" } })
+  })
+
+  it("wraps the name cell and gives the status and the buttons room", async () => {
+    const { container } = await mk()
+    const row = rowOf("release-notes")
+    const nameCell = within(row).getByText("/release-notes").closest("td")!
+    expect(nameCell.classList.contains("whitespace-normal")).toBe(true)
+    const statusCell = within(row).getByText("update available").closest("td")!
+    expect(statusCell.classList.contains("whitespace-normal")).toBe(true)
+    expect(statusCell.classList.contains("overflow-hidden")).toBe(false)
+    const cols = container.querySelectorAll("colgroup col")
+    expect((cols[cols.length - 1] as HTMLElement).style.width).toBe("16rem")
   })
 })
