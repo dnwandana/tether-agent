@@ -121,18 +121,6 @@ const (
 	retryLine    = "An earlier start of this run failed after it used tools. Check what it did before you act again."
 )
 
-// retryable reports whether err can clear with time: a connection error, or an HTTP 408,
-// 429, or 5xx.
-func retryable(err error) bool {
-	if errors.Is(err, provider.ErrConnection) {
-		return true
-	}
-	if se, ok := errors.AsType[*provider.HTTPStatusError](err); ok {
-		return se.Code == 408 || se.Code == 429 || (se.Code >= 500 && se.Code <= 599)
-	}
-	return false
-}
-
 // errKey returns the key of a failed run for the quiet repeat. It has no provider body and
 // no digits, so the same failure gives the same key.
 func errKey(err error, alert string) string {
@@ -368,10 +356,16 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job, manual bool) (RunOutcom
 	return o, nil
 }
 
-// canRetry reports whether a failed first start gets a second start: the gateway did not stop,
-// the time limit did not end the turn, the error can clear with time, and enough time is left.
+// canRetry reports whether a failed first start gets a second start. These conditions must
+// all be true:
+//   - The gateway did not stop.
+//   - The time limit did not end the turn.
+//   - The error class is Retry or Timeout (provider.Retryable).
+//   - Enough time is left.
+//
+// Thus a used-up quota gets no second start.
 func (r *Runner) canRetry(ctx, tctx context.Context, err error) bool {
-	if ctx.Err() != nil || errors.Is(context.Cause(tctx), errAgentTimeout) || !retryable(err) {
+	if ctx.Err() != nil || errors.Is(context.Cause(tctx), errAgentTimeout) || !provider.Retryable(err) {
 		return false
 	}
 	if dl, ok := tctx.Deadline(); ok && time.Until(dl) < retryMinLeft {

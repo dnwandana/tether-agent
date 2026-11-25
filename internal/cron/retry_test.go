@@ -256,3 +256,44 @@ func TestErrKeys(t *testing.T) {
 		t.Fatalf("%q", o.ErrKey)
 	}
 }
+
+// classed is a chain error of one entry with its class.
+func classed(entry string, c provider.Class, code int) error {
+	return &provider.ClassedError{Entry: entry, Class: c, Err: fmt.Errorf("provider %s: %w: %w: body",
+		entry, provider.ErrBeforeFirstByte, &provider.HTTPStatusError{Code: code, Body: "body"})}
+}
+
+// turnErr wraps a chain error as agent.RunTurn wraps it.
+func turnErr(err error) error {
+	return fmt.Errorf("agent: the model call to primary failed: %w", err)
+}
+
+// A used-up quota does not clear in 60 s, so it gets no second start.
+func TestNoRetryForUsedUpQuota(t *testing.T) {
+	for name, e := range map[string]error{
+		"quota":         turnErr(classed("primary", provider.ClassQuota, 429)),
+		"quota and 401": turnErr(errors.Join(classed("primary", provider.ClassQuota, 429), classed("fallback", provider.ClassNextEntry, 401))),
+		"retry-after 120": turnErr(fmt.Errorf("provider primary: %w: %w: body", provider.ErrBeforeFirstByte,
+			&provider.HTTPStatusError{Code: 429, Body: "body", RetryAfter: 120 * time.Second})),
+	} {
+		f, j, l := retryRunner(t, e)
+		o := f.r.Run(bg, j, false)
+		if len(l.texts) != 1 || len(l.waits) != 0 || o.Status != "error" {
+			t.Fatalf("%s: %+v, %d starts", name, o, len(l.texts))
+		}
+	}
+}
+
+// When the primary gave a quota error and the fallback gave a 503, the run starts again.
+func TestRetryAfterJoinedQuotaAnd503(t *testing.T) {
+	for name, e := range map[string]error{
+		"quota first": turnErr(errors.Join(classed("primary", provider.ClassQuota, 429), classed("fallback", provider.ClassRetry, 503))),
+		"503 first":   turnErr(errors.Join(classed("fallback", provider.ClassRetry, 503), classed("primary", provider.ClassQuota, 429))),
+	} {
+		f, j, l := retryRunner(t, e)
+		o := f.r.Run(bg, j, false)
+		if len(l.texts) != 2 || !reflect.DeepEqual(l.waits, []time.Duration{60 * time.Second}) || o.Status != "ok" {
+			t.Fatalf("%s: %+v, %d starts, waits %v", name, o, len(l.texts), l.waits)
+		}
+	}
+}
