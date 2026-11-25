@@ -165,3 +165,27 @@ func TestFromConfigSetsProviderKeys(t *testing.T) {
 		t.Fatal("zero keys keep the consts:", s.Health.Skip)
 	}
 }
+
+func TestChainForZAIFlags(t *testing.T) {
+	c := setConfig("")
+	c.Providers["zai"] = config.Provider{Preset: "zai-coding", Format: "openai", BaseURL: "https://api.z.ai/api/coding/paas/v4", Model: "glm-5.3"}
+	c.Providers["zai-api"] = config.Provider{Format: "openai", BaseURL: "https://api.z.ai/api/paas/v4/", Model: "glm-5.3"}
+	s, err := FromConfig(c, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name      string
+		zai, plan bool
+	}{{"zai", true, true}, {"zai-api", true, false}, {"primary", false, false}} {
+		if e := s.ChainFor(tc.name, "").entries[0]; e.Name != tc.name || e.ZAI != tc.zai || e.CodingPlan != tc.plan {
+			t.Fatalf("%+v", e)
+		}
+	}
+	// A fallback entry gets its flags too.
+	c.Agent.Fallback = []string{"zai"}
+	s, _ = FromConfig(c, nil, nil)
+	if e := s.Default.entries[1]; e.Name != "zai" || !e.ZAI || !e.CodingPlan {
+		t.Fatalf("%+v", e)
+	}
+}

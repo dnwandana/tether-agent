@@ -906,6 +906,7 @@ func TestReviewPromptMarksToolTextAsData(t *testing.T) {
 func TestNoReviewSessionWhenTheProviderIsDown(t *testing.T) {
 	a, sess, parentReq, _ := agentAfterTurn(t)
 	health := provider.NewHealth(nil)
+	health.Sleep = func(context.Context, time.Duration) error { return nil }
 	chain := provider.NewChain([]provider.ChainEntry{{Name: "primary", P: failProv{"primary", "m"}}}, health, slog.New(slog.DiscardHandler))
 	if _, err := chain.Stream(ctx, provider.Request{}); err == nil {
 		t.Fatal("the call must fail")
@@ -928,8 +929,10 @@ func TestDueReviewWaitsWhileTheProviderIsDown(t *testing.T) {
 		userTurn(t, a, sess, "hi")
 	}
 	up := a.Prov
+	health := provider.NewHealth(nil)
+	health.Sleep = func(context.Context, time.Duration) error { return nil }
 	chain := provider.NewChain([]provider.ChainEntry{{Name: "primary", P: failProv{"primary", "m"}}},
-		provider.NewHealth(nil), slog.New(slog.DiscardHandler))
+		health, slog.New(slog.DiscardHandler))
 	if _, err := chain.Stream(ctx, provider.Request{}); err == nil {
 		t.Fatal("the call must fail")
 	}

@@ -24,12 +24,13 @@ type Provider interface {
 
 // ErrBeforeFirstByte marks a failure before the first byte of the stream,
 // for example a connection error, an HTTP 5xx, or an HTTP 429. The chain
-// tries the next entry only for this error.
+// tries the same entry again or goes to the next entry only for this error.
+// Classify gives the action.
 var ErrBeforeFirstByte = errors.New("provider failed before the first byte")
 
 // ErrConnection marks a transport failure, for example a refused connection or a reset. It is
-// always wrapped with ErrBeforeFirstByte. A cron run retries it, but not an unusable entry or
-// the vision error, which also wrap ErrBeforeFirstByte.
+// always wrapped with ErrBeforeFirstByte. The chain and a cron run retry it, but not an
+// unusable entry or the vision error, which also wrap ErrBeforeFirstByte.
 var ErrConnection = errors.New("provider connection failed")
 
 // endpoint holds the settings that the adapters share: the entry name, the
@@ -123,10 +124,11 @@ type Set struct {
 	Raw     map[string]Provider
 	Health  *Health
 
-	log      *slog.Logger
-	fallback []string
-	vision   map[string]bool
-	effort   map[string]string
+	log             *slog.Logger
+	fallback        []string
+	vision          map[string]bool
+	effort          map[string]string
+	zai, codingPlan map[string]bool
 }
 
 // FromConfig builds the adapter of every entry of cfg.Providers, one Health,
@@ -140,12 +142,14 @@ func FromConfig(cfg *config.Config, hc *http.Client, log *slog.Logger) (*Set, er
 	health := NewHealth(nil)
 	health.Skip = time.Duration(cfg.Provider.FailureSkipS) * time.Second
 	s := &Set{
-		Raw:      make(map[string]Provider, len(cfg.Providers)),
-		Health:   health,
-		log:      log,
-		fallback: cfg.FallbackList(),
-		vision:   make(map[string]bool, len(cfg.Providers)),
-		effort:   make(map[string]string, len(cfg.Providers)),
+		Raw:        make(map[string]Provider, len(cfg.Providers)),
+		Health:     health,
+		log:        log,
+		fallback:   cfg.FallbackList(),
+		vision:     make(map[string]bool, len(cfg.Providers)),
+		effort:     make(map[string]string, len(cfg.Providers)),
+		zai:        make(map[string]bool, len(cfg.Providers)),
+		codingPlan: make(map[string]bool, len(cfg.Providers)),
 	}
 	for name, pc := range cfg.Providers {
 		p, err := NewWith(name, pc, hc, cfg.Provider.AnthropicMaxTokens)
@@ -154,6 +158,7 @@ func FromConfig(cfg *config.Config, hc *http.Client, log *slog.Logger) (*Set, er
 		}
 		s.Raw[name] = p
 		s.vision[name], s.effort[name] = pc.Vision, pc.Effort
+		s.zai[name], s.codingPlan[name] = ZAIFlags(pc)
 	}
 	s.Default = s.ChainFor("primary", "")
 	s.All = make(map[string]Provider, len(s.Raw))
@@ -185,7 +190,8 @@ func (s *Set) ChainFor(first, model string) *Chain {
 		if _, bad := p.(*unusable); bad && name != "primary" {
 			continue
 		}
-		e := ChainEntry{Name: name, P: p, Vision: s.vision[name], Effort: s.effort[name]}
+		e := ChainEntry{Name: name, P: p, Vision: s.vision[name], Effort: s.effort[name],
+			ZAI: s.zai[name], CodingPlan: s.codingPlan[name]}
 		if name == first {
 			e.Model = model
 		}

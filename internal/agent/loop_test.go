@@ -877,7 +877,9 @@ func fallbackAgent(t *testing.T, edit func(*config.Config), s ...step) (*Agent, 
 	t.Helper()
 	sec := &fakeProv{name: "fallback", model: "deepseek/deepseek-v4.1-flash-1017", stamp: true, script: s}
 	a, sess := newAgent(t, scripted())
-	a.Prov = provider.NewChain([]provider.ChainEntry{{Name: "primary", P: deadPrimary{}}, {Name: "fallback", P: sec}}, provider.NewHealth(nil), slog.New(slog.DiscardHandler))
+	health := provider.NewHealth(nil)
+	health.Sleep = func(context.Context, time.Duration) error { return nil }
+	a.Prov = provider.NewChain([]provider.ChainEntry{{Name: "primary", P: deadPrimary{}}, {Name: "fallback", P: sec}}, health, slog.New(slog.DiscardHandler))
 	a.Providers = map[string]provider.Provider{"primary": a.Prov, "fallback": sec}
 	a.Cfg.Providers = map[string]config.Provider{
 		"primary":  {Model: "glm-5.3"},
@@ -1250,6 +1252,7 @@ func (f failProv) Stream(context.Context, provider.Request) (<-chan provider.Eve
 // failEntry records an HTTP 503 of the entry name and model in the Health of set.
 func failEntry(t *testing.T, set *provider.Set, name, model string) {
 	t.Helper()
+	set.Health.Sleep = func(context.Context, time.Duration) error { return nil }
 	c := provider.NewChain([]provider.ChainEntry{{Name: name, P: failProv{name, model}}}, set.Health, slog.New(slog.DiscardHandler))
 	if _, err := c.Stream(ctx, provider.Request{}); err == nil {
 		t.Fatal("the call must fail")

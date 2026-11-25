@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,7 +53,7 @@ func TestChainOn503ThenRealAdapterServes(t *testing.T) {
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }))
 	defer bad.Close()
 	good := fixtureServer(t, "testdata/openai_text_stream.sse")
-	ch := chainOf(NewHealth(nil), NewOpenAI("primary", bad.URL, "k", "m", bad.Client()), NewOpenAI("fallback", good.URL, "k", "m2", good.Client()))
+	ch := chainOf(rhf(), NewOpenAI("primary", bad.URL, "k", "m", bad.Client()), NewOpenAI("fallback", good.URL, "k", "m2", good.Client()))
 	r := mustCollect(t, ch, Request{})
 	if r.Text == "" || r.Provider != "fallback" || r.Model != "m2" {
 		t.Fatal(r)
@@ -67,7 +68,7 @@ func TestChainOnConnectError(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 	sec := &stub{name: "fallback"}
-	if r := mustCollect(t, chainOf(NewHealth(nil), NewOpenAI("p", url, "k", "m", nil), sec), Request{}); r.Text != "stub" || sec.calls.Load() != 1 {
+	if r := mustCollect(t, chainOf(rhf(), NewOpenAI("p", url, "k", "m", nil), sec), Request{}); r.Text != "stub" || sec.calls.Load() != 1 {
 		t.Fatal(r, sec.calls.Load())
 	}
 }
@@ -139,5 +140,32 @@ func TestStatusOfPlainProvider(t *testing.T) {
 	}
 	if _, ok := StatusOf(chainOf(NewHealth(nil), &stub{name: "p"})); !ok {
 		t.Fatal("a chain must report a fallback state")
+	}
+}
+
+// rhf returns a Health with a fake sleep.
+func rhf() *Health { h, _ := retryHealth(nil); return h }
+
+// A Z.AI overload goes away after two retries. The real adapter serves the third try, and
+// the fallback gets no call.
+func TestChainZAIOverloadThenRealAdapterServes(t *testing.T) {
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if n.Add(1) <= 2 {
+			w.WriteHeader(429)
+			fmt.Fprint(w, `{"error":{"code":"1305","message":"The service may be temporarily overloaded, please try again later"}}`)
+			return
+		}
+		serveFile(w, "testdata/openai_text_stream.sse")
+	}))
+	defer srv.Close()
+	fb := &stub{name: "fallback"}
+	ch := NewChain([]ChainEntry{
+		{Name: "primary", P: NewOpenAI("primary", srv.URL, "k", "m", srv.Client()), ZAI: true, CodingPlan: true},
+		{Name: "fallback", P: fb},
+	}, quotaHealth(nil), slog.New(slog.DiscardHandler))
+	r := mustCollect(t, ch, Request{})
+	if r.Provider != "primary" || r.Text == "" || n.Load() != 3 || fb.calls.Load() != 0 || ch.FallbackStatus().Active {
+		t.Fatal(r, n.Load(), fb.calls.Load())
 	}
 }

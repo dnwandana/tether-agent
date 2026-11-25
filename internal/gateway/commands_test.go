@@ -1412,6 +1412,7 @@ func (f failProv) Stream(context.Context, provider.Request) (<-chan provider.Eve
 // the clock of the commands to 2 minutes after the failure.
 func failEntry(t *testing.T, set *provider.Set, name, model string) {
 	t.Helper()
+	set.Health.Sleep = func(context.Context, time.Duration) error { return nil }
 	c := provider.NewChain([]provider.ChainEntry{{Name: name, P: failProv{name, model}}}, set.Health, slog.New(slog.DiscardHandler))
 	if _, err := c.Stream(context.Background(), provider.Request{}); err == nil {
 		t.Fatal("the call must fail")

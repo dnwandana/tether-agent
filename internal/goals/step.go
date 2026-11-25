@@ -22,8 +22,9 @@ const (
 )
 
 // RetryDelay is the wait before the one retry after a failed or empty turn. It is the
-// fallback when Deps.RetryDelay is 0. It matches the skip time of a failed provider in
-// provider.Health.
+// fallback when Deps.RetryDelay is 0. It matches the default skip time of a failed provider
+// entry in provider.Health. A used-up plan quota skips the entry longer, until its reset
+// time, so the retry turn then goes to the next entry.
 const RetryDelay = 60 * time.Second
 
 // Continuation is the next turn of a goal. The caller queues Text as a system turn and drops

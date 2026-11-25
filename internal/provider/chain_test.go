@@ -81,7 +81,7 @@ func mustCollect(t *testing.T, p Provider, req Request) Result {
 
 func TestChainMovesOnAndWaits(t *testing.T) {
 	clk := &clock{t: time.Unix(1000, 0)}
-	h := NewHealth(clk.now)
+	h, _ := retryHealth(clk.now)
 	a, b := &failing{name: "primary", code: 503}, &failing{name: "deepseek", code: 429}
 	c := &stub{name: "openrouter"}
 	ch := chainOf(h, a, b, c)
@@ -94,19 +94,19 @@ func TestChainMovesOnAndWaits(t *testing.T) {
 	}
 	clk.add(30 * time.Second)
 	mustCollect(t, ch, Request{})
-	if a.calls.Load() != 1 || b.calls.Load() != 1 {
+	if a.calls.Load() != 3 || b.calls.Load() != 3 {
 		t.Fatal("an entry in its wait time got a call")
 	}
 	clk.add(31 * time.Second)
 	mustCollect(t, ch, Request{})
-	if a.calls.Load() != 2 {
+	if a.calls.Load() != 6 {
 		t.Fatal("after 60 s the first entry must get the call")
 	}
 }
 
 func TestChainSuccessClearsFailure(t *testing.T) {
 	clk := &clock{t: time.Unix(0, 0)}
-	h := NewHealth(clk.now)
+	h, _ := retryHealth(clk.now)
 	chainOf(h, &failing{name: "primary", code: 503}, &stub{name: "b"}).Stream(ctx, Request{})
 	ok := chainOf(h, &stub{name: "primary"}, &stub{name: "b"})
 	ok.entries[0].Model = "primary-model"
@@ -140,21 +140,22 @@ func TestChainStopsOnPlainErrorAndCancel(t *testing.T) {
 
 func TestChainAllFailJoinsAndAllWaitingStillTries(t *testing.T) {
 	clk := &clock{t: time.Unix(0, 0)}
-	h := NewHealth(clk.now)
+	h, _ := retryHealth(clk.now)
 	a, b := &failing{name: "a", code: 503}, &failing{name: "b", code: 502}
 	_, err := chainOf(h, a, b).Stream(ctx, Request{})
 	if err == nil || !strings.Contains(err.Error(), "provider a") || !strings.Contains(err.Error(), "provider b") {
 		t.Fatal(err)
 	}
+	clk.add(5 * time.Second) // the hold of the first call ends
 	_, _ = chainOf(h, a, b).Stream(ctx, Request{})
-	if a.calls.Load() != 2 || b.calls.Load() != 2 {
+	if a.calls.Load() != 6 || b.calls.Load() != 6 {
 		t.Fatal("all entries wait: the chain must still try them")
 	}
 }
 
 func TestChainDownWhenAllEntriesWait(t *testing.T) {
 	clk := &clock{t: time.Unix(0, 0)}
-	h := NewHealth(clk.now)
+	h, _ := retryHealth(clk.now)
 	a, b := &failing{name: "a", code: 503}, &failing{name: "b", code: 502}
 	if chainOf(h, a, b).Down() {
 		t.Fatal("a chain with no failure is not down")
@@ -188,12 +189,12 @@ func TestChainStartAtAndPin(t *testing.T) {
 }
 
 func TestChainStartAtWrapsAround(t *testing.T) {
-	h := NewHealth(nil)
+	h, _ := retryHealth(nil)
 	a, b := &stub{name: "a"}, &failing{name: "b", code: 503}
 	c := &failing{name: "c", code: 503}
 	r := mustCollect(t, chainOf(h, a, b, c), Request{StartAt: "b"})
 	eq(t, r.Provider, "a")
-	if b.calls.Load() != 1 || c.calls.Load() != 1 {
+	if b.calls.Load() != 3 || c.calls.Load() != 3 {
 		t.Fatal("the chain must try the start entry, then the entries after it")
 	}
 }
@@ -212,7 +213,7 @@ func TestHealthIsPerEntryAndModel(t *testing.T) {
 }
 
 func TestHealthParallel(t *testing.T) {
-	h := NewHealth(nil)
+	h, _ := retryHealth(nil)
 	ch := chainOf(h, &failing{name: "a", code: 503}, &stub{name: "b"})
 	var wg sync.WaitGroup
 	for range 50 {
@@ -257,7 +258,8 @@ func (a *always400) Stream(_ context.Context, req Request) (<-chan Event, error)
 
 func TestChainEffortFill(t *testing.T) {
 	b := &effortProv{name: "openrouter"}
-	ch := NewChain([]ChainEntry{{Name: "primary", P: &failing{name: "primary", code: 503}, Effort: "high"}, {Name: "openrouter", P: b, Effort: "low"}}, NewHealth(nil), slog.New(slog.DiscardHandler))
+	h, _ := retryHealth(nil)
+	ch := NewChain([]ChainEntry{{Name: "primary", P: &failing{name: "primary", code: 503}, Effort: "high"}, {Name: "openrouter", P: b, Effort: "low"}}, h, slog.New(slog.DiscardHandler))
 	mustCollect(t, ch, Request{})
 	mustCollect(t, ch, Request{Effort: "max"})
 	eq(t, strings.Join(b.efforts, ","), "low,max") // the config value of the serving entry, then the session value
@@ -303,7 +305,8 @@ func TestChainNoSafetyNetWithoutEffort(t *testing.T) {
 func TestChainStripsImagesForNoVisionEntry(t *testing.T) {
 	b := &effortProv{name: "openrouter"}
 	a := &effortProv{name: "primary"}
-	ch := NewChain([]ChainEntry{{Name: "primary", P: &failing{name: "primary", code: 503}, Vision: true}, {Name: "openrouter", P: b}}, NewHealth(nil), slog.New(slog.DiscardHandler))
+	h, _ := retryHealth(nil)
+	ch := NewChain([]ChainEntry{{Name: "primary", P: &failing{name: "primary", code: 503}, Vision: true}, {Name: "openrouter", P: b}}, h, slog.New(slog.DiscardHandler))
 	img := Message{Role: RoleUser, Content: "look [image: /tmp/a.png]", Images: []Image{{Path: "/tmp/a.png", MIME: "image/png", Data: []byte{1}}}}
 	msgs := []Message{img}
 	mustCollect(t, ch, Request{Messages: msgs})
@@ -317,11 +320,12 @@ func TestChainVisionCallSkipsNoVisionEntry(t *testing.T) {
 	text := &effortProv{name: "openrouter"}
 	see := &effortProv{name: "vision"}
 	img := Message{Role: RoleUser, Content: "what is in it", Images: []Image{{MIME: "image/png", Data: []byte{1}}}}
+	rh, _ := retryHealth(nil)
 	ch := NewChain([]ChainEntry{
 		{Name: "primary", P: &failing{name: "primary", code: 503}, Vision: true},
 		{Name: "openrouter", P: text},
 		{Name: "vision", P: see, Vision: true},
-	}, NewHealth(nil), nil)
+	}, rh, nil)
 	r := mustCollect(t, ch, Request{Messages: []Message{img}, NeedVision: true})
 	eq(t, r.Provider, "vision")
 	eq(t, len(text.efforts), 0) // the entry with no vision got no call
@@ -344,29 +348,29 @@ func TestChainEffortNotRecordedWhenRetryFails(t *testing.T) {
 
 func TestHealthSkipFromField(t *testing.T) {
 	clk := &clock{t: time.Unix(1000, 0)}
-	h := NewHealth(clk.now)
+	h, _ := retryHealth(clk.now)
 	h.Skip = 10 * time.Second
 	a := &failing{name: "primary", code: 503}
 	ch := chainOf(h, a, &stub{name: "fallback"})
 	mustCollect(t, ch, Request{})
 	clk.add(9 * time.Second)
 	mustCollect(t, ch, Request{})
-	if a.calls.Load() != 1 {
+	if a.calls.Load() != 3 {
 		t.Fatal("an entry in its skip time got a call")
 	}
 	clk.add(2 * time.Second)
 	mustCollect(t, ch, Request{})
-	if a.calls.Load() != 2 {
+	if a.calls.Load() != 6 {
 		t.Fatal("after the skip time the first entry must get the call")
 	}
 	// A zero Skip keeps 60 s.
-	h0 := NewHealth(clk.now)
+	h0, _ := retryHealth(clk.now)
 	b := &failing{name: "primary", code: 503}
 	ch0 := chainOf(h0, b, &stub{name: "fallback"})
 	mustCollect(t, ch0, Request{})
 	clk.add(59 * time.Second)
 	mustCollect(t, ch0, Request{})
-	if b.calls.Load() != 1 {
+	if b.calls.Load() != 3 {
 		t.Fatal("a zero Skip must keep 60 s")
 	}
 }
@@ -377,11 +381,11 @@ func TestHealthSnapshot(t *testing.T) {
 	if got := h.Snapshot(clk.now()); len(got) != 0 {
 		t.Fatalf("%+v", got)
 	}
-	h.fail("primary", "glm-5", fmt.Errorf("provider primary: %w: %w", ErrBeforeFirstByte, &HTTPStatusError{Code: 503}))
+	h.fail("primary", "glm-5", fmt.Errorf("provider primary: %w: %w", ErrBeforeFirstByte, &HTTPStatusError{Code: 503}), time.Time{})
 	clk.mu.Lock()
 	clk.t = time.Unix(1010, 0)
 	clk.mu.Unlock()
-	h.fail("openrouter", "z-ai/glm-4.7", fmt.Errorf("dial: %w", ErrBeforeFirstByte))
+	h.fail("openrouter", "z-ai/glm-4.7", fmt.Errorf("dial: %w", ErrBeforeFirstByte), time.Time{})
 	got := h.Snapshot(time.Unix(1065, 0))
 	want := []HealthRow{
 		{Entry: "openrouter", Model: "z-ai/glm-4.7", Cause: "no connection", FailedAt: time.Unix(1010, 0), SkipUntil: time.Unix(1070, 0)},
@@ -397,7 +401,7 @@ func TestHealthSnapshot(t *testing.T) {
 			t.Fatalf("%d: %+v, want %+v", i, got[i], want[i])
 		}
 	}
-	h.clear("openrouter", "z-ai/glm-4.7")
+	h.clear("openrouter", "z-ai/glm-4.7", time.Unix(1065, 0))
 	if got := h.Snapshot(time.Unix(1065, 0)); len(got) != 1 || got[0].Entry != "primary" {
 		t.Fatalf("a success clears the row: %+v", got)
 	}
