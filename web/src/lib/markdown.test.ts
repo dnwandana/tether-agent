@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { renderMarkdown } from "./markdown"
+import { renderDocument, renderMarkdown } from "./markdown"
 
 function dom(html: string) {
   const div = document.createElement("div")
@@ -66,5 +66,52 @@ describe("renderMarkdown", () => {
     expect(out).toContain("<strong>bold</strong>")
     expect(out).toContain("<code>code</code>")
     expect(out).toContain("<br>")
+  })
+})
+
+describe("renderDocument", () => {
+  it("keeps a soft line break inside one paragraph", () => {
+    const out = renderDocument("You are very good at building.\nKeep the plan short.")
+    expect(out).not.toContain("<br>")
+    const ps = dom(out).querySelectorAll("p")
+    expect(ps).toHaveLength(1)
+    expect(ps[0].textContent).toBe("You are very good at building.\nKeep the plan short.")
+  })
+
+  it("renders hostile markdown inert, the same as renderMarkdown", () => {
+    const src = [
+      "<script>alert(1)</script>",
+      "<img src=x onerror=alert(1)>",
+      "[x](javascript:alert(1))",
+      "![a](/api/sessions/x/export)",
+    ].join("\n\n")
+    const out = renderDocument(src)
+    const d = dom(out)
+    expect(out).not.toContain("<script")
+    expect(d.querySelector("script")).toBeNull()
+    expect(d.querySelector("[onerror]")).toBeNull()
+    expect(out).not.toMatch(/href="javascript:/i)
+    expect(d.querySelector('img[src="/api/sessions/x/export"]')).toBeNull()
+    expect(d.textContent).toContain("<script>alert(1)</script>")
+    expect(d.textContent).toContain("<img src=x onerror=alert(1)>")
+  })
+
+  it("keeps the link and image rules of renderMarkdown", () => {
+    const d = dom(
+      renderDocument(
+        "[docs](https://example.com/a?b=1) [rel](/api/jobs) ![shot](/api/files/ab12CD-_9) ![x](https://evil.example/p.png)",
+      ),
+    )
+    const links = [...d.querySelectorAll("a")]
+    expect(links.map((a) => a.getAttribute("href"))).toEqual(["https://example.com/a?b=1"])
+    expect(links[0].getAttribute("rel")).toBe("noopener noreferrer")
+    const imgs = [...d.querySelectorAll("img")]
+    expect(imgs.map((i) => i.getAttribute("src"))).toEqual(["/api/files/ab12CD-_9"])
+    expect(d.textContent).toContain("rel")
+  })
+
+  it("does not change the line breaks of renderMarkdown", () => {
+    renderDocument("a\nb")
+    expect(renderMarkdown("a\nb")).toContain("<br>")
   })
 })

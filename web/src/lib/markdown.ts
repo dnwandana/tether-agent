@@ -40,3 +40,9 @@ const instance = new Marked({ gfm: true, breaks: true, async: false }).use({
 export function renderMarkdown(src: string): string {
   return instance.parse(src ?? "") as string
 }
+
+// Renders a Markdown file, for example SKILL.md, to HTML that is safe to put in v-html. A single
+// newline does not break the line. The per-call option keeps the rules of the one instance.
+export function renderDocument(src: string): string {
+  return instance.parse(src ?? "", { breaks: false }) as string
+}
