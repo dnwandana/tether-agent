@@ -8,8 +8,9 @@ import (
 )
 
 // ContextEstimate returns the size of the model view of the session in tokens, the context
-// window of its model, and the compaction threshold. It is the size that the compaction
-// check uses. It makes no model call.
+// window of the entry that serves its calls, and the compaction trigger as a part of that
+// window (trigger / window). These are the size and the trigger that the compaction check
+// uses. It makes no model call.
 func (a *Agent) ContextEstimate(ctx context.Context, sessionID string) (tokens, window int, threshold float64, err error) {
 	s, err := a.Store.Get(ctx, sessionID)
 	if err != nil {
@@ -30,11 +31,16 @@ func (a *Agent) ContextEstimate(ctx context.Context, sessionID string) (tokens, 
 		fixed = ctxmgr.EstimateFixed(sh.system, sh.schemas)
 	}
 	tokens = ctxmgr.StoredSize(stored, comps, fixed)
-	window = a.contextWindow(a.providerFor(s))
+	window = a.servedWindow(a.providerFor(s))
+	var trigger int
 	if a.Compactor != nil {
-		threshold = a.Compactor.Cfg.CompactThreshold
+		trigger = a.Compactor.TriggerFor(sessionID, window)
 	} else {
-		threshold = a.config().Context.CompactThreshold
+		cfg := a.config().Context
+		trigger = ctxmgr.Trigger(window, cfg.CompactThreshold, cfg.CompactAtTokens)
+	}
+	if window > 0 {
+		threshold = float64(trigger) / float64(window)
 	}
 	return tokens, window, threshold, nil
 }

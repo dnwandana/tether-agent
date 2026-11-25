@@ -43,7 +43,7 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 
 - `providers.primary` and `providers.fallback`: `format`, `base_url`, `api_key`, and `model`.
 - `agent.max_turns`: 90 tool rounds in one turn. After the last round, you write a summary of the work. A tool call in that answer does not run.
-- `context.compact_threshold`: 0.50. `context.tool_output_max_chars`: 50000.
+- `context.compact_threshold`: 0.50. `context.compact_at_tokens`: 200000. `context.tool_output_max_chars`: 50000.
 - `memory.memory_char_limit`: 2200. `memory.user_char_limit`: 1375.
 - `skills.external_dirs`: read-only skill folders. `skills.guard`: true.
 - `terminal.default_timeout_s`: 120. `terminal.env_passthrough`: env names that commands see.
@@ -53,12 +53,12 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 
 ## Compaction
 
-- The agent compacts the history when it is larger than 50% of the context window.
+- The agent compacts the history when it is larger than 50% of the context window (`context.compact_threshold`) or 200000 tokens (`context.compact_at_tokens`), whichever is smaller.
 - It keeps the system prompt, the first 3 messages, and the last 20 messages.
 - A summary from the same model replaces the messages between them.
 - The stored transcript does not change. The `/compact` command starts compaction at once.
 - After each automatic compaction, the user sees a notice with the number of replaced messages and the context size. `context.compact_notice: false` turns it off.
-- When 2 compactions in a row (`context.compact_max_ineffective`) leave the context over the threshold, automatic compaction stops, and the user sees a warning. It starts again when the context is under the threshold. `/compact` still runs, but it does not help when the system prompt and the tools are too large. `context.compact_notice` does not turn off this warning.
+- When 2 compactions in a row (`context.compact_max_ineffective`) leave the context over the compaction trigger, automatic compaction stops, and the user sees a warning. When `context.compact_at_tokens` was the lower trigger, automatic compaction then waits for `context.compact_threshold` of the context window. A check that finds the context at or under `context.compact_at_tokens` uses that trigger again. Else automatic compaction starts again when the context is under the trigger. `/compact` still runs, but it does not help when the system prompt and the tools are too large. `context.compact_notice` does not turn off this warning.
 - An open task list of `todo_list` stays after a compaction.
 - Write important facts into memory or a skill. A summary can lose details.
 

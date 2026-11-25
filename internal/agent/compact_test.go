@@ -350,3 +350,74 @@ func TestCompactNoticeOffKeepsTheStopWarning(t *testing.T) {
 		t.Fatalf("no success notice, but the stop warning: %q", sink.notices)
 	}
 }
+
+func TestCompactionStopNoteTexts(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{fmt.Sprintf(NoteCompactionStopped, 2), "⚠️ Automatic compaction stopped. After 2 compactions in a row, the context is still over the compaction trigger. The system prompt and the tools can be too large for this model. Automatic compaction starts again when the context is under the compaction trigger. Send /new to start a new session."},
+		{NoteCompactionStoppedOne, "⚠️ Automatic compaction stopped. After 1 compaction, the context is still over the compaction trigger. The system prompt and the tools can be too large for this model. Automatic compaction starts again when the context is under the compaction trigger. Send /new to start a new session."},
+		{fmt.Sprintf(NoteCompactionCapStopped, 2), "⚠️ Compaction at `context.compact_at_tokens` stopped. After 2 compactions in a row, the context is still over this number of tokens. Automatic compaction now waits for `context.compact_threshold` of the context window. A larger `context.compact_at_tokens` stops this warning."},
+		{NoteCompactionCapStoppedOne, "⚠️ Compaction at `context.compact_at_tokens` stopped. After 1 compaction, the context is still over this number of tokens. Automatic compaction now waits for `context.compact_threshold` of the context window. A larger `context.compact_at_tokens` stops this warning."},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("got  %q\nwant %q", tc.got, tc.want)
+		}
+	}
+}
+
+// A stop under the cap gives the cap note one time. The next check uses the ratio trigger.
+func TestCompactionCapStopNote(t *testing.T) {
+	fp := scripted(text("SUM"))
+	a, sess := compactingAgent(t, fp)
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", ContextWindow: 1_000_000, Vision: true}
+	a.Compactor.Cfg.CompactAtTokens = 200000
+	a.Compactor.Cfg.CompactMaxIneffective = 1
+	const overCap = 300000 // over the cap, under the ratio trigger of 500000
+	stored := messages(t, a, sess.ID)
+	sink := &noticeSink{}
+	if did, _, _ := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overCap); !did {
+		t.Fatal("the first check compacts")
+	}
+	if did, comps, read := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overCap); did || comps == nil || !read {
+		t.Fatal("the cap stop keeps the read of the check:", did, comps, read)
+	}
+	if did, _, read := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, overCap); did || !read {
+		t.Fatal("after the cap stop, the view is under the ratio trigger:", did, read)
+	}
+	if len(sink.notices) != 2 || !strings.HasPrefix(sink.notices[0], "🗜 Context compacted.") ||
+		sink.notices[1] != NoteCompactionCapStoppedOne {
+		t.Fatalf("one success notice and one cap note: %q", sink.notices)
+	}
+}
+
+// The check uses the window of the entry that serves the calls.
+func TestCompactionUsesTheServedWindow(t *testing.T) {
+	fp := scripted(text("SUM"))
+	a, sess := compactingAgent(t, fp)
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", ContextWindow: 1_000_000, Vision: true}
+	a.Cfg.Providers["fallback"] = config.Provider{Format: "openai", Model: "deepseek/deepseek-v4.1-flash-1017", ContextWindow: 2000}
+	stored := messages(t, a, sess.ID)
+	sink := &noticeSink{}
+	if did, _, _ := a.compact(ctx, Turn{Session: sess}, fp, sink, stored, 0); did {
+		t.Fatal("the primary window gives a trigger of 200000")
+	}
+	served := statusProv{fakeProv: fp, status: activeStatus}
+	if did, _, _ := a.compact(ctx, Turn{Session: sess}, served, sink, stored, 0); !did {
+		t.Fatal("the fallback window of 2000 gives a trigger of 1000")
+	}
+}
+
+// /compact sizes the summary from the window of the entry that serves the calls.
+func TestCompactNowUsesTheServedWindow(t *testing.T) {
+	fp := scripted(text("SUM"))
+	a, sess := compactingAgent(t, fp)
+	a.Cfg.Providers["primary"] = config.Provider{Format: "openai", Model: "test-model", ContextWindow: 1_000_000, Vision: true}
+	a.Cfg.Providers["fallback"] = config.Provider{Format: "openai", Model: "deepseek/deepseek-v4.1-flash-1017", ContextWindow: 2000}
+	a.Prov = statusProv{fakeProv: fp, status: activeStatus}
+	if res, err := a.CompactNow(ctx, sess); err != nil || res.Replaced == 0 {
+		t.Fatal(res, err)
+	}
+	// The trigger 1000 gives the target 2000 (summary_min_tokens), so max tokens is 2600.
+	if got := fp.requests[0].MaxTokens; got != 2600 {
+		t.Fatalf("max tokens %d, want 2600 from the fallback window", got)
+	}
+}

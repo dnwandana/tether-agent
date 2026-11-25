@@ -48,10 +48,18 @@ const NoteCompacted = "🗜 Context compacted. %d messages → 1 summary. Contex
 
 // NoteCompactionStopped is the warning to the user when automatic compaction stops. %d is
 // the effective limit of context.compact_max_ineffective.
-const NoteCompactionStopped = "⚠️ Automatic compaction stopped. After %d compactions in a row, the context is still over the threshold. The system prompt and the tools can be too large for this model. Automatic compaction starts again when the context is under the threshold. Send /new to start a new session."
+const NoteCompactionStopped = "⚠️ Automatic compaction stopped. After %d compactions in a row, the context is still over the compaction trigger. The system prompt and the tools can be too large for this model. Automatic compaction starts again when the context is under the compaction trigger. Send /new to start a new session."
 
 // NoteCompactionStoppedOne is NoteCompactionStopped for the limit 1.
-const NoteCompactionStoppedOne = "⚠️ Automatic compaction stopped. After 1 compaction, the context is still over the threshold. The system prompt and the tools can be too large for this model. Automatic compaction starts again when the context is under the threshold. Send /new to start a new session."
+const NoteCompactionStoppedOne = "⚠️ Automatic compaction stopped. After 1 compaction, the context is still over the compaction trigger. The system prompt and the tools can be too large for this model. Automatic compaction starts again when the context is under the compaction trigger. Send /new to start a new session."
+
+// NoteCompactionCapStopped is the warning to the user when compaction at
+// context.compact_at_tokens stops, and automatic compaction waits for the ratio trigger. %d
+// is the effective limit of context.compact_max_ineffective.
+const NoteCompactionCapStopped = "⚠️ Compaction at `context.compact_at_tokens` stopped. After %d compactions in a row, the context is still over this number of tokens. Automatic compaction now waits for `context.compact_threshold` of the context window. A larger `context.compact_at_tokens` stops this warning."
+
+// NoteCompactionCapStoppedOne is NoteCompactionCapStopped for the limit 1.
+const NoteCompactionCapStoppedOne = "⚠️ Compaction at `context.compact_at_tokens` stopped. After 1 compaction, the context is still over this number of tokens. Automatic compaction now waits for `context.compact_threshold` of the context window. A larger `context.compact_at_tokens` stops this warning."
 
 // NoteNoSummary is the final text after two empty summary answers. %d is the limit.
 const NoteNoSummary = "I used all %d tool rounds of this turn, and I could not write a summary. Send \"continue\" to go on, or increase `agent.max_turns` in the config."
@@ -304,6 +312,9 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	if t.Session == nil {
 		return res, errors.New("agent: the turn has no session")
 	}
+	// A child turn runs in the context of a tool call of its parent. The notify function of
+	// the parent must not reach the calls of the child.
+	ctx = provider.WithNotify(ctx, nil)
 	if t.Member || t.Mode == security.ModeReadOnly {
 		ctx = WithNoReview(ctx)
 	}
@@ -333,6 +344,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	if maxTurns <= 0 {
 		maxTurns = config.Default().Agent.MaxTurns
 	}
+	live := liveNotices(t)
 	sink := t.Sink
 	if sink == nil {
 		sink = nopSink{}
@@ -455,7 +467,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			// The pass saves at most one row, and that row has the usage of all attempts.
 			// The usage report reads only the stored assistant rows, so it does not count an
 			// attempt that has no row.
-			out, usage, cerr := a.callSummary(ctx, prov, req, sink)
+			out, usage, cerr := a.callSummary(ctx, prov, req, sink, live)
 			addUsage(&res.Usage, usage, false)
 			out.Usage = usage
 			meta := a.meta(prov, out)
@@ -495,7 +507,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			res.Final, res.HitLimit = out.Text, true
 			return res, nil
 		}
-		out, cerr := a.callModel(ctx, prov, req, sink)
+		out, cerr := a.callModel(ctx, prov, req, sink, live)
 		addUsage(&res.Usage, out.Usage, round == 1)
 		meta := a.meta(prov, out)
 		if cerr != nil {
@@ -664,20 +676,32 @@ func (a *Agent) viewOf(ctx context.Context, sessionID string, msgs []sessions.St
 // compacted. When read is true, comps is the latest compaction of the session that the
 // check read. A failure does not stop the turn. After a compaction, the sink gets a notice
 // with the numbers when context.compact_notice is true. When automatic compaction stops,
-// the sink gets a warning. After the third failure in a row, the sink tells the user.
+// the sink gets a warning. After the third failure in a row, the sink tells the user. In a
+// chat turn, the summary call sends the notices of the chain to sink.
 func (a *Agent) compact(ctx context.Context, t Turn, prov provider.Provider, sink Sink, stored []sessions.StoredMessage, fixed int) (did bool, comps []ctxmgr.Compaction, read bool) {
 	// A review run reads a copy of the parent view, so it does not compact.
 	if a.Compactor == nil || t.review != nil {
 		return false, nil, false
 	}
-	res, comps, err := a.Compactor.MaybeStoredView(ctx, t.Session, prov, a.contextWindow(prov), false, stored, fixed)
+	ctx = withNotices(ctx, liveNotices(t), sink)
+	res, comps, err := a.Compactor.MaybeStoredView(ctx, t.Session, prov, a.servedWindow(prov), false, stored, fixed)
 	did = res.Replaced > 0
 	switch {
 	case errors.Is(err, ctxmgr.ErrCompactionStopped):
 		// context.compact_notice does not stop this warning. The comps of the check are valid.
-		text := fmt.Sprintf(NoteCompactionStopped, a.Compactor.IneffectiveLimit())
-		if a.Compactor.IneffectiveLimit() == 1 {
+		// A cap stop also wraps ErrCompactionStopped, so test it first.
+		limit := a.Compactor.IneffectiveLimit()
+		capStop := errors.Is(err, ctxmgr.ErrCompactionCapStopped)
+		var text string
+		switch {
+		case capStop && limit == 1:
+			text = NoteCompactionCapStoppedOne
+		case capStop:
+			text = fmt.Sprintf(NoteCompactionCapStopped, limit)
+		case limit == 1:
 			text = NoteCompactionStoppedOne
+		default:
+			text = fmt.Sprintf(NoteCompactionStopped, limit)
 		}
 		sink.Notice(text)
 		return false, comps, true
@@ -699,7 +723,7 @@ func (a *Agent) compact(ctx context.Context, t Turn, prov provider.Provider, sin
 // ErrNoCompactor is the error of CompactNow when the agent has no compactor.
 var ErrNoCompactor = errors.New("agent: compaction is not configured")
 
-// CompactNow compacts the session now, below the threshold too (the /compact command). It
+// CompactNow compacts the session now, below the compaction trigger too (the /compact command). It
 // returns what the compaction did. The result is the zero value and the error is nil when
 // the session is too short to compact. A summary call that fails is an error.
 func (a *Agent) CompactNow(ctx context.Context, s *sessions.Session) (ctxmgr.Result, error) {
@@ -725,7 +749,7 @@ func (a *Agent) CompactNow(ctx context.Context, s *sessions.Session) (ctxmgr.Res
 		fixed = ctxmgr.EstimateFixed(sh.system, sh.schemas)
 	}
 	prov := a.providerFor(s)
-	res, _, err := a.Compactor.MaybeStoredView(ctx, s, prov, a.contextWindow(prov), true, stored, fixed)
+	res, _, err := a.Compactor.MaybeStoredView(ctx, s, prov, a.servedWindow(prov), true, stored, fixed)
 	if err != nil {
 		return ctxmgr.Result{}, err
 	}
@@ -850,6 +874,16 @@ func (a *Agent) contextWindow(prov provider.Provider) int {
 	return a.modelWindow(prov.Name(), prov.Model())
 }
 
+// servedWindow returns the context window of the entry that serves the calls of prov. When
+// the first entry of the chain is in its wait time, it is the window of the served entry,
+// as in CurrentModel.
+func (a *Agent) servedWindow(prov provider.Provider) int {
+	if st, ok := provider.StatusOf(prov); ok && st.Active {
+		return a.modelWindow(st.FallbackName, st.FallbackModel)
+	}
+	return a.contextWindow(prov)
+}
+
 // modelWindow returns the context window of model in the config entry name. An empty
 // model uses the model of the entry.
 func (a *Agent) modelWindow(name, model string) int {
@@ -938,7 +972,9 @@ func (a *Agent) save(ctx context.Context, ts *turnState, m provider.Message, met
 
 // callModel streams one request. It returns when the stream ends, when ctx ends, or when
 // the stream sends no event for the stream idle limit. The result keeps the partial text.
-func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provider.Request, sink Sink) (provider.Result, error) {
+// When live is true, the chain sends its wait and quota notices to sink.
+func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provider.Request, sink Sink, live bool) (provider.Result, error) {
+	ctx = withNotices(ctx, live, sink)
 	idleLimit := a.streamIdleLimit()
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -990,9 +1026,9 @@ func (a *Agent) callModel(ctx context.Context, prov provider.Provider, req provi
 }
 
 // callSummary makes the summary call, and one more call when the text is empty.
-func (a *Agent) callSummary(ctx context.Context, prov provider.Provider, req provider.Request, sink Sink) (out provider.Result, usage provider.Usage, err error) {
+func (a *Agent) callSummary(ctx context.Context, prov provider.Provider, req provider.Request, sink Sink, live bool) (out provider.Result, usage provider.Usage, err error) {
 	for attempt := 1; ; attempt++ {
-		out, err = a.callModel(ctx, prov, req, sink)
+		out, err = a.callModel(ctx, prov, req, sink, live)
 		addUsage(&usage, out.Usage, attempt == 1)
 		if err != nil || strings.TrimSpace(out.Text) != "" || attempt == 2 {
 			return out, usage, err
