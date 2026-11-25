@@ -409,8 +409,8 @@ background delegation, because the job ends before the children.
 The gate waits `approvals.timeout_s` seconds for an answer. The default is 600 seconds. No answer
 is a denial. The result shows `⌛ Approval denied · no answer in N min`, or
 `⌛ Program denied · no answer in N min` for a program pin. A stopped turn cancels the open
-requests. Their result shows `⏹ No answer · the turn stopped` on Telegram, the CLI, and the
-dashboard. A stop never shows as a tap on ❌ Deny.
+requests. Their result shows `⏹ No answer · the turn stopped` on Telegram and the CLI. The
+dashboard shows the same words after an icon. A stop never shows as a tap on ❌ Deny.
 
 The approval message shows a one-line summary that the model writes in the `description`
 parameter. The model can write a wrong summary, so the message also shows the command. Telegram
@@ -1922,8 +1922,8 @@ controls of Telegram and the CLI, in a web page. See the wiki page
 - The dashboard is a private target, like the CLI. The outbound scan does not hold its replies.
 - Each turn is an owner turn with the tools of `toolsets.dashboard` (default `[all]`).
 - `/mode` on the dashboard sets the scope `dashboard`. The page cannot change another scope.
-- "✅ Approve all once…" in the tray and a typed `/approve all` on the dashboard skip each
-  human-only card and each 📤 send card with findings. "Once" on a send card with findings sends
+- "Approve all once…" in the tray and a typed `/approve all` on the dashboard skip each
+  human-only card and each send card with findings. "Once" on a send card with findings sends
   the text with no redaction, so the owner answers such a card on the card. The confirm of
   "Approve all once" lists each command as literal text, and the focus starts on Cancel.
 - The server keeps the last 30 answered cards in memory, so the page can show a record of each
@@ -2053,7 +2053,7 @@ Other rules:
 
 ### Known limits of the dashboard
 
-- In ⚡ Full mode, the agent can add a session row. A script that writes to `state.db` in a way
+- In Full mode, the agent can add a session row. A script that writes to `state.db` in a way
   that the gate cannot see can do the same. Full mode already runs any command with no question.
 - Plain HTTP on a LAN or VPN address sends the cookie and the header as clear text.
 - A signed-in device is the owner. Revoke a lost device at once.

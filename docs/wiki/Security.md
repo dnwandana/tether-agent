@@ -394,7 +394,7 @@ These requests have no session answer. They ask each time:
 - a request to leave plan mode
 - a command that matches a dangerous rule, for example `rm -r build`
 
-No answer in `approvals.timeout_s` refuses the action. `/stop` cancels the open requests. A canceled request shows ⏹ No answer · the turn stopped. The
+No answer in `approvals.timeout_s` refuses the action. `/stop` cancels the open requests. A canceled request shows "No answer · the turn stopped". The
 [security model](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md#coding-agents-acp)
 gives the full list of wrapper programs.
 
@@ -711,10 +711,10 @@ page of the dashboard. You limit the network: use loopback or a VPN address. Set
 `dashboard.tls_cert` and `dashboard.tls_key` for HTTPS. See [Dashboard](Dashboard) and the full rules in
 [docs/SECURITY.md](https://github.com/dnwandana/tether-agent/blob/main/docs/SECURITY.md).
 
-"✅ Approve all once…" in the tray skips each human-only card and each 📤 send card with
+"Approve all once…" in the tray skips each human-only card and each send card with
 findings. Answer such a card on the card. The confirm lists each command as literal text, and
 the focus starts on Cancel. An answered card leaves a one-line record in the chat until the
-gateway restarts. A stopped turn shows ⏹ No answer · the turn stopped.
+gateway restarts. A stopped turn shows "No answer · the turn stopped".
 
 ## The skill guard
 
@@ -762,7 +762,7 @@ itself. Refer to [Skills](Skills#the-skill-guard).
 - **A network program that is not on the list does not mark a run.** For example, `python
   fetch.py` does not mark the run as a run with outside content, so `model_guard` does not
   check the later send.
-- **A script can add a dashboard session in Full mode.** In ⚡ Full mode, the agent can write to state.db with no question. Keep the dashboard scope in Guarded mode.
+- **A script can add a dashboard session in Full mode.** In Full mode, the agent can write to state.db with no question. Keep the dashboard scope in Guarded mode.
 - **A coding agent can write outside its work folder.** Its permission preset sets which actions
   it asks for. See [Coding agents](#coding-agents).
 

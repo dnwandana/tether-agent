@@ -113,7 +113,7 @@ tabs open. Or use a TLS proxy with HTTP/2.
 | Page | What it does |
 |---|---|
 | Chat | Talk to the agent, stream the answer, and attach files or voice notes. |
-| Waiting for you | A tray with the open cards. The oldest card shows in full. Deny all, or approve all once. On a phone, the ⏳ Waiting tab opens it. |
+| Waiting for you | A tray with the open cards. The oldest card shows in full. Deny all, or approve all once. On a phone, the Waiting tab opens it. |
 | Sessions | List the sessions of all channels. Read the transcript. Open, rename, fork, archive, unarchive, or export one. Child sessions fold under their parent. |
 | Jobs | Show the brief, the cron jobs, their runs, and the held sends. |
 | Goals | Show the goals of all sessions with their state and gates. |
@@ -127,15 +127,18 @@ tabs open. Or use a TLS proxy with HTTP/2.
 | Access | Approve a pairing code. Revoke an approved person. Deny a request. See the revoked people. |
 | Getting started | Show each setup step with its next command. |
 
+The dashboard shows Lucide icons in place of the emoji of Telegram. The words are the same on
+each channel.
+
 An answered card leaves a one-line record in the chat. The record lasts until the gateway
 restarts. The approval log keeps the permanent record.
 
 The pages update by themselves when the data changes, when the page connects again, and when
-you come back to the tab. Each page header shows the time of the last update and ↻ Refresh.
+you come back to the tab. Each page header shows the time of the last update and the Refresh button.
 
 A long table shows 20 rows on each page. Choose 10, 20, 50, or 100 in Rows per page. Each table
 keeps its choice in this browser. The Sessions, Skills, Jobs, Goals, and Memory pages keep the
-page number in the address, so Refresh and the ‹ back links keep it.
+page number in the address, so Refresh and the back links keep it.
 
 The theme follows the theme of the system by default. The theme menu at the right end of the
 status bar sets System, Dark, or Light.

@@ -113,6 +113,8 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
      or give it a `ReadOnlyCall` method. `TestEachToolIsInOneReadOnlyList` in `internal/tools`
      fails until the tool is in one list.
   4. Generate `docs/TOOLS.md` again. `TestGeneratedDocIsCurrent` fails when it is out of date.
+  5. Give the tool an icon in `tools` of `web/src/lib/glyphs.json` when it has a row in
+     `toolEmoji`. `TestGlyphsCover` in `internal/dashboard` fails until it has one.
 - A change to a struct in an `internal/dashboard/api*.go` file needs
   `go run ./cmd/tether gen-dashboard-types` and then `make web`. A named string type with a fixed
   set of values, for example `dashboard.SetupState`, registers its values with `registerEnum` in
@@ -129,6 +131,11 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
   repository.
 - Colors come from the tokens in `web/src/styles/app.css`, for example `bg-primary` and
   `text-muted-foreground`. Do not use a Tailwind palette class such as `bg-blue-500`.
+- The dashboard shows no emoji. It draws Lucide icons in place of the emoji of Telegram and
+  the CLI, and it keeps their words. A Go text that reaches the page with a new mark needs a
+  key in `web/src/lib/glyphs.json`. `TestGlyphsCover` in `internal/dashboard` fails until it
+  has one. A source file under `web/src` has no mark. `web/src/lib/glyphs.guard.test.ts`
+  fails on one.
 - The component and page tests of `web/` find elements by role, label, and text, with
   `@testing-library/vue`.
 - Each `DataTable` passes a `pageKey` and a `pageLabel`, and gives each column a `type`. The
