@@ -129,6 +129,13 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
   `npx shadcn-vue@2.9.0 add <name>` in `web/`. Then make sure that each version in
   `web/package.json` stays exact. The copied files are part of the source, so keep them in the
   repository.
+- `web/package.json` pins each version and each `overrides` value exactly. `web/.npmrc` sets
+  `min-release-age=14`, so `npm install` takes only versions that are 14 days old or older. A
+  package with an install script needs a name-only entry in `allowScripts` of
+  `web/package.json`. The default entry is `false`. `web/package.test.ts` fails until each
+  install script in the lock file has an entry. For a security fix that is newer than 14 days,
+  run one `npm install` with `--min-release-age=0`. Do not remove the line from `.npmrc`. These
+  settings need npm 11.16 or later (the `engines` of `web/package.json`).
 - Colors come from the tokens in `web/src/styles/app.css`, for example `bg-primary` and
   `text-muted-foreground`. Do not use a Tailwind palette class such as `bg-blue-500`.
 - The dashboard shows no emoji. It draws Lucide icons in place of the emoji of Telegram and

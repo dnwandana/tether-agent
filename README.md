@@ -187,8 +187,8 @@ tether skills check
 
 ## Build from source
 
-You need Go 1.26 or later, and Node with npm for the page of the web dashboard. The build does
-not use CGO.
+You need Go 1.26 or later, and Node 24.18 or later (or Node 26.3 or later) with npm 11.16 or later
+for the page of the web dashboard. The build does not use CGO.
 
 Git keeps no built page. Run `make web` before `make build`. It builds the page from `web/` into
 `internal/dashboard/dist/`, and the binary embeds it. A binary that you build before `make web`
