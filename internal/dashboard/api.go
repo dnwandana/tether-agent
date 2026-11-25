@@ -51,8 +51,10 @@ type TurnView struct {
 
 // ToolView is one tool line of a turn.
 type ToolView struct {
-	Call       string `json:"call"`
-	Name       string `json:"name"`
+	Call string `json:"call"`
+	Name string `json:"name"`
+	// Emoji is the tool emoji of Telegram and the CLI. The page does not read it. It draws the
+	// icon from the tool name. An old tab can still read the field.
 	Emoji      string `json:"emoji"`
 	Preview    string `json:"preview"`
 	Args       string `json:"args"`

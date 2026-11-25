@@ -36,7 +36,8 @@ var toolEmoji = map[string]string{
 // defaultEmoji is the emoji of a tool that is not in toolEmoji.
 const defaultEmoji = "🔧"
 
-// Emoji returns the emoji of the tool name. Telegram and the dashboard use the same table.
+// Emoji returns the emoji of the tool name. Telegram and the CLI use this table. The dashboard
+// draws its own icons from web/src/lib/glyphs.json.
 func Emoji(name string) string {
 	if e, ok := toolEmoji[name]; ok {
 		return e
