@@ -6,6 +6,8 @@ import type { GoalRowView } from "../api/types.gen"
 import { useCommand } from "../lib/command"
 import { friendlyError } from "../lib/errors"
 import { useLiveData } from "../lib/live"
+import { useRoutePage } from "../lib/routePage"
+import type { Column } from "../lib/table"
 import { fullTime, shortTime } from "../lib/time"
 import { confirm } from "../stores/ui"
 import DataTable from "../components/DataTable.vue"
@@ -19,6 +21,7 @@ import { cn } from "@/lib/utils"
 type Filter = "all" | "active" | "parked" | "paused" | "finished"
 
 const router = useRouter()
+const { page, setPage } = useRoutePage("goals")
 const { run } = useCommand()
 const filter = ref<Filter>("all")
 const finished = computed(() => filter.value === "finished")
@@ -26,14 +29,14 @@ const rows = ref<GoalRowView[]>([])
 const state = ref<"loading" | "error" | "ready">("loading")
 const errText = ref("")
 
-const columns = [
-  { key: "state", label: "State" },
-  { key: "goal", label: "Goal" },
-  { key: "session", label: "Session" },
-  { key: "turns", label: "Turns" },
-  { key: "last_verdict", label: "Last verdict" },
-  { key: "last_turn", label: "Last turn" },
-  { key: "actions", label: "" },
+const columns: Column[] = [
+  { key: "state", label: "State", type: "badge" },
+  { key: "goal", label: "Goal", type: "text" },
+  { key: "session", label: "Session", type: "text" },
+  { key: "turns", label: "Turns", type: "num", optional: true },
+  { key: "last_verdict", label: "Last verdict", type: "badge", optional: true },
+  { key: "last_turn", label: "Last turn", type: "date" },
+  { key: "actions", label: "", type: "act", width: "14rem" },
 ]
 
 const SOURCES: Record<string, string> = { dashboard: "Dashboard", telegram: "Telegram", cli: "CLI" }
@@ -117,6 +120,7 @@ async function load(): Promise<void> {
 async function pick(f: Filter): Promise<void> {
   const changed = finished.value !== (f === "finished")
   filter.value = f
+  setPage(1)
   if (!changed) return
   state.value = "loading"
   await refresh()
@@ -175,6 +179,10 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
         :columns="columns"
         :rows="shown as unknown as Record<string, unknown>[]"
         row-key="session_id"
+        page-key="goals"
+        page-label="Goals"
+        :page="page"
+        @update:page="setPage"
       >
         <template #cell-state="{ row }">
           <Badge
@@ -185,7 +193,8 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
         </template>
         <template #cell-goal="{ row }">
           <RouterLink
-            class="font-semibold"
+            class="block truncate font-semibold"
+            :title="(row as unknown as GoalRowView).goal"
             :to="{
               name: 'goal',
               params: { session: (row as unknown as GoalRowView).session_id },
@@ -194,9 +203,11 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["goal.state"]
           >
         </template>
         <template #cell-session="{ row }">
-          <span class="text-xs text-muted-foreground">{{
-            line(row as unknown as GoalRowView)
-          }}</span>
+          <span
+            class="block truncate text-xs text-muted-foreground"
+            :title="line(row as unknown as GoalRowView)"
+            >{{ line(row as unknown as GoalRowView) }}</span
+          >
         </template>
         <template #cell-turns="{ row }"
           >{{ (row as unknown as GoalRowView).turns_used }}/{{

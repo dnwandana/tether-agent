@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, within } from "@testing-library/vue"
+import { render, screen, within } from "@testing-library/vue"
 import userEvent from "@testing-library/user-event"
 import { flushPromises } from "@vue/test-utils"
 import { createRouter, createMemoryHistory } from "vue-router"
@@ -173,5 +173,45 @@ describe("DevicesTable", () => {
     const span = within(cell).getByText(shortTime("2026-11-20T09:12:00Z"))
     expect(span.getAttribute("title")).toBe(fullTime("2026-11-20T09:12:00Z"))
     expect(span.classList.contains("whitespace-nowrap")).toBe(true)
+  })
+
+  it("pages the devices with their own stored size", async () => {
+    localStorage.setItem("tether.rows.devices", "10")
+    const many = Array.from({ length: 11 }, (_, i) => ({
+      ...devices[1],
+      id: `d${i + 1}`,
+      label: `Phone ${i + 1}`,
+    }))
+    vi.mocked(api).mockImplementation(async (m: string) => (m === "GET" ? many : {}) as any)
+    const { q, user } = await mk()
+    const nav = q.getByRole("navigation", { name: "Devices pages" })
+    expect(q.getByText("1–10 of 11")).toBeTruthy()
+    expect(q.getAllByRole("button", { name: "Sign out" })).toHaveLength(10)
+    await user.click(within(nav).getByRole("button", { name: "Next Page" }))
+    expect(q.getByText("Phone 11")).toBeTruthy()
+  })
+
+  it("lets the Device cell grow and keeps Sign out at the right in a 7rem column", async () => {
+    const { r, q } = await mk()
+    const device = within(bodyRows(q)[0]).getAllByRole("cell")[0]
+    expect(device.classList).toContain("whitespace-normal")
+    expect(device.classList).not.toContain("overflow-hidden")
+    const cell = q.getAllByRole("button", { name: "Sign out" })[0].closest("td")!
+    expect(cell.classList).toContain("text-right")
+    const cols = [...r.container.querySelectorAll("colgroup col")] as HTMLElement[]
+    expect(cols[cols.length - 1].style.width).toBe("7rem")
+  })
+
+  it("shows cards with no column widths below 1024 px", async () => {
+    window.matchMedia = ((q: string) => ({
+      matches: q === "(max-width: 1023px)",
+      media: q,
+      addEventListener() {},
+      removeEventListener() {},
+    })) as any
+    const { r } = await mk()
+    expect(r.container.querySelector('[data-layout="cards"]')).not.toBeNull()
+    expect(r.container.querySelector("colgroup")).toBeNull()
+    expect(screen.getAllByRole("button", { name: "Sign out" })).toHaveLength(2)
   })
 })

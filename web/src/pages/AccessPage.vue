@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import type { AccessView, PairingRow } from "../api/types.gen"
 import DataTable from "../components/DataTable.vue"
+import type { Column } from "../lib/table"
 import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { friendlyError } from "../lib/errors"
@@ -70,21 +71,21 @@ function hhmm(s: string | null): string {
   return shortTime(s)
 }
 
-const pendingColumns = [
-  { key: "name", label: "Person" },
-  { key: "since", label: "Asked" },
-  { key: "expires", label: "Expires" },
-  { key: "code", label: "Code" },
+const pendingColumns: Column[] = [
+  { key: "name", label: "Person", type: "wrap" },
+  { key: "since", label: "Asked", type: "date" },
+  { key: "expires", label: "Expires", type: "badge" },
+  { key: "code", label: "Code", type: "block" },
 ]
-const revokedColumns = [
-  { key: "name", label: "Person" },
-  { key: "since", label: "Since" },
+const revokedColumns: Column[] = [
+  { key: "name", label: "Person", type: "wrap" },
+  { key: "since", label: "Since", type: "date" },
 ]
-const approvedColumns = [
-  { key: "name", label: "Person" },
-  { key: "role", label: "Role" },
-  { key: "since", label: "Since" },
-  { key: "actions", label: "" },
+const approvedColumns: Column[] = [
+  { key: "name", label: "Person", type: "wrap" },
+  { key: "role", label: "Role", type: "badge" },
+  { key: "since", label: "Since", type: "date" },
+  { key: "actions", label: "", type: "act", width: "6.5rem" },
 ]
 
 const rowKey = (r: PairingRow): string => `${r.platform}:${r.user_id}`
@@ -225,10 +226,20 @@ async function denyRow(row: PairingRow): Promise<void> {
         title="No pairing requests."
         text="A person who sends /start to the bot gets a code. They tell you the code, and you approve it here."
       />
-      <DataTable v-else :columns="pendingColumns" :rows="asRows(pending)" row-key="key">
+      <DataTable
+        v-else
+        :columns="pendingColumns"
+        :rows="asRows(pending)"
+        row-key="key"
+        page-key="access-pending"
+        page-label="Pending requests"
+      >
         <template #cell-name="{ row }">
           <b class="font-medium">{{ asRow(row).name }}</b>
-          <div class="font-mono text-xs text-muted-foreground">
+          <div
+            class="truncate font-mono text-xs text-muted-foreground"
+            :title="`${asRow(row).platform} · ${asRow(row).user_id}`"
+          >
             {{ asRow(row).platform }} · {{ asRow(row).user_id }}
           </div>
         </template>
@@ -287,10 +298,15 @@ async function denyRow(row: PairingRow): Promise<void> {
         :columns="approvedColumns"
         :rows="asRows(approved)"
         row-key="key"
+        page-key="access-approved"
+        page-label="Approved people"
       >
         <template #cell-name="{ row }">
           <b class="font-medium">{{ asRow(row).name }}</b>
-          <div class="font-mono text-xs text-muted-foreground">
+          <div
+            class="truncate font-mono text-xs text-muted-foreground"
+            :title="`${asRow(row).platform} · ${asRow(row).user_id}`"
+          >
             {{ asRow(row).platform }} · {{ asRow(row).user_id }}
           </div>
         </template>
@@ -311,10 +327,19 @@ async function denyRow(row: PairingRow): Promise<void> {
       <section v-if="revoked.length > 0" aria-labelledby="revoked-h" class="flex flex-col gap-2">
         <h2 id="revoked-h" class="text-base font-semibold">Revoked</h2>
         <p class="text-xs text-muted-foreground">They can send /start again.</p>
-        <DataTable :columns="revokedColumns" :rows="asRows(revoked)" row-key="key">
+        <DataTable
+          :columns="revokedColumns"
+          :rows="asRows(revoked)"
+          row-key="key"
+          page-key="access-revoked"
+          page-label="Revoked people"
+        >
           <template #cell-name="{ row }">
             <b class="font-medium">{{ asRow(row).name }}</b>
-            <div class="font-mono text-xs text-muted-foreground">
+            <div
+              class="truncate font-mono text-xs text-muted-foreground"
+              :title="`${asRow(row).platform} · ${asRow(row).user_id}`"
+            >
               {{ asRow(row).platform }} · {{ asRow(row).user_id }}
             </div>
           </template>

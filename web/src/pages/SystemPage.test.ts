@@ -465,4 +465,21 @@ describe("SystemPage", () => {
     await flushPromises()
     expect(router.currentRoute.value.name).toBe("ops")
   })
+
+  it("pages the MCP servers with their own stored size and lets the Tools cell grow", async () => {
+    localStorage.setItem("tether.rows.system-mcp", "10")
+    data["/api/mcp"] = Array.from({ length: 11 }, (_, i) =>
+      mcpRow({ name: `srv${i + 1}`, connected: true, tools: 1, tool_names: ["find"] }),
+    )
+    const { user } = await mk()
+    const nav = within(mcp()).getByRole("navigation", { name: "MCP servers pages" })
+    expect(within(mcp()).getByText("1–10 of 11")).toBeTruthy()
+    expect(bodyRows()).toHaveLength(10)
+    const tools = cell3("srv1")
+    expect(tools.classList).toContain("whitespace-normal")
+    expect(tools.classList).not.toContain("text-right")
+    expect(tools.classList).not.toContain("overflow-hidden")
+    await user.click(within(nav).getByRole("button", { name: "Next Page" }))
+    expect(within(mcp()).getByText("srv11")).toBeTruthy()
+  })
 })

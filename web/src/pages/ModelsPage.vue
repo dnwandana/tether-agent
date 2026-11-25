@@ -6,6 +6,7 @@ import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
 import { friendlyError } from "../lib/errors"
+import type { Column } from "../lib/table"
 import { useLiveData } from "../lib/live"
 import { status } from "../stores/status"
 import { toast } from "../stores/ui"
@@ -145,15 +146,15 @@ function ctxLabel(n: number): string {
   return String(n)
 }
 
-const columns = [
-  { key: "name", label: "Entry" },
-  { key: "preset", label: "Preset · format" },
-  { key: "model", label: "Model" },
-  { key: "base_url", label: "Base URL" },
-  { key: "vision", label: "Vision" },
-  { key: "context", label: "Context" },
-  { key: "effort", label: "Effort" },
-  { key: "status", label: "Status" },
+const columns: Column[] = [
+  { key: "name", label: "Entry", type: "wrap" },
+  { key: "preset", label: "Preset · format", type: "text", optional: true },
+  { key: "model", label: "Model", type: "wrap" },
+  { key: "base_url", label: "Base URL", type: "wrap", optional: true },
+  { key: "vision", label: "Vision", type: "badge", width: "5rem", optional: true },
+  { key: "context", label: "Context", type: "badge", width: "5rem" },
+  { key: "effort", label: "Effort", type: "badge", width: "6rem", optional: true },
+  { key: "status", label: "Status", type: "wrap" },
 ]
 const rows = computed(() =>
   (view.value?.entries ?? []).map((e) => ({
@@ -168,10 +169,10 @@ const rows = computed(() =>
     status: entryStatus(e, now.value),
   })),
 )
-const roleColumns = [
-  { key: "role", label: "Role" },
-  { key: "key", label: "Key" },
-  { key: "value", label: "Entry" },
+const roleColumns: Column[] = [
+  { key: "role", label: "Role", type: "text" },
+  { key: "key", label: "Key", type: "text" },
+  { key: "value", label: "Entry", type: "wrap" },
 ]
 const roleRows = computed(() =>
   (view.value?.roles ?? []).map((r) => ({
@@ -231,7 +232,13 @@ onBeforeUnmount(stopTimer)
           </li>
         </template>
       </ol>
-      <DataTable :columns="columns" :rows="rows" row-key="name">
+      <DataTable
+        :columns="columns"
+        :rows="rows"
+        row-key="name"
+        page-key="models"
+        page-label="Model entries"
+      >
         <template #cell-name="{ value, row }"
           ><b class="font-medium">{{ value }}</b
           ><template v-if="isUnused(row)"
@@ -251,9 +258,15 @@ onBeforeUnmount(stopTimer)
         </template>
       </DataTable>
       <h2 class="text-base font-semibold">Roles</h2>
-      <DataTable :columns="roleColumns" :rows="roleRows" row-key="key">
+      <DataTable
+        :columns="roleColumns"
+        :rows="roleRows"
+        row-key="key"
+        page-key="model-roles"
+        page-label="Model roles"
+      >
         <template #cell-key="{ value }"
-          ><span class="font-mono">{{ value }}</span></template
+          ><span class="font-mono" :title="String(value)">{{ value }}</span></template
         >
         <template #cell-value="{ value, row }"
           >{{ value

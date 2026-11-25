@@ -59,6 +59,16 @@ const view = {
   ],
 }
 
+const people = (status: string, n: number) =>
+  Array.from({ length: n }, (_, i) => ({
+    platform: "telegram",
+    user_id: String(9000 + i),
+    name: `Person ${i + 1}`,
+    status,
+    since: "2026-11-01T10:00:00Z",
+    expires: "2026-11-20T10:56:00Z",
+  }))
+
 // Renders the page on /access with today's two routes (access: AccessPage, start: Blank).
 async function mk(user = userEvent.setup()) {
   const router = createRouter({
@@ -291,5 +301,24 @@ describe("AccessPage", () => {
     ])
     await flushPromises()
     expect(api).toHaveBeenCalledWith("GET", "/api/pairing")
+  })
+
+  it.each([
+    ["pending", "access-pending", "Pending requests"],
+    ["approved", "access-approved", "Approved people"],
+    ["revoked", "access-revoked", "Revoked people"],
+  ] as const)("pages the %s list with its own stored size", async (list, key, label) => {
+    localStorage.setItem(`tether.rows.${key}`, "10")
+    vi.mocked(api).mockImplementation(
+      async (m: string) => (m === "GET" ? { ...view, [list]: people(list, 11) } : {}) as any,
+    )
+    const { user } = await mk()
+    const nav = screen.getByRole("navigation", { name: `${label} pages` })
+    expect(screen.getByText("1–10 of 11")).toBeTruthy()
+    expect(screen.getByText("Person 1")).toBeTruthy()
+    expect(screen.queryByText("Person 11")).toBeNull()
+    await user.click(within(nav).getByRole("button", { name: "Next Page" }))
+    expect(screen.getByText("11–11 of 11")).toBeTruthy()
+    expect(screen.getByText("Person 11")).toBeTruthy()
   })
 })

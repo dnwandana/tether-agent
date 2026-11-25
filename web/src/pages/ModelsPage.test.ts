@@ -292,4 +292,33 @@ describe("ModelsPage", () => {
     expect(screen.getByText("No model entries. Run `tether setup` on the host.")).toBeTruthy()
     unmount()
   })
+
+  it("pages the entries and the roles with their own stored sizes", async () => {
+    localStorage.setItem("tether.rows.models", "10")
+    localStorage.setItem("tether.rows.model-roles", "10")
+    vi.mocked(api).mockResolvedValue({
+      ...view,
+      entries: [
+        ...view.entries,
+        ...Array.from({ length: 9 }, (_, i) => entry({ name: `extra${i + 1}` })),
+      ],
+      roles: [
+        ...view.roles,
+        ...Array.from({ length: 10 }, (_, i) => ({
+          role: `role${i + 1}`,
+          key: `key${i + 1}`,
+          value: "",
+          entry_usable: true,
+        })),
+      ],
+    })
+    const { unmount } = await mk()
+    expect(screen.getByRole("navigation", { name: "Model entries pages" })).toBeTruthy()
+    expect(screen.getByRole("navigation", { name: "Model roles pages" })).toBeTruthy()
+    expect(screen.getByText("1–10 of 12")).toBeTruthy()
+    expect(screen.getByText("1–10 of 11")).toBeTruthy()
+    expect(bodyRows(entries())).toHaveLength(10)
+    expect(cells(bodyRows(entries())[0])[2].classList).toContain("whitespace-normal")
+    unmount()
+  })
 })

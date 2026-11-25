@@ -10,6 +10,8 @@ import { Input } from "@/components/ui/input"
 import { Item, ItemActions, ItemContent, ItemGroup } from "@/components/ui/item"
 import { Textarea } from "@/components/ui/textarea"
 import { api } from "../api/client"
+import { useRoutePage } from "../lib/routePage"
+import type { Column } from "../lib/table"
 import type {
   MemoryEntry,
   MemoryHit,
@@ -50,6 +52,7 @@ const undo = ref<{ target: Target; text: string } | null>(null)
 const saving = ref(false)
 const searching = ref(false)
 const pulsing = ref("")
+const { page, setPage } = useRoutePage("memory")
 // The text that the open editor started with. A draft that differs from it is dirty.
 const original = ref("")
 let timer: ReturnType<typeof setTimeout> | undefined
@@ -58,12 +61,12 @@ const files: { target: Target; title: string }[] = [
   { target: "memory", title: "Agent memory · memory.md" },
   { target: "user", title: "User profile · user_profile.md" },
 ]
-const topicColumns = [
-  { key: "name", label: "Topic" },
-  { key: "type", label: "Type" },
-  { key: "entries", label: "Entries", align: "right" as const },
-  { key: "modified", label: "Modified" },
-  { key: "actions", label: "" },
+const topicColumns: Column[] = [
+  { key: "name", label: "Topic", type: "text" },
+  { key: "type", label: "Type", type: "badge" },
+  { key: "entries", label: "Entries", type: "num" },
+  { key: "modified", label: "Modified", type: "date" },
+  { key: "actions", label: "", type: "act", width: "6rem" },
 ]
 const t = (x: unknown) => x as TopicRow
 
@@ -620,17 +623,23 @@ onBeforeUnmount(() => {
         :columns="topicColumns"
         :rows="view.topics as unknown as Record<string, unknown>[]"
         row-key="name"
+        page-key="memory-topics"
+        page-label="Topic notes"
+        :page="page"
+        @update:page="setPage"
       >
-        <template #cell-name="{ row }"
-          ><span class="font-mono">{{ t(row).name }}</span> {{ " "
-          }}<Badge
-            v-if="t(row).name.startsWith('inbox-')"
-            variant="outline"
-            class="border-warning/40 text-warning"
-            data-tone="warn"
-            >inbox</Badge
-          ></template
-        >
+        <template #cell-name="{ row }">
+          <div class="flex min-w-0 items-center gap-2">
+            <span class="min-w-0 truncate font-mono" :title="t(row).name">{{ t(row).name }}</span>
+            <Badge
+              v-if="t(row).name.startsWith('inbox-')"
+              variant="outline"
+              class="shrink-0 border-warning/40 text-warning"
+              data-tone="warn"
+              >inbox</Badge
+            >
+          </div>
+        </template>
         <template #cell-modified="{ row }"
           ><span
             data-test="modified"

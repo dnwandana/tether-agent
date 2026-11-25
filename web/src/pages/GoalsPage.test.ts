@@ -68,7 +68,7 @@ const list = [
   }),
 ]
 
-async function mk() {
+async function mk(path = "/goals") {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
@@ -78,7 +78,7 @@ async function mk() {
       { path: "/sessions/:id", name: "transcript", component: Blank },
     ],
   })
-  await router.push("/goals")
+  await router.push(path)
   const r = render(GoalsPage, { global: { plugins: [router] } })
   await flushPromises()
   return { ...r, router }
@@ -240,5 +240,22 @@ describe("GoalsPage", () => {
     await user.click(screen.getByRole("button", { name: "Open chat" }))
     await flushPromises()
     expect(router.currentRoute.value.name).toBe("chat")
+  })
+  it("opens the page of the route and goes to page 1 on a filter change", async () => {
+    const user = setup()
+    const many = Array.from({ length: 25 }, (_, i) =>
+      goal({ session_id: "g" + i, title: "T" + i, goal: "Goal " + i }),
+    )
+    vi.mocked(api).mockResolvedValue(many)
+    const { router } = await mk("/goals?page=2")
+    expect(screen.getByText("21–25 of 25")).toBeTruthy()
+    expect(screen.getByRole("button", { name: "Page 2" }).getAttribute("aria-current")).toBe("page")
+    expect(screen.getByText("Goal 24")).toBeTruthy()
+    expect(screen.queryByText("Goal 0")).toBeNull()
+    await user.click(within(filterGroup()).getByRole("button", { name: "Active" }))
+    await flushPromises()
+    expect(router.currentRoute.value.query.page).toBeUndefined()
+    expect(screen.getByText("1–20 of 25")).toBeTruthy()
+    expect(screen.getByText("Goal 0")).toBeTruthy()
   })
 })

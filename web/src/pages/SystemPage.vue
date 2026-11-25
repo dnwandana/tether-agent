@@ -20,6 +20,7 @@ import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
 import ResultNote from "../components/ResultNote.vue"
 import StateBlock from "../components/StateBlock.vue"
+import type { Column } from "../lib/table"
 import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
 import { useCommand, type ResultNoteData } from "../lib/command"
@@ -55,14 +56,14 @@ const openSummary = ref(new Set<string>())
 const resumed = new Set<string>()
 const stops = new Set<() => void>()
 
-const mcpColumns = [
-  { key: "name", label: "Server" },
-  { key: "transport", label: "Transport" },
-  { key: "status", label: "Status" },
-  { key: "tools", label: "Tools", align: "right" as const },
-  { key: "classes", label: "Classes" },
-  { key: "settings", label: "Settings" },
-  { key: "last", label: "Last error" },
+const mcpColumns: Column[] = [
+  { key: "name", label: "Server", type: "text" },
+  { key: "transport", label: "Transport", type: "badge", optional: true },
+  { key: "status", label: "Status", type: "badge" },
+  { key: "tools", label: "Tools", type: "block" },
+  { key: "classes", label: "Classes", type: "text", optional: true },
+  { key: "settings", label: "Settings", type: "wrap", optional: true },
+  { key: "last", label: "Last error", type: "wrap" },
 ]
 
 // The dot color of each MCP server state.
@@ -431,7 +432,14 @@ onBeforeUnmount(() => {
         title="No MCP servers."
         text="Add one under `mcp` in config.yaml, then tap Reload MCP."
       />
-      <DataTable v-else :columns="mcpColumns" :rows="mcpRows" row-key="name">
+      <DataTable
+        v-else
+        :columns="mcpColumns"
+        :rows="mcpRows"
+        row-key="name"
+        page-key="system-mcp"
+        page-label="MCP servers"
+      >
         <template #cell-status="{ row }">
           <span class="inline-flex items-center gap-1.5"
             ><span

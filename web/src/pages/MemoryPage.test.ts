@@ -3,6 +3,7 @@ import { flushPromises } from "@vue/test-utils"
 import { fireEvent, render, screen, within } from "@testing-library/vue"
 import userEvent from "@testing-library/user-event"
 import { defineComponent, h as hv } from "vue"
+import { createRouter, createMemoryHistory } from "vue-router"
 
 const h = vi.hoisted(() => ({
   live: null as null | { load: () => Promise<void>; opts?: { events?: string[] } },
@@ -76,11 +77,18 @@ const NoteStub = defineComponent({
     return () => ((lastNote = p.note), p.note ? hv("div", p.note.text) : null)
   },
 })
-const mk = async () => {
+const mk = async (path = "/memory") => {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: "/memory", name: "memory", component: MemoryPage }],
+  })
+  await router.push(path)
   const user = userEvent.setup()
-  const r = render(MemoryPage, { global: { stubs: { LiveHeader: true, ResultNote: NoteStub } } })
+  const r = render(MemoryPage, {
+    global: { plugins: [router], stubs: { LiveHeader: true, ResultNote: NoteStub } },
+  })
   await flushPromises()
-  return { ...r, user }
+  return { ...r, user, router }
 }
 const btns = (name: string) => screen.queryAllByRole("button", { name })
 const items = () => screen.getAllByRole("listitem")
@@ -567,10 +575,13 @@ describe("MemoryPage", () => {
     )
   })
 
-  it("puts a space between the note name and the inbox chip", async () => {
+  it("shows the note name and the inbox chip as two items of one flex box", async () => {
     await mk()
     const row = screen.getAllByRole("row").find((r) => r.textContent!.includes("inbox-memory"))!
-    expect(fold(within(row).getAllByRole("cell")[0]!.textContent)).toBe("inbox-memory inbox")
+    const name = within(row).getByText("inbox-memory")
+    expect(name.getAttribute("title")).toBe("inbox-memory")
+    expect(name.parentElement!.classList.contains("flex")).toBe(true)
+    expect(within(name.parentElement!).getByText("inbox")).toBeTruthy()
   })
 
   it("uses no legacy class", async () => {
@@ -580,5 +591,23 @@ describe("MemoryPage", () => {
         ".page-h, .search, .li, .card-h, .card-b, .card-f, .grid-2, .meter, .warn-banner, .chip, .btn, .section-h, .note-text, .c-bad",
       ),
     ).toBeNull()
+  })
+  it("opens the page of the route in the topic notes", async () => {
+    const topics = Array.from({ length: 25 }, (_, i) => ({
+      name: "topic-" + i,
+      type: "memory",
+      modified: "2026-11-18T10:00:00Z",
+      entries: 1,
+    }))
+    vi.mocked(api).mockImplementation(
+      async (m: string, p: string) =>
+        (m === "GET" && p === "/api/memory" ? { ...view, topics } : view) as any,
+    )
+    await mk("/memory?page=2")
+    const nav = within(screen.getByRole("navigation", { name: "Topic notes pages" }))
+    expect(nav.getByRole("button", { name: "Page 2" }).getAttribute("aria-current")).toBe("page")
+    expect(screen.getByText("21–25 of 25")).toBeTruthy()
+    expect(screen.getByText("topic-24")).toBeTruthy()
+    expect(screen.queryByText("topic-0")).toBeNull()
   })
 })

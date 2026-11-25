@@ -18,6 +18,7 @@ import type { CronUsageView, DailyView, UsageModelRow, UsageView } from "../api/
 import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
 import StateBlock from "../components/StateBlock.vue"
+import type { Column } from "../lib/table"
 import { friendlyError } from "../lib/errors"
 import { useLiveData } from "../lib/live"
 import { dayLabel } from "../lib/time"
@@ -97,16 +98,16 @@ const hit = computed(() =>
   totalIn.value > 0 ? `${Math.round((totalCached.value / totalIn.value) * 100)}%` : "—",
 )
 
-const columns = [
-  { key: "model", label: "Model" },
-  { key: "provider", label: "Provider" },
-  { key: "calls", label: "Calls", align: "right" as const },
-  { key: "in", label: "In", align: "right" as const },
-  { key: "cached", label: "Cached", align: "right" as const },
-  { key: "hit", label: "Hit", align: "right" as const },
-  { key: "out", label: "Out", align: "right" as const },
-  { key: "tok", label: "Tok/s", align: "right" as const },
-  { key: "cost", label: "Cost", align: "right" as const },
+const columns: Column[] = [
+  { key: "model", label: "Model", type: "text" },
+  { key: "provider", label: "Provider", type: "text" },
+  { key: "calls", label: "Calls", type: "num" },
+  { key: "in", label: "In", type: "num" },
+  { key: "cached", label: "Cached", type: "num", optional: true },
+  { key: "hit", label: "Hit", type: "num", optional: true },
+  { key: "out", label: "Out", type: "num" },
+  { key: "tok", label: "Tok/s", type: "num", optional: true },
+  { key: "cost", label: "Cost", type: "num" },
 ]
 const tableRows = computed(() =>
   rows.value.map((r) => ({
@@ -123,14 +124,13 @@ const tableRows = computed(() =>
   })),
 )
 
-const cronColumns = [
-  { key: "name", label: "Job" },
-  { key: "cost", label: "Cost", align: "right" as const },
-  { key: "flagged", label: "Flagged", align: "right" as const },
+const cronColumns: Column[] = [
+  { key: "name", label: "Job", type: "text" },
+  { key: "cost", label: "Cost", type: "num" },
+  { key: "flagged", label: "Flagged", type: "num" },
 ]
-const cronRows = computed(() => {
-  const jobs = cron.value.jobs
-  const out: Record<string, unknown>[] = jobs.map((j) => {
+const cronRows = computed(() =>
+  cron.value.jobs.map((j) => {
     const n = cron.value.flagged.filter((f) => f.job_id === j.job_id).length
     return {
       job_id: j.job_id,
@@ -139,16 +139,17 @@ const cronRows = computed(() => {
       cost: usd(j.usd) + (j.unpriced ? "+" : ""),
       flagged: n > 0 ? `💸 ${n}` : "—",
     }
-  })
+  }),
+)
+// The total of the cron table. It shows in the footer of each page and is not a job row.
+const cronTotal = computed(() => {
+  const jobs = cron.value.jobs
   const m = cron.value.flagged.length
-  out.push({
-    job_id: "total",
+  return {
     name: `Total · ${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}`,
     cost: usd(jobs.reduce((a, j) => a + j.usd, 0)) + (jobs.some((j) => j.unpriced) ? "+" : ""),
     flagged: m > 0 ? `💸 ${m}` : "—",
-    total: true,
-  })
-  return out
+  }
 })
 
 const table = ref(false)
@@ -545,7 +546,13 @@ const legend = computed(() => {
         </div>
       </Card>
 
-      <DataTable :columns="columns" :rows="tableRows" row-key="key">
+      <DataTable
+        :columns="columns"
+        :rows="tableRows"
+        row-key="key"
+        page-key="usage-models"
+        page-label="Usage by model"
+      >
         <template #cell-model="{ value }"
           ><span class="font-mono">{{ value }}</span></template
         >
@@ -554,13 +561,27 @@ const legend = computed(() => {
       <template v-if="range !== 'session'">
         <section aria-labelledby="usage-cron" class="flex flex-col gap-2">
           <h2 id="usage-cron" class="text-lg font-semibold">Cron cost by job</h2>
-          <DataTable :columns="cronColumns" :rows="cronRows" row-key="job_id">
+          <DataTable
+            :columns="cronColumns"
+            :rows="cronRows"
+            row-key="job_id"
+            page-key="usage-cron"
+            page-label="Cron cost by job"
+          >
             <template #cell-name="{ row }">
-              <b v-if="row.total">{{ row.name }}</b>
-              <span v-else-if="row.deleted" class="text-muted-foreground">Deleted job</span>
+              <span v-if="row.deleted" class="text-muted-foreground">Deleted job</span>
               <router-link v-else :to="{ name: 'job', params: { id: String(row.job_id) } }">{{
                 row.name
               }}</router-link>
+            </template>
+            <template v-if="cronRows.length" #footer>
+              <TableRow>
+                <TableCell
+                  ><b>{{ cronTotal.name }}</b></TableCell
+                >
+                <TableCell class="text-right tabular-nums">{{ cronTotal.cost }}</TableCell>
+                <TableCell class="text-right tabular-nums">{{ cronTotal.flagged }}</TableCell>
+              </TableRow>
             </template>
           </DataTable>
         </section>

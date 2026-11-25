@@ -20,6 +20,7 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
 import { cn } from "@/lib/utils"
+import type { Column } from "../lib/table"
 
 const route = useRoute()
 const router = useRouter()
@@ -77,13 +78,13 @@ const pct = computed(() => {
   const r = d.value?.row
   return r && r.max_turns > 0 ? Math.min(100, Math.round((r.turns_used / r.max_turns) * 100)) : 0
 })
-const gateCols = [
-  { key: "command", label: "Command" },
-  { key: "timeout", label: "Timeout" },
-  { key: "retries", label: "Retries" },
-  { key: "exit", label: "Last exit" },
-  { key: "tail", label: "Output tail" },
-  { key: "actions", label: "", align: "right" as const },
+const gateCols: Column[] = [
+  { key: "command", label: "Command", type: "text" },
+  { key: "timeout", label: "Timeout", type: "num" },
+  { key: "retries", label: "Retries", type: "num" },
+  { key: "exit", label: "Last exit", type: "num" },
+  { key: "tail", label: "Output tail", type: "block" },
+  { key: "actions", label: "", type: "act", width: "7rem" },
 ]
 // Returns the output tail of a gate row. The table slot types a row as unknown.
 function tailOf(row: unknown): string {
@@ -416,9 +417,17 @@ watch(
           Clear all
         </Button>
       </div>
-      <DataTable :columns="gateCols" :rows="gateRows" row-key="n">
+      <DataTable
+        :columns="gateCols"
+        :rows="gateRows"
+        row-key="n"
+        page-key="goal-gates"
+        page-label="Gates"
+      >
         <template #cell-command="{ row }"
-          ><code class="font-mono text-sm">{{ row.command }}</code></template
+          ><code class="block truncate font-mono text-sm" :title="String(row.command)">{{
+            row.command
+          }}</code></template
         >
         <template #cell-exit="{ row }">
           <span :class="cn(row.exit !== null && row.exit !== 0 && 'text-destructive')">{{

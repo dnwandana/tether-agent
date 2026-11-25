@@ -36,6 +36,16 @@ vi.mock("../lib/live", async () => {
     },
   }
 })
+// DataTable measures its wrapper with useElementSize. jsdom has no layout, so the test sets the width.
+const box = vi.hoisted(() => ({ width: 2000 }))
+vi.mock("@vueuse/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@vueuse/core")>()
+  const { ref } = await import("vue")
+  return {
+    ...actual,
+    useElementSize: () => ({ width: ref(box.width), height: ref(0), stop: () => {} }),
+  }
+})
 import { api } from "../api/client"
 import { session } from "../stores/session"
 import UsagePage from "./UsagePage.vue"
@@ -137,6 +147,10 @@ const bodyRows = (el: HTMLElement) =>
   within(el)
     .getAllByRole("row")
     .filter((r) => within(r).queryAllByRole("cell").length > 0)
+const modelHeads = () =>
+  within(screen.getAllByRole("table")[0])
+    .getAllByRole("columnheader")
+    .map((c) => c.textContent!.trim())
 const cronRegion = () => screen.getByRole("region", { name: "Cron cost by job" })
 const one = (usd: number) => ({
   range: "30d",
@@ -147,6 +161,7 @@ const one = (usd: number) => ({
 let cb: (e: { contentRect: { width: number } }[]) => void = () => {}
 
 beforeEach(() => {
+  box.width = 2000
   window.matchMedia = ((q: string) => ({
     matches: false,
     media: q,
@@ -498,6 +513,12 @@ describe("UsagePage", () => {
     expect(screen.queryByRole("tooltip")).toBeNull()
   })
 
+  it("shows no cron total when no job ran", async () => {
+    reply(daily, { ...cron, jobs: [], flagged: [] })
+    await mk()
+    expect(screen.queryByText(/Total · 0 jobs/)).toBeNull()
+  })
+
   it("marks an unpriced job cost in the cron table", async () => {
     reply(daily, { ...cron, jobs: [{ ...cron.jobs[0], unpriced: true }] })
     await mk()
@@ -518,5 +539,56 @@ describe("UsagePage", () => {
         ".page-h, .seg, .grid-4, .tile, .eyebrow, .sbars, .sbar, .axis-x, .axis-y, .lg, .usage-tip, .popover, .section-h, .cron-cost, .flagged, .li, .btn, .s1",
       ),
     ).toBeNull()
+  })
+
+  it("shows the cron total in the footer on each page and not in the range", async () => {
+    const jobs = Array.from({ length: 25 }, (_, i) => ({
+      job_id: `j${i + 1}`,
+      job_name: `job-${i + 1}`,
+      usd: 0.1,
+      unpriced: false,
+    }))
+    reply(daily, { ...cron, jobs, flagged: [] })
+    const { user } = await mk()
+    const region = cronRegion()
+    expect(within(region).getByText("1–20 of 25")).toBeTruthy()
+    expect(within(region).getAllByRole("link")).toHaveLength(20)
+    expect(within(region).getByText("Total · 25 jobs")).toBeTruthy()
+    expect(region.textContent).toContain("$2.5000")
+    const nav = within(region).getByRole("navigation", { name: "Cron cost by job pages" })
+    await user.click(within(nav).getByRole("button", { name: "Next Page" }))
+    expect(within(region).getByText("21–25 of 25")).toBeTruthy()
+    expect(within(region).getAllByRole("link")).toHaveLength(5)
+    expect(within(region).getByText("Total · 25 jobs")).toBeTruthy()
+  })
+
+  it("hides Cached, Hit, and Tok/s while the model table is narrow", async () => {
+    box.width = 800
+    await mk()
+    expect(modelHeads()).toEqual(["Model", "Provider", "Calls", "In", "Out", "Cost"])
+  })
+
+  it("shows every model column while the model table fits", async () => {
+    await mk()
+    expect(modelHeads()).toEqual([
+      "Model",
+      "Provider",
+      "Calls",
+      "In",
+      "Cached",
+      "Hit",
+      "Out",
+      "Tok/s",
+      "Cost",
+    ])
+  })
+
+  it("pages the model table with its own stored size", async () => {
+    localStorage.setItem("tether.rows.usage-models", "10")
+    const many = Array.from({ length: 12 }, (_, i) => ({ ...usage.rows[0], model: `m${i + 1}` }))
+    reply(daily, cron, { ...usage, rows: many })
+    await mk()
+    expect(screen.getByRole("navigation", { name: "Usage by model pages" })).toBeTruthy()
+    expect(screen.getByText("1–10 of 12")).toBeTruthy()
   })
 })

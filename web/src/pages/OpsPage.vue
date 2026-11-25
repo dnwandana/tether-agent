@@ -18,6 +18,7 @@ import DataTable from "../components/DataTable.vue"
 import LiveHeader from "../components/LiveHeader.vue"
 import LogViewer from "../components/LogViewer.vue"
 import ResultNote from "../components/ResultNote.vue"
+import type { Column } from "../lib/table"
 import StateBlock from "../components/StateBlock.vue"
 import Tabs from "../components/Tabs.vue"
 import { friendlyError } from "../lib/errors"
@@ -297,11 +298,11 @@ const rows = computed(() =>
     modified: f.modified,
   })),
 )
-const cols = [
-  { key: "name", label: "File" },
-  { key: "size", label: "Size", align: "right" as const },
-  { key: "modified", label: "Date" },
-  { key: "actions", label: "" },
+const cols: Column[] = [
+  { key: "name", label: "File", type: "text" },
+  { key: "size", label: "Size", type: "num" },
+  { key: "modified", label: "Date", type: "date" },
+  { key: "actions", label: "", type: "act", width: "7rem" },
 ]
 
 onBeforeUnmount(() => {
@@ -434,7 +435,17 @@ onBeforeUnmount(() => {
             <span v-if="backingUp" class="text-muted-foreground">Creating the backup…</span>
           </div>
           <ResultNote :note="backupNote" @close="backupNote = null" />
-          <DataTable v-if="rows.length" :columns="cols" :rows="rows" row-key="name">
+          <DataTable
+            v-if="rows.length"
+            :columns="cols"
+            :rows="rows"
+            row-key="name"
+            page-key="backups"
+            page-label="Backups"
+          >
+            <template #cell-name="{ row }"
+              ><span :title="String(row.name)">{{ row.name }}</span></template
+            >
             <template #cell-modified="{ row }"
               ><span class="whitespace-nowrap" :title="fullTime(String(row.modified))">{{
                 shortTime(String(row.modified)) || "—"

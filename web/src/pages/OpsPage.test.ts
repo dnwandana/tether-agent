@@ -429,4 +429,27 @@ describe("OpsPage", () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it("pages the backups with their own stored size and keeps Download at the right", async () => {
+    localStorage.setItem("tether.rows.backups", "10")
+    backups = {
+      dir: "~/.tether/backups",
+      files: Array.from({ length: 12 }, (_, i) => ({
+        name: `tether-backup-${i + 1}.tar.gz`,
+        size: 1048576,
+        modified: local(9, i),
+      })),
+    }
+    const { container, user } = await mk()
+    const nav = screen.getByRole("navigation", { name: "Backups pages" })
+    expect(screen.getByText("1–10 of 12")).toBeTruthy()
+    expect(backupRows()).toHaveLength(10)
+    const cols = [...container.querySelectorAll("colgroup col")] as HTMLElement[]
+    expect(cols[cols.length - 1].style.width).toBe("7rem")
+    const cell = screen.getAllByRole("button", { name: "Download" })[0].closest("td")!
+    expect(cell.classList).toContain("text-right")
+    await user.click(within(nav).getByRole("button", { name: "Next Page" }))
+    expect(screen.getByText("11–12 of 12")).toBeTruthy()
+    expect(backupRows()).toHaveLength(2)
+  })
 })

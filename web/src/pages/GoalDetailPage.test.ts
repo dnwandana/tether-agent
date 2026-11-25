@@ -343,4 +343,21 @@ describe("GoalDetailPage", () => {
     await flushPromises()
     expect(api).not.toHaveBeenCalled()
   })
+  it("lets the output tail wrap, keeps Remove at the right edge, and names the gate pager", async () => {
+    const gates = Array.from({ length: 12 }, (_, i) => ({
+      ...detail.gates[0],
+      command: "make check" + i,
+    }))
+    vi.mocked(api).mockResolvedValue({ ...detail, gates, gate_hashes: gates.map(() => "cccccccc") })
+    await mk()
+    expect(screen.getByRole("navigation", { name: "Gates pages" })).toBeTruthy()
+    expect(screen.getByText("1–12 of 12")).toBeTruthy()
+    const command = screen.getByText("make check0")
+    expect(command.getAttribute("title")).toBe("make check0")
+    const row = command.closest("tr")!
+    const tail = within(row).getByText(/FAIL internal\/gateway/)
+    expect(tail.closest("td")!.classList.contains("whitespace-normal")).toBe(true)
+    const remove = within(row).getByRole("button", { name: "Remove" })
+    expect(remove.closest("td")!.classList.contains("text-right")).toBe(true)
+  })
 })

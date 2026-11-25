@@ -10,6 +10,7 @@ import type { DeviceRow } from "../api/types.gen"
 import { friendlyError } from "../lib/errors"
 import { fullTime, shortTime } from "../lib/time"
 import { confirm, toast } from "../stores/ui"
+import type { Column } from "../lib/table"
 import DataTable from "./DataTable.vue"
 import StateBlock from "./StateBlock.vue"
 
@@ -19,13 +20,13 @@ const state = ref<"loading" | "error" | "ready">("loading")
 const cause = ref("")
 const now = ref(Date.now())
 
-const columns = [
-  { key: "label", label: "Device" },
-  { key: "ip", label: "IP" },
-  { key: "created", label: "Signed in" },
-  { key: "last_seen", label: "Last seen" },
-  { key: "expires", label: "Expires" },
-  { key: "actions", label: "", align: "right" as const },
+const columns: Column[] = [
+  { key: "label", label: "Device", type: "block" },
+  { key: "ip", label: "IP", type: "text" },
+  { key: "created", label: "Signed in", type: "date" },
+  { key: "last_seen", label: "Last seen", type: "badge", width: "7rem" },
+  { key: "expires", label: "Expires", type: "badge", width: "7rem", optional: true },
+  { key: "actions", label: "", type: "act", width: "7rem" },
 ]
 
 const others = computed(() => devices.value.filter((d) => !d.this_device).length)
@@ -125,7 +126,15 @@ onMounted(load)
     </div>
     <StateBlock v-if="state === 'loading'" state="loading" />
     <StateBlock v-else-if="state === 'error'" state="error" :text="cause" @action="load" />
-    <DataTable v-else :columns="columns" :rows="rows" row-key="id" :cards-below="1024">
+    <DataTable
+      v-else
+      :columns="columns"
+      :rows="rows"
+      row-key="id"
+      :cards-below="1024"
+      page-key="devices"
+      page-label="Devices"
+    >
       <template #cell-label="{ row }">
         <MonitorIcon aria-hidden="true" />
         <b class="font-medium">{{ (row as unknown as DeviceRow).label }}</b
@@ -141,7 +150,9 @@ onMounted(load)
         </details>
       </template>
       <template #cell-ip="{ row }"
-        ><span class="font-mono">{{ (row as unknown as DeviceRow).ip }}</span></template
+        ><span class="font-mono" :title="(row as unknown as DeviceRow).ip">{{
+          (row as unknown as DeviceRow).ip
+        }}</span></template
       >
       <template #cell-created="{ row }"
         ><span class="whitespace-nowrap" :title="fullTime((row as unknown as DeviceRow).created)">{{
