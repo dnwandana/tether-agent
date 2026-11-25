@@ -53,7 +53,8 @@ type SkillFinding struct {
 // SkillDetailView is the detail of one skill.
 type SkillDetailView struct {
 	Skill       SkillRow       `json:"skill"`
-	Body        string         `json:"body"` // the full SKILL.md
+	Body        string         `json:"body"`     // the SKILL.md text after the frontmatter, redacted and cut at 256 KiB
+	BodyCut     bool           `json:"body_cut"` // true when the body was cut at 256 KiB
 	Files       []string       `json:"files"`
 	Ref         string         `json:"ref"`
 	InstalledAt string         `json:"installed_at"`
@@ -62,6 +63,7 @@ type SkillDetailView struct {
 	Override    bool           `json:"override"`
 	Findings    []SkillFinding `json:"findings"`
 	Unscanned   []string       `json:"unscanned"`
+	CronJobs    *[]string      `json:"cron_jobs"` // the cron jobs that use the skill, as "<name>" (<id>); nil when unknown
 }
 
 // CatalogRow is one entry of the curated index.
@@ -260,8 +262,17 @@ func (a *SkillsAPI) detail(w http.ResponseWriter, r *http.Request) {
 	}
 	s := loaded[i]
 	v := SkillDetailView{Skill: a.row(s, lock), Files: []string{}, Findings: []SkillFinding{}, Unscanned: []string{}}
-	if body, err := os.ReadFile(s.Path); err == nil {
-		v.Body = skills.Sanitize(string(body))
+	body := skills.Sanitize(s.Body)
+	if a.redact != nil {
+		body = a.redact(body)
+	}
+	v.Body, v.BodyCut = cutText(body, skillFileCutMax)
+	// cron.Store.List closes its own rows, and the handler holds no open rows here.
+	if a.cronUsers != nil {
+		if users, err := a.cronUsers(r.Context()); err == nil {
+			jobs := append([]string{}, users[name]...)
+			v.CronJobs = &jobs
+		}
 	}
 	v.Files = skillFiles(s.Dir)
 	if e, ok := lock.Installed[name]; ok {

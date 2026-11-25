@@ -121,7 +121,9 @@ func TestSkillsInstallListUninstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rec.Code != 200 || d.Skill.Name != "pdf" || !strings.Contains(d.Body, "Read PDF files with care.") ||
-		!slices.Equal(d.Files, []string{"SKILL.md"}) || len(d.Findings) != 0 {
+		strings.HasPrefix(d.Body, "---") || strings.Contains(d.Body, "description:") || d.BodyCut ||
+		!slices.Equal(d.Files, []string{"SKILL.md"}) || len(d.Findings) != 0 ||
+		d.CronJobs == nil || !slices.Equal(*d.CronJobs, []string{`"morning-brief" (a1b2)`}) {
 		t.Fatalf("%d %+v", rec.Code, d)
 	}
 	if rec := skillsDo(t, mux, "GET", "/api/skills/nope", ""); rec.Code != 404 ||
@@ -419,5 +421,63 @@ func TestSkillFindingPattern(t *testing.T) {
 		if f.Pattern == "" {
 			t.Fatalf("a finding with no pattern: %+v", f)
 		}
+	}
+}
+
+// The detail sends the SKILL.md text after the frontmatter, redacted and then cut, and the cron
+// jobs that use the skill. No job gives [], and an unknown answer gives null.
+func TestSkillDetailBodyAndCronJobs(t *testing.T) {
+	a, mux, data := skillsNew(t, &skillsAsker{}, "", nil)
+	skillsWrite(t, filepath.Join(data, "skills", "pdf"), "SKILL.md",
+		[]byte("---\nname: pdf\ndescription: Read PDF files.\n---\n# PDF\nUse the key sk-live-123 here.\n"))
+	skillsWrite(t, filepath.Join(data, "skills", "big"), "SKILL.md",
+		[]byte("---\nname: big\ndescription: Big.\n---\n"+strings.Repeat("y", 300<<10)))
+	get := func(name string) (string, SkillDetailView) {
+		t.Helper()
+		rec := skillsDo(t, mux, "GET", "/api/skills/"+name, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", name, rec.Code, rec.Body)
+		}
+		var d SkillDetailView
+		if err := json.Unmarshal(rec.Body.Bytes(), &d); err != nil {
+			t.Fatal(err)
+		}
+		return rec.Body.String(), d
+	}
+
+	// With no cron users function, the jobs are unknown.
+	raw, d := get("pdf")
+	if !strings.Contains(raw, `"cron_jobs":null`) {
+		t.Fatalf("no users function must give null: %s", raw)
+	}
+	if !strings.HasPrefix(d.Body, "# PDF") || strings.Contains(d.Body, "name: pdf") ||
+		strings.Contains(d.Body, "sk-live-123") || !strings.Contains(d.Body, "Use the key *** here.") || d.BodyCut {
+		t.Fatalf("%q cut=%v", d.Body, d.BodyCut)
+	}
+
+	calls := 0
+	a.cronUsers = func(context.Context) (map[string][]string, error) {
+		calls++
+		return map[string][]string{"big": {`"nightly" (j_12)`}}, nil
+	}
+	if raw, _ := get("pdf"); !strings.Contains(raw, `"cron_jobs":[]`) {
+		t.Fatalf("a skill that no job uses must give []: %s", raw)
+	}
+	_, d = get("big")
+	if d.CronJobs == nil || !slices.Equal(*d.CronJobs, []string{`"nightly" (j_12)`}) {
+		t.Fatalf("%v", d.CronJobs)
+	}
+	if !d.BodyCut || len(d.Body) != 256<<10 {
+		t.Fatalf("cut=%v len=%d", d.BodyCut, len(d.Body))
+	}
+
+	calls = 0
+	if rec := skillsDo(t, mux, "GET", "/api/skills/nope", ""); rec.Code != http.StatusNotFound || calls != 0 {
+		t.Fatalf("an unknown name must run no query: %d calls=%d", rec.Code, calls)
+	}
+
+	a.cronUsers = func(context.Context) (map[string][]string, error) { return nil, errors.New("db closed") }
+	if raw, _ := get("pdf"); !strings.Contains(raw, `"cron_jobs":null`) {
+		t.Fatalf("an error must give null: %s", raw)
 	}
 }

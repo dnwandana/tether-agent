@@ -781,6 +781,7 @@ export interface SignInState {
 export interface SkillDetailView {
   skill: SkillRow;
   body: string;
+  body_cut: boolean;
   files: string[];
   ref: string;
   installed_at: string;
@@ -789,6 +790,7 @@ export interface SkillDetailView {
   override: boolean;
   findings: SkillFinding[];
   unscanned: string[];
+  cron_jobs: string[] | null;
 }
 
 export interface SkillFileView {
