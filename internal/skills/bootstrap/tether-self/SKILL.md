@@ -14,7 +14,8 @@ process runs the CLI. Both processes share `~/.tether/state.db`.
 - `~/.tether/.env` holds the secrets. Its mode must be 0600.
 - `~/.tether/skills/` holds the skills. The agent reads them again at each session start.
 - `~/.tether/scripts/` holds the scripts for cron jobs and for API calls.
-- `~/.tether/memory/` holds `memory.md`, `user_profile.md`, and the memory notes in `notes/`.
+- `~/.tether/memory/` holds `rules.md`, `memory.md`, `user_profile.md`, and
+  the memory notes in `notes/`.
 
 ## Tools by toolset
 
@@ -44,7 +45,8 @@ or a child can only make its set smaller. You do not see a tool that is not in y
 - `providers.primary` and `providers.fallback`: `format`, `base_url`, `api_key`, and `model`.
 - `agent.max_turns`: 90 tool rounds in one turn. After the last round, you write a summary of the work. A tool call in that answer does not run.
 - `context.compact_threshold`: 0.50. `context.compact_at_tokens`: 200000. `context.tool_output_max_chars`: 50000.
-- `memory.memory_char_limit`: 2200. `memory.user_char_limit`: 1375.
+- `memory.memory_char_limit`: 2200. `memory.user_char_limit`: 1375. `memory.rules_char_limit`: 1000.
+- `skills.curator.enabled`: true. A skill that nobody reads or changes for `skills.curator.archive_after_days` (30) days moves to `skills/.archive/`. `/skills restore <name>` puts it back.
 - `skills.external_dirs`: read-only skill folders. `skills.guard`: true.
 - `terminal.default_timeout_s`: 120. `terminal.env_passthrough`: env names that commands see.
 - `delegation.max_concurrent_children`: 5. `delegation.child_timeout_s`: 600.

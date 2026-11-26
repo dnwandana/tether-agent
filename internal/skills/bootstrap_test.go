@@ -104,7 +104,7 @@ func TestAllThreeBootstrapSkills(t *testing.T) {
 func TestTetherSkillsTeachesScriptPattern(t *testing.T) {
 	b, _ := bootstrapFS.ReadFile("bootstrap/tether-skills/SKILL.md")
 	s := string(b)
-	for _, must := range []string{"name: tether-skills", "description:", "Use when", "references/", "~/.tether/scripts/", "required_environment_variables", "one lesson per rule"} {
+	for _, must := range []string{"name: tether-skills", "description:", "Use when", "references/", "~/.tether/scripts/", "required_environment_variables", "one rule for each lesson"} {
 		if !strings.Contains(s, must) {
 			t.Fatal(must)
 		}
@@ -170,6 +170,47 @@ func TestBootstrapSkillsPassOwnGuardAnyway(t *testing.T) {
 				t.Errorf("%s: keep the examples clean: %s", name, FormatFindings(r))
 				break
 			}
+		}
+	}
+}
+
+func TestTetherSkillsFourSections(t *testing.T) {
+	b, _ := bootstrapFS.ReadFile("bootstrap/tether-skills/SKILL.md")
+	s := string(b)
+	order := []string{"`## When to Use`", "`## Procedure`", "`## Pitfalls`", "`## Verification`"}
+	last := -1
+	for _, h := range order {
+		i := strings.Index(s, h)
+		if i < 0 || i < last {
+			t.Fatalf("missing or out of order: %s", h)
+		}
+		last = i
+	}
+	if !strings.Contains(s, "Keep SKILL.md short. Put long material in references/.") {
+		t.Fatal("the short-body rule is gone")
+	}
+}
+
+func TestTetherMemoryRuleTarget(t *testing.T) {
+	b, _ := bootstrapFS.ReadFile("bootstrap/tether-memory/SKILL.md")
+	s := string(b)
+	for _, must := range []string{"rules.md (target `rule`)", "1,000", "`quote`", "`until`",
+		"`move`", "Give a snapshot an `until` date.", "Read the similar entries in the result of an add.",
+		"When a fact changes, use `replace`.", "Held for the owner"} {
+		if !strings.Contains(s, must) {
+			t.Error("missing", must)
+		}
+	}
+}
+
+func TestTetherSelfNamesRulesAndCurator(t *testing.T) {
+	b, err := bootstrapFS.ReadFile("bootstrap/tether-self/SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"memory.rules_char_limit", "skills.curator.enabled", "/skills restore"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("tether-self does not name %q", want)
 		}
 	}
 }

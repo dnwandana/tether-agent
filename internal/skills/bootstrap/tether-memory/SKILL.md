@@ -1,12 +1,23 @@
 ---
 name: tether-memory
-description: Where to keep what you learn in Tether Agent, in memory.md, user_profile.md, or a skill, and the size limits. Use when you save a fact, when a fact does not fit in a memory file, or when you are not sure where a fact goes.
+description: Where to keep what you learn in Tether Agent, in rules.md, memory.md, user_profile.md, or a skill, and the size limits. Use when you save a fact or a rule of your user, when a fact does not fit in a memory file, or when you are not sure where a fact goes.
 ---
 
 # Memory and skills
 
-Tether Agent has three places for what you learn. Use the `memory` tool for the two memory
+Tether Agent has four places for what you learn. Use the `memory` tool for the three memory
 files. Use `skill_manage` for skills.
+
+## rules.md (target `rule`)
+
+- It holds the standing rules of your user. The `## OWNER RULES` section of the system prompt
+  shows them first.
+- When your user states a standing rule ("always", "never", "from now on", "do not ... unless"),
+  save it with target `rule`. Put the exact words of your user in `quote`. A rule write with
+  no quote from this session is refused.
+- The limit is 1,000 characters. A full rules.md refuses a new rule. It does not go to a note.
+  Ask your user which rule to remove.
+- Do not give a `topic` to a rule.
 
 ## memory.md (target `memory`)
 
@@ -34,8 +45,20 @@ files. Use `skill_manage` for skills.
 - Do not save a fact that is true for this task only.
 - Do not save secrets, tokens, or passwords.
 - When a fact changes, use `replace`. Do not add a second entry.
-- An `add` never fails because of the limit. When a fact does not fit in memory.md or
-  user_profile.md, the entry goes to a memory note: `inbox-memory` or `inbox-user`.
+- An `add` to memory.md or user_profile.md never fails because of the limit. When the fact
+  does not fit, the entry goes to a memory note: `inbox-memory` or `inbox-user`.
+- Give a snapshot an `until` date. A snapshot is true only for a time, for example a version or
+  a plan for this week. Use the field `until` with a date `YYYY-MM-DD`, at most 366 days ahead.
+  The entry stops loading after that date.
+- Read the similar entries in the result of an add. When an old entry is no longer true,
+  replace it or remove it.
+- When you save what your user said, put the exact words in `quote`. A write to the user
+  profile from a review needs it.
+- Use the action `move` to move one entry between a memory file and a note. Set `to` to
+  `note` or `file`.
+- A write after outside content (a web page, a browser page, an MCP tool, or a subagent result)
+  waits for your user. The result starts with "Held for the owner:". Do not try again, and do
+  not write the text to a file.
 - Give a `topic` to put related facts in one note. For example, use the topic `rpc` for
   the facts about RPC providers.
 - A note has a limit of 1 MiB. When a note is full, an `add` puts the entry in the next
@@ -51,8 +74,8 @@ files. Use `skill_manage` for skills.
 
 ## When the agent reads them
 
-- The agent reads memory.md and user_profile.md into the system prompt at the start of a
-  session.
+- The agent reads rules.md, memory.md, and user_profile.md into the system prompt at the start
+  of a session. An entry whose `until` date is past does not load.
 - A note does not load into the system prompt. Only its topic shows in `## MEMORY TOPICS`.
 - An edit goes to disk at once. A `search` and a `read` show the edit at once.
 - The system prompt shows the edit from the next session, or after compaction.

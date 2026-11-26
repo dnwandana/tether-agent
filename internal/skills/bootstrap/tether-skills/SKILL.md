@@ -32,11 +32,15 @@ A skill is a procedure that you can use again. It is a folder under
 
 ## Body
 
-- Write the steps as a numbered list.
-- Write one lesson per rule. Do not join two lessons in one sentence.
-- Give the exact command, path, or setting. Do not give general advice.
-- When a step failed in the past, add the error text and the fix.
-- Keep `SKILL.md` short. Put long material in `references/`.
+Use these sections in this order:
+
+- `## When to Use`: the requests and the signs that call for the skill.
+- `## Procedure`: numbered steps with the exact command, path, or setting.
+- `## Pitfalls`: one rule for each lesson, with one clause of why. When a step failed in the
+  past, add the error text and the fix.
+- `## Verification`: how to check that the work is done.
+
+Keep SKILL.md short. Put long material in references/.
 
 ## Folders
 
