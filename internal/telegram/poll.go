@@ -339,6 +339,8 @@ func builtinCommands() []BotCommand {
 		{Command: "secrets", Description: "See and save the bound secrets"},
 		{Command: "jobs", Description: "See and control the cron jobs"},
 		{Command: "brief", Description: "See what needs you"},
+		{Command: "memory", Description: "See and change the memory"},
+		{Command: "skills", Description: "See stale and archived skills"},
 		{Command: "sethome", Description: "Send cron results here"},
 		{Command: "reload_mcp", Description: "Reload the MCP servers"},
 		{Command: "restart", Description: "Restart the gateway"},

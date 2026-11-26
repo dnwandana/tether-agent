@@ -49,7 +49,7 @@ func TestBotCommandsSkills(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
 	}
-	if !reflect.DeepEqual(got[:27], BotCommands(nil, 0)) {
+	if !reflect.DeepEqual(got[:29], BotCommands(nil, 0)) {
 		t.Fatal("the built-ins must come first, in the same order")
 	}
 }
@@ -60,10 +60,10 @@ func TestBotCommandsCap(t *testing.T) {
 		cmds = append(cmds, skillCmd(fmt.Sprintf("s%02d", i), "x"))
 	}
 	got := BotCommands(cmds, 0)
-	if len(got) != menuMax || got[len(got)-1].Command != "s32" {
+	if len(got) != menuMax || got[len(got)-1].Command != "s30" {
 		t.Fatalf("%d entries, last %+v", len(got), got[len(got)-1])
 	}
-	if _, hidden := botMenu(cmds, 0); hidden != 17 {
+	if _, hidden := botMenu(cmds, 0); hidden != 19 {
 		t.Fatal(hidden)
 	}
 }
@@ -97,7 +97,7 @@ func TestRegisterCommandsFallsBackToBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []int{28, 27}; !reflect.DeepEqual(*sizes, want) {
+	if want := []int{30, 29}; !reflect.DeepEqual(*sizes, want) {
 		t.Fatal(*sizes)
 	}
 	// With no skill entries, a failed call is not sent again.
@@ -154,17 +154,17 @@ func TestBotCommandsMax(t *testing.T) {
 	for i := range 50 {
 		cmds = append(cmds, skillCmd(fmt.Sprintf("s%02d", i), "x"))
 	}
-	// 27 built-in commands and 3 skill commands.
-	if got := BotCommands(cmds, 30); len(got) != 30 || got[29].Command != "s02" {
+	// 29 built-in commands and 1 skill command.
+	if got := BotCommands(cmds, 30); len(got) != 30 || got[29].Command != "s00" {
 		t.Fatalf("%d entries, last %+v", len(got), got[len(got)-1])
 	}
-	if _, hidden := botMenu(cmds, 30); hidden != 47 {
+	if _, hidden := botMenu(cmds, 30); hidden != 49 {
 		t.Fatal(hidden)
 	}
 	if got := BotCommands(cmds, 0); len(got) != menuMax {
 		t.Fatalf("zero max: %d entries", len(got))
 	}
-	if got := BotCommands(cmds, 100); len(got) != 77 {
+	if got := BotCommands(cmds, 100); len(got) != 79 {
 		t.Fatalf("max 100: %d entries", len(got))
 	}
 }

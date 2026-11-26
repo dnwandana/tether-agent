@@ -31,6 +31,8 @@ type fakeBot struct {
 	calls  []apiCall
 	nextID int
 	reply  func(method string, body map[string]any) *APIError
+	// result, when set, gives the result of a call. A nil return keeps the default result.
+	result func(method string, body map[string]any) any
 	srv    *httptest.Server
 	files  map[string]fakeFile // by file_id
 }
@@ -102,6 +104,11 @@ func (b *fakeBot) serve(w http.ResponseWriter, r *http.Request) {
 		apiErr = b.reply(method, body)
 	}
 	var result any = true
+	if apiErr == nil && b.result != nil {
+		if v := b.result(method, body); v != nil {
+			result = v
+		}
+	}
 	if apiErr == nil {
 		switch method {
 		case "sendMessage", "sendPhoto", "sendDocument", "sendAudio", "sendVoice", "sendVideo":
@@ -141,6 +148,13 @@ func (b *fakeBot) client() *Client {
 func (b *fakeBot) setReply(f func(method string, body map[string]any) *APIError) {
 	b.mu.Lock()
 	b.reply = f
+	b.mu.Unlock()
+}
+
+// setResult sets the hook that gives the result of a call.
+func (b *fakeBot) setResult(f func(method string, body map[string]any) any) {
+	b.mu.Lock()
+	b.result = f
 	b.mu.Unlock()
 }
 

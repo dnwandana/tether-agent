@@ -134,6 +134,13 @@ type Channel struct {
 	// level.
 	richFailed atomic.Bool
 
+	// gw is the gateway that Run got. RefreshCommands reads it. Nil before Run.
+	gw *gateway.Gateway
+
+	// memberMu guards memberSeen, the result of ChatHasMember for each chat.
+	memberMu   sync.Mutex
+	memberSeen map[int64]memberCheck
+
 	// inflight counts the inbound messages that the channel received and did not submit to
 	// the gateway yet: an update that waits in the queue of its chat or that its handler
 	// prepares, for example a voice note in speech to text, and an album part that waits for
@@ -172,6 +179,7 @@ func (ch *Channel) Run(ctx context.Context, gw *gateway.Gateway) error {
 		ch.Held = &HeldOriginals{}
 	}
 	ch.albums.Wait = ch.albumWait()
+	ch.gw = gw
 	p := ch.poller()
 	go ch.registerMenu(ctx, p, gw)
 	ch.logger().Info("telegram channel started", "bot", ch.Bot.Username)
@@ -196,6 +204,15 @@ func secondsFloat(f float64) time.Duration {
 // it in a goroutine, because the skill load reads the skill folders and must not delay the
 // first poll.
 func (ch *Channel) registerMenu(ctx context.Context, p *Poller, gw *gateway.Gateway) {
+	// A stop of the gateway cancels ctx while the call runs. That error is not a fault.
+	if err := ch.setMenu(ctx, p, gw); err != nil && ctx.Err() == nil {
+		ch.logger().Warn("telegram: cannot register the bot commands", "err", err.Error())
+	}
+}
+
+// setMenu sets the bot menu with the built-in commands and the skill commands of gw. gw can
+// be nil. It returns the error of Poller.RegisterCommands.
+func (ch *Channel) setMenu(ctx context.Context, p *Poller, gw *gateway.Gateway) error {
 	var cmds []gateway.SkillCommand
 	if gw != nil && gw.Deps != nil {
 		cmds = gw.Deps.SkillCommandsFor("telegram")
@@ -203,10 +220,124 @@ func (ch *Channel) registerMenu(ctx context.Context, p *Poller, gw *gateway.Gate
 	if ch.Secrets != nil {
 		ch.Secrets.setSkillCommands(cmds)
 	}
-	// A stop of the gateway cancels ctx while the call runs. That error is not a fault.
-	if err := p.RegisterCommands(ctx, cmds); err != nil && ctx.Err() == nil {
-		ch.logger().Warn("telegram: cannot register the bot commands", "err", err.Error())
+	return p.RegisterCommands(ctx, cmds)
+}
+
+// RefreshCommands sets the bot menu again, for example after a skill change. Before Run, the
+// menu gets the built-in commands only.
+func (ch *Channel) RefreshCommands(ctx context.Context) error {
+	return ch.setMenu(ctx, ch.poller(), ch.gw)
+}
+
+// errNoOwnerChat is the error of a card send when no owner chat exists.
+var errNoOwnerChat = errors.New("telegram: no owner chat for the card; set a home channel or allowed_users")
+
+// SendOwnerReply sends r with its buttons to the home chat of the owner. The send has no
+// turn, so it uses the default send class.
+func (ch *Channel) SendOwnerReply(ctx context.Context, r gateway.Reply) error {
+	chatID, ok := ch.HomeOwnerChat(ctx)
+	if !ok {
+		return errNoOwnerChat
 	}
+	kb := cmdKeyboard(strconv.FormatInt(chatID, 10), r.Buttons)
+	_, err := ch.sendText(ctx, chatID, "", r.Text, sendOpts{keyboard: kb})
+	return err
+}
+
+// SendPrivateReply sends r with its buttons to the private chat of the owner. userID is the
+// user of the turn, or "". The send answers the owner, so it uses the reply class.
+func (ch *Channel) SendPrivateReply(ctx context.Context, userID string, r gateway.Reply) error {
+	chatID, ok := ch.OwnerChat(ctx, userID)
+	if !ok {
+		return errNoOwnerChat
+	}
+	// The buttons belong to the user of the private chat that gets the card. In a private chat
+	// the user id is the chat id. When userID is not an owner, the card goes to the home owner
+	// chat, and the owner of that chat must be able to press the buttons.
+	user := strconv.FormatInt(chatID, 10)
+	_, err := ch.sendText(ctx, chatID, "", r.Text, sendOpts{keyboard: cmdKeyboard(user, r.Buttons), class: paceReply})
+	return err
+}
+
+// memberCheckTTL is the time that ChatHasMember keeps the result of a chat.
+const memberCheckTTL = 10 * time.Minute
+
+// memberCheck is the kept result of ChatHasMember for one chat.
+type memberCheck struct {
+	at  time.Time
+	has bool
+}
+
+// ChatHasMember reports whether a chat has a user who is not an owner. The count of the
+// users of the chat is used, because a text in the chat reaches each user. An API error gives
+// true, because the safe place for a card is the private chat.
+func (ch *Channel) ChatHasMember(ctx context.Context, chatID int64) bool {
+	if chatID > 0 {
+		return false
+	}
+	allowed, group := trimmed(ch.Cfg.AllowedUsers), trimmed(ch.Cfg.GroupAllowedUsers)
+	if ch.Cfg.AllowAllUsers || slices.Contains(allowed, "*") || slices.Contains(group, "*") {
+		return false
+	}
+	ch.memberMu.Lock()
+	seen, ok := ch.memberSeen[chatID]
+	ch.memberMu.Unlock()
+	if ok && time.Since(seen.at) < memberCheckTTL {
+		return seen.has
+	}
+	has := ch.countMember(ctx, chatID, allowed, group)
+	ch.memberMu.Lock()
+	if ch.memberSeen == nil {
+		ch.memberSeen = map[int64]memberCheck{}
+	}
+	ch.memberSeen[chatID] = memberCheck{at: time.Now(), has: has}
+	ch.memberMu.Unlock()
+	return has
+}
+
+// countMember asks the Bot API for the users of a chat and the owners among them.
+func (ch *Channel) countMember(ctx context.Context, chatID int64, allowed, group []string) bool {
+	var n int
+	if err := ch.C.Call(ctx, "getChatMemberCount", map[string]any{"chat_id": chatID}, &n); err != nil {
+		ch.logger().Debug("telegram: cannot count the chat members", "chat", chatID, "err", err.Error())
+		return true
+	}
+	var owners []int64
+	add := func(id int64) {
+		if id > 0 && !slices.Contains(owners, id) {
+			owners = append(owners, id)
+		}
+	}
+	for _, s := range slices.Concat(allowed, group) {
+		if id, err := strconv.ParseInt(s, 10, 64); err == nil {
+			add(id)
+		}
+	}
+	for _, id := range ch.pairedUserIDs(ctx) {
+		add(id)
+	}
+	inChat := 0
+	for _, id := range owners {
+		var m struct {
+			Status   string `json:"status"`
+			IsMember bool   `json:"is_member"`
+		}
+		err := ch.C.Call(ctx, "getChatMember", map[string]any{"chat_id": chatID, "user_id": id}, &m)
+		if err != nil {
+			ch.logger().Debug("telegram: cannot read a chat member", "chat", chatID, "err", err.Error())
+			return true
+		}
+		switch m.Status {
+		case "creator", "administrator", "member":
+			inChat++
+		case "restricted":
+			if m.IsMember {
+				inChat++
+			}
+		}
+	}
+	// n - 1 leaves out the bot.
+	return n-1 > inChat
 }
 
 // SetTurnContext sets the context of the update handlers and the turns. Then the context
@@ -1474,6 +1605,7 @@ func (r *tgRenderer) Ack(text string) {
 // message of the pressed button, when there is one. Rich goes as a rich message, and Text is
 // the fallback when Telegram refuses it.
 func (r *tgRenderer) AckReply(rep gateway.Reply) {
+	rep.Text, rep.Rich = r.maskOut(rep.Text), r.maskOut(rep.Rich)
 	kb := cmdKeyboard(r.userID, rep.Buttons)
 	if rep.Edit && r.editMsgID > 0 && r.editReply(rep, kb) {
 		return
@@ -1501,6 +1633,7 @@ func (r *tgRenderer) AckReply(rep gateway.Reply) {
 // reply with Rich or Edit set, or with no text, goes through AckReply and has no handle. A
 // failed send has no handle.
 func (r *tgRenderer) AckReplyHandle(rep gateway.Reply) gateway.AckHandle {
+	rep.Text = r.maskOut(rep.Text)
 	if rep.Rich != "" || rep.Edit || strings.TrimSpace(rep.Text) == "" {
 		r.AckReply(rep)
 		return nil
