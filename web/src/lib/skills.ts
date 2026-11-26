@@ -1,4 +1,5 @@
 import type { SkillRow } from "../api/types.gen"
+import { shortTime } from "./time"
 
 export type Tone = "ok" | "warn" | "bad" | "info" | "plain"
 
@@ -20,5 +21,11 @@ export function chips(r: SkillRow): { text: string; tone: Tone }[] {
   if (r.check.includes("modified locally")) out.push({ text: "modified locally", tone: "warn" })
   if (r.check.includes("cannot check")) out.push({ text: "cannot check", tone: "plain" })
   if (r.check.includes("source changed")) out.push({ text: "source changed", tone: "warn" })
+  if (r.kept) out.push({ text: "kept", tone: "plain" })
   return out
+}
+
+// Returns the last read line of a skill.
+export function lastReadText(at: string | null): string {
+  return at === null ? "Never read" : `Read ${shortTime(at)}`
 }

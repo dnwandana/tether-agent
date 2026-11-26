@@ -32,7 +32,7 @@ import { useLiveData } from "../lib/live"
 import { fullTime, shortTime } from "../lib/time"
 import { confirm, toast } from "../stores/ui"
 
-type Target = "memory" | "user"
+type Target = "rule" | "memory" | "user"
 
 const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
@@ -48,7 +48,7 @@ const topicName = ref("")
 const topicText = ref("")
 const topicType = ref("memory")
 const note = ref<ResultNoteData | null>(null)
-const undo = ref<{ target: Target; text: string } | null>(null)
+const undo = ref<{ target: Target; editId: number } | null>(null)
 const saving = ref(false)
 const searching = ref(false)
 const pulsing = ref("")
@@ -58,6 +58,7 @@ const original = ref("")
 let timer: ReturnType<typeof setTimeout> | undefined
 
 const files: { target: Target; title: string }[] = [
+  { target: "rule", title: "Owner rules · rules.md" },
   { target: "memory", title: "Agent memory · memory.md" },
   { target: "user", title: "User profile · user_profile.md" },
 ]
@@ -70,14 +71,23 @@ const topicColumns: Column[] = [
 ]
 const t = (x: unknown) => x as TopicRow
 
+// One row for each target, so a new target cannot fall into the wrong branch.
+const FILE_NAMES: Record<Target, string> = {
+  rule: "rules.md",
+  memory: "memory.md",
+  user: "user_profile.md",
+}
+const USED_KEYS = { rule: "rule_used", memory: "memory_used", user: "user_used" } as const
+const LIMIT_KEYS = { rule: "rule_limit", memory: "memory_limit", user: "user_limit" } as const
+
 function entriesOf(target: Target): MemoryEntry[] {
   return view.value ? view.value[target] : []
 }
 function used(target: Target): number {
-  return view.value ? (target === "memory" ? view.value.memory_used : view.value.user_used) : 0
+  return view.value ? view.value[USED_KEYS[target]] : 0
 }
 function limit(target: Target): number {
-  return view.value ? (target === "memory" ? view.value.memory_limit : view.value.user_limit) : 0
+  return view.value ? view.value[LIMIT_KEYS[target]] : 0
 }
 function pct(target: Target): number {
   const l = limit(target)
@@ -156,6 +166,7 @@ function cancel(): void {
   fieldError.value = ""
 }
 let lastOk = false
+let lastEditId = 0
 
 // Posts one memory tool call with all the keys. An edit or a remove names the entry by its id.
 async function save(
@@ -168,6 +179,7 @@ async function save(
   fieldError.value = ""
   undo.value = null
   lastOk = false
+  lastEditId = 0
   saving.value = true
   let reply: MemoryView
   try {
@@ -187,6 +199,7 @@ async function save(
     saving.value = false
   }
   lastOk = true
+  lastEditId = reply?.edit_ids?.[0] ?? 0
   const inbox = INBOX.exec(reply?.result ?? "")
   if (inbox) {
     note.value = {
@@ -207,7 +220,7 @@ async function save(
 }
 
 async function remove(target: Target, e: MemoryEntry): Promise<void> {
-  const file = target === "memory" ? "memory.md" : "user_profile.md"
+  const file = FILE_NAMES[target]
   const ok = await confirm({
     title: `Remove the entry from ${file}?`,
     body: "New sessions do not get this entry.",
@@ -217,27 +230,21 @@ async function remove(target: Target, e: MemoryEntry): Promise<void> {
   })
   if (!ok) return
   await save(target, "remove", "", e.blocked ? e.id : e.text, e.id)
-  if (lastOk && !masked(e)) undo.value = { target, text: e.text }
+  if (lastOk && lastEditId > 0 && !e.blocked) undo.value = { target, editId: lastEditId }
 }
 
-// Puts a removed entry back. The mask never reaches here, because a masked entry has no Undo.
+// Puts a removed entry back through the server, so the entry keeps its place.
 async function undoRemove(): Promise<void> {
   const u = undo.value
   if (!u) return
   undo.value = null
   try {
-    await api("POST", "/api/memory", {
-      action: "add",
-      target: u.target,
-      content: u.text,
-      old_text: "",
-      id: "",
-    })
+    view.value = await api<MemoryView>("POST", "/api/memory/undo", { edit_id: u.editId })
   } catch (e) {
-    toast(friendlyError(e, "/api/memory"), "error")
+    toast(friendlyError(e, "/api/memory/undo"), "error")
     return
   }
-  await load()
+  toast("Restored. Applies to new sessions.", "ok")
 }
 
 let searchSeq = 0
@@ -408,7 +415,11 @@ onBeforeUnmount(() => {
       <ResultNote :note="note" @close="note = null" />
 
       <div class="grid gap-4 lg:grid-cols-2">
-        <Card v-for="fl in files" :key="fl.target">
+        <Card
+          v-for="fl in files"
+          :key="fl.target"
+          :class="fl.target === 'rule' ? 'lg:col-span-2' : undefined"
+        >
           <CardHeader>
             <CardTitle>{{ fl.title }}</CardTitle>
           </CardHeader>
@@ -637,6 +648,13 @@ onBeforeUnmount(() => {
               class="shrink-0 border-warning/40 text-warning"
               data-tone="warn"
               >inbox</Badge
+            >
+            <Badge
+              v-if="t(row).held"
+              variant="outline"
+              class="shrink-0 border-warning/40 text-warning"
+              data-tone="warn"
+              >held, not used by the agent</Badge
             >
           </div>
         </template>

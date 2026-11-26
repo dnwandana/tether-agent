@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest"
 import type { SkillRow } from "../api/types.gen"
-import { TONE, chips } from "./skills"
+import { TONE, chips, lastReadText } from "./skills"
+import { shortTime } from "./time"
 
 const skill = (o: Partial<SkillRow>): SkillRow => ({
   name: "x",
@@ -14,6 +15,8 @@ const skill = (o: Partial<SkillRow>): SkillRow => ({
   check: "",
   update: false,
   actions: [],
+  last_read: null,
+  kept: false,
   ...o,
 })
 
@@ -61,5 +64,15 @@ describe("TONE", () => {
       info: "border-info/40 text-info",
       plain: "",
     })
+  })
+})
+
+describe("kept and last read", () => {
+  it("adds the kept chip", () => {
+    expect(chips(skill({ kept: true }))).toEqual([{ text: "kept", tone: "plain" }])
+  })
+  it("gives the last read text", () => {
+    expect(lastReadText(null)).toBe("Never read")
+    expect(lastReadText("2026-11-20T10:00:00Z")).toBe(`Read ${shortTime("2026-11-20T10:00:00Z")}`)
   })
 })

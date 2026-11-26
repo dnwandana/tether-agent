@@ -7,7 +7,7 @@ const dismissed = new Set<string>()
 import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { api } from "../api/client"
-import type { CatalogRow, SkillRow, TaskView } from "../api/types.gen"
+import type { ArchivedSkillRow, CatalogRow, SkillRow, TaskView } from "../api/types.gen"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -23,10 +23,11 @@ import { followTask, useLiveData } from "../lib/live"
 import { useRoutePage } from "../lib/routePage"
 import { TONE, chips, type Tone } from "../lib/skills"
 import type { Column } from "../lib/table"
+import { fullTime, shortTime } from "../lib/time"
 import type { ResultNoteData } from "../lib/command"
 import { confirm, isSecure, rememberListQuery, toast, ui } from "../stores/ui"
 
-type Action = "install" | "update" | "uninstall" | "reset"
+type Action = "install" | "update" | "uninstall" | "reset" | "restore"
 type Running = { id: string; name: string; action: Action | "check"; waiting: boolean }
 type Manual = { name: string; action: "install" | "update"; findings: string }
 
@@ -40,6 +41,8 @@ const state = ref<"loading" | "ready" | "error">("loading")
 const errorText = ref("")
 const rows = ref<SkillRow[]>([])
 const catalog = ref<CatalogRow[]>([])
+const archived = ref<ArchivedSkillRow[]>([])
+const archivedPage = ref(1)
 const catalogState = ref<"idle" | "loading" | "ready" | "error">("idle")
 const catalogError = ref("")
 const search = ref("")
@@ -69,8 +72,15 @@ const columns: Column[] = [
   { key: "trust", label: "Trust", type: "badge" },
   { key: "source", label: "Source", type: "text", optional: true },
   { key: "env", label: "Env", type: "text", optional: true },
+  { key: "last_read", label: "Last read", type: "date", optional: true },
   { key: "status", label: "Status", type: "block" },
   { key: "actions", label: "", type: "act", width: "16rem" },
+]
+const archivedColumns: Column[] = [
+  { key: "name", label: "Skill", type: "text" },
+  { key: "rel_dir", label: "Folder", type: "text" },
+  { key: "archived_at", label: "Archived", type: "date" },
+  { key: "actions", label: "", type: "act", width: "6rem" },
 ]
 const catalogColumns: Column[] = [
   { key: "name", label: "Skill", type: "wrap" },
@@ -81,6 +91,7 @@ const catalogColumns: Column[] = [
 
 const s = (x: unknown) => x as SkillRow
 const c = (x: unknown) => x as CatalogRow
+const ar = (x: unknown) => x as ArchivedSkillRow
 
 const shownRows = computed(() => {
   const q = installedQuery.value.trim().toLowerCase()
@@ -153,6 +164,14 @@ async function loadRows(): Promise<void> {
   }
 }
 
+async function loadArchived(): Promise<void> {
+  try {
+    archived.value = await api<ArchivedSkillRow[]>("GET", "/api/skills/archived")
+  } catch (e) {
+    toast(friendlyError(e), "error")
+  }
+}
+
 async function loadCatalog(): Promise<void> {
   catalogState.value = "loading"
   try {
@@ -168,6 +187,7 @@ async function loadCatalog(): Promise<void> {
 // shows the newest skills task again.
 async function load(): Promise<void> {
   await loadRows()
+  await loadArchived()
   if (catalogState.value === "ready" || (catalogState.value === "idle" && tab.value === "catalog"))
     await loadCatalog()
   if (!restored) {
@@ -199,6 +219,7 @@ const verbs: Record<Action, [string, string]> = {
   update: ["Updating", "Updated"],
   uninstall: ["Uninstalling", "Uninstalled"],
   reset: ["Resetting", "Reset"],
+  restore: ["Restoring", "Restored"],
 }
 
 // Shows the end of a task. A live end also toasts a done task.
@@ -221,6 +242,7 @@ function settle(t: TaskView, name: string, action: Action | "check" | null, live
   } else if (t.state === "done") {
     note.value = { title, at: new Date(), text: t.text || doneText, kind: "info" }
     if (live) toast(doneText, "ok")
+    if (action === "restore") void load()
   } else if (t.code === "need_force") {
     note.value = { title, at: new Date(), text: t.text, kind: "warn" }
     forceOffer.value = { name, action: a }
@@ -458,6 +480,11 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
           <template #cell-env="{ row }">{{
             s(row).required_env.length ? s(row).required_env.join(", ") : "—"
           }}</template>
+          <template #cell-last_read="{ row }"
+            ><span :title="s(row).last_read ? fullTime(s(row).last_read) : undefined">{{
+              s(row).last_read ? shortTime(s(row).last_read) : "—"
+            }}</span></template
+          >
           <template #cell-status="{ row }">
             <Badge
               v-if="running && running.name === s(row).name"
@@ -509,6 +536,42 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
               @click.stop="skillAction(s(row).name, 'uninstall')"
             >
               Uninstall
+            </Button>
+          </template>
+        </DataTable>
+      </template>
+      <template v-if="state === 'ready'">
+        <h2 class="text-lg font-semibold tracking-tight">Archived skills</h2>
+        <StateBlock v-if="archived.length === 0" state="empty" text="No archived skills" />
+        <DataTable
+          v-else
+          :columns="archivedColumns"
+          :rows="archived as unknown as Record<string, unknown>[]"
+          row-key="name"
+          page-key="skills-archived"
+          page-label="Archived skills"
+          :page="archivedPage"
+          @update:page="(p: number) => (archivedPage = p)"
+        >
+          <template #cell-name="{ row }"
+            ><b>/{{ ar(row).name }}</b></template
+          >
+          <template #cell-rel_dir="{ row }"
+            ><span class="font-mono text-xs">{{ ar(row).rel_dir }}</span></template
+          >
+          <template #cell-archived_at="{ row }"
+            ><span :title="fullTime(ar(row).archived_at)">{{
+              shortTime(ar(row).archived_at)
+            }}</span></template
+          >
+          <template #cell-actions="{ row }">
+            <Button
+              variant="outline"
+              size="sm"
+              :disabled="busy"
+              @click.stop="start(ar(row).name, 'restore')"
+            >
+              Restore
             </Button>
           </template>
         </DataTable>

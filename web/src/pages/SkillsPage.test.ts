@@ -45,6 +45,7 @@ vi.mock("../lib/live", async () => {
 import { api } from "../api/client"
 import { confirm, isSecure, listLink, toast, ui } from "../stores/ui"
 import SkillsPage from "./SkillsPage.vue"
+import { shortTime } from "../lib/time"
 
 const Blank = { render: () => null }
 const skill = (o: object) => ({
@@ -59,6 +60,8 @@ const skill = (o: object) => ({
   check: "",
   update: false,
   actions: ["update", "uninstall"],
+  last_read: null,
+  kept: false,
   ...o,
 })
 const many = (n: number) =>
@@ -113,6 +116,12 @@ const task = (o: object) => ({
 let tasks: unknown[] = []
 let rowsOf = installed
 let catalogOf: unknown[] = catalog
+const archivedRow = {
+  name: "old-one",
+  rel_dir: "research/old-one",
+  archived_at: "2026-11-20T10:00:00Z",
+}
+let archivedOf: unknown[] = [archivedRow]
 
 // Keeps the last note prop, so the tests check the kind and the title of the result note.
 let lastNote: any = null
@@ -158,6 +167,7 @@ beforeEach(() => {
   tasks = []
   rowsOf = installed
   catalogOf = catalog
+  archivedOf = []
   ui.trayOpen = false
   window.matchMedia = ((q: string) => ({
     matches: false,
@@ -171,6 +181,7 @@ beforeEach(() => {
       if (m === "POST") return { task_id: "t1" } as any
       if (p === "/api/tasks?kind=skills") return tasks as any
       if (p === "/api/skills") return rowsOf as any
+      if (p === "/api/skills/archived") return archivedOf as any
       return catalogOf as any
     })
   vi.mocked(confirm).mockReset().mockResolvedValue(true)
@@ -588,5 +599,29 @@ describe("SkillsPage", () => {
     // A phone card lays out the children of a cell in one row. One child keeps the name wide.
     expect(nameCell.children).toHaveLength(1)
     expect(nameCell.children[0].contains(name)).toBe(true)
+  })
+
+  it("shows the archived skills and restores one", async () => {
+    archivedOf = [archivedRow]
+    const { user } = await mk()
+    screen.getByRole("heading", { name: "Archived skills" })
+    const r = rowOf("old-one")
+    expect(r.textContent).toContain("research/old-one")
+    await user.click(within(r).getByRole("button", { name: "Restore" }))
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("POST", "/api/skills/old-one/restore")
+  })
+  it("shows no archived table rows when nothing is archived", async () => {
+    archivedOf = []
+    await mk()
+    screen.getByText("No archived skills")
+  })
+  it("shows the last read column and the kept chip", async () => {
+    rowsOf = [skill({ name: "demo", last_read: "2026-11-20T10:00:00Z", kept: true })]
+    await mk()
+    screen.getByRole("columnheader", { name: "Last read" })
+    const r = rowOf("demo")
+    expect(r.textContent).toContain(shortTime("2026-11-20T10:00:00Z"))
+    expect(r.textContent).toContain("kept")
   })
 })

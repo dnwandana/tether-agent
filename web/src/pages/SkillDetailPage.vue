@@ -5,6 +5,8 @@ import { ArrowDownIcon, ChevronLeftIcon } from "@lucide/vue"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { api, ApiError } from "../api/client"
 import type { SkillDetailView, TaskView } from "../api/types.gen"
@@ -17,13 +19,13 @@ import StateBlock from "../components/StateBlock.vue"
 import { friendlyError } from "../lib/errors"
 import { followTask, useLiveData } from "../lib/live"
 import { renderDocument } from "../lib/markdown"
-import { TONE, chips, type Tone } from "../lib/skills"
+import { TONE, chips, lastReadText, type Tone } from "../lib/skills"
 import type { Column } from "../lib/table"
 import { fullTime, shortTime } from "../lib/time"
 import type { ResultNoteData } from "../lib/command"
 import { confirm, isSecure, listLink, toast, ui } from "../stores/ui"
 
-type Action = "update" | "uninstall" | "reset"
+type Action = "update" | "uninstall" | "reset" | "keep" | "unkeep"
 type Running = { id: string; action: Action; waiting: boolean }
 
 const LOST = "The gateway restarted. The result of the task is lost."
@@ -44,6 +46,14 @@ const name = computed(() => String(route.params.name))
 const html = computed(() => renderDocument(view.value?.body ?? ""))
 const hasLock = computed(
   () => !!view.value && (view.value.skill.source !== "" || view.value.installed_at !== ""),
+)
+// The curator never archives a hub, bundled, or external skill, so no Keep switch shows for it.
+const canKeep = computed(
+  () =>
+    !!view.value &&
+    view.value.skill.source === "" &&
+    !view.value.skill.actions.includes("reset") &&
+    view.value.skill.trust !== "external",
 )
 const scanned = computed(() => !!view.value && view.value.skill.trust !== "builtin")
 
@@ -168,6 +178,8 @@ const verbs: Record<Action, [string, string]> = {
   update: ["Updating", "Updated"],
   uninstall: ["Uninstalling", "Uninstalled"],
   reset: ["Resetting", "Reset"],
+  keep: ["Keeping", "Kept"],
+  unkeep: ["Releasing", "Released"],
 }
 
 // Shows the end of a task. The rules have a fixed order.
@@ -181,7 +193,9 @@ function settle(t: TaskView, action: Action): void {
       void router.push(listLink("skills"))
       return
     }
-    toast(`${verbs[action][1]} /${name.value}. It loads in new sessions.`, "ok")
+    if (action === "keep") toast(`Kept /${name.value}. The curator never archives it.`, "ok")
+    else if (action === "unkeep") toast(`/${name.value} is not kept now.`, "ok")
+    else toast(`${verbs[action][1]} /${name.value}. It loads in new sessions.`, "ok")
     void load()
   } else if (t.code === "need_force") {
     note.value = { title, at: new Date(), text: t.text, kind: "warn" }
@@ -351,6 +365,16 @@ const { stale, updatedAt, refresh } = useLiveData(load, { events: ["task"], filt
         >
           Uninstall
         </Button>
+      </div>
+      <p class="text-sm text-muted-foreground">{{ lastReadText(view.skill.last_read) }}</p>
+      <div v-if="canKeep" class="flex items-center gap-2">
+        <Switch
+          id="keep-skill"
+          :model-value="view.skill.kept"
+          :disabled="busy"
+          @update:model-value="(v: boolean) => skillAction(v ? 'keep' : 'unkeep')"
+        />
+        <Label for="keep-skill">Keep this skill</Label>
       </div>
       <p class="text-muted-foreground">{{ view.skill.description }}</p>
       <ResultNote :note="note" @close="note = null" />

@@ -60,6 +60,8 @@ const row = (o: object) => ({
   check: "",
   update: false,
   actions: ["update", "uninstall"],
+  last_read: null,
+  kept: false,
   ...o,
 })
 const view = (o: object = {}, r: object = {}) => ({
@@ -565,5 +567,48 @@ describe("SkillDetailPage", () => {
     } finally {
       rememberListQuery("skills", {})
     }
+  })
+
+  it("shows the last read time", async () => {
+    await mk()
+    screen.getByText("Never read")
+  })
+  it("keeps a skill with the switch", async () => {
+    vi.mocked(api).mockImplementation(async (m: string, p: string) => {
+      if (m === "POST") return { task_id: "t1" } as any
+      if (p.startsWith("/api/tasks")) return [] as any
+      return view({}, { source: "", actions: [], kept: false, name: "demo" }) as any
+    })
+    const { user } = await mk()
+    await user.click(screen.getByRole("switch", { name: "Keep this skill" }))
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("POST", "/api/skills/release-notes/keep")
+    await end({ state: "done" })
+    expect(toast).toHaveBeenCalledWith("Kept /release-notes. The curator never archives it.", "ok")
+  })
+  it("unkeeps a kept skill", async () => {
+    vi.mocked(api).mockImplementation(async (m: string, p: string) => {
+      if (m === "POST") return { task_id: "t1" } as any
+      if (p.startsWith("/api/tasks")) return [] as any
+      return view({}, { source: "", actions: [], kept: true }) as any
+    })
+    const { user } = await mk()
+    const sw = screen.getByRole("switch", { name: "Keep this skill" })
+    expect(sw.getAttribute("aria-checked")).toBe("true")
+    await user.click(sw)
+    await flushPromises()
+    expect(api).toHaveBeenCalledWith("POST", "/api/skills/release-notes/unkeep")
+  })
+  it("shows no keep switch for a hub or a bundled skill", async () => {
+    await mk()
+    expect(screen.queryByRole("switch", { name: "Keep this skill" })).toBeNull()
+  })
+  it("shows no keep switch for a bundled skill", async () => {
+    vi.mocked(api).mockImplementation(async (m: string, p: string) => {
+      if (p.startsWith("/api/tasks")) return [] as any
+      return view({}, { source: "", actions: ["reset"] }) as any
+    })
+    await mk()
+    expect(screen.queryByRole("switch", { name: "Keep this skill" })).toBeNull()
   })
 })
