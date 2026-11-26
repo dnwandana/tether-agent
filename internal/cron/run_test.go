@@ -918,3 +918,19 @@ func TestWatchChangeInCutPart(t *testing.T) {
 		t.Fatalf("%q", u)
 	}
 }
+
+func TestCronSkillsRecordRead(t *testing.T) {
+	r, _ := runner(t, say("done"))
+	r.Skills = func() ([]skills.Skill, []skills.Warning, error) {
+		return []skills.Skill{{Name: "a", Body: "Body of a"}, {Name: "b", Body: "Body of b"}}, nil, nil
+	}
+	var got []string
+	r.SkillRead = func(_ context.Context, name, sessionID string) {
+		got = append(got, name+"|"+sessionID)
+	}
+	o := r.Run(bg, cron.Job{ID: "j1", Name: "n", Prompt: "p", Skills: []string{"b", "a", "gone"}}, false)
+	want := []string{"b|" + o.SessionID, "a|" + o.SessionID}
+	if o.SessionID == "" || !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

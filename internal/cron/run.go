@@ -97,6 +97,9 @@ type Runner struct {
 	AgentTimeout time.Duration
 	// Skills returns the installed skills. Nil means that no skill is installed.
 	Skills func() ([]skills.Skill, []skills.Warning, error)
+	// SkillRead records a read of a skill that a job prompt loads. The app sets it. Nil
+	// records nothing.
+	SkillRead func(ctx context.Context, name, sessionID string)
 	// Env is the environment of the scripts. Nil gives the process environment without
 	// secrets.
 	Env []string
@@ -277,7 +280,7 @@ func (r *Runner) runAgentJob(ctx context.Context, j Job, manual bool) (RunOutcom
 		return o, err
 	}
 	o.SessionID, o.SessionIDs = sess.ID, []string{sess.ID}
-	text, scriptFailed, err := r.buildText(ctx, j, sr)
+	text, scriptFailed, err := r.buildText(ctx, j, sr, sess.ID)
 	if err != nil {
 		return o, err
 	}
@@ -404,9 +407,9 @@ func (r *Runner) prepareRetry(tctx context.Context, j Job, firstID, text string)
 // buildText returns the user message of an agent job: the skills in order, the continuity
 // block, the script output, the prompt, and CronPreamble. sr is nil for a job with no script. scriptFailed is true
 // when the data script failed.
-func (r *Runner) buildText(ctx context.Context, j Job, sr *scriptRun) (text string, scriptFailed bool, err error) {
+func (r *Runner) buildText(ctx context.Context, j Job, sr *scriptRun, sessionID string) (text string, scriptFailed bool, err error) {
 	var b strings.Builder
-	if err := r.writeSkills(&b, j); err != nil {
+	if err := r.writeSkills(ctx, &b, j, sessionID); err != nil {
 		return "", false, err
 	}
 	if err := r.writeContinuity(ctx, &b, j); err != nil {
@@ -533,7 +536,7 @@ func (r *Runner) writeWatch(b *strings.Builder, j Job, res ScriptResult) {
 
 // writeSkills writes each skill of the job as "[Skill: <name>]\n<body>\n". A skill that is
 // not installed is skipped with a notice to the model, so the user learns about it (Hermes).
-func (r *Runner) writeSkills(b *strings.Builder, j Job) error {
+func (r *Runner) writeSkills(ctx context.Context, b *strings.Builder, j Job, sessionID string) error {
 	if len(j.Skills) == 0 {
 		return nil
 	}
@@ -556,6 +559,9 @@ func (r *Runner) writeSkills(b *strings.Builder, j Job) error {
 			continue
 		}
 		fmt.Fprintf(&body, "[Skill: %s]\n%s\n", name, strings.TrimSpace(s.Body))
+		if r.SkillRead != nil {
+			r.SkillRead(ctx, name, sessionID)
+		}
 	}
 	if len(missing) > 0 {
 		list := strings.Join(missing, ", ")
