@@ -290,3 +290,31 @@ func TestRendererDoneRewrite(t *testing.T) {
 		t.Fatalf("%s %s", e.Name, e.Data)
 	}
 }
+
+func TestRendererCardAsLines(t *testing.T) {
+	r, _, ev, _ := rendererFixture(t)
+	r.(gateway.ReplyRenderer).AckReply(gateway.Reply{Text: "💾 User profile updated (add)\nNow: `Time zone: Asia/Jakarta.`",
+		Buttons: [][]gateway.Button{{{Text: "↩ Undo", Data: "/notice undo 42.a3f1"}},
+			{{Text: "✓ OK", Data: "/notice ok 42.a3f1"}}}})
+	var a AckView
+	if e := nextEvent(t, ev); e.Name != "ack" || json.Unmarshal(e.Data, &a) != nil {
+		t.Fatalf("%s %s", e.Name, e.Data)
+	}
+	want := "💾 User profile updated (add)\nNow: `Time zone: Asia/Jakarta.`\n\nUndo: /notice undo 42.a3f1\nOK: /notice ok 42.a3f1"
+	if a.Text != want || len(a.Buttons) != 0 {
+		t.Fatalf("%q %+v", a.Text, a.Buttons)
+	}
+}
+
+func TestRendererKeepsOtherButtons(t *testing.T) {
+	r, _, ev, _ := rendererFixture(t)
+	r.(gateway.ReplyRenderer).AckReply(gateway.Reply{Text: "Delete it?",
+		Buttons: [][]gateway.Button{{{Text: "🗑 Delete", Data: "/memory delete m-1 confirm"}}}})
+	var a AckView
+	if e := nextEvent(t, ev); e.Name != "ack" || json.Unmarshal(e.Data, &a) != nil {
+		t.Fatalf("%s %s", e.Name, e.Data)
+	}
+	if a.Text != "Delete it?" || len(a.Buttons) != 1 || a.Buttons[0][0].Data != "/memory delete m-1 confirm" {
+		t.Fatalf("%q %+v", a.Text, a.Buttons)
+	}
+}

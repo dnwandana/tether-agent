@@ -33,6 +33,28 @@ func (a *Agent) runRound(ctx context.Context, calls []provider.ToolCall, env *to
 	return results
 }
 
+type callGateKey struct{}
+
+// withCallGate returns ctx with gate. runRoundTimed calls gate before each call. A non-empty
+// result refuses the call: it does not run, and the text is its error result.
+func withCallGate(ctx context.Context, gate func(c provider.ToolCall) string) context.Context {
+	return context.WithValue(ctx, callGateKey{}, gate)
+}
+
+// callGate returns the gate of ctx, or nil.
+func callGate(ctx context.Context) func(c provider.ToolCall) string {
+	g, _ := ctx.Value(callGateKey{}).(func(c provider.ToolCall) string)
+	return g
+}
+
+// gateText returns the refusal text of the gate of ctx for c, or "" when the call can run.
+func gateText(ctx context.Context, c provider.ToolCall) string {
+	if g := callGate(ctx); g != nil {
+		return g(c)
+	}
+	return ""
+}
+
 // runRoundTimed is runRound that also returns the run time of each call, in call order. A
 // call that did not start has 0.
 func (a *Agent) runRoundTimed(ctx context.Context, calls []provider.ToolCall, env *tools.Env, visible map[string]bool, sink Sink, deny string) ([]tools.Result, []time.Duration) {
@@ -57,6 +79,8 @@ func (a *Agent) runRoundTimed(ctx context.Context, calls []provider.ToolCall, en
 		t0 := time.Now()
 		if deny != "" && !visible[c.Name] {
 			results[i] = tools.Result{Text: deny, IsError: true}
+		} else if msg := gateText(ctx, c); msg != "" {
+			results[i] = tools.Result{Text: msg, IsError: true}
 		} else {
 			results[i] = a.dispatch(ctx, c, env, visible)
 		}

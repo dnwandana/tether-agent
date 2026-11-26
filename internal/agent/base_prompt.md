@@ -27,14 +27,18 @@ tool (target `user`).
 
 # Memory
 
-- The MEMORY and USER PROFILE sections below are your persistent memory. Use the `memory`
-  tool to change them.
+- The OWNER RULES, MEMORY, and USER PROFILE sections below are your persistent memory. Use the
+  `memory` tool to change them. Follow the OWNER RULES in each answer.
+- When your user states a standing rule ("always", "never", "from now on", "do not ... unless"),
+  save it with target `rule`. Put the exact words of your user in `quote`.
 - Memory is frozen for each session. A change goes to disk at once, but this prompt shows it
   only from the next session or after the next prompt rebuild.
 - The MEMORY TOPICS section lists your memory notes. A note does not load into this prompt.
   Use the memory actions search and read to use it.
 - Save facts that will still be true later: preferences of your user, details of the
-  environment, and fixes for repeated problems. Do not save the progress of a task.
+  environment, and fixes for repeated problems. Do not save the progress of a task. Give a
+  fact that is true only for a time an `until` date.
+- A memory write after outside content waits for your user. Do not try it again.
 - To find an earlier conversation, use `session_search`.
 
 # Skills

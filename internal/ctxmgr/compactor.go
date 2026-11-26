@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -144,7 +145,9 @@ type Compactor struct {
 	// Maybe returns. view is the full model view before the compaction, and view[start:end]
 	// is the part that the saved summary replaces. A failed attempt does not call it. It
 	// must return at once, so it starts long work in its own goroutine. It can be nil.
-	OnCompact func(ctx context.Context, s *sessions.Session, view []provider.Message, start, end int)
+	// outside is the union of the outside sources of the stored messages that the summary
+	// replaces (OutsideIn).
+	OnCompact func(ctx context.Context, s *sessions.Session, view []provider.Message, start, end int, outside []string)
 	// Todo returns the task list snapshot of the session for the end of the summary, or "".
 	// It can be nil.
 	Todo func(ctx context.Context, sessionID string) string
@@ -364,9 +367,33 @@ func (c *Compactor) MaybeStoredView(ctx context.Context, s *sessions.Session, pr
 	// range that it replaces. The call is in this goroutine, so the hook reads the state of
 	// the turn before the turn continues.
 	if c.OnCompact != nil {
-		c.OnCompact(context.WithoutCancel(ctx), s, msgs, start, end)
+		c.OnCompact(context.WithoutCancel(ctx), s, msgs, start, end, OutsideIn(stored, from, upto))
 	}
 	return res, nil, nil
+}
+
+// OutsideIn returns the sorted union of the outside sources of the stored messages whose id is
+// from to upto, both included. A compaction summary has the flags of the messages that it
+// replaces, so a review of a compacted range still sees them.
+func OutsideIn(stored []sessions.StoredMessage, from, upto int64) []string {
+	set := map[string]bool{}
+	for _, m := range stored {
+		if m.ID < from || m.ID > upto {
+			continue
+		}
+		for _, src := range m.Meta.Outside {
+			set[src] = true
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for src := range set {
+		out = append(out, src)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // View returns the model view of the session: the stored messages with the latest

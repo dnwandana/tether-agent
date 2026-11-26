@@ -26,7 +26,7 @@ const (
 type searchSource struct {
 	name   string // "memory.md", "user_profile.md", or the topic
 	isNote bool
-	// tier1 is true for memory.md and user_profile.md, the files that a mask applies to.
+	// tier1 is true for rules.md, memory.md, and user_profile.md, the files that a mask applies to.
 	tier1    bool
 	typ      string
 	modified time.Time
@@ -56,6 +56,7 @@ func (s *Store) rank(query string) (hits []searchSource, words, names []string, 
 	// reads the old file or the new file.
 	var srcs []searchSource
 	for _, t := range []struct{ target, file string }{
+		{TargetRule, ruleFile},
 		{TargetMemory, memoryFile},
 		{TargetUser, profileFile},
 	} {
@@ -116,6 +117,8 @@ func (s *Store) SearchMasked(query string, mask func(entry string) (string, bool
 	if err != nil {
 		return "", err
 	}
+	hits = slices.DeleteFunc(hits, func(h searchSource) bool { return h.isNote && IsHeldNote(h.name) })
+	names = slices.DeleteFunc(names, IsHeldNote)
 	maxHits := s.SearchMaxHits
 	if maxHits <= 0 {
 		maxHits = maxSearchHits

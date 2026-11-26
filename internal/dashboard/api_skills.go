@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/config"
@@ -26,17 +28,35 @@ import (
 
 // SkillRow is one installed skill of the Skills page.
 type SkillRow struct {
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	Trust       string   `json:"trust"`
-	Source      string   `json:"source"` // the lock identifier; "" for a skill outside the lockfile
-	Commit      string   `json:"commit"`
-	Pinned      bool     `json:"pinned"`
-	Verdict     string   `json:"verdict"`
-	RequiredEnv []string `json:"required_env"`
-	Check       string   `json:"check"` // the status of the last check; "" before the first check
-	Update      bool     `json:"update"`
-	Actions     []string `json:"actions"`
+	Name        string     `json:"name"`
+	Description string     `json:"description"`
+	Trust       string     `json:"trust"`
+	Source      string     `json:"source"` // the lock identifier; "" for a skill outside the lockfile
+	Commit      string     `json:"commit"`
+	Pinned      bool       `json:"pinned"`
+	Verdict     string     `json:"verdict"`
+	RequiredEnv []string   `json:"required_env"`
+	Check       string     `json:"check"` // the status of the last check; "" before the first check
+	Update      bool       `json:"update"`
+	Actions     []string   `json:"actions"`
+	LastRead    *time.Time `json:"last_read"` // the last time the owner or the agent used the skill; nil when unknown
+	Kept        bool       `json:"kept"`      // true when the curator never archives the skill
+}
+
+// ArchivedSkillRow is one skill that the curator archived.
+type ArchivedSkillRow struct {
+	Name       string    `json:"name"`
+	RelDir     string    `json:"rel_dir"`
+	ArchivedAt time.Time `json:"archived_at"`
+}
+
+// SkillInfo gives the read time, the kept flag, and the archive of the skills.
+type SkillInfo interface {
+	LastRead(ctx context.Context, name string) (time.Time, bool)
+	Kept(ctx context.Context, name string) bool
+	Archived(ctx context.Context) ([]skills.Flag, error)
+	SetKept(ctx context.Context, name string, kept bool) error
+	Restore(ctx context.Context, name string) error
 }
 
 // SkillFinding is one guard finding of a skill.
@@ -83,7 +103,7 @@ type SkillFileView struct {
 }
 
 func init() {
-	registerAPI(SkillRow{}, SkillFinding{}, SkillDetailView{}, CatalogRow{}, SkillFileView{})
+	registerAPI(SkillRow{}, SkillFinding{}, SkillDetailView{}, CatalogRow{}, SkillFileView{}, ArchivedSkillRow{})
 }
 
 const (
@@ -99,6 +119,7 @@ type SkillsAPI struct {
 	tasks     *Tasks
 	cronUsers func(ctx context.Context) (map[string][]string, error)
 	findGit   func() (skills.Git, error) // the git finder with skills.git_timeout_s; a test replaces it
+	info      SkillInfo                  // the history of the skills; nil when not available
 	redact    func(string) string        // masks secrets in a file text; nil keeps the text
 	source    func(name string) string   // the install source of a name; a test replaces it
 	mu        sync.Mutex
@@ -109,13 +130,13 @@ type SkillsAPI struct {
 const skillsKind = "skills"
 
 // NewSkillsAPI returns the API for the skills of dataDir. ask opens the confirm cards.
-func NewSkillsAPI(dataDir string, cfg *config.Config, ask tools.Asker, tasks *Tasks, cronUsers func(ctx context.Context) (map[string][]string, error), redact func(string) string) *SkillsAPI {
+func NewSkillsAPI(dataDir string, cfg *config.Config, ask tools.Asker, tasks *Tasks, cronUsers func(ctx context.Context) (map[string][]string, error), redact func(string) string, info SkillInfo) *SkillsAPI {
 	var findGit func() (skills.Git, error)
 	if in, err := skills.NewInstaller(dataDir, cfg, nil, io.Discard, nil); err == nil {
 		findGit = in.FindGit
 	}
 	return &SkillsAPI{
-		dataDir: dataDir, cfg: cfg, ask: ask, tasks: tasks, cronUsers: cronUsers, findGit: findGit, redact: redact,
+		dataDir: dataDir, cfg: cfg, ask: ask, tasks: tasks, cronUsers: cronUsers, findGit: findGit, redact: redact, info: info,
 		source: func(name string) string { return name },
 		checks: map[string]skills.CheckRow{},
 	}
@@ -125,27 +146,18 @@ func NewSkillsAPI(dataDir string, cfg *config.Config, ask tools.Asker, tasks *Ta
 func (a *SkillsAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/skills", a.list)
 	mux.HandleFunc("GET /api/skills/catalog", a.catalog)
+	mux.HandleFunc("GET /api/skills/archived", a.archived)
 	mux.HandleFunc("GET /api/skills/{name}", a.detail)
 	mux.HandleFunc("GET /api/skills/{name}/file", a.file)
 	mux.HandleFunc("POST /api/skills/check", a.check)
 	mux.HandleFunc("POST /api/skills/{name}/{action}", a.action)
 }
 
-// CronSkillUsers returns the cron users function of the gateway. It reads the jobs with
-// st.List on the gateway connection.
+// CronSkillUsers returns the cron users function of the gateway. It uses the one rule of
+// cron.SkillUsers, so a prompt word is a user of a skill too.
 func CronSkillUsers(st *cron.Store) func(ctx context.Context) (map[string][]string, error) {
 	return func(ctx context.Context) (map[string][]string, error) {
-		jobs, err := st.List(ctx)
-		if err != nil {
-			return nil, err
-		}
-		users := map[string][]string{}
-		for _, j := range jobs {
-			for _, name := range j.Skills {
-				users[name] = append(users[name], `"`+j.Name+`" (`+j.ID+`)`)
-			}
-		}
-		return users, nil
+		return cron.SkillUsers(ctx, st, nil)
 	}
 }
 
@@ -169,7 +181,7 @@ func (a *SkillsAPI) external() []string {
 }
 
 // row builds the row of one skill from the loader and the lockfile.
-func (a *SkillsAPI) row(s skills.Skill, lock *skills.LockFile) SkillRow {
+func (a *SkillsAPI) row(ctx context.Context, s skills.Skill, lock *skills.LockFile) SkillRow {
 	r := SkillRow{
 		Name: s.Name, Description: s.Description, Trust: string(s.Trust),
 		RequiredEnv: s.RequiredEnv, Actions: []string{},
@@ -197,7 +209,28 @@ func (a *SkillsAPI) row(s skills.Skill, lock *skills.LockFile) SkillRow {
 		r.Check, r.Update = c.Status, c.Update
 	}
 	a.mu.Unlock()
+	if a.info != nil {
+		if t, ok := a.info.LastRead(ctx, s.Name); ok {
+			r.LastRead = &t
+		}
+		r.Kept = a.info.Kept(ctx, s.Name)
+	}
 	return r
+}
+
+func (a *SkillsAPI) archived(w http.ResponseWriter, r *http.Request) {
+	rows := []ArchivedSkillRow{}
+	if a.info != nil {
+		flags, err := a.info.Archived(r.Context())
+		if err != nil {
+			skillsErr(w, http.StatusInternalServerError, skills.Sanitize(err.Error()))
+			return
+		}
+		for _, f := range flags {
+			rows = append(rows, ArchivedSkillRow{Name: skills.Sanitize(f.Name), RelDir: skills.Sanitize(f.RelDir), ArchivedAt: f.ArchivedAt})
+		}
+	}
+	skillsJSON(w, http.StatusOK, rows)
 }
 
 func (a *SkillsAPI) list(w http.ResponseWriter, r *http.Request) {
@@ -213,7 +246,7 @@ func (a *SkillsAPI) list(w http.ResponseWriter, r *http.Request) {
 	}
 	rows := []SkillRow{}
 	for _, s := range loaded {
-		rows = append(rows, a.row(s, lock))
+		rows = append(rows, a.row(r.Context(), s, lock))
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
 	skillsJSON(w, http.StatusOK, rows)
@@ -261,7 +294,7 @@ func (a *SkillsAPI) detail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s := loaded[i]
-	v := SkillDetailView{Skill: a.row(s, lock), Files: []string{}, Findings: []SkillFinding{}, Unscanned: []string{}}
+	v := SkillDetailView{Skill: a.row(r.Context(), s, lock), Files: []string{}, Findings: []SkillFinding{}, Unscanned: []string{}}
 	body := skills.Sanitize(s.Body)
 	if a.redact != nil {
 		body = a.redact(body)
@@ -438,6 +471,33 @@ func (a *SkillsAPI) action(w http.ResponseWriter, r *http.Request) {
 	}
 	switch action {
 	case "install", "update", "uninstall", "reset":
+	case "keep", "unkeep", "restore":
+		if a.info == nil {
+			skillsErr(w, http.StatusServiceUnavailable, "The skill history is not available.")
+			return
+		}
+		a.startTask(w, name, func(ctx context.Context, h TaskHandle, out *bytes.Buffer) error {
+			var err error
+			switch action {
+			case "keep":
+				if err = a.info.SetKept(ctx, name, true); err == nil {
+					fmt.Fprintf(out, "Kept %s. The curator never archives it.\n", name)
+				}
+			case "unkeep":
+				if err = a.info.SetKept(ctx, name, false); err == nil {
+					fmt.Fprintf(out, "%s is not kept now. The curator can archive it.\n", name)
+				}
+			default:
+				if err = a.info.Restore(ctx, name); err == nil {
+					fmt.Fprintf(out, "Restored %s. It loads in new sessions.\n", name)
+				}
+			}
+			if err != nil {
+				return errors.New(skills.Sanitize(err.Error()))
+			}
+			return nil
+		})
+		return
 	default:
 		skillsErr(w, http.StatusNotFound, `Unknown skill action "`+action+`".`)
 		return

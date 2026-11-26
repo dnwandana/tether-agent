@@ -27,6 +27,8 @@ type TopicRow struct {
 	Type     string    `json:"type"`
 	Modified time.Time `json:"modified"`
 	Entries  int       `json:"entries"`
+	// Held is true for a note of held writes. The page shows a label.
+	Held bool `json:"held"`
 }
 
 // MemoryView is the Memory page. Used and Limit are runes, separators included. Result is the
@@ -38,9 +40,14 @@ type MemoryView struct {
 	MemoryLimit int           `json:"memory_limit"`
 	UserUsed    int           `json:"user_used"`
 	UserLimit   int           `json:"user_limit"`
+	Rule        []MemoryEntry `json:"rule"`
+	RuleUsed    int           `json:"rule_used"`
+	RuleLimit   int           `json:"rule_limit"`
 	EntryLimit  int           `json:"entry_limit"`
 	Topics      []TopicRow    `json:"topics"`
 	Result      string        `json:"result"`
+	// EditIDs holds the ids of the history rows of the last change. It is never null.
+	EditIDs []int64 `json:"edit_ids"`
 }
 
 // TopicView is the text of one note.
@@ -73,6 +80,11 @@ type MemoryEdit struct {
 	Topic   string `json:"topic"`
 }
 
+// MemoryUndo is the body of POST /api/memory/undo.
+type MemoryUndo struct {
+	EditID int64 `json:"edit_id"`
+}
+
 // MemoryAPI serves the Memory page.
 type MemoryAPI struct {
 	st     *memory.Store
@@ -91,6 +103,7 @@ func (a *MemoryAPI) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/memory/topics/{topic}", a.topic)
 	mux.HandleFunc("GET /api/memory/search", a.search)
 	mux.HandleFunc("POST /api/memory", a.edit)
+	mux.HandleFunc("POST /api/memory/undo", a.undo)
 }
 
 // hide returns text with the secrets removed.
@@ -107,7 +120,7 @@ func (a *MemoryAPI) memoryEntries(raw []string) []MemoryEntry {
 	limit := a.st.EntryLimit()
 	out := make([]MemoryEntry, 0, len(raw))
 	for _, e := range raw {
-		row := MemoryEntry{ID: tools.MemoryEntryID(e)}
+		row := MemoryEntry{ID: memory.EntryID(e)}
 		if line, blocked := tools.MemoryBlockedLineWithin(e, limit); blocked {
 			row.Text, row.Blocked = line, true
 		} else {
@@ -120,7 +133,7 @@ func (a *MemoryAPI) memoryEntries(raw []string) []MemoryEntry {
 
 // buildView reads the store and returns the Memory page. It returns the status and the
 // text of the error when a read fails.
-func (a *MemoryAPI) buildView(result string) (MemoryView, int, string) {
+func (a *MemoryAPI) buildView(result string, editIDs []int64) (MemoryView, int, string) {
 	mem, err := a.st.ReadEntries(memory.TargetMemory)
 	if err != nil {
 		return MemoryView{}, http.StatusInternalServerError, a.hide(err.Error())
@@ -129,9 +142,16 @@ func (a *MemoryAPI) buildView(result string) (MemoryView, int, string) {
 	if err != nil {
 		return MemoryView{}, http.StatusInternalServerError, a.hide(err.Error())
 	}
+	rule, err := a.st.ReadEntries(memory.TargetRule)
+	if err != nil {
+		return MemoryView{}, http.StatusInternalServerError, a.hide(err.Error())
+	}
 	infos, err := a.st.TopicInfos()
 	if err != nil {
 		return MemoryView{}, http.StatusInternalServerError, a.hide(err.Error())
+	}
+	if editIDs == nil {
+		editIDs = []int64{}
 	}
 	v := MemoryView{
 		Memory:      a.memoryEntries(mem),
@@ -140,18 +160,22 @@ func (a *MemoryAPI) buildView(result string) (MemoryView, int, string) {
 		MemoryLimit: a.st.Limit(memory.TargetMemory),
 		UserUsed:    utf8.RuneCountInString(strings.Join(user, memory.Separator)),
 		UserLimit:   a.st.Limit(memory.TargetUser),
+		Rule:        a.memoryEntries(rule),
+		RuleUsed:    utf8.RuneCountInString(strings.Join(rule, memory.Separator)),
+		RuleLimit:   a.st.Limit(memory.TargetRule),
 		EntryLimit:  a.st.EntryLimit(),
+		EditIDs:     editIDs,
 		Topics:      make([]TopicRow, 0, len(infos)),
 		Result:      result,
 	}
 	for _, t := range infos {
-		v.Topics = append(v.Topics, TopicRow{Name: t.Name, Type: t.Type, Modified: t.Modified, Entries: t.Entries})
+		v.Topics = append(v.Topics, TopicRow{Name: t.Name, Type: t.Type, Modified: t.Modified, Entries: t.Entries, Held: t.Held})
 	}
 	return v, 0, ""
 }
 
 func (a *MemoryAPI) view(w http.ResponseWriter, _ *http.Request) {
-	v, status, msg := a.buildView("")
+	v, status, msg := a.buildView("", nil)
 	if status != 0 {
 		memoryErr(w, status, msg)
 		return
@@ -209,7 +233,13 @@ func (a *MemoryAPI) edit(w http.ResponseWriter, r *http.Request) {
 		memoryErr(w, http.StatusBadRequest, a.hide(fmt.Sprintf("unknown action %q; use add, replace, or remove", e.Action)))
 		return
 	}
-	old := e.OldText
+	if (e.Action == "add" || e.Action == "replace") && a.st.Threat != nil {
+		if msg := a.st.Threat(e.Content); msg != "" {
+			memoryErr(w, http.StatusBadRequest, a.hide(msg))
+			return
+		}
+	}
+	old, exact := e.OldText, false
 	if e.ID != "" && e.Action != "add" {
 		entries, err := a.st.ReadEntries(e.Target)
 		if err != nil {
@@ -218,7 +248,7 @@ func (a *MemoryAPI) edit(w http.ResponseWriter, r *http.Request) {
 		}
 		raw, found := "", false
 		for _, en := range entries {
-			if tools.MemoryEntryID(en) == e.ID {
+			if memory.EntryID(en) == e.ID {
 				raw, found = en, true
 				break
 			}
@@ -227,31 +257,59 @@ func (a *MemoryAPI) edit(w http.ResponseWriter, r *http.Request) {
 			memoryErr(w, http.StatusNotFound, a.hide(fmt.Sprintf("no entry in %s has the ID %s", e.Target, e.ID)))
 			return
 		}
-		// A replace matches a substring, so it gets the full raw entry. A remove gets the ID,
-		// and the tool removes the exact entry.
-		if e.Action == "replace" {
-			old = raw
-		} else {
-			old = e.ID
-		}
+		old = raw
+		exact = e.Action == "remove"
 	}
-	args, err := json.Marshal(map[string]string{
-		"action": e.Action, "target": e.Target, "content": e.Content, "old_text": old, "topic": e.Topic,
-	})
+	res, err := a.st.ApplyContext(r.Context(), memory.Op{Action: e.Action, Target: e.Target, Content: e.Content,
+		OldText: old, Topic: e.Topic, Exact: exact, Source: memory.SourceOwner})
 	if err != nil {
-		memoryErr(w, http.StatusBadRequest, "the request cannot be encoded")
+		memoryErr(w, http.StatusBadRequest, a.hide(err.Error()))
 		return
 	}
-	res, err := tools.MemoryTool{Store: a.st}.Run(r.Context(), args, nil)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if errors.Is(err, tools.ErrToolError) {
-			status = http.StatusBadRequest
-		}
-		memoryErr(w, status, a.hide(strings.TrimPrefix(err.Error(), tools.ErrToolError.Error()+": ")))
+	v, status, msg := a.buildView(a.hide(res.Text), res.EditIDs)
+	if status != 0 {
+		memoryErr(w, status, msg)
 		return
 	}
-	v, status, msg := a.buildView(a.hide(res))
+	memoryJSON(w, http.StatusOK, v)
+}
+
+// undo reverses one history row of the owner page.
+func (a *MemoryAPI) undo(w http.ResponseWriter, r *http.Request) {
+	var b MemoryUndo
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, memoryBodyMax)).Decode(&b); err != nil {
+		memoryErr(w, http.StatusBadRequest, "the request body is not valid JSON")
+		return
+	}
+	if b.EditID <= 0 {
+		memoryErr(w, http.StatusBadRequest, "edit_id is required")
+		return
+	}
+	if a.st.History == nil {
+		memoryErr(w, http.StatusNotFound, "The memory history is not available.")
+		return
+	}
+	e, err := a.st.History.Get(r.Context(), b.EditID)
+	if err != nil {
+		memoryErr(w, http.StatusNotFound, fmt.Sprintf("No memory edit has the ID %d.", b.EditID))
+		return
+	}
+	res, err := a.st.Undo(r.Context(), b.EditID, e.Stamp)
+	switch {
+	case errors.Is(err, memory.ErrChanged):
+		memoryErr(w, http.StatusConflict, "The entry changed after this edit. Nothing was undone.")
+		return
+	case errors.Is(err, memory.ErrUndone):
+		memoryErr(w, http.StatusConflict, "This edit is undone already.")
+		return
+	case errors.Is(err, memory.ErrThreat):
+		memoryErr(w, http.StatusBadRequest, "The text matched the memory threat scan. Nothing was restored.")
+		return
+	case err != nil:
+		memoryErr(w, http.StatusInternalServerError, a.hide(err.Error()))
+		return
+	}
+	v, status, msg := a.buildView(a.hide(res.Text), res.EditIDs)
 	if status != 0 {
 		memoryErr(w, status, msg)
 		return
@@ -273,5 +331,5 @@ func memoryErr(w http.ResponseWriter, status int, msg string) {
 }
 
 func init() {
-	registerAPI(MemoryView{}, MemoryEntry{}, TopicRow{}, TopicView{}, MemoryHit{}, MemorySearchView{}, MemoryEdit{})
+	registerAPI(MemoryView{}, MemoryEntry{}, TopicRow{}, TopicView{}, MemoryHit{}, MemorySearchView{}, MemoryEdit{}, MemoryUndo{})
 }

@@ -449,7 +449,7 @@ func seedTurns(t *testing.T, st *sessions.Store, id string, n int) {
 func TestNewStartsBackgroundReviewOfOldSession(t *testing.T) {
 	ctx := context.Background()
 	c, out := cmdCtxDB(t, "cli:t")
-	m, err := memory.Open(t.TempDir(), 2200, 1375)
+	m, err := memory.Open(t.TempDir(), 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestNewStartsBackgroundReviewOfOldSession(t *testing.T) {
 
 func TestNewReviewNeedsSixUserTurns(t *testing.T) {
 	c, _ := cmdCtxDB(t, "cli:t")
-	m, err := memory.Open(t.TempDir(), 2200, 1375)
+	m, err := memory.Open(t.TempDir(), 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -633,7 +633,7 @@ func TestHelpTelegram(t *testing.T) {
 		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 		"/goal · keep working toward a goal\n/todo · see the task list\n" +
-		"/approve · /deny · answer an approval\n\n**Setup**\n/sethome · send cron results to this chat\n/jobs · see and control the cron jobs\n/brief · see what needs you\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat or topic\n/secrets · see and save the bound secrets\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
+		"/approve · /deny · answer an approval\n\n**Memory and skills**\n/memory · see and change the memory\n/skills · see stale and archived skills\n\n**Setup**\n/sethome · send cron results to this chat\n/jobs · see and control the cron jobs\n/brief · see what needs you\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat or topic\n/secrets · see and save the bound secrets\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 	run(t, c, "/help")
 	if r := lastSent(t, sent); r.Text != want || r.Buttons != nil {
 		t.Fatalf("got:\n%s", r.Text)
@@ -651,6 +651,7 @@ func TestHelpCLI(t *testing.T) {
 		"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 		"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 		"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
+		"**Memory and skills**\n/memory · see and change the memory\n/skills · see stale and archived skills\n\n" +
 		"**Setup**\n/jobs · see and control the cron jobs\n/brief · see what needs you\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat\n/secrets · see and save the bound secrets\n/reload-mcp · reload the MCP servers\n/exit · leave the chat\n"
 	if out.String() != want {
 		t.Fatalf("got:\n%s", out)
@@ -1986,7 +1987,7 @@ const helpDashboardWant = "📖 **Commands**\n\n**Sessions**\n/new · start a ne
 	"**This session**\n/model · change the model\n/effort · change the reasoning effort\n/prompt · change the prompt\n/compact · make the context shorter\n" +
 	"/usage · see tokens and cost\n\n**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n" +
-	"/approve · /deny · answer an approval\n\n**Setup**\n/jobs · see and control the cron jobs\n/brief · see what needs you\n" +
+	"/approve · /deny · answer an approval\n\n**Memory and skills**\n/memory · see and change the memory\n/skills · see stale and archived skills\n\n**Setup**\n/jobs · see and control the cron jobs\n/brief · see what needs you\n" +
 	"/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n" +
 	"/mode · set the approval mode of the dashboard\n/secrets · see and save the bound secrets\n" +
 	"/reload-mcp · reload the MCP servers\n/restart · restart the gateway"

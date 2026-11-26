@@ -256,9 +256,10 @@ func TestWriteFileRefusesSymlinkIntoSkills(t *testing.T) {
 
 func TestWriteRefusesMemoryFiles(t *testing.T) {
 	env := newEnv(t)
+	env.Kind = "chat"
 	env.DataDir = t.TempDir()
 	mem := filepath.Join(env.DataDir, "memory")
-	store, err := memory.Open(mem, 2200, 1375)
+	store, err := memory.Open(mem, 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}

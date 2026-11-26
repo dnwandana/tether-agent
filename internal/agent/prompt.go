@@ -26,9 +26,12 @@ const promptTopicsMax = 40
 
 // PromptInput holds the parts of a system prompt.
 type PromptInput struct {
-	Base, Memory, Profile string
-	SkillsIndex           []SkillLine
-	ToolNotes             []string
+	Base string
+	// Rules holds the entries of rules.md, the standing rules of the owner.
+	Rules           string
+	Memory, Profile string
+	SkillsIndex     []SkillLine
+	ToolNotes       []string
 	// NoteTopics holds the topics of the memory notes, in the order of the prompt.
 	NoteTopics []string
 	// MaxTopics is the maximum number of topics in the MEMORY TOPICS section. 0 or less uses
@@ -58,7 +61,7 @@ func SkillLines(index []skills.IndexLine) []SkillLine {
 // BasePrompt returns the embedded base prompt.
 func BasePrompt() string { return basePrompt }
 
-// BuildSystemPrompt returns the system prompt. The parts are in this order: base, MEMORY,
+// BuildSystemPrompt returns the system prompt. The parts are in this order: base, OWNER RULES, MEMORY,
 // USER PROFILE, MEMORY TOPICS, SKILLS, TOOL NOTES, and CONTEXT. A part with no content has no header. The
 // output depends only on in, because the prompt cache of the provider needs the same bytes
 // for the same input.
@@ -66,6 +69,9 @@ func BuildSystemPrompt(in PromptInput) string {
 	var parts []string
 	if s := strings.TrimSpace(in.Base); s != "" {
 		parts = append(parts, s)
+	}
+	if s := strings.TrimSpace(in.Rules); s != "" {
+		parts = append(parts, "## OWNER RULES\n"+s)
 	}
 	if s := strings.TrimSpace(in.Memory); s != "" {
 		parts = append(parts, "## MEMORY\n"+s)

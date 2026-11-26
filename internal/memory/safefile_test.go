@@ -18,7 +18,7 @@ func TestTier1SymlinkIsNotRead(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, memoryFile)); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(dir, 2200, 1375)
+	s, err := Open(dir, 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestNoteFIFODoesNotBlock(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(dir, "notes", "pipe.md"), 0o600); err != nil {
 		t.Skip("no FIFO support:", err)
 	}
-	s, err := Open(dir, 2200, 1375)
+	s, err := Open(dir, 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestNotesFolderSymlinkIsRefused(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "notes")); err != nil {
 		t.Fatal(err)
 	}
-	s, err := Open(dir, 2200, 1375)
+	s, err := Open(dir, 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}

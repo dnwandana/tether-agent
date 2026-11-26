@@ -49,10 +49,10 @@ func TestSectionOrderAndEmptySectionsOmitted(t *testing.T) {
 }
 
 func TestAllSectionsInOrder(t *testing.T) {
-	s := BuildSystemPrompt(PromptInput{Base: "BASE", Memory: "m1", Profile: "p1", SkillsIndex: []SkillLine{{"a", "b"}},
+	s := BuildSystemPrompt(PromptInput{Base: "BASE", Rules: "r1", Memory: "m1", Profile: "p1", SkillsIndex: []SkillLine{{"a", "b"}},
 		ToolNotes: []string{"note one"}, NoteTopics: []string{"rpc"}, Now: time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC), TZ: "Asia/Jakarta",
 		WorkDir: "/w", Channel: "telegram", ChatInfo: "group \"Ops\", topic 7"})
-	order := []string{"BASE", "## MEMORY\nm1", "## USER PROFILE\np1", "## MEMORY TOPICS\nNotes: rpc", "## SKILLS", "## TOOL NOTES\n- note one", "## CONTEXT"}
+	order := []string{"BASE", "## OWNER RULES\nr1", "## MEMORY\nm1", "## USER PROFILE\np1", "## MEMORY TOPICS\nNotes: rpc", "## SKILLS", "## TOOL NOTES\n- note one", "## CONTEXT"}
 	last := -1
 	for _, h := range order {
 		i := strings.Index(s, h)
@@ -65,6 +65,17 @@ func TestAllSectionsInOrder(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Fatal(want, s)
 		}
+	}
+}
+
+func TestOwnerRulesFirst(t *testing.T) {
+	s := BuildSystemPrompt(PromptInput{Base: "BASE", Rules: "Never send a file unless the owner asks.",
+		Memory: "m1", Profile: "p1", Now: time.Unix(0, 0).UTC()})
+	if !strings.Contains(s, "BASE\n\n## OWNER RULES\nNever send a file unless the owner asks.\n\n## MEMORY\nm1\n\n## USER PROFILE\np1") {
+		t.Fatal(s)
+	}
+	if strings.Contains(BuildSystemPrompt(PromptInput{Base: "BASE", Rules: " \n"}), "## OWNER RULES") {
+		t.Fatal("an empty rules part has no header")
 	}
 }
 
@@ -175,5 +186,15 @@ func TestMemoryTopicsCapFromInput(t *testing.T) {
 	s := BuildSystemPrompt(PromptInput{Base: "B", NoteTopics: names, MaxTopics: 10, Now: time.Unix(0, 0)})
 	if !strings.Contains(s, "\nNotes: "+strings.Join(names[:10], ", ")+", and 35 more\n") {
 		t.Fatal(s)
+	}
+}
+
+func TestBasePromptOwnerRules(t *testing.T) {
+	b := BasePrompt()
+	for _, want := range []string{"OWNER RULES", "target `rule`", "`quote`", "`until`",
+		"waits for your user", "The MEMORY TOPICS section lists your memory notes."} {
+		if !strings.Contains(b, want) {
+			t.Error("missing", want)
+		}
 	}
 }

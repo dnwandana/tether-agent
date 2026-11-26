@@ -57,9 +57,19 @@ func (c *SkillCatalog) find(name string) (skills.Skill, error) {
 	return skills.Skill{}, toolErr("no skill named %q; the skills are: %s", name, strings.Join(names, ", "))
 }
 
+// SkillReadRecorder records a read of a skill.
+type SkillReadRecorder interface {
+	RecordRead(ctx context.Context, name, source, sessionID string) error
+}
+
 // SkillViewTool is the skill_view tool.
 type SkillViewTool struct {
 	Catalog *SkillCatalog
+	// Reads records each successful read with the source view. Nil records nothing.
+	Reads SkillReadRecorder
+	// Archived tells whether a skill with the name is archived. Nil means that no skill is
+	// archived.
+	Archived func(ctx context.Context, name string) bool
 	// EnvStatus returns the status of each env name of a skill, in the same order. Nil
 	// gives "not set" for each name.
 	EnvStatus func(names []string) []string
@@ -120,7 +130,7 @@ func (SkillViewTool) Schema() provider.ToolSchema {
 }
 
 // Run returns the skill body or one support file.
-func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (string, error) {
+func (t SkillViewTool) Run(ctx context.Context, raw json.RawMessage, env *Env) (string, error) {
 	var a skillViewArgs
 	if err := decodeArgs(raw, &a); err != nil {
 		return "", err
@@ -131,14 +141,21 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 	}
 	s, err := t.Catalog.find(a.Name)
 	if err != nil {
+		if t.Archived != nil && t.Archived(ctx, a.Name) {
+			return "", toolErr("The skill %s is archived. The owner can run /skills restore %s.", a.Name, a.Name)
+		}
 		return "", err
-	}
-	if strings.TrimSpace(a.File) != "" {
-		return readSkillFile(s, a.File, t.MaxLinkedFiles)
 	}
 	sessionID := ""
 	if env != nil {
 		sessionID = env.SessionID
+	}
+	if strings.TrimSpace(a.File) != "" {
+		out, err := readSkillFile(s, a.File, t.MaxLinkedFiles)
+		if err == nil {
+			t.recordRead(ctx, s.Name, env)
+		}
+		return out, err
 	}
 	body := skills.SubstituteTemplateVars(s.Body, s.Dir, sessionID)
 
@@ -153,7 +170,23 @@ func (t SkillViewTool) Run(_ context.Context, raw json.RawMessage, env *Env) (st
 	if len(s.RequiredEnv) > 0 {
 		fmt.Fprintf(&b, "\n%s\n", envStatusLine(s.RequiredEnv, t.EnvStatus))
 	}
+	t.recordRead(ctx, s.Name, env)
 	return b.String(), nil
+}
+
+// recordRead records one read of the skill name. A review run records nothing. An error
+// goes to the log and does not change the tool result.
+func (t SkillViewTool) recordRead(ctx context.Context, name string, env *Env) {
+	if t.Reads == nil || (env != nil && env.Kind == "review") {
+		return
+	}
+	sessionID := ""
+	if env != nil {
+		sessionID = env.SessionID
+	}
+	if err := t.Reads.RecordRead(context.WithoutCancel(ctx), name, "view", sessionID); err != nil && env != nil && env.Log != nil {
+		env.Log.Warn("cannot record a skill read", "skill", name, "err", err.Error())
+	}
 }
 
 // readSkillFile returns the content of file in the folder of s. The file
@@ -389,12 +422,16 @@ func (t SkillManageTool) Run(_ context.Context, raw json.RawMessage, env *Env) (
 		err  error
 		verb string
 	)
+	o := skills.Origin{Source: skillSource(env)}
+	if env != nil {
+		o.SessionID = env.SessionID
+	}
 	switch a.Action {
 	case "create":
 		if a.Content == nil {
 			return "", toolErr("content is required for create")
 		}
-		res, err = t.Mgr.Create(a.Name, *a.Content)
+		res, err = t.Mgr.Create(o, a.Name, *a.Content)
 		verb = "created skill " + a.Name
 	case "patch":
 		if a.OldString == nil || a.NewString == nil {
@@ -404,17 +441,21 @@ func (t SkillManageTool) Run(_ context.Context, raw json.RawMessage, env *Env) (
 		if strings.TrimSpace(file) == "" {
 			file = "SKILL.md"
 		}
-		res, err = t.Mgr.PatchFile(a.Name, file, *a.OldString, *a.NewString)
+		res, err = t.Mgr.PatchFile(o, a.Name, file, *a.OldString, *a.NewString)
 		verb = "patched skill " + a.Name
 	case "write_file":
 		if a.Content == nil {
 			return "", toolErr("content is required for write_file")
 		}
-		res, err = t.Mgr.WriteFile(a.Name, a.File, *a.Content)
+		res, err = t.Mgr.WriteFile(o, a.Name, a.File, *a.Content)
 		verb = "wrote a file of skill " + a.Name
 	case "delete":
-		if err := t.Mgr.Delete(a.Name); err != nil {
+		c, err := t.Mgr.Delete(o, a.Name)
+		if err != nil {
 			return "", toolErr("%v", err)
+		}
+		if c.ID > 0 {
+			AddEdit(env, "skill", c.ID)
 		}
 		return "deleted skill " + a.Name, nil
 	default:
@@ -423,7 +464,14 @@ func (t SkillManageTool) Run(_ context.Context, raw json.RawMessage, env *Env) (
 	if err != nil {
 		return "", toolErr("%v", err)
 	}
+	if res.CopyID > 0 {
+		AddEdit(env, "skill", res.CopyID)
+	}
 	out := fmt.Sprintf("%s: %s", verb, res.Path)
+	if len(res.Similar) > 0 {
+		out += "\nSimilar skills exist: " + strings.Join(res.Similar, ", ") +
+			". Check that the new skill is not a duplicate. If an old skill covers the task, patch it and delete the new one."
+	}
 	if len(res.Findings) > 0 {
 		report := skills.FormatFindings(skills.ScanResult{Verdict: res.Verdict, Findings: res.Findings})
 		if env != nil && env.Log != nil && res.Verdict != skills.VerdictSafe {
@@ -432,6 +480,21 @@ func (t SkillManageTool) Run(_ context.Context, raw json.RawMessage, env *Env) (
 		out += "\nThe skill is saved, but the skill guard found these items. Check them:\n" + report
 	}
 	return out, nil
+}
+
+// skillSource returns the skill source of a run kind: chat, review, and cron keep their name,
+// a subagent run is child, and each other kind, also "" or a nil env, is chat.
+func skillSource(env *Env) string {
+	if env == nil {
+		return "chat"
+	}
+	switch env.Kind {
+	case "chat", "review", "cron":
+		return env.Kind
+	case "subagent":
+		return "child"
+	}
+	return "chat"
 }
 
 // refuseExternal returns an error when name is a skill of an external

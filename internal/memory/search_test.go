@@ -285,7 +285,7 @@ func TestSearchReportsUnreadableTierOneFile(t *testing.T) {
 
 func TestSearchMaskedTierOneOnly(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir, 2200, 1375)
+	s, err := Open(dir, 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,5 +350,18 @@ func TestSearchHits(t *testing.T) {
 	// The text result of the tool does not change.
 	if out := mustSearch(t, s, "quicknode plan"); !strings.HasPrefix(out, "2 matches for \"quicknode plan\":\n1. note rpc (type memory, ") {
 		t.Fatalf("%q", out)
+	}
+}
+
+func TestSearchRuleFile(t *testing.T) {
+	s := open(t)
+	apply(t, s, Op{Action: "add", Target: TargetRule, Content: "Never build from source; install the release"})
+	hits, err := s.SearchHits("release", 0)
+	if err != nil || len(hits) != 1 || hits[0].File != "rules.md" {
+		t.Fatalf("%+v %v", hits, err)
+	}
+	out, err := s.SearchMasked("release", func(string) (string, bool) { return "[MASKED]", true })
+	if err != nil || !strings.Contains(out, "1. rules.md\n   [MASKED]") {
+		t.Fatalf("%q %v", out, err)
 	}
 }

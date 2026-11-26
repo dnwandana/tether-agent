@@ -30,6 +30,12 @@ export interface AnsweredCard {
   at: string;
 }
 
+export interface ArchivedSkillRow {
+  name: string;
+  rel_dir: string;
+  archived_at: string;
+}
+
 export interface BackupFile {
   name: string;
   size: number;
@@ -479,6 +485,10 @@ export interface MemorySearchView {
   hits: MemoryHit[];
 }
 
+export interface MemoryUndo {
+  edit_id: number;
+}
+
 export interface MemoryView {
   memory: MemoryEntry[];
   user: MemoryEntry[];
@@ -486,9 +496,13 @@ export interface MemoryView {
   memory_limit: number;
   user_used: number;
   user_limit: number;
+  rule: MemoryEntry[];
+  rule_used: number;
+  rule_limit: number;
   entry_limit: number;
   topics: TopicRow[];
   result: string;
+  edit_ids: number[];
 }
 
 export interface MessagePage {
@@ -820,6 +834,8 @@ export interface SkillRow {
   check: string;
   update: boolean;
   actions: string[];
+  last_read: string | null;
+  kept: boolean;
 }
 
 export interface Snapshot {
@@ -879,6 +895,7 @@ export interface TopicRow {
   type: string;
   modified: string;
   entries: number;
+  held: boolean;
 }
 
 export interface TopicView {

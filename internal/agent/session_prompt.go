@@ -155,12 +155,17 @@ func NowPrefix(frozenAt, now time.Time) string {
 	return now.Format(nowPrefixFormat)
 }
 
+// promptNow gives the time of a prompt build. Tests set it.
+var promptNow = time.Now
+
 // SessionPrompt builds the system prompt of the session. It reads memory, the note topics,
 // and the skills from disk. A session prompt override replaces the base prompt. A member
 // session prompt has no memory sections and no topic list. The second result
-// is the time at which the prompt is frozen. Use it as the build function of NewPromptCache.
+// is the time at which the prompt is frozen. The expiry check of the memory entries runs only
+// here, so the prompt of a session keeps its bytes. Use it as the build function of NewPromptCache.
 func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, key PromptKey, channel string) (string, time.Time) {
-	now := time.Now()
+	now := promptNow()
+	today := now.Format("2006-01-02")
 	in := PromptInput{Base: BasePrompt(), Now: now, TZ: zoneName(now), WorkDir: a.workDir(), Channel: channel}
 	if s != nil && strings.TrimSpace(s.PromptOverride) != "" {
 		in.Base = s.PromptOverride
@@ -169,8 +174,8 @@ func (a *Agent) SessionPrompt(_ context.Context, s *sessions.Session, key Prompt
 		for _, f := range []struct {
 			target string
 			text   *string
-		}{{memory.TargetMemory, &in.Memory}, {memory.TargetUser, &in.Profile}} {
-			entries, err := a.Memory.ReadEntries(f.target)
+		}{{memory.TargetRule, &in.Rules}, {memory.TargetMemory, &in.Memory}, {memory.TargetUser, &in.Profile}} {
+			entries, err := a.Memory.LiveEntries(f.target, today)
 			if err != nil {
 				a.logger().Warn("agent: cannot read a memory file; the prompt has no entries of it", "target", f.target, "err", err.Error())
 				continue

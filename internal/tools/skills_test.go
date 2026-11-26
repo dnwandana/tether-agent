@@ -341,3 +341,160 @@ func TestSkillViewMaxLinkedFiles(t *testing.T) {
 		t.Fatal("0 keeps the limit of 50:", out)
 	}
 }
+
+// skillCopies is a skills.CopyRecorder in memory.
+type skillCopies struct{ rows []skills.Copy }
+
+func (r *skillCopies) AddCopy(c skills.Copy) (skills.Copy, error) {
+	c.ID, c.Stamp = int64(len(r.rows)+1), "ab12"
+	r.rows = append(r.rows, c)
+	return c, nil
+}
+func (r *skillCopies) FinishCopy(id int64, h string) error { r.rows[id-1].HashAfter = h; return nil }
+func (r *skillCopies) GetCopy(id int64) (skills.Copy, error) {
+	return r.rows[id-1], nil
+}
+func (r *skillCopies) ListCopies(string, int) ([]skills.Copy, error) { return r.rows, nil }
+func (r *skillCopies) MarkCopyUndone(int64, int64) error             { return nil }
+func (r *skillCopies) PruneCopies(string, int) ([]skills.Copy, error) {
+	return nil, nil
+}
+
+func TestSkillManageSourceFromKind(t *testing.T) {
+	md := `---\nname: deploy\ndescription: Deploy. Use when deploying.\n---\n# Steps\n1. build\n`
+	cases := []struct {
+		kind, want string
+		nilEnv     bool
+	}{
+		{"chat", "chat", false}, {"review", "review", false}, {"cron", "cron", false},
+		{"subagent", "child", false}, {"", "chat", false}, {"", "chat", true},
+	}
+	for _, tc := range cases {
+		tool := manageTool(t)
+		rec := &skillCopies{}
+		tool.Mgr.Copies = rec
+		env := newEnv(t)
+		env.Kind, env.SessionID = tc.kind, "s1"
+		if tc.nilEnv {
+			runToolEnv(t, tool, `{"action":"create","name":"deploy","content":"`+md+`"}`, nil)
+		} else {
+			runToolEnv(t, tool, `{"action":"create","name":"deploy","content":"`+md+`"}`, env)
+		}
+		if len(rec.rows) != 1 || rec.rows[0].Source != tc.want {
+			t.Fatalf("kind %q nil=%v: rows %+v, want source %s", tc.kind, tc.nilEnv, rec.rows, tc.want)
+		}
+		if tc.nilEnv {
+			continue
+		}
+		if rec.rows[0].SessionID != "s1" {
+			t.Fatalf("session %q", rec.rows[0].SessionID)
+		}
+		if got := Edits(env); len(got) != 1 || got[0] != (EditRef{Kind: "skill", ID: 1}) {
+			t.Fatalf("edits %+v", got)
+		}
+	}
+}
+
+func TestSkillManageDeleteAddsRef(t *testing.T) {
+	tool := manageTool(t)
+	tool.Mgr.Copies = &skillCopies{}
+	env := newEnv(t)
+	md := `---\nname: deploy\ndescription: Deploy. Use when deploying.\n---\n# Steps\n1. build\n`
+	runToolEnv(t, tool, `{"action":"create","name":"deploy","content":"`+md+`"}`, env)
+	ResetEdits(env)
+	runToolEnv(t, tool, `{"action":"delete","name":"deploy"}`, env)
+	if got := Edits(env); len(got) != 1 || got[0] != (EditRef{Kind: "skill", ID: 2}) {
+		t.Fatalf("edits %+v", got)
+	}
+}
+
+type readRec struct{ got []string } // each item "<name>|<source>|<session>"
+
+func (r *readRec) RecordRead(_ context.Context, name, source, sessionID string) error {
+	r.got = append(r.got, name+"|"+source+"|"+sessionID)
+	return nil
+}
+
+func TestSkillViewRecordsRead(t *testing.T) {
+	cat := catalogWith(t, "demo", "Demo skill.", "body", map[string]string{"references/api.md": "API"})
+	rec := &readRec{}
+	tool := SkillViewTool{Catalog: cat, Reads: rec}
+	env := &Env{SessionID: "s1", Kind: "chat"}
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"name":"demo"}`), env); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"name":"demo","file":"references/api.md"}`), env); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"demo|view|s1", "demo|view|s1"}; !slices.Equal(rec.got, want) {
+		t.Fatalf("got %q", rec.got)
+	}
+}
+
+func TestSkillViewNoReadInReview(t *testing.T) {
+	rec := &readRec{}
+	tool := SkillViewTool{Catalog: catalogWith(t, "demo", "Demo skill.", "body", nil), Reads: rec}
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"name":"demo"}`), &Env{SessionID: "s1", Kind: "review"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.got) != 0 {
+		t.Fatalf("got %q", rec.got)
+	}
+}
+
+func TestSkillViewNoReadOnError(t *testing.T) {
+	rec := &readRec{}
+	tool := SkillViewTool{Catalog: catalogWith(t, "demo", "Demo skill.", "body", nil), Reads: rec}
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"name":"missing"}`), &Env{SessionID: "s1", Kind: "chat"}); err == nil {
+		t.Fatal("want an error")
+	}
+	if len(rec.got) != 0 {
+		t.Fatalf("got %q", rec.got)
+	}
+}
+
+func TestSkillViewArchivedAnswer(t *testing.T) {
+	tool := SkillViewTool{
+		Catalog:  catalogWith(t, "demo", "Demo skill.", "body", nil),
+		Archived: func(_ context.Context, n string) bool { return n == "graphkb-lightrag" },
+	}
+	env := &Env{SessionID: "s1", Kind: "chat"}
+	_, err := tool.Run(context.Background(), json.RawMessage(`{"name":"graphkb-lightrag"}`), env)
+	if err == nil || !strings.Contains(err.Error(), "The skill graphkb-lightrag is archived. The owner can run /skills restore graphkb-lightrag.") {
+		t.Fatalf("%v", err)
+	}
+	_, err = tool.Run(context.Background(), json.RawMessage(`{"name":"other"}`), env)
+	if err == nil || !strings.Contains(err.Error(), `no skill named "other"`) {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestSkillManageCreateListsSimilar(t *testing.T) {
+	tool := manageTool(t)
+	mk := func(name, desc string) string {
+		return "---\nname: " + name + "\ndescription: " + desc + "\n---\nbody\n"
+	}
+	desc := "Build and query a lightrag graph knowledge base from documents."
+	env := &Env{Kind: "chat"}
+	first := mk("lightrag-graph", desc)
+	if _, err := tool.Run(context.Background(), json.RawMessage(jsonArgs(t, map[string]any{"action": "create", "name": "lightrag-graph", "content": first})), env); err != nil {
+		t.Fatal(err)
+	}
+	second := mk("lightrag-kb", desc)
+	out, err := tool.Run(context.Background(), json.RawMessage(jsonArgs(t, map[string]any{"action": "create", "name": "lightrag-kb", "content": second})), env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Similar skills exist: lightrag-graph.") {
+		t.Fatalf("%q", out)
+	}
+}
+
+func jsonArgs(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}

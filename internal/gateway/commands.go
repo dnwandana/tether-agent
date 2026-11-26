@@ -1062,6 +1062,7 @@ const helpTelegram = "📖 **Commands**\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n" +
 	"/approve · /deny · answer an approval\n\n" +
+	"**Memory and skills**\n/memory · see and change the memory\n/skills · see stale and archived skills\n\n" +
 	"**Setup**\n/sethome · send cron results to this chat\n/jobs · see and control the cron jobs\n/brief · see what needs you\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat or topic\n/secrets · see and save the bound secrets\n/reload_mcp · reload the MCP servers\n/restart · restart the gateway"
 
 // helpCLI is the reply to /help on a text-only channel. It does not have the Telegram
@@ -1074,6 +1075,7 @@ const helpCLI = "📖 **Commands**\n\n" +
 	"/compact · make the context shorter\n/usage · see tokens and cost\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n\n" +
+	"**Memory and skills**\n/memory · see and change the memory\n/skills · see stale and archived skills\n\n" +
 	"**Setup**\n/jobs · see and control the cron jobs\n/brief · see what needs you\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of this chat\n/secrets · see and save the bound secrets\n/reload-mcp · reload the MCP servers\n/exit · leave the chat"
 
 // helpDashboard is the reply to /help on the dashboard. It has /approve and /deny, and it
@@ -1087,6 +1089,7 @@ const helpDashboard = "📖 **Commands**\n\n" +
 	"**The current task**\n/stop · stop it\n/steer · send it a note\n/now · run your waiting message now\n" +
 	"/goal · keep working toward a goal\n/todo · see the task list\n" +
 	"/approve · /deny · answer an approval\n\n" +
+	"**Memory and skills**\n/memory · see and change the memory\n/skills · see stale and archived skills\n\n" +
 	"**Setup**\n/jobs · see and control the cron jobs\n/brief · see what needs you\n/approvals · see and remove the Always answers\n/approvals log [all] · see the approval decisions\n/mode · set the approval mode of the dashboard\n/secrets · see and save the bound secrets\n/reload-mcp · reload the MCP servers\n/restart · restart the gateway"
 
 // helpMember is the reply to /help for a member. It lists only the commands that a member

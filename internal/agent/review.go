@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
+	"github.com/dnwandana/tether-agent/internal/skills"
 	"github.com/dnwandana/tether-agent/internal/tools"
 )
 
@@ -27,21 +30,90 @@ const reviewDeny = "review runs may only use memory, skill_view, skill_manage"
 // run (Hermes max_iterations=16).
 const reviewMaxTurns = 16
 
+// reviewSkillCap is the tool result of a skill_manage call after the review limit. The value is
+// skills.review_max_changes.
+const reviewSkillCap = "A review makes at most %d skill changes. Stop, and keep the most useful changes."
+
+// reviewMaxSkillChanges is the default of skills.review_max_changes.
+const reviewMaxSkillChanges = 3
+
+// reviewSkillLimit returns skills.review_max_changes, or reviewMaxSkillChanges for 0 or less.
+func (a *Agent) reviewSkillLimit() int {
+	if n := a.config().Skills.ReviewMaxChanges; n > 0 {
+		return n
+	}
+	return reviewMaxSkillChanges
+}
+
+// memoryRoutingBlock is the text of Hermes _MEMORY_ROUTING_BLOCK (agent/background_review.py at
+// commit b579fe6). Only the two file names change. The last part is memoryTetherRules.
+const memoryRoutingBlock = "TWO distinct stores — pick the right one for each fact:\n" +
+	"  • user_profile.md (memory tool, target='user'): who the user is — persona, preferences, " +
+	"communication and work style, personal details they revealed, and expectations about how you " +
+	"should behave.\n" +
+	"  • memory.md (memory tool, target='memory'): facts about the ENVIRONMENT you operate in — " +
+	"tool quirks, project conventions, config gotchas, paths and endpoints that matter.\n\n" +
+	"One fact goes to ONE store, never both — writing it to both bloats both files until they hit " +
+	"their size limits and crowds out the facts that matter; misrouting it puts it where the next " +
+	"session won't look. If the tool schema lists only one " +
+	"target, that store is the only one enabled — use it and skip the other.\n\n" +
+	"Save only facts GROUNDED in this conversation — a user message or tool result you can point " +
+	"to. Never infer the user's traits, skill level, role, mood or preferences from topic, tone or " +
+	"tools used, and never turn a one-off request into a standing preference (in either store) " +
+	"unless the user marked it general ('always', 'from now on', 'remember') or stated a standing " +
+	"like/dislike ('I hate X', 'stop doing Y'). If unsure, leave it " +
+	"out — a wrong fact misleads every future session.\n\n" +
+	memoryTetherRules
+
+// memoryTetherRules are the three Tether Agent rules that follow the Hermes routing text.
+const memoryTetherRules = "For each add or replace with target='user', put the user's exact words from this " +
+	"conversation in quote. A write to the user profile with no quote of the user is refused.\n" +
+	"Owner rules (target='rule') are not yours to write. When the user states a new standing rule, " +
+	"name it in your last answer, and do not save it.\n" +
+	"When a fact is a snapshot, for example a version or a plan for this week, give it an until " +
+	"date (YYYY-MM-DD).\n\n"
+
 // MemoryReviewPrompt asks the review run to save facts about the user. It is the text of
-// Hermes _MEMORY_REVIEW_PROMPT.
+// Hermes _MEMORY_REVIEW_PROMPT (agent/background_review.py at commit b579fe6).
 const MemoryReviewPrompt = "Review the conversation above and consider saving to memory if appropriate.\n\n" +
-	"Focus on:\n" +
-	"1. Has the user revealed things about themselves — their persona, desires, " +
-	"preferences, or personal details worth remembering?\n" +
-	"2. Has the user expressed expectations about how you should behave, their work " +
-	"style, or ways they want you to operate?\n\n" +
-	"If something stands out, save it using the memory tool. " +
-	"If nothing is worth saving, just say 'Nothing to save.' and stop."
+	"Memory has " + memoryRoutingBlock +
+	"If something stands out, save it once, in the right store, using the memory tool with the " +
+	"matching target. If nothing is worth saving, just say 'Nothing to save.' and stop."
+
+// lessonLayerBlock is the text of Hermes _LESSON_LAYER_BLOCK (agent/background_review.py at
+// commit b579fe6).
+const lessonLayerBlock = "What a skill IS: the instructions for doing a class of task the most efficient and correct " +
+	"way, to THIS user's specifications — the procedure, the tools and commands that work, the " +
+	"order, the user's preferences for how the result should look, and the pitfalls that cost time. " +
+	"A future session should be able to follow it and produce what the user wants on the first " +
+	"try. Everything below is about writing that well:\n" +
+	"  • Procedure first: the steps in the order they are done, with the concrete commands, tool " +
+	"calls, and decision points. Lessons and pitfalls attach to the step they affect.\n" +
+	"  • A pitfall is a generalizable rule + one clause of WHY (the mechanism), imperative. 'Grep the " +
+	"test tree for the SYMBOL before widening a helper signature — hand-rolled mocks reimplement the " +
+	"old shape and fail on a shard you did not run.' Not a narrative of what happened this session.\n" +
+	"  • No PR/issue numbers, dates, ticket IDs, or quoted user text as content — the rule must stand " +
+	"without the incident behind it. Keep a short quote ONLY when the quote itself is the clearest " +
+	"statement of the rule.\n" +
+	"  • The same lesson learned twice is ONE rule. Before adding, search the skill (and its " +
+	"references/) for the rule already stated; strengthen or clarify it rather than appending a " +
+	"second copy.\n" +
+	"  • Not a duplicate of what the environment already teaches: repo AGENTS.md files, tool schema " +
+	"descriptions, and other always-loaded context. A skill carries the WORKFLOW and the pitfalls; " +
+	"it does not restate the codebase map or a tool's parameter list.\n" +
+	"  • Always-on rules (standing user preferences, gates that apply to every instance of the " +
+	"task) live in SKILL.md itself, whole. references/ is for depth that is only needed sometimes: " +
+	"a decision table, a recipe, a domain note — each file topical and reusable, never " +
+	"'<date>-<incident>.md'. Prefer extending an existing references/ file over creating one; " +
+	"a skill with dozens of one-off references is the failure shape, not the goal.\n" +
+	"  • Fix the skill in place when it is wrong: edit the sentence that misled, do not append " +
+	"'UPDATE: actually...' underneath it.\n\n"
 
 // skillProtected is the part of the Hermes skill prompts about the skills that the review
 // must not edit. The names are the Tether Agent names.
 const skillProtected = "Protected skills (DO NOT edit these):\n" +
 	"  • Bundled skills (shipped with Tether Agent, e.g. 'tether-self').\n" +
+	"  • Skills installed from the hub (listed in skills/.hub/lock.json). The tool refuses a review change to them.\n" +
 	"  • Skills from the external skill folders (skills.external_dirs). They are read-only.\n" +
 	"If the only skills that need updating are protected, say\n" +
 	"'Nothing to save.' and stop.\n\n"
@@ -68,7 +140,8 @@ const skillDoNotCapture = "  • Environment-dependent failures: missing binarie
 	"standalone constraint.\n\n"
 
 // SkillReviewPrompt asks the review run to update the skill library. It is the text of
-// Hermes _SKILL_REVIEW_PROMPT, with the Tether Agent tool and skill names.
+// Hermes _SKILL_REVIEW_PROMPT (agent/background_review.py at commit b579fe6), with the
+// Tether Agent tool and skill names.
 const SkillReviewPrompt = "Review the conversation above and update the skill library. Be " +
 	"ACTIVE — most sessions produce at least one skill update, even if " +
 	"small. A pass that does nothing is a missed learning opportunity, " +
@@ -77,6 +150,7 @@ const SkillReviewPrompt = "Review the conversation above and update the skill li
 	"SKILL.md and a `references/` directory for session-specific detail. " +
 	"Not a long flat list of narrow one-session-one-skill entries. This " +
 	"shapes HOW you update, not WHETHER you update.\n\n" +
+	lessonLayerBlock +
 	"Signals to look for (any one of these warrants action):\n" +
 	"  • User corrected your style, tone, format, legibility, or " +
 	"verbosity. Frustration signals like 'stop doing X', 'this is too " +
@@ -142,18 +216,17 @@ const SkillReviewPrompt = "Review the conversation above and update the skill li
 	"Otherwise, act."
 
 // CombinedReviewPrompt asks for a memory review and a skill review in one run. It is the
-// text of Hermes _COMBINED_REVIEW_PROMPT, with the Tether Agent tool and skill names.
+// text of Hermes _COMBINED_REVIEW_PROMPT (agent/background_review.py at commit b579fe6), with
+// the Tether Agent tool and skill names.
 const CombinedReviewPrompt = "Review the conversation above and update two things:\n\n" +
-	"**Memory**: who the user is. Did the user reveal persona, " +
-	"desires, preferences, personal details, or expectations about " +
-	"how you should behave? Save facts about the user and durable " +
-	"preferences with the memory tool.\n\n" +
+	"**Memory**: " + memoryRoutingBlock +
 	"**Skills**: how to do this class of task. Be ACTIVE — most " +
 	"sessions produce at least one skill update. A pass that does " +
 	"nothing is a missed learning opportunity, not a neutral outcome.\n\n" +
 	"Target shape of the skill library: CLASS-LEVEL skills with a rich " +
 	"SKILL.md and a `references/` directory for session-specific detail. " +
 	"Not a long flat list of narrow one-session-one-skill entries.\n\n" +
+	lessonLayerBlock +
 	"Signals that warrant a skill update (any one is enough):\n" +
 	"  • User corrected your style, tone, format, legibility, " +
 	"verbosity, or approach. Frustration is a FIRST-CLASS skill " +
@@ -232,8 +305,16 @@ type ReviewRequest struct {
 	Memory, Skills bool
 	// FocusRange is View[start:end], the part that a compaction removes. It can be nil.
 	FocusRange *[2]int
-	// Notify receives one summary text of the saved changes after the review. It can be nil.
+	// Outside holds the outside sources of the range that the review checks, with no terminal
+	// source. The review turn starts with them, so a memory write of the review waits for the
+	// owner.
+	Outside []string
+	// Notify receives the text of the change card after the review, when Card is nil. It can
+	// be nil.
 	Notify func(text string)
+	// Card receives the change card of the review, and one held card for each memory write
+	// that waits for the owner. It can be nil.
+	Card func(Notice)
 	// ParentEnv gives the work dir, the data dir, and the logger of the parent. It can be nil.
 	ParentEnv *tools.Env
 }
@@ -249,7 +330,8 @@ const maxConcurrentReviews = 2
 
 // RunReview runs one review: a fork of the parent conversation that can only save memory
 // and skills. The parent session never changes. It returns the notices of the saved
-// changes, and sends one summary of them to r.Notify.
+// changes, for the log, and sends one change card of them to r.Card (or its text to
+// r.Notify).
 func (a *Agent) RunReview(ctx context.Context, r ReviewRequest) (saved []string, err error) {
 	if r.Session == nil {
 		return nil, errors.New("agent: the review has no session")
@@ -277,8 +359,10 @@ func (a *Agent) RunReview(ctx context.Context, r ReviewRequest) (saved []string,
 		}
 	}
 	var (
-		mu   sync.Mutex
-		seen = map[string]bool{}
+		mu     sync.Mutex
+		seen   = map[string]bool{}
+		copies []skills.Copy
+		held   []heldCall
 	)
 	onResult := func(c provider.ToolCall, res tools.Result) {
 		n := reviewNotice(c, res)
@@ -288,33 +372,55 @@ func (a *Agent) RunReview(ctx context.Context, r ReviewRequest) (saved []string,
 			seen[n] = true
 			saved = append(saved, n)
 		}
+		if c.Name == "skill_manage" && !res.IsError {
+			var args struct{ Action, Name string }
+			if json.Unmarshal([]byte(c.Args), &args) == nil {
+				copies = append(copies, skills.Copy{Name: strings.TrimSpace(args.Name), Action: args.Action})
+			}
+		}
+		if h, ok := heldOf(c, res); ok {
+			held = append(held, h)
+		}
 	}
-	// The defer also sends the summary when the review fails or times out.
-	defer func() {
-		if r.Notify == nil {
-			return
-		}
-		if text := reviewSummary(saved); text != "" {
-			r.Notify(text)
-		}
-	}()
 	limits := delegationLimits(a.config())
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(limits.ChildTimeoutS)*time.Second)
 	defer cancel()
 	env := childEnv(r.ParentEnv, sess)
 	defer releaseApprovals(env)
+	// The defer also sends the card when the review fails or times out.
+	defer func() {
+		mu.Lock()
+		defer mu.Unlock()
+		refs := tools.Edits(env)
+		n := 0
+		for _, ref := range refs {
+			if ref.Kind != "skill" {
+				continue
+			}
+			// The n-th skill ref belongs to the n-th kept skill call.
+			if n < len(copies) {
+				copies[n].ID = ref.ID
+			}
+			n++
+		}
+		// The card goes out also when the review ends with a canceled context, so its reads
+		// of the history must not stop.
+		a.sendCard(context.WithoutCancel(ctx), r.Session.Key, refs, copies, held, tools.Outside(env), r.Card, r.Notify)
+	}()
 	_, err = a.RunTurn(cctx, Turn{
 		Session:  sess,
 		UserText: reviewPrompt(r.Memory, r.Skills, r.FocusRange),
 		Env:      env,
 		System:   r.System,
+		Outside:  r.Outside,
 		MaxTurns: a.reviewRounds(),
 		review: &reviewOpts{
-			history:  append([]provider.Message(nil), r.View...),
-			schemas:  r.Tools,
-			allow:    allow,
-			deny:     reviewDeny,
-			onResult: onResult,
+			history:    append([]provider.Message(nil), r.View...),
+			schemas:    r.Tools,
+			allow:      allow,
+			deny:       reviewDeny,
+			onResult:   onResult,
+			skillLimit: a.reviewSkillLimit(),
 		},
 	})
 	if err != nil {
@@ -363,7 +469,7 @@ func reviewNotice(c provider.ToolCall, res tools.Result) string {
 			return ""
 		}
 		first, _, _ := strings.Cut(res.Text, "\n")
-		if strings.HasPrefix(first, "The entry already exists") {
+		if strings.HasPrefix(first, tools.HeldResultPrefix) || strings.HasPrefix(first, "The entry already exists") {
 			return ""
 		}
 		// The args do not show a spill, so the result text gives the note.
@@ -376,10 +482,14 @@ func reviewNotice(c provider.ToolCall, res tools.Result) string {
 		if args.Action == "remove" {
 			detail = args.OldText
 		}
+		label := "💾 Memory updated"
 		if args.Target == "user" {
-			return "💾 User profile updated" + noticeQuote(args.Action, detail)
+			label = "💾 User profile updated"
 		}
-		return "💾 Memory updated" + noticeQuote(args.Action, detail)
+		if args.Action == "remove" {
+			return label + " (removed): " + noticeQuote(detail, 0)
+		}
+		return label + ": " + noticeQuote(detail, 0)
 	case "skill_manage":
 		name := strings.TrimSpace(args.Name)
 		switch args.Action {
@@ -394,23 +504,17 @@ func reviewNotice(c provider.ToolCall, res tools.Result) string {
 	return ""
 }
 
-// noticeQuote returns the text of a memory write for its notice, for example
-// ": `VPS = ovh`" or " (removed): `hetzner`". The text is one line in a code span.
-// It is not cut, because memory.md and user_profile.md go into the system prompt of
-// later sessions, and the user must see all of it. security.ShowHidden shows each
+// noticeQuote returns the text of a memory write for its notice, in a code span, for
+// example "`VPS = ovh`". The text is one line. It is cut at max runes when max is above 0.
+// With max 0 it is not cut, because memory.md and user_profile.md go into the system
+// prompt of later sessions, and the user must see all of it. security.ShowHidden shows each
 // hidden rune as a mark. An empty text gives "".
-func noticeQuote(action, text string) string {
-	text = strings.Join(strings.Fields(strings.ReplaceAll(text, "`", "'")), " ")
+func noticeQuote(text string, max int) string {
+	text = cardSpan(text, max)
 	if text == "" {
 		return ""
 	}
-	// The join comes first, so the notice stays on one line. ShowHidden then marks the
-	// control and format runes that stay.
-	text = security.ShowHidden(text)
-	if action == "remove" {
-		return " (removed): `" + text + "`"
-	}
-	return ": `" + text + "`"
+	return "`" + text + "`"
 }
 
 // memoryNotePrefix starts the notice of a memory write that changed a note.
@@ -429,7 +533,7 @@ func noteTopic(text string) string {
 	return ""
 }
 
-// The prefixes of the skill notices. reviewSummary finds a skill notice by its prefix.
+// The prefixes of the skill notices. CardText puts the skill names under them.
 const (
 	skillCreatedPrefix = "🧩 Skill created: "
 	skillUpdatedPrefix = "🧩 Skill updated: "
@@ -443,72 +547,41 @@ var skillPrefixes = [...]struct{ one, many string }{
 	{skillDeletedPrefix, "🧩 Skills deleted: "},
 }
 
-// reviewSummary returns one text for the notices of one review, or "" for no notice.
-// It puts the skill names of each prefix on one line, at the place of the first notice
-// of that prefix. Each other notice is a line of its own. The names keep their order.
-func reviewSummary(saved []string) string {
-	type line struct {
-		prefix int // index in skillPrefixes, or -1 for a line of its own
-		text   string
-		names  []string
-	}
-	var lines []line
-	group := map[int]int{} // index in skillPrefixes to index in lines
-next:
-	for _, s := range saved {
-		for p, sp := range skillPrefixes {
-			name, ok := strings.CutPrefix(s, sp.one)
-			if !ok {
-				continue
-			}
-			if i, ok := group[p]; ok {
-				lines[i].names = append(lines[i].names, name)
-			} else {
-				group[p] = len(lines)
-				lines = append(lines, line{prefix: p, names: []string{name}})
-			}
-			continue next
-		}
-		lines = append(lines, line{prefix: -1, text: s})
-	}
-	out := make([]string, len(lines))
-	for i, l := range lines {
-		switch {
-		case l.prefix < 0:
-			out[i] = l.text
-		case len(l.names) == 1:
-			out[i] = skillPrefixes[l.prefix].one + l.names[0]
-		default:
-			out[i] = skillPrefixes[l.prefix].many + strings.Join(l.names, ", ")
-		}
-	}
-	return strings.Join(out, "\n")
-}
-
 // HoldNotices holds the review notices until the main answer is delivered. A
 // notice that arrives before release waits. release sends the held notices in order, and
 // later notices go out at once. The notices keep their order.
 func HoldNotices(send func(string)) (notify func(string), release func()) {
+	return holdQueue(send)
+}
+
+// HoldCards holds the change cards like HoldNotices holds the notices. Wrap the send
+// function of the channel with it, and call release after the answer.
+func HoldCards(send func(Notice)) (card func(Notice), release func()) {
+	return holdQueue(send)
+}
+
+// holdQueue is the queue of HoldNotices and HoldCards.
+func holdQueue[T any](send func(T)) (add func(T), release func()) {
 	var (
 		mu       sync.Mutex
 		sendMu   sync.Mutex
 		released bool
-		held     []string
+		held     []T
 	)
-	notify = func(text string) {
+	add = func(v T) {
 		mu.Lock()
 		if !released {
-			held = append(held, text)
+			held = append(held, v)
 			mu.Unlock()
 			return
 		}
 		mu.Unlock()
 		sendMu.Lock()
 		defer sendMu.Unlock()
-		send(text)
+		send(v)
 	}
 	release = func() {
-		// sendMu is taken first, so a notice after the release waits for the held ones.
+		// sendMu is taken first, so an item after the release waits for the held ones.
 		sendMu.Lock()
 		defer sendMu.Unlock()
 		mu.Lock()
@@ -520,11 +593,11 @@ func HoldNotices(send func(string)) (notify func(string), release func()) {
 		out := held
 		held = nil
 		mu.Unlock()
-		for _, text := range out {
-			send(text)
+		for _, v := range out {
+			send(v)
 		}
 	}
-	return notify, release
+	return add, release
 }
 
 // reviewMinUserTurns is the default of review.min_user_turns: the number of user turns that
@@ -552,6 +625,7 @@ type reviewState struct {
 	schemas   []provider.ToolSchema
 	env       *tools.Env
 	notify    func(string)
+	card      func(Notice)
 	// mode is the /mode value of the last turn.
 	mode string
 }
@@ -570,13 +644,16 @@ func (c *ReviewCounters) state(id string) *reviewState {
 }
 
 // remember keeps the request shape and the notice function of the current turn.
-func (c *ReviewCounters) remember(id, system string, schemas []provider.ToolSchema, env *tools.Env, notify func(string), mode string) {
+func (c *ReviewCounters) remember(id, system string, schemas []provider.ToolSchema, env *tools.Env, notify func(string), card func(Notice), mode string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	st := c.state(id)
 	st.haveShape, st.system, st.schemas, st.env, st.mode = true, system, schemas, env, mode
 	if notify != nil {
 		st.notify = notify
+	}
+	if card != nil {
+		st.card = card
 	}
 }
 
@@ -630,7 +707,7 @@ func NoReview(ctx context.Context) bool {
 
 // noReviews reports whether a session of the kind never gets a review.
 func noReviews(kind string) bool {
-	return kind == "cron" || kind == KindSubagent || kind == KindReview
+	return kind == "cron" || kind == KindSubagent || kind == KindReview || kind == sessions.KindTidy
 }
 
 // MaybeStartReviews counts the turn and starts a background review when a count is
@@ -644,8 +721,8 @@ func noReviews(kind string) bool {
 //   - A turn that called the tool itself resets the count of the tool (Hermes). A memory
 //     search or read does not count.
 //
-// The review gets notify. MaybeStartReviews does not wait for the review.
-func (a *Agent) MaybeStartReviews(ctx context.Context, sess *sessions.Session, lastReq provider.Request, res TurnResult, notify func(string)) {
+// The review gets notify and card. MaybeStartReviews does not wait for the review.
+func (a *Agent) MaybeStartReviews(ctx context.Context, sess *sessions.Session, lastReq provider.Request, res TurnResult, notify func(string), card func(Notice)) {
 	if sess == nil || noReviews(sess.Kind) {
 		return
 	}
@@ -710,14 +787,15 @@ func (a *Agent) MaybeStartReviews(ctx context.Context, sess *sessions.Session, l
 	c.mu.Unlock()
 
 	a.startReview(ctx, ReviewRequest{Session: sess, System: lastReq.System, Tools: lastReq.Tools,
-		Memory: mem, Skills: skill, Notify: notify, ParentEnv: env})
+		Memory: mem, Skills: skill, Notify: notify, Card: card, ParentEnv: env})
 }
 
 // ReviewOnCompaction starts one memory and skill review of the part of the view that a
-// compaction replaces: view[start:end]. It needs a session with review.min_user_turns or
+// compaction replaces: view[start:end]. The outside sources of the replaced rows come in
+// outside. It needs a session with review.min_user_turns or
 // more user turns. It returns at once, and the review runs in the background. It is the
 // Compactor.OnCompact hook. A context from WithNoReview starts no review.
-func (a *Agent) ReviewOnCompaction(ctx context.Context, sess *sessions.Session, view []provider.Message, start, end int) {
+func (a *Agent) ReviewOnCompaction(ctx context.Context, sess *sessions.Session, view []provider.Message, start, end int, outside []string) {
 	if sess == nil || noReviews(sess.Kind) || NoReview(ctx) {
 		return
 	}
@@ -728,6 +806,7 @@ func (a *Agent) ReviewOnCompaction(ctx context.Context, sess *sessions.Session, 
 	}
 	r.View = append([]provider.Message(nil), view...)
 	r.FocusRange = &[2]int{start, end}
+	r.Outside = tools.HoldSources(tools.OutsideFacts{Sources: outside})
 	a.goReview(ctx, func(ctx context.Context) {
 		if !a.enoughTurns(ctx, sess) {
 			return
@@ -780,25 +859,36 @@ func (a *Agent) fullReview(ctx context.Context, sess *sessions.Session) (r Revie
 	if mode == security.ModeReadOnly {
 		return r, false
 	}
-	r = ReviewRequest{Session: sess, Memory: mem, Skills: skill, Notify: st.notify, ParentEnv: st.env,
-		System: st.system, Tools: st.schemas}
-	if !st.haveShape {
-		// No turn of this session ran in this process: use the frozen prompt and the
-		// tools of the channel. A member session keeps its member prompt and tools.
-		member := a.Prompts != nil && a.Prompts.storedMember(sess.ID)
-		if a.Prompts != nil {
-			r.System, _ = a.Prompts.Get(ctx, sess, a.promptKey(ctx, sess, member, mode), sess.Source)
-		}
-		if a.Tools != nil {
-			cfg := a.config()
-			sets := tools.Resolve(cfg.Toolsets[sess.Source], nil, nil)
-			if member {
-				sets = tools.MemberToolsets(cfg.Toolsets[sess.Source], cfg.Toolsets["member"])
-			}
-			_, r.Tools = a.Tools.Visible(sets, nil)
-		}
-	}
+	r = ReviewRequest{Session: sess, Memory: mem, Skills: skill, Notify: st.notify, Card: st.card}
+	r.System, r.Tools, r.ParentEnv = a.reviewShape(ctx, sess)
 	return r, true
+}
+
+// reviewShape returns the system prompt, the tool schemas, and the tool context of the last turn
+// of the session. With no turn in this process, it uses the frozen prompt and the tools of the channel.
+func (a *Agent) reviewShape(ctx context.Context, sess *sessions.Session) (system string, schemas []provider.ToolSchema, env *tools.Env) {
+	st := a.Reviews.shape(sess.ID)
+	system, schemas, env = st.system, st.schemas, st.env
+	if st.haveShape {
+		return system, schemas, env
+	}
+	// No turn of this session ran in this process: use the frozen prompt and the
+	// tools of the channel. A member session keeps its member prompt and tools.
+	var mode string
+	member := false
+	if a.Prompts != nil {
+		mode, member = a.Prompts.storedMode(sess.ID), a.Prompts.storedMember(sess.ID)
+		system, _ = a.Prompts.Get(ctx, sess, a.promptKey(ctx, sess, member, mode), sess.Source)
+	}
+	if a.Tools != nil {
+		cfg := a.config()
+		sets := tools.Resolve(cfg.Toolsets[sess.Source], nil, nil)
+		if member {
+			sets = tools.MemberToolsets(cfg.Toolsets[sess.Source], cfg.Toolsets["member"])
+		}
+		_, schemas = a.Tools.Visible(sets, nil)
+	}
+	return system, schemas, env
 }
 
 // reviewProviderDown reports whether each provider entry of the session failed recently.
@@ -852,7 +942,19 @@ func (a *Agent) startReview(ctx context.Context, r ReviewRequest) {
 			a.logger().Info("review not started: each provider entry failed recently", "session", r.Session.ID)
 			return
 		}
-		if r.View == nil {
+		var newest int64
+		if r.FocusRange == nil && a.DB != nil {
+			view, outside, n, err := a.reviewRange(ctx, r.Session.ID)
+			if err != nil {
+				a.logger().Warn("agent: review not started", "session", r.Session.ID, "err", err.Error())
+				return
+			}
+			if r.View == nil {
+				r.View = view
+			}
+			r.Outside = tools.HoldSources(tools.OutsideFacts{Sources: outside})
+			newest = n
+		} else if r.View == nil {
 			v, err := a.View(ctx, r.Session.ID)
 			if err != nil {
 				a.logger().Warn("agent: review not started", "session", r.Session.ID, "err", err.Error())
@@ -862,6 +964,7 @@ func (a *Agent) startReview(ctx context.Context, r ReviewRequest) {
 		}
 		if a.reviewHook != nil {
 			a.reviewHook(r)
+			a.saveReadMark(ctx, r.Session.ID, newest)
 			return
 		}
 		a.logger().Info("review start", "session", r.Session.ID, "memory", r.Memory, "skills", r.Skills, "compaction", r.FocusRange != nil)
@@ -870,6 +973,7 @@ func (a *Agent) startReview(ctx context.Context, r ReviewRequest) {
 			a.logger().Warn("review failed", "session", r.Session.ID, "err", err.Error())
 			return
 		}
+		a.saveReadMark(ctx, r.Session.ID, newest)
 		a.logger().Info("review done", "session", r.Session.ID, "saved", len(saved))
 	})
 }
@@ -971,4 +1075,57 @@ func hasSchema(schemas []provider.ToolSchema, name string) bool {
 		}
 	}
 	return false
+}
+
+// reviewReadKey is the kv key prefix of the newest message id that a review of the session read.
+const reviewReadKey = "review.last_read."
+
+// reviewRange reads the stored messages of the session one time. It returns the model view, the
+// union of the outside sources of the messages after the newest message that the previous review
+// read (all messages for the first review), and the newest stored message id.
+func (a *Agent) reviewRange(ctx context.Context, sessionID string) (view []provider.Message, outside []string, newest int64, err error) {
+	msgs, err := a.Store.Messages(ctx, sessionID)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("agent: read the history: %w", err)
+	}
+	var after int64
+	v, ok, err := a.DB.KVGet(ctx, reviewReadKey+sessionID)
+	if err != nil {
+		return nil, nil, 0, fmt.Errorf("agent: read the review mark: %w", err)
+	}
+	if ok {
+		if after, err = strconv.ParseInt(v, 10, 64); err != nil {
+			a.logger().Warn("agent: the review mark is not a number; the review checks the whole session", "session", sessionID, "value", v)
+			after = 0
+		}
+	}
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		newest = max(newest, m.ID)
+		if m.ID <= after {
+			continue
+		}
+		for _, s := range m.Meta.Outside {
+			seen[s] = true
+		}
+	}
+	for s := range seen {
+		outside = append(outside, s)
+	}
+	sort.Strings(outside)
+	stored, err := a.viewOf(ctx, sessionID, msgs, nil)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	return plain(withObserved(stored, lastAddressed(stored))), outside, newest, nil
+}
+
+// saveReadMark stores the newest message id that a finished review read. A zero id stores nothing.
+func (a *Agent) saveReadMark(ctx context.Context, sessionID string, newest int64) {
+	if newest == 0 || a.DB == nil {
+		return
+	}
+	if err := a.DB.KVSet(ctx, reviewReadKey+sessionID, strconv.FormatInt(newest, 10)); err != nil {
+		a.logger().Warn("agent: cannot save the review mark", "session", sessionID, "err", err.Error())
+	}
 }

@@ -60,6 +60,8 @@ const GLYPH_ROWS: [string, string, string, string, string][] = [
   ["♻", "restarted", "RefreshCw", "muted", "restarted"],
   ["↻", "restarted", "RefreshCw", "muted", "restarted"],
   ["🧩", "skill", "Puzzle", "muted", "skill"],
+  ["🗂", "curator", "Archive", "muted", "skill curator"],
+  ["📌", "rule", "ListChecks", "info", "rule"],
   ["📖", "help", "BookOpen", "muted", "help"],
   ["📊", "usage", "ChartColumn", "muted", "usage"],
   ["💸", "cost", "CircleDollarSign", "warn", "cost alert"],

@@ -589,18 +589,35 @@ func (c *CLI) AgentTurn(ctx context.Context, sess *sessions.Session, text string
 	// A review notice, for example "💾 Memory updated", shows after the answer. A summary
 	// with several lines prints one dim line for each line.
 	notify, release := agent.HoldNotices(sink.Notices)
+	// A change card shows after the answer, as text with the command lines.
+	card, releaseCards := agent.HoldCards(func(n agent.Notice) { sink.Notices(c.cardText(ctx, n)) })
 	// Only the first turn after a skill command is marked. A goal continuation of the loop
 	// has another text, and the field is empty then.
 	slash := text != "" && text == c.slashText
 	c.slashText = ""
-	res, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify, Slash: slash, Owner: true})
+	res, err := d.Turn(ctx, sess, TurnInput{Text: text, Channel: "cli", Sink: sink, Notify: notify, Card: card, Slash: slash, Owner: true})
 	sink.Finish()
 	// The stream already showed each other final text.
 	if res.NoSummary {
 		fmt.Fprintln(out, res.Final)
 	}
 	release()
+	releaseCards()
 	return res, err
+}
+
+// cardText returns the text of a change card for the CLI. A card with a notices row gets
+// the command lines of its buttons. Another card, or a failed read, gives the text of n.
+func (c *CLI) cardText(ctx context.Context, n agent.Notice) string {
+	l := c.deps().Learn
+	if n.ID == 0 || l == nil || l.Notices == nil {
+		return n.Text
+	}
+	row, err := l.Notices.Get(ctx, n.ID)
+	if err != nil {
+		return n.Text
+	}
+	return CardReply(row, false).Text
 }
 
 // deps returns c.Deps, or a Deps with the store and the log only.

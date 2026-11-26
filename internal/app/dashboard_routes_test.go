@@ -119,3 +119,29 @@ func TestBootstrapCommandRows(t *testing.T) {
 		}
 	}
 }
+
+func TestBootCommandsLeaveOutNotice(t *testing.T) {
+	a := dashApp(t)
+	prev, had := gateway.Commands()["notice"]
+	gateway.Register(gateway.Command{Name: "notice", Help: "Answer a change notice",
+		Run: func(context.Context, *gateway.CommandCtx, string) error { return nil }})
+	t.Cleanup(func() {
+		if had {
+			gateway.Register(prev)
+		} else {
+			gateway.Unregister("notice")
+		}
+	})
+	usage := false
+	for _, r := range a.bootCommands() {
+		if r.Name == "/notice" {
+			t.Fatal("/notice is in the palette")
+		}
+		if r.Name == "/usage" {
+			usage = true
+		}
+	}
+	if !usage {
+		t.Fatal("/usage is missing")
+	}
+}

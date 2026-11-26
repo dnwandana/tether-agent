@@ -1,8 +1,6 @@
 package tools
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
@@ -11,6 +9,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
+	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/skills"
 )
@@ -191,11 +190,9 @@ func MemoryThreatIDsWithin(text string, maxRunes int) []string {
 	return ids
 }
 
-// MemoryEntryID returns the short ID of a memory entry: "m-" and the first 8 hex
-// characters of the SHA-256 of the raw entry.
+// MemoryEntryID returns the short ID of a memory entry. It is memory.EntryID.
 func MemoryEntryID(entry string) string {
-	sum := sha256.Sum256([]byte(entry))
-	return "m-" + hex.EncodeToString(sum[:])[:8]
+	return memory.EntryID(entry)
 }
 
 // MemoryBlockedLine returns the line that replaces a blocked entry in the system

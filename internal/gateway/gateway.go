@@ -931,20 +931,23 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 	g.mu.Unlock()
 	g.sendMarker(op)
 	// A review notice goes out as its own message after the answer.
+	turnUser := senderOf(p.in)
+	if p.system {
+		turnUser = ""
+	}
 	notify, release := agent.HoldNotices(r.Ack)
+	card, releaseCards := agent.HoldCards(func(n agent.Notice) {
+		g.sendCard(context.WithoutCancel(tctx), p.in, r, turnUser, n)
+	})
 	if p.goalLine != "" {
 		if gl, ok := r.(GoalLineRenderer); ok {
 			gl.GoalLine(p.goalLine)
 		}
 	}
 	end.ran = true
-	turnUser := senderOf(p.in)
-	if p.system {
-		turnUser = ""
-	}
 	res, err := g.Deps.Turn(tctx, sess, TurnInput{
 		Text: p.in.Text, Images: p.in.Images, Channel: p.in.Source, UserID: turnUser, Sink: r, Steer: rs.Steer, Notify: notify,
-		Slash: p.in.Slash,
+		Slash: p.in.Slash, Card: card,
 		Owner: p.in.Owner, Shared: p.in.Shared,
 		OnSteerRead: func(seq uint64) { g.steerRead(rs, seq) },
 	})
@@ -956,7 +959,39 @@ func (g *Gateway) turn(ctx context.Context, p *pendingTurn) (end turnEnd) {
 	// model left out its tag (Hermes _collect_auto_append_media_tags).
 	r.Done(agent.AppendMediaTags(res.Final, res.Media), err)
 	release()
+	releaseCards()
 	return end
+}
+
+// sendCard sends a change card of a turn. A card with a notices row gets buttons. A card in
+// a group that has a member goes to the private chat of the owner. A send with no
+// AckReply, or a turn with no user, gets the commands as lines, because no button can
+// bind to a user there.
+func (g *Gateway) sendCard(ctx context.Context, in Inbound, r Renderer, user string, n agent.Notice) {
+	l := g.Deps.Learn
+	if n.ID == 0 || l == nil || l.Notices == nil {
+		r.Ack(n.Text)
+		return
+	}
+	ln, err := l.Notices.Get(ctx, n.ID)
+	if err != nil {
+		g.logger().Error("gateway: cannot read the notice of a card", "notice", n.ID, "err", err.Error())
+		r.Ack(n.Text)
+		return
+	}
+	if in.Source == "telegram" && l.GroupHasMember != nil && l.SendPrivate != nil && l.GroupHasMember(ctx, in.Key) {
+		err := l.SendPrivate(ctx, in.Key, CardReply(ln, true))
+		if err == nil {
+			r.Ack("Sent to your private chat.")
+			return
+		}
+		g.logger().Error("gateway: cannot send a card to the private chat", "key", in.Key, "err", err.Error())
+	}
+	if rr, ok := r.(ReplyRenderer); ok && user != "" {
+		rr.AckReply(CardReply(ln, true))
+		return
+	}
+	r.Ack(CardReply(ln, false).Text)
 }
 
 // BusyCommandReply is the reply to a command that cannot run while the key is busy. %s is

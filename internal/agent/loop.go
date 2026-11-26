@@ -133,6 +133,8 @@ type Agent struct {
 	Prompts *PromptCache
 	// Memory gives the MEMORY and USER PROFILE sections of the system prompt.
 	Memory *memory.Store
+	// Notices saves each change card as a notices row. A nil Notices gives cards with no ID.
+	Notices NoticeStore
 	// Skills gives the skills index of the system prompt.
 	Skills *tools.SkillCatalog
 	// MCPGen returns the MCP generation. A /reload-mcp changes it, so the prompt is rebuilt.
@@ -174,6 +176,8 @@ type Agent struct {
 	// reviewSlots holds one token for each running background review (goReview). It is
 	// made under reviewMu.
 	reviewSlots chan struct{}
+	// tidyRunning is true while a memory tidy runs.
+	tidyRunning atomic.Bool
 
 	// beforeCall is a test hook. It runs before the steer drain of each model call.
 	beforeCall func(round int)
@@ -235,6 +239,9 @@ type Turn struct {
 	// example "💾 Memory updated". Wrap the send function with HoldNotices, so that a
 	// notice waits for the answer. Nil drops the notices.
 	Notify func(text string)
+	// Card receives the change cards of the turn and of the reviews that it starts. Wrap the
+	// send function with HoldCards. When Card is nil, the card text goes to Notify.
+	Card func(Notice)
 
 	// review makes the turn a review run. Only RunReview sets it.
 	review *reviewOpts
@@ -252,6 +259,10 @@ type reviewOpts struct {
 	deny  string
 	// onResult receives each tool call and its result.
 	onResult func(c provider.ToolCall, r tools.Result)
+	// skillLimit is the number of skill_manage calls that the run can make. 0 means no limit.
+	skillLimit int
+	// skillCalls counts the skill_manage calls that passed the check.
+	skillCalls atomic.Int32
 }
 
 // TurnResult is the output of one turn.
@@ -333,7 +344,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 				counted.Final = ""
 			}
 			// The review runs in its own goroutine, so this does not block the turn.
-			a.MaybeStartReviews(context.WithoutCancel(ctx), t.Session, lastReq, counted, t.Notify)
+			a.MaybeStartReviews(context.WithoutCancel(ctx), t.Session, lastReq, counted, t.Notify, t.Card)
 		}()
 	}
 	cfg := a.config()
@@ -351,6 +362,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	}
 	env := a.turnEnv(t)
 	tools.ResetOutside(env)
+	tools.ResetEdits(env)
 	for _, src := range t.Outside {
 		tools.MarkOutside(env, src, "")
 	}
@@ -358,6 +370,20 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	defer func() { res.Outside = tools.Outside(env) }()
 	// The writes use a context without cancel, so a /stop does not lose a finished message.
 	dbCtx := context.WithoutCancel(ctx)
+	// A chat turn sends one card with the memory edits of the turn. A skill change makes no
+	// chat card. The defer runs after the answer is saved.
+	var heldCalls []heldCall
+	if t.review == nil && t.Session.Kind == "chat" {
+		defer func() {
+			var refs []tools.EditRef
+			for _, ref := range tools.Edits(env) {
+				if ref.Kind != "skill" {
+					refs = append(refs, ref)
+				}
+			}
+			a.sendCard(dbCtx, t.Session.Key, refs, nil, heldCalls, tools.Outside(env), t.Card, t.Notify)
+		}()
+	}
 	prov := a.providerFor(t.Session)
 	visible, schemas := a.visible(t)
 	deny := ""
@@ -382,7 +408,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	}
 	system, frozenAt := a.turnSystem(ctx, t, channel)
 	if t.review == nil && !noReviews(t.Session.Kind) {
-		a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify, t.Mode)
+		a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify, t.Card, t.Mode)
 	}
 
 	// The stored user message keeps only the image markers. The images go inline only to a
@@ -398,7 +424,8 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 	}
 	// A message on a later day than the frozen prompt tells the model the date.
 	user := provider.Message{Role: provider.RoleUser, Content: NowPrefix(frozenAt, time.Now()) + content}
-	if ts.userID, err = a.save(dbCtx, ts, user, sessions.MessageMeta{}); err != nil {
+	// The member flag keeps the words of a member out of the owner quote check.
+	if ts.userID, err = a.save(dbCtx, ts, user, sessions.MessageMeta{Outside: tools.Outside(env).Sources, Member: t.Member}); err != nil {
 		return res, err
 	}
 
@@ -441,7 +468,7 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			// The compaction count is part of the prompt key, so the prompt is rebuilt.
 			system, _ = a.turnSystem(ctx, t, channel)
 			if t.review == nil && !noReviews(t.Session.Kind) {
-				a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify, t.Mode)
+				a.Reviews.remember(t.Session.ID, system, schemas, env, t.Notify, t.Card, t.Mode)
 			}
 		}
 		// The check read the latest compaction in this round. No other writer adds a
@@ -537,10 +564,27 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 		}
 
 		sink.Boundary()
-		results, durs := a.runRoundTimed(ctx, out.ToolCalls, env, turnVisible, sink, deny)
+		before := tools.Outside(env).Sources
+		roundCtx := ctx
+		if rv := t.review; rv != nil && rv.skillLimit > 0 {
+			roundCtx = withCallGate(ctx, func(c provider.ToolCall) string {
+				if c.Name == "skill_manage" && int(rv.skillCalls.Add(1)) > rv.skillLimit {
+					return fmt.Sprintf(reviewSkillCap, rv.skillLimit)
+				}
+				return ""
+			})
+		}
+		results, durs := a.runRoundTimed(roundCtx, out.ToolCalls, env, turnVisible, sink, deny)
 		if t.review != nil && t.review.onResult != nil {
 			for i, c := range out.ToolCalls {
 				t.review.onResult(c, results[i])
+			}
+		}
+		if t.review == nil {
+			for i, c := range out.ToolCalls {
+				if h, ok := heldOf(c, results[i]); ok {
+					heldCalls = append(heldCalls, h)
+				}
 			}
 		}
 		res.ToolRounds = round
@@ -575,9 +619,10 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 				}
 			}
 		}
+		flags := roundOutside(out.ToolCalls, results, before, tools.Outside(env).Sources)
 		for i, c := range out.ToolCalls {
 			m := provider.Message{Role: provider.RoleTool, Content: contents[i], ToolCallID: c.ID, ToolName: c.Name}
-			if _, err := a.save(dbCtx, ts, m, sessions.MessageMeta{}); err != nil {
+			if _, err := a.save(dbCtx, ts, m, sessions.MessageMeta{Outside: flags[i]}); err != nil {
 				return res, err
 			}
 			// The page shows the same text as the saved row.
@@ -593,6 +638,37 @@ func (a *Agent) RunTurn(ctx context.Context, t Turn) (res TurnResult, err error)
 			return res, failures.Err()
 		}
 	}
+}
+
+// roundOutside returns the outside flags of the tool rows of one round. The row of a call with an
+// outside result gets the name of the call. A source that is new after the round and that no
+// outside result names goes on the last row, after the sources of that row. Each list is sorted
+// and has no duplicates. A list with no source is nil.
+func roundOutside(calls []provider.ToolCall, results []tools.Result, before, after []string) [][]string {
+	flags := make([][]string, len(calls))
+	if len(calls) == 0 {
+		return flags
+	}
+	named := map[string]bool{}
+	for i, c := range calls {
+		if i < len(results) && results[i].Outside {
+			flags[i] = []string{c.Name}
+			named[c.Name] = true
+		}
+	}
+	old := map[string]bool{}
+	for _, src := range before {
+		old[src] = true
+	}
+	last := len(calls) - 1
+	for _, src := range after {
+		if !old[src] && !named[src] {
+			flags[last] = append(flags[last], src)
+		}
+	}
+	slices.Sort(flags[last])
+	flags[last] = slices.Compact(flags[last])
+	return flags
 }
 
 // memoryUse reports whether c is a memory call that resets the count of the memory review.
@@ -658,16 +734,22 @@ func (a *Agent) viewOf(ctx context.Context, sessionID string, msgs []sessions.St
 	if len(*comps) == 0 {
 		return repairToolCalls(msgs), nil
 	}
+	latest := (*comps)[len(*comps)-1]
 	observed := map[int64]bool{}
+	outside := map[int64][]string{}
 	for _, m := range msgs {
 		if m.Meta.Observed {
 			observed[m.ID] = true
 		}
+		outside[m.ID] = m.Meta.Outside
 	}
 	view := ctxmgr.BuildStoredView(msgs, *comps)
 	out := make([]sessions.StoredMessage, len(view))
 	for i, v := range view {
-		out[i] = sessions.StoredMessage{ID: v.ID, Msg: v.Msg, Meta: sessions.MessageMeta{Observed: observed[v.ID]}}
+		out[i] = sessions.StoredMessage{ID: v.ID, Msg: v.Msg, Meta: sessions.MessageMeta{Observed: observed[v.ID], Outside: outside[v.ID]}}
+		if v.ID == 0 && strings.HasPrefix(v.Msg.Content, ctxmgr.SummaryPrefix) {
+			out[i].Meta.Outside = ctxmgr.OutsideIn(msgs, latest.FromMessageID, latest.UptoMessageID)
+		}
 	}
 	return repairToolCalls(out), nil
 }

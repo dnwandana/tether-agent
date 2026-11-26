@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log/slog"
 	"slices"
@@ -213,5 +214,23 @@ func TestSkillCommandsForSenderMemberGate(t *testing.T) {
 	cfg.Toolsets["member"] = []string{tools.SetFile, tools.SetSkills}
 	if s := cmdSlugs(d.SkillCommandsForSender("telegram", false)); !slices.Equal(s, []string{"arxiv"}) {
 		t.Fatal("member with skill_view:", s)
+	}
+}
+
+func TestSkillCommandRecordsRead(t *testing.T) {
+	fp := &fakeProv{}
+	d := testDeps(t, fp)
+	addTurnSkill(t, d, "demo", "", "Do the demo.\n")
+	var got []string
+	d.SkillRead = func(_ context.Context, name, sessionID string) {
+		got = append(got, name+"|"+sessionID)
+	}
+	sess := skillTurn(t, d, "/demo now", true)
+	if want := []string{"demo|" + sess.ID}; !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	skillTurn(t, d, "/nope", true)
+	if len(got) != 1 {
+		t.Fatalf("a text that is not a skill command recorded a read: %q", got)
 	}
 }

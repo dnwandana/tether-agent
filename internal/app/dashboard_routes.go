@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"runtime/debug"
@@ -118,7 +119,7 @@ func (a *App) dashboardRoutes(ch *dashboard.Channel, f DashboardFuncs) []dashboa
 		dashboard.NewJobsAPI(jobs),
 		dashboard.NewGoalsAPI(&goals.Store{DB: a.DB}, a.Store, redact, now),
 		sec,
-		dashboard.NewSkillsAPI(a.DataDir, a.Cfg, ch.Cards(), tasks, dashboard.CronSkillUsers(a.Cron), redact),
+		dashboard.NewSkillsAPI(a.DataDir, a.Cfg, ch.Cards(), tasks, dashboard.CronSkillUsers(a.Cron), redact, appSkillInfo{a: a}),
 		dashboard.NewUsageAPI(usage),
 		dashboard.NewSystemAPI(sys, tasks, redact),
 		dashboard.NewOpsAPI(ops),
@@ -165,6 +166,9 @@ func (a *App) bootCommands() []dashboard.CommandRow {
 	all := gateway.Commands()
 	rows := make([]dashboard.CommandRow, 0, len(all)+2)
 	for name, c := range all {
+		if name == "notice" {
+			continue // only the buttons of a change card send it
+		}
 		rows = append(rows, dashboard.CommandRow{Name: "/" + name, Description: c.Help})
 	}
 	for _, r := range []dashboard.CommandRow{
@@ -238,4 +242,53 @@ func (a *App) bootSecurityFixed() dashboard.SecurityFixed {
 		}
 	}
 	return fx
+}
+
+// appSkillInfo adapts the skill log and the curator of a.Learn to dashboard.SkillInfo. It
+// acts as a nil info when a.Learn is nil.
+type appSkillInfo struct{ a *App }
+
+var errNoSkillHistory = errors.New("the skill history is not available")
+
+func (i appSkillInfo) LastRead(ctx context.Context, name string) (time.Time, bool) {
+	if i.a.Learn == nil || i.a.Learn.SkillLog == nil {
+		return time.Time{}, false
+	}
+	t, ok, err := i.a.Learn.SkillLog.LastActivity(ctx, name)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, ok
+}
+
+func (i appSkillInfo) Kept(ctx context.Context, name string) bool {
+	if i.a.Learn == nil || i.a.Learn.SkillLog == nil {
+		return false
+	}
+	flags, err := i.a.Learn.SkillLog.Flags(ctx)
+	if err != nil {
+		return false
+	}
+	return flags[name].Kept
+}
+
+func (i appSkillInfo) Archived(ctx context.Context) ([]skills.Flag, error) {
+	if i.a.Learn == nil || i.a.Learn.Curator == nil {
+		return nil, nil
+	}
+	return i.a.Learn.Curator.Archived(ctx)
+}
+
+func (i appSkillInfo) SetKept(ctx context.Context, name string, kept bool) error {
+	if i.a.Learn == nil || i.a.Learn.Curator == nil {
+		return errNoSkillHistory
+	}
+	return i.a.Learn.Curator.SetKept(ctx, name, kept)
+}
+
+func (i appSkillInfo) Restore(ctx context.Context, name string) error {
+	if i.a.Learn == nil || i.a.Learn.Curator == nil {
+		return errNoSkillHistory
+	}
+	return i.a.Learn.Curator.Restore(ctx, name)
 }

@@ -45,6 +45,8 @@
     "♻": { "key": "restarted", "icon": "RefreshCw", "tone": "muted", "word": "restarted" },
     "↻": { "key": "restarted", "icon": "RefreshCw", "tone": "muted", "word": "restarted" },
     "🧩": { "key": "skill", "icon": "Puzzle", "tone": "muted", "word": "skill" },
+    "🗂": { "key": "curator", "icon": "Archive", "tone": "muted", "word": "skill curator" },
+    "📌": { "key": "rule", "icon": "ListChecks", "tone": "info", "word": "rule" },
     "📖": { "key": "help", "icon": "BookOpen", "tone": "muted", "word": "help" },
     "📊": { "key": "usage", "icon": "ChartColumn", "tone": "muted", "word": "usage" },
     "💸": { "key": "cost", "icon": "CircleDollarSign", "tone": "warn", "word": "cost alert" },

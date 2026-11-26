@@ -26,13 +26,13 @@ import (
 // a session after one turn, and the last request of that turn.
 func agentAfterTurn(t *testing.T) (*Agent, *sessions.Session, provider.Request, namedTool) {
 	t.Helper()
-	m, err := memory.Open(t.TempDir(), 2200, 1375)
+	m, err := memory.Open(t.TempDir(), 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := newNamed("terminal", tools.SetTerminal)
 	fp := scripted(toolCalls(tc("c1", "echo", `{"s":"x"}`)), text("Here is the answer."))
-	a, sess := newAgent(t, fp, echoTool{}, tools.MemoryTool{Store: m}, cmd)
+	a, sess := newAgent(t, fp, echoTool{}, tools.MemoryTool{Store: m, Quotes: acceptQuotes{}}, cmd)
 	a.Memory = m
 	if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "I prefer Go. Run x.", Toolsets: all(), System: "SYS", Sink: &recSink{}}); err != nil {
 		t.Fatal(err)
@@ -60,10 +60,16 @@ func reviewView(t *testing.T, a *Agent, sess *sessions.Session) []provider.Messa
 	return v
 }
 
+// acceptQuotes is a QuoteSource that accepts each quote.
+type acceptQuotes struct{}
+
+func (acceptQuotes) HasQuote(context.Context, string, string) (bool, error) { return true, nil }
+
 func TestReviewUsesParentToolsAndSystem(t *testing.T) {
 	a, sess, parentReq, _ := agentAfterTurn(t)
+	a.Memory.History = &memHistory{}
 	fp := a.Prov.(*fakeProv)
-	fp.script = []step{toolCalls(tc("r1", "memory", `{"action":"add","target":"user","content":"The user prefers Go"}`)), text("done")}
+	fp.script = []step{toolCalls(tc("r1", "memory", `{"action":"add","target":"memory","content":"The user prefers Go"}`)), text("done")}
 	var notified []string
 	saved, err := a.RunReview(ctx, ReviewRequest{Session: sess, View: reviewView(t, a, sess), System: parentReq.System, Tools: parentReq.Tools,
 		Memory: true, Notify: func(s string) { notified = append(notified, s) }})
@@ -86,10 +92,10 @@ func TestReviewUsesParentToolsAndSystem(t *testing.T) {
 	if last := req.Messages[n+1]; last.Role != provider.RoleUser || !strings.HasPrefix(last.Content, MemoryReviewPrompt) {
 		t.Fatal(last.Content)
 	}
-	if len(saved) != 1 || saved[0] != "💾 User profile updated: `The user prefers Go`" || !reflect.DeepEqual(notified, saved) {
+	if len(saved) != 1 || !reflect.DeepEqual(notified, []string{"💾 Memory updated (add)\nNow: `The user prefers Go`"}) {
 		t.Fatal(saved, notified)
 	}
-	if !strings.Contains(a.Memory.Profile(), "The user prefers Go") {
+	if !strings.Contains(a.Memory.Memory(), "The user prefers Go") {
 		t.Fatal("the review writes to memory")
 	}
 }
@@ -113,7 +119,7 @@ func TestReviewSendsOneSummary(t *testing.T) {
 	if len(saved) != 3 {
 		t.Fatal("one notice for each distinct change:", saved)
 	}
-	want := "🧩 Skills updated: a, b\n💾 Memory updated: `x`"
+	want := "💾 Memory updated (add)\nNow: `x`\n🧩 Skills updated: a, b"
 	if len(notified) != 1 || notified[0] != want {
 		t.Fatalf("want one notify call with %q, got %q", want, notified)
 	}
@@ -279,14 +285,14 @@ func TestMemoryNotices(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			m, err := memory.Open(t.TempDir(), 2200, 1375)
+			m, err := memory.Open(t.TempDir(), 2200, 1375, 1000)
 			if err != nil {
 				t.Fatal(err)
 			}
 			reg := tools.NewRegistry()
 			reg.Register(tools.MemoryTool{Store: m})
 			run := func(args string) tools.Result {
-				return reg.Dispatch(ctx, "memory", json.RawMessage(args), nil, map[string]bool{"memory": true})
+				return reg.Dispatch(ctx, "memory", json.RawMessage(args), &tools.Env{Kind: "chat", Values: map[string]any{}}, map[string]bool{"memory": true})
 			}
 			for _, s := range c.setup {
 				if res := run(s); res.IsError {
@@ -318,42 +324,6 @@ func TestMemoryUseRule(t *testing.T) {
 	}
 	if memoryUse(tc("c", "skill_manage", `{"action":"create"}`)) {
 		t.Fatal("only a memory call is memory use")
-	}
-}
-
-func TestReviewSummary(t *testing.T) {
-	cases := []struct {
-		name  string
-		saved []string
-		want  string
-	}{
-		{"none", nil, ""},
-		{"one skill", []string{"🧩 Skill updated: vps-services"}, "🧩 Skill updated: vps-services"},
-		{"one memory", []string{"💾 Memory updated"}, "💾 Memory updated"},
-		{"plural and memory",
-			[]string{"🧩 Skill updated: a", "🧩 Skill updated: b", "💾 Memory updated"},
-			"🧩 Skills updated: a, b\n💾 Memory updated"},
-		{"order of first notice",
-			[]string{"💾 User profile updated", "🧩 Skill created: c", "🧩 Skill updated: a", "🧩 Skill updated: b"},
-			"💾 User profile updated\n🧩 Skill created: c\n🧩 Skills updated: a, b"},
-		{"singular and plural deleted",
-			[]string{"🧩 Skill updated: a", "🧩 Skill deleted: d", "🧩 Skill deleted: e"},
-			"🧩 Skill updated: a\n🧩 Skills deleted: d, e"},
-		{"created then updated",
-			[]string{"🧩 Skill created: x", "🧩 Skill updated: x"},
-			"🧩 Skill created: x\n🧩 Skill updated: x"},
-		{"group after memory keeps its first place",
-			[]string{"🧩 Skill updated: a", "💾 Memory updated", "🧩 Skill updated: b"},
-			"🧩 Skills updated: a, b\n💾 Memory updated"},
-		{"four updates (the screenshot)",
-			[]string{"🧩 Skill updated: crypto-gainer-wallet-reports", "🧩 Skill updated: solana-launch-sniping",
-				"🧩 Skill updated: subagent-driven-development", "🧩 Skill updated: vps-services"},
-			"🧩 Skills updated: crypto-gainer-wallet-reports, solana-launch-sniping, subagent-driven-development, vps-services"},
-	}
-	for _, c := range cases {
-		if got := reviewSummary(c.saved); got != c.want {
-			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
-		}
 	}
 }
 
@@ -498,11 +468,13 @@ func TestReviewLimitSummary(t *testing.T) {
 // recorder of the reviews that the triggers start. The recorder replaces RunReview.
 func reviewAgent(t *testing.T, fp *fakeProv) (*Agent, *sessions.Session, func() []ReviewRequest) {
 	t.Helper()
-	m, err := memory.Open(t.TempDir(), 2200, 1375)
+	m, err := memory.Open(t.TempDir(), 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, sess := newAgent(t, fp, echoTool{}, tools.MemoryTool{Store: m}, newNamed("skill_manage", tools.SetSkills))
+	m.History = &memHistory{}
+	a, sess := newAgent(t, fp, echoTool{}, tools.MemoryTool{Store: m, Quotes: acceptQuotes{}},
+		refTool{name: "skill_manage", set: tools.SetSkills, kind: "skill", next: new(int64)})
 	a.Memory = m
 	var (
 		mu  sync.Mutex
@@ -729,14 +701,14 @@ func TestCompactionReviewNeeds6UserTurnsAndIsBackground(t *testing.T) {
 	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
 	seedHistory(t, a, sess.ID, 10) // 5 user turns
 	view := reviewView(t, a, sess)
-	a.ReviewOnCompaction(ctx, sess, view, 3, 8)
+	a.ReviewOnCompaction(ctx, sess, view, 3, 8, nil)
 	time.Sleep(20 * time.Millisecond)
 	if len(reviews()) != 0 {
 		t.Fatal("5 user turns: no review")
 	}
 	seedHistory(t, a, sess.ID, 2) // 6 user turns
 	view = reviewView(t, a, sess)
-	a.ReviewOnCompaction(ctx, sess, view, 3, 8)
+	a.ReviewOnCompaction(ctx, sess, view, 3, 8, nil)
 	waitUntil(t, func() bool { return len(reviews()) == 1 })
 	r := reviews()[0]
 	if !r.Memory || !r.Skills || r.FocusRange == nil || *r.FocusRange != [2]int{3, 8} || len(r.View) != 12 {
@@ -786,7 +758,7 @@ func TestTriggeredReviewRunsAndNotifies(t *testing.T) {
 		userTurn(t, a, sess, "hi")
 	}
 	fp := a.Prov.(*fakeProv)
-	fp.script = []step{text("answer"), toolCalls(tc("r1", "memory", `{"action":"add","target":"user","content":"likes Go"}`)), text("done")}
+	fp.script = []step{text("answer"), toolCalls(tc("r1", "memory", `{"action":"add","target":"memory","content":"likes Go"}`)), text("done")}
 	var mu sync.Mutex
 	var notices []string
 	notify, release := HoldNotices(func(s string) { mu.Lock(); notices = append(notices, s); mu.Unlock() })
@@ -796,7 +768,7 @@ func TestTriggeredReviewRunsAndNotifies(t *testing.T) {
 	waitUntil(t, func() bool { return len(childSessions(t, a, sess.ID)) == 1 })
 	release()
 	waitUntil(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(notices) == 1 })
-	if notices[0] != "💾 User profile updated: `likes Go`" || !strings.Contains(a.Memory.Profile(), "likes Go") {
+	if notices[0] != "💾 Memory updated (add)\nNow: `likes Go`" || !strings.Contains(a.Memory.Memory(), "likes Go") {
 		t.Fatal(notices)
 	}
 }
@@ -813,7 +785,7 @@ func TestCompactNowForcesAndCounts(t *testing.T) {
 	// The last turn of the session remembered its prompt shape, so the sizes count the
 	// system prompt.
 	system := strings.Repeat("s", 4000)
-	a.Reviews.remember(sess.ID, system, nil, nil, nil, "")
+	a.Reviews.remember(sess.ID, system, nil, nil, nil, nil, "")
 	fixed := ctxmgr.EstimateFixed(system, nil)
 	before, err := a.Compactor.View(ctx, sess.ID)
 	if err != nil {
@@ -876,21 +848,25 @@ func TestCompactNowFailedSummaryDidNotComplete(t *testing.T) {
 
 func TestNoticeQuote(t *testing.T) {
 	long := strings.Repeat("é", 500)
-	cases := []struct{ action, text, want string }{
-		{"add", "", ""},
-		{"add", "  a\n  b ", ": `a b`"},
-		{"add", "run `rm`", ": `run 'rm'`"},
-		{"remove", "Go", " (removed): `Go`"},
+	cases := []struct {
+		text string
+		max  int
+		want string
+	}{
+		{"", 0, ""},
+		{"  a\n  b ", 0, "`a b`"},
+		{"run `rm`", 0, "`run 'rm'`"},
 		// A tier-1 write goes into the system prompt, so the notice shows the full text.
-		{"add", long, ": `" + long + "`"},
+		{long, 0, "`" + long + "`"},
 		// A hidden rune shows as a mark.
-		{"add", "VPS\u200b = ovh", ": `VPS<U+200B> = ovh`"},
-		{"remove", "a\u202eb", " (removed): `a<U+202E>b`"},
-		{"add", "tag\U000E0041", ": `tag<U+E0041>`"},
+		{"VPS\u200b = ovh", 0, "`VPS<U+200B> = ovh`"},
+		{"a\u202eb", 0, "`a<U+202E>b`"},
+		{"tag\U000E0041", 0, "`tag<U+E0041>`"},
+		{strings.Repeat("a", 301), 300, "`" + strings.Repeat("a", 300) + "…`"},
 	}
 	for _, c := range cases {
-		if got := noticeQuote(c.action, c.text); got != c.want {
-			t.Errorf("%q %q: %q, want %q", c.action, c.text, got, c.want)
+		if got := noticeQuote(c.text, c.max); got != c.want {
+			t.Errorf("%q %d: %q, want %q", c.text, c.max, got, c.want)
 		}
 	}
 }
@@ -938,13 +914,13 @@ func TestDueReviewWaitsWhileTheProviderIsDown(t *testing.T) {
 	}
 	a.Prov = chain
 	req := provider.Request{System: "SYS", Tools: []provider.ToolSchema{{Name: "memory"}}}
-	a.MaybeStartReviews(ctx, sess, req, TurnResult{Final: "ok"}, nil)
+	a.MaybeStartReviews(ctx, sess, req, TurnResult{Final: "ok"}, nil, nil)
 	time.Sleep(20 * time.Millisecond)
 	if n := len(reviews()); n != 0 {
 		t.Fatal("no review while the provider is down:", n)
 	}
 	a.Prov = up
-	a.MaybeStartReviews(ctx, sess, req, TurnResult{Final: "ok"}, nil)
+	a.MaybeStartReviews(ctx, sess, req, TurnResult{Final: "ok"}, nil, nil)
 	waitUntil(t, func() bool { return len(reviews()) == 1 })
 }
 
@@ -1031,13 +1007,13 @@ func TestReviewMinUserTurnsFromConfig(t *testing.T) {
 	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
 	a.Cfg.Review.MinUserTurns = 3
 	seedHistory(t, a, sess.ID, 4) // 2 user turns
-	a.ReviewOnCompaction(ctx, sess, reviewView(t, a, sess), 1, 3)
+	a.ReviewOnCompaction(ctx, sess, reviewView(t, a, sess), 1, 3, nil)
 	time.Sleep(20 * time.Millisecond)
 	if len(reviews()) != 0 {
 		t.Fatal("2 user turns: no review")
 	}
 	seedHistory(t, a, sess.ID, 2) // 3 user turns
-	a.ReviewOnCompaction(ctx, sess, reviewView(t, a, sess), 1, 3)
+	a.ReviewOnCompaction(ctx, sess, reviewView(t, a, sess), 1, 3, nil)
 	waitUntil(t, func() bool { return len(reviews()) == 1 })
 }
 
@@ -1066,7 +1042,7 @@ func TestNoReviewContextStopsCompactionAndNewReviews(t *testing.T) {
 	a, sess, reviews := reviewAgent(t, scriptedForever(text("ok")))
 	seedHistory(t, a, sess.ID, 12) // 6 user turns
 	view := reviewView(t, a, sess)
-	a.ReviewOnCompaction(WithNoReview(ctx), sess, view, 3, 8)
+	a.ReviewOnCompaction(WithNoReview(ctx), sess, view, 3, 8, nil)
 	a.ReviewBeforeNew(WithNoReview(ctx), sess)
 	time.Sleep(20 * time.Millisecond)
 	if n := len(reviews()); n != 0 {
@@ -1075,7 +1051,7 @@ func TestNoReviewContextStopsCompactionAndNewReviews(t *testing.T) {
 	if NoReview(ctx) {
 		t.Fatal("a plain context has no flag")
 	}
-	a.ReviewOnCompaction(ctx, sess, view, 3, 8)
+	a.ReviewOnCompaction(ctx, sess, view, 3, 8, nil)
 	waitUntil(t, func() bool { return len(reviews()) == 1 })
 }
 
@@ -1084,7 +1060,7 @@ func TestMemberTurnMarksTheCompactionHook(t *testing.T) {
 		fp := scripted(text("SUM"), text("ok"))
 		a, sess := compactingAgent(t, fp)
 		var got []bool
-		a.Compactor.OnCompact = func(c context.Context, _ *sessions.Session, _ []provider.Message, _, _ int) {
+		a.Compactor.OnCompact = func(c context.Context, _ *sessions.Session, _ []provider.Message, _, _ int, _ []string) {
 			got = append(got, NoReview(c))
 		}
 		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Toolsets: all(), Sink: &recSink{}, Member: member}); err != nil {
@@ -1138,7 +1114,7 @@ func TestReadOnlyTurnMarksTheCompactionHook(t *testing.T) {
 		fp := scripted(text("SUM"), text("ok"))
 		a, sess := compactingAgent(t, fp)
 		var got []bool
-		a.Compactor.OnCompact = func(c context.Context, _ *sessions.Session, _ []provider.Message, _, _ int) {
+		a.Compactor.OnCompact = func(c context.Context, _ *sessions.Session, _ []provider.Message, _, _ int, _ []string) {
 			got = append(got, NoReview(c))
 		}
 		if _, err := a.RunTurn(ctx, Turn{Session: sess, UserText: "q", Toolsets: all(), Sink: &recSink{}, Mode: mode}); err != nil {

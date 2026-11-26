@@ -1000,7 +1000,7 @@ func (d *Doctor) checkMemory(entryMax int) Check {
 		c.Detail = "no memory yet"
 		return c
 	}
-	st, err := memory.Open(dir, 0, 0)
+	st, err := memory.Open(dir, 0, 0, 0)
 	if err != nil {
 		c.Status, c.Detail, c.Next = StatusWarn, "cannot open the memory store: "+err.Error(), "check the folder "+dir
 		return c
@@ -1010,6 +1010,7 @@ func (d *Doctor) checkMemory(entryMax int) Check {
 	for _, t := range []struct{ target, file string }{
 		{memory.TargetMemory, "memory.md"},
 		{memory.TargetUser, "user_profile.md"},
+		{memory.TargetRule, "rules.md"},
 	} {
 		entries, err := st.ReadEntries(t.target)
 		if err != nil {

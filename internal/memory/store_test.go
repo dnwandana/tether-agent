@@ -16,7 +16,7 @@ import (
 
 func open(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(t.TempDir(), 2200, 1375)
+	s, err := Open(t.TempDir(), 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestAddUsesSectionSeparator(t *testing.T) {
 
 func TestOpenCreatesFolder(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "memory")
-	s, err := Open(dir, 2200, 1375)
+	s, err := Open(dir, 2200, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestAddOverLimitSpillsToInbox(t *testing.T) {
 }
 
 func TestLimitCountsSeparators(t *testing.T) {
-	s, err := Open(t.TempDir(), 10, 10)
+	s, err := Open(t.TempDir(), 10, 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestLimitCountsSeparators(t *testing.T) {
 }
 
 func TestLimitCountsRunes(t *testing.T) {
-	s, err := Open(t.TempDir(), 4, 4)
+	s, err := Open(t.TempDir(), 4, 4, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestAmbiguousTier1MasksPreviews(t *testing.T) {
 
 // Spec test 13.
 func TestReplaceOverLimitSpills(t *testing.T) {
-	s, err := Open(t.TempDir(), 10, 10)
+	s, err := Open(t.TempDir(), 10, 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestReadsFreshFromDisk(t *testing.T) {
 }
 
 func TestConcurrentApplySerialized(t *testing.T) {
-	s, err := Open(t.TempDir(), 100000, 1375)
+	s, err := Open(t.TempDir(), 100000, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,8 +271,8 @@ func TestConcurrentApplySerialized(t *testing.T) {
 func TestTwoStoresOnOneFolder(t *testing.T) {
 	// The gateway and a chat process each open a Store on the same folder.
 	dir := t.TempDir()
-	a, _ := Open(dir, 100000, 1375)
-	b, _ := Open(dir, 100000, 1375)
+	a, _ := Open(dir, 100000, 1375, 1000)
+	b, _ := Open(dir, 100000, 1375, 1000)
 	var wg sync.WaitGroup
 	for i := range 20 {
 		wg.Add(2)
@@ -334,7 +334,7 @@ func TestTopicWithNoLetters(t *testing.T) {
 
 // Spec test 6.
 func TestAddDedupe(t *testing.T) {
-	s, err := Open(t.TempDir(), 10, 10)
+	s, err := Open(t.TempDir(), 10, 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,8 +377,8 @@ func TestEntryLimit(t *testing.T) {
 // Spec test 21, over two stores on one folder.
 func TestConcurrentNoteAdds(t *testing.T) {
 	dir := t.TempDir()
-	a, _ := Open(dir, 2200, 1375)
-	b, _ := Open(dir, 2200, 1375)
+	a, _ := Open(dir, 2200, 1375, 1000)
+	b, _ := Open(dir, 2200, 1375, 1000)
 	var wg sync.WaitGroup
 	for i := range 20 {
 		wg.Add(2)
@@ -409,7 +409,7 @@ func TestAddFailsWhenNotesIsAFile(t *testing.T) {
 
 // Spec test 14.
 func TestReplaceShrinksOverCapFile(t *testing.T) {
-	s, err := Open(t.TempDir(), 10, 10)
+	s, err := Open(t.TempDir(), 10, 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +535,7 @@ func TestReplaceSpillPartialFailure(t *testing.T) {
 		t.Skip("root ignores the folder mode")
 	}
 	dir := t.TempDir()
-	s, err := Open(dir, 10, 10)
+	s, err := Open(dir, 10, 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +681,7 @@ func fullNote(t *testing.T, s *Store, topic string, free int) {
 // An add never makes a note larger than 1 MiB. Entries with non-ASCII text
 // reach the limit after less than 100 adds.
 func TestAddNeverGrowsNotePastLimit(t *testing.T) {
-	s, err := Open(t.TempDir(), 10, 10)
+	s, err := Open(t.TempDir(), 10, 10, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -882,7 +882,7 @@ func TestEntryLimitFromField(t *testing.T) {
 	if err := applyErr(t, s, Op{Action: "add", Target: "memory", Content: strings.Repeat("é", 101)}); err != want {
 		t.Fatal(err)
 	}
-	big, err := Open(t.TempDir(), 20000, 1375)
+	big, err := Open(t.TempDir(), 20000, 1375, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -911,5 +911,81 @@ func TestLockWaitFromField(t *testing.T) {
 	}
 	if d := time.Since(start); d < 150*time.Millisecond || d > 2*time.Second {
 		t.Fatal(d)
+	}
+}
+
+func TestRuleTarget(t *testing.T) {
+	s := open(t)
+	apply(t, s, Op{Action: "add", Target: TargetRule, Content: "Do not send a file unless I ask"})
+	b, err := os.ReadFile(filepath.Join(s.dir, "rules.md"))
+	if err != nil || string(b) != "Do not send a file unless I ask" {
+		t.Fatalf("%q %v", b, err)
+	}
+	if got := s.Entries(TargetRule); !slices.Equal(got, []string{"Do not send a file unless I ask"}) {
+		t.Fatal(got)
+	}
+	if s.Limit(TargetRule) != 1000 || s.Limit(TargetMemory) != 2200 || s.Limit(TargetUser) != 1375 {
+		t.Fatal(s.Limit(TargetRule), s.Limit(TargetMemory), s.Limit(TargetUser))
+	}
+	apply(t, s, Op{Action: "replace", Target: TargetRule, OldText: "send a file", Content: "Never send a file unless I ask"})
+	apply(t, s, Op{Action: "remove", Target: TargetRule, OldText: "Never send"})
+	if len(s.Entries(TargetRule)) != 0 {
+		t.Fatal(s.Entries(TargetRule))
+	}
+}
+
+// A rule that does not fit is refused. It never goes to a note.
+func TestRuleFullRefused(t *testing.T) {
+	s, err := Open(t.TempDir(), 2200, 1375, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply(t, s, Op{Action: "add", Target: TargetRule, Content: strings.Repeat("a", 30)})
+	want := "The owner rules are full (30/40). Ask the owner which rule to remove, " +
+		"or ask the owner to raise memory.rules_char_limit."
+	if got := applyErr(t, s, Op{Action: "add", Target: TargetRule, Content: strings.Repeat("b", 20)}); got != want {
+		t.Fatal(got)
+	}
+	if got := applyErr(t, s, Op{Action: "replace", Target: TargetRule, OldText: "aaa", Content: strings.Repeat("c", 50)}); got != want {
+		t.Fatal(got)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "notes", "inbox-rule.md")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("a rule must not spill to a note:", err)
+	}
+	if got := s.Entries(TargetRule); !slices.Equal(got, []string{strings.Repeat("a", 30)}) {
+		t.Fatal(got)
+	}
+}
+
+func TestRuleTopicRefused(t *testing.T) {
+	s := open(t)
+	want := "the target rule takes no topic, because a rule in a note never loads; remove the topic"
+	for _, op := range []Op{
+		{Action: "add", Target: TargetRule, Topic: "x", Content: "Do not build from source"},
+		{Action: "replace", Target: TargetRule, Topic: "x", OldText: "a", Content: "b"},
+		{Action: "remove", Target: TargetRule, Topic: "x", OldText: "a"},
+	} {
+		if got := applyErr(t, s, op); got != want {
+			t.Fatalf("%+v: %s", op, got)
+		}
+	}
+}
+
+// A replace or a remove of a rule looks only in rules.md, never in the notes.
+func TestRuleChangeSkipsNotes(t *testing.T) {
+	s := open(t)
+	apply(t, s, Op{Action: "add", Target: TargetMemory, Topic: "rpc", Content: "zzz in a note"})
+	if got := applyErr(t, s, Op{Action: "remove", Target: TargetRule, OldText: "zzz"}); got != `no entry matches "zzz" in rule` {
+		t.Fatal(got)
+	}
+	if n := noteOf(t, s, "rpc"); len(n.Entries) != 1 {
+		t.Fatalf("%+v", n)
+	}
+}
+
+func TestUnknownTargetNamesRule(t *testing.T) {
+	s := open(t)
+	if got := applyErr(t, s, Op{Action: "add", Target: "other", Content: "x"}); got != `unknown target "other"; use memory, user, or rule` {
+		t.Fatal(got)
 	}
 }

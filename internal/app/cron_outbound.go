@@ -512,8 +512,10 @@ func (a *App) logDeliveryDecision(ctx context.Context, j cron.Job, decision, rea
 		JobName: j.Name, LogScope: scope}, decision, "model-guard", "")
 }
 
-// sweepHeld ends each held row older than 24 h and edits its card to "Expired.".
+// sweepHeld ends each held send older than 24 h and edits its card to "Expired.". It also
+// sweeps the held memory writes and the old notice cards, and it runs the curator check.
 func (a *App) sweepHeld(ctx context.Context) {
+	a.sweepLearn(ctx)
 	held := a.Sched.Deliver.Held
 	rows, err := held.ClaimExpired(ctx, time.Now().Add(-heldExpiry))
 	if err != nil {

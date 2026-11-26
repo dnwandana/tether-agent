@@ -301,7 +301,7 @@ func TestOnCompactHookCalledWithFullView(t *testing.T) {
 		start, end int
 	}
 	got := make(chan call, 1)
-	c.OnCompact = func(_ context.Context, s *sessions.Session, view []provider.Message, start, end int) {
+	c.OnCompact = func(_ context.Context, s *sessions.Session, view []provider.Message, start, end int, _ []string) {
 		got <- call{view, start, end}
 	}
 	if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
@@ -317,10 +317,46 @@ func TestOnCompactHookCalledWithFullView(t *testing.T) {
 	}
 }
 
+func TestOutsideIn(t *testing.T) {
+	row := func(id int64, src ...string) sessions.StoredMessage {
+		return sessions.StoredMessage{ID: id, Meta: sessions.MessageMeta{Outside: src}}
+	}
+	stored := []sessions.StoredMessage{row(1), row(2, "web_fetch"), row(3, "mcp_github_search", "web_fetch"), row(4), row(5, "terminal:curl")}
+	if got := OutsideIn(stored, 2, 4); !reflect.DeepEqual(got, []string{"mcp_github_search", "web_fetch"}) {
+		t.Fatal(got)
+	}
+	if got := OutsideIn(stored, 1, 1); got != nil {
+		t.Fatal(got)
+	}
+	if got := OutsideIn(stored, 1, 5); !reflect.DeepEqual(got, []string{"mcp_github_search", "terminal:curl", "web_fetch"}) {
+		t.Fatal(got)
+	}
+}
+
+func TestOnCompactGetsOutsideUnion(t *testing.T) {
+	c, sess, fp := compactorWithSession(t, 80)
+	if _, err := c.DB.ExecContext(ctx, `UPDATE messages SET outside = 'web_fetch' WHERE id = 10`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DB.ExecContext(ctx, `UPDATE messages SET outside = 'mcp_x' WHERE id = 80`); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	c.OnCompact = func(_ context.Context, _ *sessions.Session, _ []provider.Message, _, _ int, outside []string) {
+		got = outside
+	}
+	if did, err := c.Maybe(ctx, sess, fp, 2000, false); !did || err != nil {
+		t.Fatal(did, err)
+	}
+	if !reflect.DeepEqual(got, []string{"web_fetch"}) {
+		t.Fatal(got)
+	}
+}
+
 func TestOnCompactRunsAfterTheSummaryIsSaved(t *testing.T) {
 	c, sess, fp := compactorWithSession(t, 80)
 	saved := -1
-	c.OnCompact = func(context.Context, *sessions.Session, []provider.Message, int, int) {
+	c.OnCompact = func(context.Context, *sessions.Session, []provider.Message, int, int, []string) {
 		comps, err := LoadCompactions(ctx, c.DB, sess.ID)
 		if err != nil {
 			t.Error(err)
@@ -354,7 +390,7 @@ func onCompactAfterFailures(t *testing.T, n int) {
 		mu    sync.Mutex
 		calls []call
 	)
-	c.OnCompact = func(_ context.Context, _ *sessions.Session, view []provider.Message, start, end int) {
+	c.OnCompact = func(_ context.Context, _ *sessions.Session, view []provider.Message, start, end int, _ []string) {
 		mu.Lock()
 		defer mu.Unlock()
 		calls = append(calls, call{view, start, end})

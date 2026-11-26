@@ -743,8 +743,11 @@ Do NOT save task progress, session results, logs of finished work, or temporary 
 TWO TARGETS:
 - 'user': who the user is: name, role, preferences, communication style, dislikes.
 - 'memory': your facts: environment facts, project conventions, tool quirks, lessons.
+- 'rule': a standing rule of the owner. Save it only when the owner states it in a chat turn, and give the exact words of the owner in quote.
 
-ACTIONS: add (a new entry), replace (change the entry that old_text finds), remove (delete the entry that old_text finds, or the blocked entry with the ID m-<id>), search (find entries by words), read (open a note by its topic).
+ACTIONS: add (a new entry), replace (change the entry that old_text finds), remove (delete the entry that old_text finds, or the blocked entry with the ID m-<id>), move (move the entry that old_text finds to a note with to 'note', or to the file of the target with to 'file'), search (find entries by words), read (open a note by its topic).
+
+A full rules file refuses an add. The entry never goes to a note. For a snapshot that stops being true on a day, give until as YYYY-MM-DD.
 
 NOTES: memory and user have a character limit. When an add does not fit, the entry goes to a memory note (inbox-memory or inbox-user), and the add still succeeds. Give a topic to put related facts in one note, for example topic 'rpc' for RPC provider facts. Give no topic for a fact that each session needs, such as the name of the user or a correction: a note does not load into the prompt. The prompt lists the topics of the notes. Use search to find a fact, and read to open a note. Before you add a fact, search the notes for the same subject. When a note has an older version, replace it.
 
@@ -760,6 +763,7 @@ SKIP: trivial facts, facts that are easy to find again, raw data, and temporary 
         "add",
         "replace",
         "remove",
+        "move",
         "search",
         "read"
       ],
@@ -769,9 +773,10 @@ SKIP: trivial facts, facts that are easy to find again, raw data, and temporary 
       "type": "string",
       "enum": [
         "memory",
-        "user"
+        "user",
+        "rule"
       ],
-      "description": "The store: 'memory' for your facts, 'user' for the user profile. Required for add, replace, and remove."
+      "description": "The store: 'memory' for your facts, 'user' for the user profile, 'rule' for the rules of the owner. Required for add, replace, remove, and move."
     },
     "content": {
       "type": "string",
@@ -792,6 +797,22 @@ SKIP: trivial facts, facts that are easy to find again, raw data, and temporary 
     "from": {
       "type": "integer",
       "description": "For read: the number of the first entry to show. The default is 1."
+    },
+    "quote": {
+      "type": "string",
+      "description": "The exact words of the owner in this chat that the entry rests on. Required for a rule."
+    },
+    "until": {
+      "type": "string",
+      "description": "A date YYYY-MM-DD after today. The entry stops loading after this day. Use it for a snapshot."
+    },
+    "to": {
+      "type": "string",
+      "enum": [
+        "note",
+        "file"
+      ],
+      "description": "For move: 'note' moves the entry to the note of topic, 'file' moves it to the file of target."
     }
   },
   "required": [

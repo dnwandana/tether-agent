@@ -44,7 +44,7 @@ func skillsNew(t *testing.T, ask tools.Asker, src string, users func(context.Con
 	}
 	cfg := config.Default()
 	tasks := NewTasks(NewHub(1<<20), func() context.Context { return context.Background() })
-	a := NewSkillsAPI(data, &cfg, ask, tasks, users, func(s string) string { return strings.ReplaceAll(s, "sk-live-123", "***") })
+	a := NewSkillsAPI(data, &cfg, ask, tasks, users, func(s string) string { return strings.ReplaceAll(s, "sk-live-123", "***") }, nil)
 	a.source = func(string) string { return src }
 	mux := http.NewServeMux()
 	a.Register(mux)
@@ -283,7 +283,7 @@ func TestSkillsCronSkillUsers(t *testing.T) {
 	}
 	t.Cleanup(func() { d.Close() })
 	st := &cron.Store{DB: d}
-	job, err := st.Create(context.Background(), cron.Job{Name: "brief", Schedule: "every 2h", Prompt: "p",
+	job, err := st.Create(context.Background(), cron.Job{Name: "brief", Schedule: "every 2h", Prompt: "Run pdf now.",
 		Skills: []string{"pdf"}, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +292,7 @@ func TestSkillsCronSkillUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{`"brief" (` + job.ID + `)`}; !slices.Equal(users["pdf"], want) || len(users) != 1 {
+	if want := []string{`"brief" (` + job.ID + `)`}; !slices.Equal(users["pdf"], want) || !slices.Equal(users["run"], want) {
 		t.Fatalf("%v", users)
 	}
 }
@@ -479,5 +479,131 @@ func TestSkillDetailBodyAndCronJobs(t *testing.T) {
 	a.cronUsers = func(context.Context) (map[string][]string, error) { return nil, errors.New("db closed") }
 	if raw, _ := get("pdf"); !strings.Contains(raw, `"cron_jobs":null`) {
 		t.Fatalf("an error must give null: %s", raw)
+	}
+}
+
+// fakeSkillInfo is a SkillInfo over maps.
+type fakeSkillInfo struct {
+	lastRead   map[string]time.Time
+	kept       map[string]bool
+	archived   []skills.Flag
+	restoreErr error
+}
+
+func (f *fakeSkillInfo) LastRead(_ context.Context, name string) (time.Time, bool) {
+	t, ok := f.lastRead[name]
+	return t, ok
+}
+func (f *fakeSkillInfo) Kept(_ context.Context, name string) bool { return f.kept[name] }
+func (f *fakeSkillInfo) Archived(context.Context) ([]skills.Flag, error) {
+	return f.archived, nil
+}
+func (f *fakeSkillInfo) SetKept(_ context.Context, name string, kept bool) error {
+	f.kept[name] = kept
+	return nil
+}
+func (f *fakeSkillInfo) Restore(context.Context, string) error { return f.restoreErr }
+
+func skillsInstallLocal(t *testing.T, data, name string) {
+	t.Helper()
+	dir := filepath.Join(data, "skills", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	md := "---\nname: " + name + "\ndescription: Test skill " + name + ".\n---\nBody.\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(md), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSkillsRowLastReadAndKept(t *testing.T) {
+	a, mux, data := skillsNew(t, &skillsAsker{}, "", nil)
+	skillsInstallLocal(t, data, "demo")
+	skillsInstallLocal(t, data, "other")
+	t0 := time.Unix(1700000000, 0)
+	a.info = &fakeSkillInfo{lastRead: map[string]time.Time{"demo": t0}, kept: map[string]bool{"demo": true}}
+	rec := skillsDo(t, mux, "GET", "/api/skills", "")
+	var rows []SkillRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		switch r.Name {
+		case "demo":
+			if r.LastRead == nil || !r.LastRead.Equal(t0) || !r.Kept {
+				t.Errorf("demo: %+v", r)
+			}
+		case "other":
+			if r.LastRead != nil || r.Kept {
+				t.Errorf("other: %+v", r)
+			}
+		}
+	}
+}
+
+func TestSkillsRowNoInfo(t *testing.T) {
+	_, mux, data := skillsNew(t, &skillsAsker{}, "", nil)
+	skillsInstallLocal(t, data, "demo")
+	rec := skillsDo(t, mux, "GET", "/api/skills", "")
+	if !strings.Contains(rec.Body.String(), `"last_read":null`) || !strings.Contains(rec.Body.String(), `"kept":false`) {
+		t.Fatal(rec.Body)
+	}
+}
+
+func TestSkillsArchivedRoute(t *testing.T) {
+	a, mux, _ := skillsNew(t, &skillsAsker{}, "", nil)
+	rec := skillsDo(t, mux, "GET", "/api/skills/archived", "")
+	if rec.Code != 200 || rec.Body.String() != "[]\n" {
+		t.Fatalf("%d %q", rec.Code, rec.Body)
+	}
+	t0 := time.Unix(1700000000, 0).UTC()
+	a.info = &fakeSkillInfo{archived: []skills.Flag{{Name: "old-one", RelDir: "research/old-one", ArchivedAt: t0}}}
+	rec = skillsDo(t, mux, "GET", "/api/skills/archived", "")
+	var rows []ArchivedSkillRow
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil || rec.Code != 200 {
+		t.Fatal(rec.Code, rec.Body, err)
+	}
+	if len(rows) != 1 || rows[0].Name != "old-one" || rows[0].RelDir != "research/old-one" || !rows[0].ArchivedAt.Equal(t0) {
+		t.Fatalf("%+v", rows)
+	}
+	if !strings.Contains(rec.Body.String(), `"rel_dir"`) || !strings.Contains(rec.Body.String(), `"archived_at"`) {
+		t.Fatal(rec.Body)
+	}
+}
+
+func TestSkillsKeepUnkeepActions(t *testing.T) {
+	a, mux, _ := skillsNew(t, &skillsAsker{}, "", nil)
+	fake := &fakeSkillInfo{kept: map[string]bool{}}
+	a.info = fake
+	v := skillsTask(t, a, skillsDo(t, mux, "POST", "/api/skills/demo/keep", ""))
+	if v.State != "done" || !strings.Contains(v.Text, "Kept demo. The curator never archives it.") || !fake.kept["demo"] {
+		t.Fatalf("%+v", v)
+	}
+	v = skillsTask(t, a, skillsDo(t, mux, "POST", "/api/skills/demo/unkeep", ""))
+	if v.State != "done" || !strings.Contains(v.Text, "demo is not kept now. The curator can archive it.") || fake.kept["demo"] {
+		t.Fatalf("%+v", v)
+	}
+}
+
+func TestSkillsRestoreAction(t *testing.T) {
+	a, mux, _ := skillsNew(t, &skillsAsker{}, "", nil)
+	fake := &fakeSkillInfo{kept: map[string]bool{}}
+	a.info = fake
+	v := skillsTask(t, a, skillsDo(t, mux, "POST", "/api/skills/old-one/restore", ""))
+	if v.State != "done" || !strings.Contains(v.Text, "Restored old-one. It loads in new sessions.") {
+		t.Fatalf("%+v", v)
+	}
+	fake.restoreErr = errors.New("a skill named old-one exists; restore refused")
+	v = skillsTask(t, a, skillsDo(t, mux, "POST", "/api/skills/old-one/restore", ""))
+	if v.State != "error" || !strings.Contains(v.Text, "restore refused") {
+		t.Fatalf("%+v", v)
+	}
+}
+
+func TestSkillsHistoryActionsNeedInfo(t *testing.T) {
+	_, mux, _ := skillsNew(t, &skillsAsker{}, "", nil)
+	rec := skillsDo(t, mux, "POST", "/api/skills/demo/keep", "")
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "The skill history is not available.") {
+		t.Fatalf("%d %s", rec.Code, rec.Body)
 	}
 }

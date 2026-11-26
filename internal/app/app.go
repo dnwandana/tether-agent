@@ -119,8 +119,10 @@ type App struct {
 	Providers map[string]provider.Provider
 	Prices    *pricing.Service
 	Memory    *memory.Store
-	Skills    *tools.SkillCatalog
-	Cron      *cron.Store
+	// Learn holds the memory history, the notices, the held writes, the skill log, and the curator.
+	Learn  *LearnParts
+	Skills *tools.SkillCatalog
+	Cron   *cron.Store
 	// Browser is the Chrome manager. It starts Chrome on the first browser call.
 	Browser *browser.Manager
 	// Media builds the media tools. The speech-to-text of Telegram voice notes uses it too.
@@ -318,9 +320,12 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	// CLI.Run attaches the prompt to the REPL input. With no CLI, a question gets no answer.
 	a.CLIAsk = &gateway.CLIAsk{Save: a.SaveSecret}
 	a.Prices = pricing.NewService(a.Cfg, filepath.Join(dir, "cache"), a.HTTP, a.DB, a.Log)
-	if a.Memory, err = memory.Open(filepath.Join(dir, "memory"), a.Cfg.Memory.MemoryCharLimit, a.Cfg.Memory.UserCharLimit); err != nil {
+	if a.Memory, err = memory.Open(filepath.Join(dir, "memory"), a.Cfg.Memory.MemoryCharLimit, a.Cfg.Memory.UserCharLimit, a.Cfg.Memory.RulesCharLimit); err != nil {
 		return nil, err
 	}
+	a.Learn = a.newLearn(skillsDir)
+	a.Memory.History = a.Learn.History
+	a.Memory.Threat = memoryThreatText
 	a.Memory.EntryMaxChars = a.Cfg.Memory.EntryMaxChars
 	a.Memory.LockWait = time.Duration(a.Cfg.Memory.LockWaitS) * time.Second
 	a.Memory.ReadMaxChars = a.Cfg.Memory.ReadMaxChars
@@ -390,6 +395,7 @@ func New(ctx context.Context, opts Options) (_ *App, err error) {
 	// generation, so the prompt is rebuilt.
 	a.Agent.MCPGen = a.MCP.Generation
 	a.Agent.Prompts = agent.NewPromptCache(a.Agent.SessionPrompt)
+	a.Agent.Notices = a.Learn.Notices
 	// A compaction starts a review of the part that the summary replaces.
 	a.Agent.Compactor.OnCompact = a.Agent.ReviewOnCompaction
 	// The compaction summary records its usage in an aux session.
@@ -585,6 +591,7 @@ func (a *App) newScheduler() *cron.Scheduler {
 			ScriptsDir: filepath.Join(a.DataDir, "scripts"),
 			Turn:       a.cronTurn,
 			Skills:     a.Skills.Load,
+			SkillRead:  a.skillRead("cron"),
 			Env:        security.ChildEnv(os.Environ(), a.DotEnv.Snapshot(), cfg.Terminal.EnvPassthrough),
 			SpillDir:   filepath.Join(a.DataDir, "cache", "spill"),
 			Log:        a.Log,
@@ -1047,7 +1054,8 @@ func (a *App) registerTools(gatewayRole bool) {
 	a.RegisterTool(tools.PatchTool{ContextLines: cfg.Files.PatchContextLines})
 	a.RegisterTool(&tools.WebFetchTool{Client: a.WebClient, MaxURLs: cfg.Web.FetchMaxURLs, MaxBytes: int64(cfg.Web.FetchMaxBytes)})
 	a.RegisterTool(&tools.WebSearchTool{Client: a.WebClient, DefaultResults: cfg.Web.SearchDefaultResults, MaxResults: cfg.Web.SearchMaxResults})
-	a.RegisterTool(tools.MemoryTool{Store: a.Memory, MaxChars: cfg.Context.ToolOutputMaxChars})
+	a.RegisterTool(tools.MemoryTool{Store: a.Memory, MaxChars: cfg.Context.ToolOutputMaxChars, Quotes: a.Learn.Owners,
+		Held: heldStore{held: a.Learn.Held, now: a.now}})
 	a.RegisterTool(tools.ClarifyTool{Timeout: time.Duration(cfg.Approvals.TimeoutS) * time.Second})
 	a.RegisterTool(tools.SessionSearchTool{
 		Store: a.Store, Cron: a.Cron, MaxChars: cfg.Context.ToolOutputMaxChars,
@@ -1056,10 +1064,10 @@ func (a *App) registerTools(gatewayRole bool) {
 	})
 	// Sessions lets the first call after a restart restore the list from the history.
 	a.RegisterTool(tools.TodoTool{Sessions: a.Store})
-	a.RegisterTool(tools.SkillViewTool{Catalog: a.Skills, MaxLinkedFiles: cfg.Skills.ViewMaxLinkedFiles, EnvStatus: func(names []string) []string { return envStatus(cfg, a.DotEnv, names) }})
+	a.RegisterTool(tools.SkillViewTool{Catalog: a.Skills, Reads: a.Learn.SkillLog,
+		Archived: func(ctx context.Context, name string) bool { return a.Learn.Curator.IsArchived(ctx, name) }, MaxLinkedFiles: cfg.Skills.ViewMaxLinkedFiles, EnvStatus: func(names []string) []string { return envStatus(cfg, a.DotEnv, names) }})
 	a.RegisterTool(tools.SkillsListTool{Catalog: a.Skills})
-	a.RegisterTool(tools.SkillManageTool{Mgr: &skills.Manager{Dir: a.Skills.Dir, Guard: cfg.Skills.Guard,
-		SkillMDMaxChars: cfg.Skills.SkillMDMaxChars, SupportFileMaxBytes: cfg.Skills.SupportFileMaxBytes}, Catalog: a.Skills})
+	a.RegisterTool(tools.SkillManageTool{Mgr: a.Learn.Skills, Catalog: a.Skills})
 	cfgBrowser := cfg.Browser
 	a.Browser = &browser.Manager{
 		ProfileDir: filepath.Join(a.DataDir, "cache", "chrome-profile"),
@@ -1276,6 +1284,8 @@ func (a *App) Deps() *gateway.Deps {
 	// A notice with no turn goes to the channel of its session, with the buttons when
 	// the channel has them. sendNotice reads a.Telegram and a.Dashboard at call time.
 	d.SendNotice = a.sendNotice
+	d.Learn = a.learnDeps()
+	d.SkillRead = a.skillRead("command")
 	if a.Telegram != nil {
 		// A resumed turn with no sender gets the owner flag of its session from the
 		// current allowlists. AddTelegram sets a.Telegram before its first call of

@@ -17,6 +17,12 @@ copied from Hermes Agent. These parts include:
   tools/threat_patterns.py).
 - The prompts for child agents, background reviews, context compaction, and the
   summary at the tool-round limit (internal/agent/, internal/ctxmgr/).
+- The newer memory review rules (_MEMORY_ROUTING_BLOCK) and the skill lesson
+  block (_LESSON_LAYER_BLOCK) of the background review (internal/agent/review.go,
+  from agent/background_review.py), the thresholds of the skill curator
+  (internal/config/, internal/skills/curator.go, from agent/curator.py and
+  hermes_cli/config_defaults.py), and the rule that binds a held memory write to
+  the text of its target entry (from tools/memory_tool_store.py).
 - The rule that stops automatic compaction after two compactions in a row that
   leave the request over the threshold (internal/ctxmgr/compactor.go, from
   agent/context_compressor.py), and its warning to the user (from

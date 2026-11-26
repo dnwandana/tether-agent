@@ -42,6 +42,10 @@ type Manager struct {
 	SkillMDMaxChars int
 	// SupportFileMaxBytes is the limit of a support file in bytes. 0 means maxSupportFileLen.
 	SupportFileMaxBytes int
+	// Copies stores the copy of a skill before each change. Nil turns copies off.
+	Copies CopyRecorder
+	// HistoryKeep is the number of copies that stay for each skill. 0 or less means 5.
+	HistoryKeep int
 
 	mu sync.Mutex
 }
@@ -71,16 +75,27 @@ type Result struct {
 	// Findings holds the guard findings of a saved skill, for example the
 	// findings of a caution verdict.
 	Findings []Finding
+	// CopyID is the ID of the copy row of the change. It is 0 when Copies is nil.
+	CopyID int64
+	// Similar holds the names of the skills that are like a new skill. A create
+	// with the source chat sets it, and the create is not refused.
+	Similar []string
 }
 
 // Create writes a new skill Dir/<name>/SKILL.md. The frontmatter name must
 // be name.
-func (m *Manager) Create(name, content string) (Result, error) {
+func (m *Manager) Create(o Origin, name, content string) (Result, error) {
 	if err := validName(name); err != nil {
 		return Result{}, err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.refuseReview(o, name); err != nil {
+		return Result{}, err
+	}
+	unlock, err := m.lock()
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
 	if s, ok, err := m.find(name); err != nil {
 		return Result{}, err
 	} else if ok {
@@ -93,38 +108,51 @@ func (m *Manager) Create(name, content string) (Result, error) {
 	if err := validSkillMD(name, content, m.skillMDLimit()); err != nil {
 		return Result{}, err
 	}
+	similar, err := m.checkSimilar(o, name, content)
+	if err != nil {
+		return Result{}, err
+	}
 	res, err := m.guard(map[string]string{skillFile: content})
 	if err != nil {
 		return Result{}, err
 	}
+	res.Similar = similar
 	target := filepath.Join(dir, skillFile)
 	if err := m.checkTarget(target); err != nil {
 		return Result{}, err
 	}
+	c, err := m.beginCopy(o, name, "create", "")
+	if err != nil {
+		return Result{}, err
+	}
 	if err := os.MkdirAll(m.Dir, 0o755); err != nil {
+		m.abortCopy(c)
 		return Result{}, fmt.Errorf("cannot create the skills folder: %w", err)
 	}
 	if err := os.Mkdir(dir, 0o755); err != nil {
+		m.abortCopy(c)
 		return Result{}, fmt.Errorf("cannot create the skill folder: %w", err)
 	}
 	if err := writeFileAtomic(target, []byte(content)); err != nil {
 		os.RemoveAll(dir)
+		m.abortCopy(c)
 		return Result{}, fmt.Errorf("cannot write %s: %w", target, err)
 	}
 	res.Path = target
+	res.CopyID = m.finishCopy(c, dir).ID
 	return res, nil
 }
 
 // Patch replaces old with new in the SKILL.md of the skill name. old must
 // match exactly once.
-func (m *Manager) Patch(name, old, new string) (Result, error) {
-	return m.PatchFile(name, skillFile, old, new)
+func (m *Manager) Patch(o Origin, name, old, new string) (Result, error) {
+	return m.PatchFile(o, name, skillFile, old, new)
 }
 
 // PatchFile replaces old with new in the file rel of the skill name. rel is
 // SKILL.md or a file under references/ or scripts/. old must match exactly
 // once.
-func (m *Manager) PatchFile(name, rel, old, new string) (Result, error) {
+func (m *Manager) PatchFile(o Origin, name, rel, old, new string) (Result, error) {
 	if old == "" {
 		return Result{}, errors.New("old_string is required for patch")
 	}
@@ -132,8 +160,14 @@ func (m *Manager) PatchFile(name, rel, old, new string) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.refuseReview(o, name); err != nil {
+		return Result{}, err
+	}
+	unlock, err := m.lock()
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
 	s, err := m.mustFind(name)
 	if err != nil {
 		return Result{}, err
@@ -165,12 +199,12 @@ func (m *Manager) PatchFile(name, rel, old, new string) (Result, error) {
 	} else if limit := m.supportFileLimit(); len(content) > limit {
 		return Result{}, fmt.Errorf("%s would be %d bytes; the limit is %d", rel, len(content), limit)
 	}
-	return m.save(s, rel, target, content)
+	return m.save(o, "patch", s, rel, target, content)
 }
 
 // WriteFile writes the file rel of the skill name. rel must be under
 // references/ or scripts/.
-func (m *Manager) WriteFile(name, rel, content string) (Result, error) {
+func (m *Manager) WriteFile(o Origin, name, rel, content string) (Result, error) {
 	rel, err := cleanRel(rel, false)
 	if err != nil {
 		return Result{}, err
@@ -178,8 +212,14 @@ func (m *Manager) WriteFile(name, rel, content string) (Result, error) {
 	if limit := m.supportFileLimit(); len(content) > limit {
 		return Result{}, fmt.Errorf("the file is %d bytes; the limit is %d", len(content), limit)
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.refuseReview(o, name); err != nil {
+		return Result{}, err
+	}
+	unlock, err := m.lock()
+	if err != nil {
+		return Result{}, err
+	}
+	defer unlock()
 	s, err := m.mustFind(name)
 	if err != nil {
 		return Result{}, err
@@ -188,27 +228,36 @@ func (m *Manager) WriteFile(name, rel, content string) (Result, error) {
 	if err := m.checkTarget(target); err != nil {
 		return Result{}, err
 	}
-	return m.save(s, rel, target, content)
+	return m.save(o, "write_file", s, rel, target, content)
 }
 
 // Delete removes the folder of the skill name. It refuses a folder that
 // holds other skills.
-func (m *Manager) Delete(name string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (m *Manager) Delete(o Origin, name string) (Copy, error) {
+	if err := validName(name); err != nil {
+		return Copy{}, err
+	}
+	if err := m.refuseReview(o, name); err != nil {
+		return Copy{}, err
+	}
+	unlock, err := m.lock()
+	if err != nil {
+		return Copy{}, err
+	}
+	defer unlock()
 	s, err := m.mustFind(name)
 	if err != nil {
-		return err
+		return Copy{}, err
 	}
 	if err := m.checkTarget(filepath.Join(s.Dir, skillFile)); err != nil {
-		return err
+		return Copy{}, err
 	}
 	if real := realOrSelf(s.Dir); real == m.realDir() || !within(m.realDir(), real) {
-		return fmt.Errorf("refused: the folder of skill %s is not in the skills folder", name)
+		return Copy{}, fmt.Errorf("refused: the folder of skill %s is not in the skills folder", name)
 	}
 	nested, _, err := scanDir(s.Dir, false)
 	if err != nil {
-		return err
+		return Copy{}, err
 	}
 	var others []string
 	for _, n := range nested {
@@ -217,17 +266,22 @@ func (m *Manager) Delete(name string) error {
 		}
 	}
 	if len(others) > 0 {
-		return fmt.Errorf("the folder of skill %s also holds the skills %s; delete those first", name, strings.Join(others, ", "))
+		return Copy{}, fmt.Errorf("the folder of skill %s also holds the skills %s; delete those first", name, strings.Join(others, ", "))
+	}
+	c, err := m.beginCopy(o, name, "delete", s.Dir)
+	if err != nil {
+		return Copy{}, err
 	}
 	if err := os.RemoveAll(s.Dir); err != nil {
-		return fmt.Errorf("cannot delete skill %s: %w", name, err)
+		m.abortCopy(c)
+		return Copy{}, fmt.Errorf("cannot delete skill %s: %w", name, err)
 	}
-	return nil
+	return m.finishCopy(c, ""), nil
 }
 
 // save scans the files of skill s with rel set to content, and writes the
 // file when the guard allows it.
-func (m *Manager) save(s Skill, rel, target, content string) (Result, error) {
+func (m *Manager) save(o Origin, action string, s Skill, rel, target, content string) (Result, error) {
 	var res Result
 	if m.Guard {
 		files, err := skillFiles(s.Dir)
@@ -239,13 +293,20 @@ func (m *Manager) save(s Skill, rel, target, content string) (Result, error) {
 			return Result{}, err
 		}
 	}
+	c, err := m.beginCopy(o, s.Name, action, s.Dir)
+	if err != nil {
+		return Result{}, err
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		m.abortCopy(c)
 		return Result{}, fmt.Errorf("cannot create the folder of %s: %w", rel, err)
 	}
 	if err := writeFileAtomic(target, []byte(content)); err != nil {
+		m.abortCopy(c)
 		return Result{}, fmt.Errorf("cannot write %s: %w", target, err)
 	}
 	res.Path = target
+	res.CopyID = m.finishCopy(c, s.Dir).ID
 	return res, nil
 }
 
@@ -428,4 +489,74 @@ func cleanRel(rel string, allowSkillMD bool) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("file %q must be under references/ or scripts/", rel)
+}
+
+// lock takes m.mu and then the flock of the skills folder. The returned
+// function releases both.
+func (m *Manager) lock() (func(), error) {
+	m.mu.Lock()
+	unlock, err := LockSkills(m.Dir)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	return func() {
+		unlock()
+		m.mu.Unlock()
+	}, nil
+}
+
+// refuseReview refuses a change of a bundled skill or a hub skill when the
+// change comes from a review. Other sources can change these skills.
+func (m *Manager) refuseReview(o Origin, name string) error {
+	if o.Source != "review" {
+		return nil
+	}
+	if isBootstrapName(name) {
+		return fmt.Errorf("refused: skill %s is a bundled skill of Tether Agent; a review cannot change it", name)
+	}
+	lock, err := ReadLock(m.Dir)
+	if err != nil {
+		return err
+	}
+	if _, ok := lock.Installed[name]; ok {
+		return fmt.Errorf("refused: skill %s is installed from the hub; a review cannot change it", name)
+	}
+	return nil
+}
+
+// checkSimilar looks for skills that are like the new skill name. A create
+// from a review is refused when one exists. A create from a chat gets the
+// names back. Other sources are not checked.
+func (m *Manager) checkSimilar(o Origin, name, content string) ([]string, error) {
+	if o.Source != "review" && o.Source != "chat" {
+		return nil, nil
+	}
+	parsed, err := parseSkill([]byte(content))
+	if err != nil {
+		return nil, err
+	}
+	existing, archived, err := SimilarSkills(m.Dir, name, parsed.Description)
+	if err != nil {
+		return nil, err
+	}
+	if o.Source == "chat" {
+		return append(existing, archived...), nil
+	}
+	if len(existing) > 0 {
+		desc := ""
+		if s, ok, err := m.find(existing[0]); err == nil && ok {
+			desc = s.Description
+		}
+		if r := []rune(desc); len(r) > 60 {
+			desc = string(r[:60]) + " …"
+		}
+		//lint:ignore ST1005 the text is a fixed user message with full sentences.
+		return nil, fmt.Errorf("A similar skill exists: %s (\"%s\"). Patch it, or add a file under its references/.", existing[0], desc)
+	}
+	if len(archived) > 0 {
+		//lint:ignore ST1005 the text is a fixed user message with full sentences.
+		return nil, fmt.Errorf("An archived skill is similar: %s. Ask the owner to restore it.", archived[0])
+	}
+	return nil, nil
 }

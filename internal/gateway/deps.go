@@ -10,6 +10,8 @@ import (
 	"github.com/dnwandana/tether-agent/internal/config"
 	"github.com/dnwandana/tether-agent/internal/ctxmgr"
 	"github.com/dnwandana/tether-agent/internal/goals"
+	"github.com/dnwandana/tether-agent/internal/learn"
+	"github.com/dnwandana/tether-agent/internal/memory"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -58,6 +60,9 @@ type Deps struct {
 	// the skill catalog. Nil turns the skill commands off. It reads the skill folders, so
 	// the gateway does not call it in accept, under Gateway.mu, or at startup.
 	Skills func() ([]skills.Skill, []skills.Warning, error)
+	// SkillRead records a read of a skill by a skill command. The app sets it. Nil records
+	// nothing.
+	SkillRead func(ctx context.Context, name, sessionID string)
 	// EnvStatus returns the status of each env name of a skill for the skill command text.
 	// Nil gives "not set" for each name.
 	EnvStatus func(names []string) []string
@@ -67,6 +72,37 @@ type Deps struct {
 	// ModeOf returns the /mode value of a scope. The app sets it to Gate.ModeOf. Nil gives
 	// guarded.
 	ModeOf func(ctx context.Context, scope string) string
+	// Learn holds the parts of the change notices and of the memory and skill commands.
+	// Nil turns the notice buttons off, and a card goes out as plain text.
+	Learn *LearnDeps
+}
+
+// LearnDeps holds what /notice, /memory, and /skills need to read and undo the changes.
+type LearnDeps struct {
+	// Memory is the memory store. Its History reads the rows that Undo and Redo use.
+	Memory *memory.Store
+	// Notices stores the change cards.
+	Notices *learn.Notices
+	// Held stores the memory writes that wait for the owner.
+	Held *learn.Held
+	// Skills is the skill manager. UndoCopy and RedoCopy use it.
+	Skills *skills.Manager
+	// Curator archives and restores the skills nobody reads.
+	Curator *skills.Curator
+	// Copies reads the copy rows of the skill changes.
+	Copies skills.CopyRecorder
+	// Tidy runs /memory tidy for sess and sends the change cards to card.
+	Tidy func(ctx context.Context, sess *sessions.Session, card func(agent.Notice)) error
+	// GroupHasMember reports whether the group of key has a member that is not the owner.
+	// Nil means no.
+	GroupHasMember func(ctx context.Context, key string) bool
+	// SendPrivate sends r to the private chat of the owner for the group of key.
+	SendPrivate func(ctx context.Context, key string, r Reply) error
+	// SendOwner sends r to the owner with no turn.
+	SendOwner func(ctx context.Context, r Reply) error
+	// RefreshMenu makes the channel read the skill list again, for example for the
+	// command menu of Telegram.
+	RefreshMenu func(ctx context.Context)
 }
 
 // TurnInput is the input of one agent turn that a channel starts.
@@ -93,6 +129,9 @@ type TurnInput struct {
 	Owner bool
 	// Shared is true when all users of the chat or the topic share the session.
 	Shared bool
+	// Card receives the change cards of the turn. Wrap the send function with
+	// agent.HoldCards, so that a card waits for the answer. It can be nil.
+	Card func(agent.Notice)
 }
 
 // Turn runs one agent turn for sess with the toolsets of the channel. After a turn with
@@ -107,6 +146,7 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 		Sink:        in.Sink,
 		Steer:       in.Steer,
 		Notify:      in.Notify,
+		Card:        in.Card,
 		OnSteerRead: in.OnSteerRead,
 		Member:      !in.Owner,
 		Shared:      in.Shared,
@@ -139,7 +179,7 @@ func (d *Deps) Turn(ctx context.Context, sess *sessions.Session, in TurnInput) (
 	if t.Mode == security.ModeReadOnly {
 		t.RemoveTools = append(t.RemoveTools, d.readOnlyHidden()...)
 	}
-	t.UserText = d.userText(sess, in)
+	t.UserText = d.userText(ctx, sess, in)
 	// The progress lines of the delegate_task children go through the CLI sink. Its lock
 	// keeps each line apart from the streamed answer text. The CLI does not group the
 	// lines, so it does not use the batch number. A channel with its own progress
@@ -182,7 +222,7 @@ func (d *Deps) readOnlyHidden() []string {
 
 // userText returns the user text of the turn. A marked slash text that names a skill of
 // the channel gives the skill invocation text. Any other text stays as it is.
-func (d *Deps) userText(sess *sessions.Session, in TurnInput) string {
+func (d *Deps) userText(ctx context.Context, sess *sessions.Session, in TurnInput) string {
 	if !in.Slash {
 		return in.Text
 	}
@@ -194,6 +234,9 @@ func (d *Deps) userText(sess *sessions.Session, in TurnInput) string {
 	sc, ok := ResolveSkill(d.SkillCommandsForSender(in.Channel, in.Owner), name)
 	if !ok {
 		return in.Text
+	}
+	if d.SkillRead != nil {
+		d.SkillRead(ctx, sc.Skill.Name, sess.ID)
 	}
 	body := skills.SubstituteTemplateVars(sc.Skill.Body, sc.Skill.Dir, sess.ID)
 	body = d.cutSkillBody(body)

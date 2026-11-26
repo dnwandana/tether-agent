@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -132,6 +133,24 @@ func noNote(topic string, names []string) error {
 	return fmt.Errorf("no note %q. The notes are: %s.", topic, joinCapped(names, 40))
 }
 
+// HeldNote is the topic of the notes that keep memory writes that wait for the owner. The model
+// never sees them.
+const HeldNote = "held-memory"
+
+// IsHeldNote reports whether topic is HeldNote or one of its continuation notes
+// (held-memory-2, held-memory-3, and so on).
+func IsHeldNote(topic string) bool {
+	if topic == HeldNote {
+		return true
+	}
+	rest, ok := strings.CutPrefix(topic, HeldNote+"-")
+	if !ok || rest == "" || rest[0] == '0' {
+		return false
+	}
+	k, err := strconv.Atoi(rest)
+	return err == nil && k >= 2 && strconv.Itoa(k) == rest
+}
+
 // Topics returns the note topics, new first by file mtime, then by name, at
 // most 2000. It opens no note, so a prompt build reads no note text.
 func (s *Store) Topics() ([]string, error) {
@@ -165,7 +184,11 @@ func (s *Store) Topics() ([]string, error) {
 		if err != nil || !fi.Mode().IsRegular() {
 			continue
 		}
-		es = append(es, entry{strings.TrimSuffix(de.Name(), ".md"), fi.ModTime()})
+		topic := strings.TrimSuffix(de.Name(), ".md")
+		if IsHeldNote(topic) {
+			continue
+		}
+		es = append(es, entry{topic, fi.ModTime()})
 	}
 	slices.SortFunc(es, func(a, b entry) int {
 		if c := b.mtime.Compare(a.mtime); c != 0 {
@@ -185,6 +208,8 @@ type TopicInfo struct {
 	Name, Type string
 	Modified   time.Time
 	Entries    int
+	// Held is true for a held note. The dashboard marks it.
+	Held bool
 }
 
 // TopicInfos returns the notes with type, modified time, and entry count, new first by
@@ -200,7 +225,7 @@ func (s *Store) TopicInfos() ([]TopicInfo, error) {
 	}
 	var out []TopicInfo
 	s.eachNote(names, maxNoteBytes, func(n note) {
-		out = append(out, TopicInfo{Name: n.Topic, Type: n.Type, Modified: n.Modified, Entries: len(n.Entries)})
+		out = append(out, TopicInfo{Name: n.Topic, Type: n.Type, Modified: n.Modified, Entries: len(n.Entries), Held: IsHeldNote(n.Topic)})
 	})
 	slices.SortStableFunc(out, func(a, b TopicInfo) int {
 		if c := b.Modified.Compare(a.Modified); c != 0 {

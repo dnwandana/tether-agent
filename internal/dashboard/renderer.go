@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/dnwandana/tether-agent/internal/agent"
@@ -289,8 +290,26 @@ func (r *renderer) AckReplyHandle(rep gateway.Reply) gateway.AckHandle {
 }
 
 func (r *renderer) sendAck(id, kind, text string, buttons [][]gateway.Button) {
-	v := AckView{ID: id, Kind: kind, Text: r.d.Redact(text), RequestID: r.d.RequestID}
+	var lines []string
+	var rows [][]gateway.Button
 	for _, row := range buttons {
+		var keep []gateway.Button
+		for _, b := range row {
+			if strings.HasPrefix(b.Data, "/notice ") {
+				lines = append(lines, noticeLabel(b.Text)+": "+b.Data)
+				continue
+			}
+			keep = append(keep, b)
+		}
+		if len(keep) > 0 {
+			rows = append(rows, keep)
+		}
+	}
+	if len(lines) > 0 {
+		text += "\n\n" + strings.Join(lines, "\n")
+	}
+	v := AckView{ID: id, Kind: kind, Text: r.d.Redact(text), RequestID: r.d.RequestID}
+	for _, row := range rows {
 		var out []Button
 		for _, b := range row {
 			out = append(out, Button{Text: r.d.Redact(b.Text), Data: b.Data})
@@ -298,6 +317,14 @@ func (r *renderer) sendAck(id, kind, text string, buttons [][]gateway.Button) {
 		v.Buttons = append(v.Buttons, out)
 	}
 	r.d.Hub.Publish(Event{Name: "ack", Data: v})
+}
+
+// noticeLabel returns the button text without the leading marks and spaces and without a
+// trailing " ›".
+func noticeLabel(text string) string {
+	text = strings.TrimSuffix(strings.TrimSpace(text), "›")
+	text = strings.TrimLeftFunc(text, func(c rune) bool { return !unicode.IsLetter(c) && !unicode.IsDigit(c) })
+	return strings.TrimSpace(text)
 }
 
 // newAckID returns a random ack id.
