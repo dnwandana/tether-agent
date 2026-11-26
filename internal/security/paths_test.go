@@ -25,6 +25,7 @@ func TestProtectedPathsRefused(t *testing.T) {
 		filepath.Join(data, "scripts/a.sh"),
 		filepath.Join(data, "memory/memory.md"),
 		filepath.Join(data, "memory/user_profile.md"),
+		filepath.Join(data, "memory/rules.md"),
 	} {
 		err := CheckWritable(f, p, false)
 		if err == nil {
@@ -170,6 +171,7 @@ func TestShellWriteToProtectedIsDangerous(t *testing.T) {
 		"cp /tmp/x.sh /home/d/.tether/scripts/",
 		"echo x >> /home/d/.tether/memory/memory.md",
 		"cp /tmp/p /home/d/.tether/memory/user_profile.md",
+		"tee /home/d/.tether/memory/rules.md < x",
 	} {
 		if _, ok := MatchDangerous(NormalizeCommand(c)); !ok {
 			t.Errorf("%q must be dangerous", c)
