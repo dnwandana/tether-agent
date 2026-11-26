@@ -157,7 +157,7 @@ Examples:
 	{
 		Name:    "skills",
 		Group:   "Manage data",
-		Summary: "List, install, check, update, and uninstall skills, or restore a bootstrap skill.",
+		Summary: "List, install, check, update, uninstall, and archive skills, and undo a skill change.",
 		Usage:   "tether skills <command> [flags]",
 		Body: `Show the skills, install a public skill, or restore the bootstrap skills that
 come in the binary. The install scans the skill with the skill guard and asks
@@ -177,6 +177,15 @@ Commands:
                        update each skill that check reports.
   reset [name]         Restore a bootstrap skill from the binary. With no name,
                        restore all of them.
+  stale                Show the skills that the curator can archive, with
+                       their last activity and their state.
+  keep <name>          Mark a skill as kept. The curator never archives it.
+  unkeep <name>        Remove the keep mark of a skill.
+  restore <name>       Move an archived skill back to its folder.
+  archived             Show the archived skills.
+  log [name]           Show the last 10 skill copies with their copy ids.
+  undo <copy id>       Undo one skill change from its copy.
+  curate               Run the skill curator now, also when it is not due.
 
 Exit codes of check:
   0 = nothing to do · 1 = an update is available · 2 = no skill could be checked
@@ -217,6 +226,8 @@ Examples:
   tether skills update pdf
   tether skills uninstall pdf
   tether skills reset tether-memory
+  tether skills stale
+  tether skills restore graphkb-lightrag
 `,
 	},
 	{

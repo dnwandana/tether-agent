@@ -5,11 +5,11 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,10 +30,12 @@ import (
 
 	"github.com/dnwandana/tether-agent/internal/app"
 	"github.com/dnwandana/tether-agent/internal/config"
+	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/dashboard"
 	"github.com/dnwandana/tether-agent/internal/db"
 	"github.com/dnwandana/tether-agent/internal/gateway"
 	"github.com/dnwandana/tether-agent/internal/gatewaylock"
+	"github.com/dnwandana/tether-agent/internal/learn"
 	"github.com/dnwandana/tether-agent/internal/obs"
 	"github.com/dnwandana/tether-agent/internal/security"
 	"github.com/dnwandana/tether-agent/internal/sessions"
@@ -887,6 +890,14 @@ var skillsCommandFlags = map[string][]string{
 	"uninstall": {"yes"},
 	"check":     {},
 	"update":    {"yes", "force"},
+	"stale":     {},
+	"keep":      {},
+	"unkeep":    {},
+	"restore":   {},
+	"archived":  {},
+	"log":       {},
+	"undo":      {},
+	"curate":    {},
 }
 
 // skillsFlagCheck returns false and prints the bad-usage lines when a flag
@@ -922,7 +933,7 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 	if len(rest) == 0 {
-		return usageError(stderr, "skills", "a command is needed: list, install, check, update, uninstall, or reset")
+		return usageError(stderr, "skills", "a command is needed: list, install, check, update, uninstall, reset, stale, keep, unkeep, restore, archived, log, undo, or curate")
 	}
 	if _, known := skillsCommandFlags[rest[0]]; !known {
 		return usageError(stderr, "skills", "unknown command: "+rest[0])
@@ -1043,6 +1054,8 @@ func runSkills(args []string, stdout, stderr io.Writer) int {
 			return skillsError(stderr, "update", err)
 		}
 		return 0
+	case "stale", "archived", "curate", "log", "keep", "unkeep", "restore", "undo":
+		return runSkillsCurator(rest, dir, stdout, stderr)
 	default:
 		return usageError(stderr, "skills", "unknown command: "+rest[0])
 	}
@@ -1062,6 +1075,226 @@ func skillsConfig(dir string) (config.Config, error) {
 	return *loaded, nil
 }
 
+// skillsDB opens <dir>/state.db. write uses db.Open, which applies the migrations. Else the
+// handle is read-only, because the gateway can have the database open.
+func skillsDB(dir string, write bool) (*db.DB, error) {
+	path := filepath.Join(dir, "state.db")
+	if write {
+		return db.Open(path)
+	}
+	return db.OpenReadOnly(path)
+}
+
+// skillTablesReady reports whether state.db has the tables of the skill history.
+func skillTablesReady(ctx context.Context, d *db.DB) (bool, error) {
+	var n int
+	err := d.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table'
+		AND name IN ('skill_reads', 'skill_flags', 'skill_copies')`).Scan(&n)
+	return n == 3, err
+}
+
+// skillsUndoError reports a failed tether skills undo. An unknown copy id names the command
+// that lists the ids.
+func skillsUndoError(stderr io.Writer, id int64, err error) int {
+	if errors.Is(err, sql.ErrNoRows) {
+		fmt.Fprintf(stderr, "skills undo: no skill copy has the id %d. Run tether skills log.\n", id)
+		return 1
+	}
+	return skillsError(stderr, "undo", err)
+}
+
+// newCurator returns the skill curator of the data folder dir over d.
+func newCurator(dir string, d *db.DB, cfg config.Config) *skills.Curator {
+	return &skills.Curator{
+		Dir:      filepath.Join(dir, "skills"),
+		External: cfg.Skills.ExternalDirs,
+		Store:    learn.NewSkillLog(d),
+		CronUsers: func(ctx context.Context, names []string) (map[string][]string, error) {
+			return cron.SkillUsers(ctx, &cron.Store{DB: d, Loc: time.Local}, names)
+		},
+		Cfg: cfg.Skills.Curator,
+		Now: time.Now,
+	}
+}
+
+// curatorText returns the text of a curator run for the terminal, with no Markdown escapes.
+func curatorText(rep skills.CuratorReport, cfg config.CuratorConfig) string {
+	stale, archive := cfg.StaleAfterDays, cfg.ArchiveAfterDays
+	if stale <= 0 {
+		stale = 14
+	}
+	if archive <= 0 {
+		archive = 30
+	}
+	if archive < stale {
+		archive = stale
+	}
+	var b strings.Builder
+	b.WriteString("🗂 Skill curator\n")
+	if len(rep.Archived) == 0 {
+		b.WriteString("Archived: none.\n")
+	} else {
+		fmt.Fprintf(&b, "Archived (no read in %d days):\n", archive)
+		for _, f := range rep.Archived {
+			fmt.Fprintf(&b, "• %s\n", skills.Sanitize(f.Name))
+		}
+	}
+	fmt.Fprintf(&b, "Stale (no read in %d days): %d skills. tether skills stale\n", stale, len(rep.Stale))
+	fmt.Fprintf(&b, "Kept: %d · Skipped: %d bundled, %d from the hub\n", rep.Kept, rep.SkippedBundled, rep.SkippedHub)
+	return b.String()
+}
+
+// runSkillsCurator runs the curator, log, and undo commands of the skills subcommand.
+func runSkillsCurator(rest []string, dir string, stdout, stderr io.Writer) int {
+	cmd := rest[0]
+	args := rest[1:]
+	needsName := cmd == "keep" || cmd == "unkeep" || cmd == "restore" || cmd == "undo"
+	if needsName && len(args) == 0 {
+		what := "a skill name"
+		if cmd == "undo" {
+			what = "a copy id"
+		}
+		return usageError(stderr, "skills", cmd+" needs "+what)
+	}
+	maxArgs := 0
+	if needsName || cmd == "log" {
+		maxArgs = 1
+	}
+	if len(args) > maxArgs {
+		return usageError(stderr, "skills", "unexpected argument: "+args[maxArgs])
+	}
+	var id int64
+	var stamp string
+	if cmd == "undo" {
+		idText, st, _ := strings.Cut(args[0], ".")
+		n, err := strconv.ParseInt(idText, 10, 64)
+		if err != nil || n <= 0 {
+			return usageError(stderr, "skills", "undo needs a copy id, for example 12 or 12.a3f1")
+		}
+		id, stamp = n, st
+	}
+	cfg, cfgErr := skillsConfig(dir)
+	if cfgErr != nil {
+		fmt.Fprintf(stderr, "warning: the config did not load, so the curator uses the default values: %v\n", cfgErr)
+	}
+	write := cmd != "stale" && cmd != "archived" && cmd != "log"
+	if !write {
+		// A read form does not make state.db. A new install has no skill history yet.
+		if _, err := os.Stat(filepath.Join(dir, "state.db")); errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintln(stdout, "No skill history yet. Start tether gateway or tether chat one time, then try again.")
+			return 0
+		}
+	}
+	d, err := skillsDB(dir, write)
+	if err != nil {
+		return skillsError(stderr, cmd, err)
+	}
+	defer d.Close()
+	if !write {
+		// A read-only open does not migrate, so a state.db of an older version has no skill
+		// tables until the gateway or the chat starts one time.
+		ok, err := skillTablesReady(context.Background(), d)
+		if err != nil {
+			return skillsError(stderr, cmd, err)
+		}
+		if !ok {
+			fmt.Fprintf(stderr, "skills %s: state.db is older than this version. Start tether gateway or tether chat one time to update it, then try again.\n", cmd)
+			return 1
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	cur := newCurator(dir, d, cfg)
+	switch cmd {
+	case "stale":
+		rows, err := cur.Stale(ctx)
+		if err != nil {
+			return skillsError(stderr, cmd, err)
+		}
+		if len(rows) == 0 {
+			fmt.Fprintln(stdout, "No candidate skills.")
+		}
+		for _, r := range rows {
+			fmt.Fprintf(stdout, "%-32s %-6s %s\n", skills.Sanitize(r.Name), r.State, r.LastActivity.Local().Format("2006-01-02"))
+		}
+	case "keep", "unkeep":
+		if err := cur.SetKept(ctx, args[0], cmd == "keep"); err != nil {
+			return skillsError(stderr, cmd, err)
+		}
+		verb := "kept"
+		if cmd == "unkeep" {
+			verb = "unkept"
+		}
+		fmt.Fprintf(stdout, "%s %s\n", verb, skills.Sanitize(args[0]))
+	case "restore":
+		if err := cur.Restore(ctx, args[0]); err != nil {
+			return skillsError(stderr, cmd, err)
+		}
+		fmt.Fprintf(stdout, "restored %s\n", skills.Sanitize(args[0]))
+	case "archived":
+		flags, err := cur.Archived(ctx)
+		if err != nil {
+			return skillsError(stderr, cmd, err)
+		}
+		if len(flags) == 0 {
+			fmt.Fprintln(stdout, "No archived skills.")
+		}
+		for _, f := range flags {
+			fmt.Fprintf(stdout, "%-32s %s %s\n", skills.Sanitize(f.Name), f.ArchivedAt.Local().Format("2006-01-02"), skills.Sanitize(f.RelDir))
+		}
+	case "log":
+		name := ""
+		if len(args) == 1 {
+			name = args[0]
+		}
+		log := learn.NewSkillLog(d)
+		copies, err := log.ListCopies(name, 10)
+		if err != nil {
+			return skillsError(stderr, cmd, err)
+		}
+		if len(copies) == 0 {
+			fmt.Fprintln(stdout, "No skill copies.")
+		}
+		// A copy that an Undo reversed and a Redo did again is not undone.
+		m := &skills.Manager{Copies: log}
+		for _, c := range copies {
+			undone := ""
+			if m.CopyUndone(c) {
+				undone = " (undone)"
+			}
+			fmt.Fprintf(stdout, "%d.%s  %s  %-6s %-10s %s%s\n", c.ID, c.Stamp, c.At.Local().Format("2006-01-02 15:04"),
+				skills.Sanitize(c.Source), c.Action, skills.Sanitize(c.Name), undone)
+		}
+	case "undo":
+		log := learn.NewSkillLog(d)
+		if stamp == "" {
+			c, err := log.GetCopy(id)
+			if err != nil {
+				return skillsUndoError(stderr, id, err)
+			}
+			stamp = c.Stamp
+		}
+		m := &skills.Manager{Dir: filepath.Join(dir, "skills"), Guard: cfg.Skills.Guard,
+			SkillMDMaxChars: cfg.Skills.SkillMDMaxChars, SupportFileMaxBytes: cfg.Skills.SupportFileMaxBytes,
+			Copies: log, HistoryKeep: cfg.Skills.HistoryKeep}
+		c, err := m.UndoCopy(skills.Origin{Source: "owner"}, id, stamp)
+		if err != nil {
+			return skillsUndoError(stderr, id, err)
+		}
+		fmt.Fprintf(stdout, "undone %d: %s %s\n", id, c.Action, skills.Sanitize(c.Name))
+	case "curate":
+		rep, _, err := cur.Run(ctx, true, time.Time{})
+		if err != nil {
+			return skillsError(stderr, cmd, err)
+		}
+		fmt.Fprint(stdout, curatorText(rep, cfg.Skills.Curator))
+		for _, f := range rep.Archived {
+			fmt.Fprintf(stdout, "Restore: tether skills restore %s\n", skills.Sanitize(f.Name))
+		}
+	}
+	return 0
+}
+
 // cronUsers returns a function that names the cron jobs that use each skill. The map key is
 // the skill name. Each line is `"<job name>" (<job id>)`. The function reads the jobs of
 // <dir>/state.db. The line is only a warning, so a missing state.db or a failed query gives
@@ -1075,33 +1308,7 @@ func cronUsers(dir string) func(ctx context.Context) (map[string][]string, error
 			return nil, nil
 		}
 		defer d.Close()
-		// The query names only the columns that every schema version has, so a
-		// database from before a later migration still works.
-		rows, err := d.QueryContext(ctx, `SELECT id, name, skills FROM cron_jobs ORDER BY created_at, id`)
-		if err != nil {
-			return nil, nil
-		}
-		users := map[string][]string{}
-		for rows.Next() {
-			var id, name string
-			var raw sql.NullString
-			if err := rows.Scan(&id, &name, &raw); err != nil {
-				rows.Close()
-				return nil, nil
-			}
-			var names []string
-			if raw.Valid && raw.String != "" {
-				if err := json.Unmarshal([]byte(raw.String), &names); err != nil {
-					rows.Close()
-					return nil, nil
-				}
-			}
-			for _, n := range names {
-				users[n] = append(users[n], fmt.Sprintf("%q (%s)", name, id))
-			}
-		}
-		err = rows.Err()
-		rows.Close()
+		users, err := cron.SkillUsers(ctx, &cron.Store{DB: d}, nil)
 		if err != nil {
 			return nil, nil
 		}

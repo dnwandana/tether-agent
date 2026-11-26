@@ -183,3 +183,13 @@ func TestBackupSetsBoundNames(t *testing.T) {
 		t.Fatalf("bound names %v", got)
 	}
 }
+
+func TestCountItemsSkipsDotFolders(t *testing.T) {
+	c := countItems([]backup.FileEntry{
+		{Path: "skills/a/SKILL.md"}, {Path: "skills/.history/7/SKILL.md"},
+		{Path: "skills/.archive/b-3/SKILL.md"}, {Path: "skills/.hub/lock.json"},
+	})
+	if len(c.skillDirs) != 1 || !c.skillDirs["a"] || c.skillFiles != 4 {
+		t.Fatalf("dirs %v, files %d", c.skillDirs, c.skillFiles)
+	}
+}

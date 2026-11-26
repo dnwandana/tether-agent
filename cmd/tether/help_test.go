@@ -247,7 +247,7 @@ func TestSkillsHelpInstall(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
-	if h, _ := findHelp("skills"); h.Summary != "List, install, check, update, and uninstall skills, or restore a bootstrap skill." {
+	if h, _ := findHelp("skills"); h.Summary != "List, install, check, update, uninstall, and archive skills, and undo a skill change." {
 		t.Errorf("summary %q", h.Summary)
 	}
 }
@@ -315,6 +315,18 @@ func TestUpdateHelpHasRestartFlags(t *testing.T) {
 	for _, want := range []string{"--restart", "--no-restart"} {
 		if !strings.Contains(h, want) {
 			t.Fatalf("update help lacks %s:\n%s", want, h)
+		}
+	}
+}
+
+func TestSkillsHelpCurator(t *testing.T) {
+	text := commandHelp("skills")
+	for _, want := range []string{
+		"stale", "keep <name>", "unkeep <name>", "restore <name>", "archived", "log [name]",
+		"undo <copy id>", "curate", "tether skills restore graphkb-lightrag",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("missing %q in:\n%s", want, text)
 		}
 	}
 }

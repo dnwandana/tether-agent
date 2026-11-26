@@ -28,6 +28,7 @@ import (
 	"github.com/dnwandana/tether-agent/internal/cron"
 	"github.com/dnwandana/tether-agent/internal/dashboard"
 	"github.com/dnwandana/tether-agent/internal/db"
+	"github.com/dnwandana/tether-agent/internal/learn"
 	"github.com/dnwandana/tether-agent/internal/provider"
 	"github.com/dnwandana/tether-agent/internal/sessions"
 	"github.com/dnwandana/tether-agent/internal/setup"
@@ -1073,7 +1074,7 @@ func TestSubcommandBadUsage(t *testing.T) {
 		args   []string
 		reason string
 	}{
-		{[]string{"skills"}, "a command is needed: list, install, check, update, uninstall, or reset"},
+		{[]string{"skills"}, "a command is needed: list, install, check, update, uninstall, reset, stale, keep, unkeep, restore, archived, log, undo, or curate"},
 		{[]string{"skills", "frob"}, "unknown command: frob"},
 		{[]string{"skills", "list", "x"}, "unexpected argument: x"},
 		{[]string{"skills", "reset", "a", "b"}, "unexpected argument: b"},
@@ -2085,4 +2086,219 @@ func TestStopGatewayNoProgress(t *testing.T) {
 		waitTurns: func(time.Duration) bool { time.Sleep(20 * time.Millisecond); return true },
 		log:       slog.New(slog.DiscardHandler)}
 	s.run()
+}
+
+// writeSkill writes a minimal skill named name into <home>/skills/<name>/.
+func writeSkill(t *testing.T, home, name string) string {
+	t.Helper()
+	dir := filepath.Join(home, "skills", name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: " + name + "\ndescription: A test skill. Use when testing.\n---\nbody\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// skillLogDB opens <home>/state.db for writes and returns its skill log.
+func skillLogDB(t *testing.T, home string) (*db.DB, *learn.SkillLog) {
+	t.Helper()
+	d, err := db.Open(filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	return d, learn.NewSkillLog(d)
+}
+
+func TestSkillsCuratorCommandsKnown(t *testing.T) {
+	for _, name := range []string{"stale", "keep", "unkeep", "restore", "archived", "log", "undo", "curate"} {
+		if _, ok := skillsCommandFlags[name]; !ok {
+			t.Errorf("skillsCommandFlags has no %q", name)
+		}
+	}
+}
+
+func TestSkillsKeepUnkeep(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("TETHER_HOME", home)
+	writeSkill(t, home, "notes-x")
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "keep", "notes-x"}, &out, &errb); code != 0 || out.String() != "kept notes-x\n" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, out.String(), errb.String())
+	}
+	_, log := skillLogDB(t, home)
+	if flags, _ := log.Flags(context.Background()); !flags["notes-x"].Kept {
+		t.Fatal("keep must set the kept flag")
+	}
+	out.Reset()
+	if code := run([]string{"skills", "unkeep", "notes-x"}, &out, &errb); code != 0 || out.String() != "unkept notes-x\n" {
+		t.Fatalf("exit %d, stdout %q", code, out.String())
+	}
+	if flags, _ := log.Flags(context.Background()); flags["notes-x"].Kept {
+		t.Fatal("unkeep must clear the kept flag")
+	}
+}
+
+func TestSkillsCurateArchivedRestore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("TETHER_HOME", home)
+	writeSkill(t, home, "old-x")
+	now := time.Now()
+	d, log := skillLogDB(t, home)
+	if _, err := log.SaveFlag(context.Background(), skills.Flag{Name: "old-x", RelDir: "old-x", FirstSeen: now.Add(-40 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	// The curator is not due: curate runs anyway.
+	if err := log.SetLastRun(context.Background(), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "curate"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	for _, want := range []string{"🗂 Skill curator", "• old-x", "Restore: tether skills restore old-x"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("curate output %q lacks %q", out.String(), want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, "skills", "old-x")); !os.IsNotExist(err) {
+		t.Fatal("curate must archive old-x:", err)
+	}
+	out.Reset()
+	if code := run([]string{"skills", "archived"}, &out, &errb); code != 0 || !strings.HasPrefix(out.String(), "old-x ") {
+		t.Fatalf("exit %d, stdout %q", code, out.String())
+	}
+	out.Reset()
+	if code := run([]string{"skills", "restore", "old-x"}, &out, &errb); code != 0 || out.String() != "restored old-x\n" {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, out.String(), errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "skills", "old-x", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+	errb.Reset()
+	if code := run([]string{"skills", "restore", "old-x"}, &out, &errb); code != 1 || errb.Len() == 0 {
+		t.Fatalf("a second restore: exit %d, stderr %q", code, errb.String())
+	}
+	out.Reset()
+	if code := run([]string{"skills", "archived"}, &out, &errb); code != 0 || out.String() != "No archived skills.\n" {
+		t.Fatalf("exit %d, stdout %q", code, out.String())
+	}
+}
+
+func TestSkillsStaleLists(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("TETHER_HOME", home)
+	writeSkill(t, home, "stale-x")
+	_, log := skillLogDB(t, home)
+	if _, err := log.SaveFlag(context.Background(), skills.Flag{Name: "stale-x", RelDir: "stale-x",
+		FirstSeen: time.Now().Add(-20 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "stale"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	found := false
+	for l := range strings.SplitSeq(out.String(), "\n") {
+		if f := strings.Fields(l); len(f) >= 2 && f[0] == "stale-x" && f[1] == "stale" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("stdout %q", out.String())
+	}
+}
+
+func TestSkillsLogAndUndo(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("TETHER_HOME", home)
+	_, log := skillLogDB(t, home)
+	m := &skills.Manager{Dir: filepath.Join(home, "skills"), Guard: true, Copies: log, HistoryKeep: 5}
+	res, err := m.Create(skills.Origin{Source: "chat", SessionID: "s1"}, "made-x",
+		"---\nname: made-x\ndescription: Made by the test. Use when testing.\n---\nbody\n")
+	if err != nil || res.CopyID == 0 {
+		t.Fatal(res, err)
+	}
+	c, _ := log.GetCopy(res.CopyID)
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "log"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	line := fmt.Sprintf("%d.%s", c.ID, c.Stamp)
+	if s := out.String(); !strings.Contains(s, line) || !strings.Contains(s, "create") || !strings.Contains(s, "made-x") {
+		t.Fatalf("log %q lacks %q, create, made-x", s, line)
+	}
+	out.Reset()
+	if code := run([]string{"skills", "undo", strconv.FormatInt(c.ID, 10)}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, "skills", "made-x")); !os.IsNotExist(err) {
+		t.Fatal("undo of a create must remove the skill:", err)
+	}
+	if code := run([]string{"skills", "undo", "999"}, &out, &errb); code != 1 {
+		t.Fatalf("unknown copy: exit %d", code)
+	}
+}
+
+func TestSkillsCuratorUsageErrors(t *testing.T) {
+	t.Setenv("TETHER_HOME", t.TempDir())
+	var out, errb bytes.Buffer
+	for _, args := range [][]string{
+		{"skills", "keep"}, {"skills", "unkeep"}, {"skills", "restore"}, {"skills", "undo"},
+		{"skills", "undo", "abc"}, {"skills", "stale", "x"}, {"skills", "archived", "x"},
+		{"skills", "curate", "x"}, {"skills", "log", "a", "b"}, {"skills", "keep", "--yes", "a"},
+	} {
+		if code := run(args, &out, &errb); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+	}
+}
+
+// With no state.db, the read forms say that no skill history exists yet.
+func TestSkillsReadFormsNoStateDB(t *testing.T) {
+	t.Setenv("TETHER_HOME", t.TempDir())
+	for _, cmd := range []string{"stale", "archived", "log"} {
+		var out, errb bytes.Buffer
+		code := run([]string{"skills", cmd}, &out, &errb)
+		if code != 0 || out.String() != "No skill history yet. Start tether gateway or tether chat one time, then try again.\n" {
+			t.Errorf("%s: exit %d, stdout %q, stderr %q", cmd, code, out.String(), errb.String())
+		}
+	}
+}
+
+// A state.db from before the skill history has no skill tables. A read-only open does not
+// migrate, so the read forms ask for one start of this version.
+func TestSkillsReadFormsOldStateDB(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("TETHER_HOME", home)
+	d, _ := skillLogDB(t, home)
+	for _, table := range []string{"skill_reads", "skill_flags", "skill_copies"} {
+		if _, err := d.Exec("DROP TABLE " + table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Close()
+	for _, cmd := range []string{"stale", "archived", "log"} {
+		var out, errb bytes.Buffer
+		code := run([]string{"skills", cmd}, &out, &errb)
+		want := "skills " + cmd + ": state.db is older than this version. Start tether gateway or tether chat one time to update it, then try again.\n"
+		if code != 1 || !strings.HasSuffix(errb.String(), want) {
+			t.Errorf("%s: exit %d, stderr %q", cmd, code, errb.String())
+		}
+	}
+}
+
+func TestSkillsUndoUnknownCopy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("TETHER_HOME", home)
+	skillLogDB(t, home)
+	var out, errb bytes.Buffer
+	if code := run([]string{"skills", "undo", "999"}, &out, &errb); code != 1 ||
+		!strings.HasSuffix(errb.String(), "skills undo: no skill copy has the id 999. Run tether skills log.\n") {
+		t.Fatalf("exit %d, stderr %q", code, errb.String())
+	}
 }

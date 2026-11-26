@@ -153,8 +153,9 @@ func countItems(files []backup.FileEntry) itemCounts {
 			c.scripts++
 		case strings.HasPrefix(f.Path, "skills/"):
 			c.skillFiles++
-			// A skill is a folder directly in skills/.
-			if name, _, ok := strings.Cut(strings.TrimPrefix(f.Path, "skills/"), "/"); ok {
+			// A skill is a folder directly in skills/. The folders .history, .archive, and
+			// .hub hold copies and records, not skills.
+			if name, _, ok := strings.Cut(strings.TrimPrefix(f.Path, "skills/"), "/"); ok && !strings.HasPrefix(name, ".") {
 				c.skillDirs[name] = true
 			}
 		}
