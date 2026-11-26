@@ -57,7 +57,7 @@ The doctor runs the checks in this order:
 9. **data folder**: the mode of the data folder `~/.tether`. A warning tells you when other
    users can read it. Run `chmod 700` on the folder. On a file system with no Unix modes, the
    warning tells you to move the data folder to a Linux file system and to set `TETHER_HOME`.
-10. **memory**: the entries of `memory.md` and `user_profile.md` that the memory threat scan
+10. **memory**: the entries of `rules.md`, `memory.md`, and `user_profile.md` that the memory threat scan
     blocks. A warning lists each blocked entry. Ask the agent to remove each entry with the
     memory tool.
 11. **host programs**: Chrome, `python3`, `pdftotext`, `git`, `ffmpeg`, and the programs of the
@@ -244,13 +244,32 @@ you do not need to send `/new`.
 ### The agent does not use a new memory entry
 
 **Cause:** the system prompt of a session does not change after it is made. This keeps the
-provider prompt cache valid. A change to `memory.md` or `user_profile.md` shows in the
+provider prompt cache valid. A change to `rules.md`, `memory.md`, or `user_profile.md` shows in the
 prompt only after the prompt is made again. A memory note never loads into the prompt. The
-`## MEMORY TOPICS` section shows a new note from the next session.
+`## MEMORY TOPICS` section shows a new note from the next session. An entry whose `until` date
+is past does not load.
 
 **Fix:** send `/new`, or wait for the next compaction of the session. In the current
 session, ask the agent to search its memory. The `search` action of the `memory` tool
 finds a new entry at once.
+
+### A memory write is held
+
+**Cause:** the turn read outside content before the write: a web page, a browser page, an MCP
+tool, or the result of a background subagent. The write waits for you, so text from outside
+cannot reach the system prompt without you.
+
+**Fix:** tap ✅ Save on the card, or send `/memory held` and save the write there. Tap ❌ Drop
+when you do not want the text. After 24 hours with no answer, the text goes to the note
+`held-memory`. The dashboard Memory page shows that note.
+
+### A skill is gone
+
+**Cause:** the skill curator moved it to `skills/.archive/`, because no chat turn, skill
+command, or cron run read it for 30 days (`skills.curator.archive_after_days`).
+
+**Fix:** send `/skills archived` to see the archived skills. Send `/skills restore <name>`, or
+run `tether skills restore <name>`. Send `/skills keep <name>` so the curator never archives it.
 
 ### `acp: <agent> is not logged in`
 

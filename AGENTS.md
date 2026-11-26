@@ -41,7 +41,10 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
 - `internal/app` is the composition root. `app.New` builds config, DB, providers, tools, MCP,
   and the agent. When `acp.enabled` is true, it also builds the ACP manager (`acp.Manager`) and
   its idle reaper, but it starts no adapter process. Only `Options.Gateway` builds the cron scheduler and the background
-  `delegate_task` batches. Only the gateway role polls Telegram.
+  `delegate_task` batches. Only the gateway role runs the skill curator and the sweeps of held
+  memory writes and old notice cards. `App.sweepHeld` runs them in the tick of `cron.Scheduler`,
+  and the curator check runs at most once an hour. `app.New` does no work for them. Only the
+  gateway role polls Telegram.
 - `internal/dashboard` is one more gateway channel, `dashboard`. It has its own `net/http`
   server, device sessions, an SSE event hub, and JSON routes. `App.AddDashboard` builds it only
   in the gateway role, and `runGateway` starts the listener.
@@ -62,6 +65,10 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
   2. `gateway.Gateway` runs one turn per session key. On a busy key, a plain text goes into
      the running turn as a steer (`agent.SteerQueue`), and other messages wait in the queue.
   3. `agent.Agent.RunTurn` runs the loop. It saves each message as soon as the message exists.
+     The `memory` and `skill_manage` tools put the ids of their changes into the env
+     (`tools.AddEdit`). The agent turns them into a `notices` row and an `agent.Notice` card, and
+     the gateway adds the buttons. A memory write after outside content waits for the owner
+     (`tools.HeldStore`).
   4. When the session has an active goal, `goals.Manager` runs the after-turn step: the wait
      check, the gates, and the judge. On `continue`, the gateway adds a continuation turn to
      the end of the queue. The CLI runs it at once.
@@ -84,8 +91,13 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
   pure-Go SQLite (`modernc.org/sqlite`) with one connection. Do not run a second query while
   rows are open, because it deadlocks. Migrations are `internal/db/migrations/NNN_*.sql`
   (embedded, applied in name order). `approval_grants` holds the Always answers, `chat_modes`
-  holds the `/mode` value of each scope, and `approval_log` holds the decisions. `Gate.ModeOf`
-  queries `chat_modes` at each decision, so close all rows first. The gateway holds a `flock` on `gateway.lock`.
+  holds the `/mode` value of each scope, and `approval_log` holds the decisions. `memory_edits`
+  holds one row for each memory change, and `memory_blocks` holds the entries that the owner
+  deleted. `memory_held` holds the memory writes that wait for the owner. `notices` holds the
+  change cards. `skill_reads`, `skill_flags`, and `skill_copies` hold the skill reads, the curator
+  flags, and the skill copies. `messages.outside` holds the outside sources of a message.
+  `messages.member` is 1 when a member, not an owner, sent the user row.
+  `Gate.ModeOf` queries `chat_modes` at each decision, so close all rows first. The gateway holds a `flock` on `gateway.lock`.
 - Import rules: `tools` cannot import `agent` (`tools.ChildSpecLite` mirrors
   `agent.ChildSpec`), and `gateway` cannot import `app` (`app` builds `gateway.Deps`).
   `goals` cannot import `gateway`, `agent`, or `app`. `app` gives it the provider, cost, and
@@ -94,7 +106,10 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
   `tools.ACPDelegator` interface. `internal/brief` imports only `cron`, `goals`, `obs`, `db`,
   `sessions`, and the standard library. `cron` cannot import `brief`, `gateway`, or `app`. `internal/dashboard` cannot import `app`,
   `telegram`, or `setup`. `gateway` cannot import `dashboard`. `internal/media` cannot import
-  `gateway`.
+  `gateway`. `internal/memory` and `internal/skills` cannot import `db`, `learn`, `tools`, or
+  `agent`. `app` gives them `memory.History`, `skills.CopyRecorder`, and `skills.CuratorStore`
+  from `internal/learn`. `internal/learn` imports only `db`, `memory`, `skills`, `config`,
+  `textmatch`, and the standard library. `tools` cannot import `learn`.
 - The browser, MCP servers, media programs, and ACP adapters (`claude-agent-acp`,
   `codex-acp`) start on the first call and stop when idle. `app.New` must not do network work, because `TestStartupUnder100ms` measures startup. For
   example, `provider.ModelCache` makes no call before the first `/model <entry>`.
@@ -154,6 +169,10 @@ go run ./cmd/tether gen-dashboard-hash       # writes internal/dashboard/dist/.s
 - A new config key goes into the structs and `Default()` in `internal/config/config.go`. Add
   its row to `docs/CONFIG.md`. `internal/config/docs_test.go` compares each yaml key and its
   default with that table.
+- Each memory change goes through `memory.Store.ApplyContext` (or `Apply`), `Undo`, or `Redo`, so
+  `memory_edits` records it. A new memory writer sets `Op.Source` to a `memory.Source*` value. A
+  new skill writer passes a `skills.Origin` to the `skills.Manager` method. A new button action of
+  a card carries the 4-hex stamp of its row, and it stays within `ActionMaxBytes`.
 - A slash command replies with a `gateway.Reply` through `CommandCtx.send`. The text is common
   Markdown. Do these steps:
   1. Escape user text, for example a title, a model name, or an error, with

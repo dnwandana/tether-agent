@@ -14,9 +14,18 @@ name: deploy
 description: Deploys the web app to the VPS. Use when the user asks to deploy or release.
 required_environment_variables: [DEPLOY_HOST]
 ---
+## When to Use
+The user asks to deploy or release the web app.
+
+## Procedure
 1. Run `bash ~/.tether/scripts/deploy.sh`.
-2. Check the output for the text "deployed".
-3. Tell the user the new version.
+2. Tell the user the new version.
+
+## Pitfalls
+- Run the script from the home folder, because it uses relative paths.
+
+## Verification
+The output has the text "deployed".
 ```
 
 The frontmatter has these fields:
@@ -26,6 +35,13 @@ The frontmatter has these fields:
 | `name` | Yes | The name of the skill. A skill that the agent writes must have the same name as its folder. |
 | `description` | Yes | The text that the agent sees in its skill list. Write when to use the skill. The list shows a maximum of 1024 characters. |
 | `required_environment_variables` | No | The names of the variables that the skill needs. A skill passes no variable. `exec_secrets` binds a secret to a command. `terminal.env_passthrough` passes a name to each command. `skill_view` shows one status for each name: `passed`, `bound: <commands>`, `not passed: add it to terminal.env_passthrough in config.yaml`, or `not set`. |
+
+The body has four sections in this order: `## When to Use` (the requests that call for the
+skill), `## Procedure` (numbered steps with the exact command, path, or setting), `## Pitfalls`
+(one rule for each lesson, with one clause of why), and `## Verification` (how to check that the
+work is done). The bundled `tether-skills` skill tells the agent to use them. An update does not
+change an installed copy of a bundled skill. Run `tether skills reset` once to get the new text of
+`tether-skills`, `tether-memory`, and `tether-self`.
 
 A skill folder can also have two subfolders:
 
@@ -47,6 +63,11 @@ A support file that the agent reads with `skill_view` keeps its tokens.
 | `~/.tether/skills/` | The skills that the agent wrote and the skills that you installed. A skill can be at any folder depth. |
 | `skills.external_dirs` | More skill folders. The agent reads them but never writes to them. A skill in `~/.tether/skills/` wins when two skills have the same name. |
 | The binary | Three bootstrap skills: `tether-memory`, `tether-self`, and `tether-skills`. The program copies them into `~/.tether/skills/` when they are missing. |
+| `~/.tether/skills/.history/` | A copy of a skill before each change of `skill_manage`. The newest 5 copies of each skill stay (`skills.history_keep`). |
+| `~/.tether/skills/.archive/` | The skills that the skill curator archived. |
+
+The program skips each folder whose name starts with `.`, so a copy or an archived skill is not
+in the skill list.
 
 The system prompt lists the name and the description of each skill. The program reads the skills
 at the start of each session. Send `/new` to start a new session after you add a skill.
@@ -66,9 +87,18 @@ The file tools cannot write in `~/.tether/skills/`. Only `skill_manage` can writ
 
 After a number of tool rounds, a background review reads the conversation again. The default is
 10 rounds (`skills.review_interval_tool_rounds`). The review can create or patch a skill, so the
-agent learns from the work. You see a short notice after the answer, for example
-`🧩 Skill created: deploy`. One review sends one message, with one line for each kind of change,
-for example `🧩 Skills updated: deploy, release-notes`.
+agent learns from the work. You see one card after the answer with each change of the review,
+and an ↩ Undo button. The review has these limits:
+
+- Before each change of `skill_manage`, the program copies the skill folder to
+  `skills/.history/`. `/skills log` shows the copies, and `/skills undo` restores one.
+- A review makes at most 3 skill changes (`skills.review_max_changes`). The next change is
+  refused before it runs.
+- A review cannot change a bundled skill or a skill from the hub. A chat turn can, when you ask.
+- A review cannot create a skill when a similar skill exists or is archived. It patches the
+  existing skill. A chat turn can create it, and the result names the similar skills.
+- The review writes each pitfall as one rule with one clause of why, with no PR numbers, no
+  dates, and no quoted user text.
 
 Set `skills.review_interval_tool_rounds` to `0` to stop the reviews.
 
@@ -135,6 +165,14 @@ Run these commands in a terminal on the host.
 | `tether skills check [name]` | Compares the installed skills with their sources. It changes nothing. |
 | `tether skills update [name...]` | Installs the new version of the skills. With no name, it updates each skill that `check` reports. |
 | `tether skills reset [name]` | Restores a bootstrap skill from the binary. With no name, it restores all three. |
+| `tether skills stale` | Shows the skills that the curator can archive, with the last activity and the state: `active` or `stale`. |
+| `tether skills keep <name>` | Marks a skill as kept. The curator never archives it. |
+| `tether skills unkeep <name>` | Removes the keep mark. |
+| `tether skills restore <name>` | Moves an archived skill back to its old folder. It refuses when a skill with the name exists. |
+| `tether skills archived` | Shows the archived skills. |
+| `tether skills log [name]` | Shows the last 10 skill copies with their copy IDs. |
+| `tether skills undo <copy id>` | Undoes one skill change from its copy. |
+| `tether skills curate` | Runs the curator now, also when it is not due. It prints the result and the restore commands. |
 
 ### Install sources
 
@@ -183,6 +221,35 @@ comes only with a new release of Tether Agent.
 
 `tether skills update --force` saves a skill that the agent changed to `skills/.hub/backup/` before
 it replaces the skill.
+
+## The skill curator
+
+A skill that nobody reads costs prompt bytes in each session. The skill curator archives such a
+skill. It makes no model call, and it never deletes a skill.
+
+The program records each read of a skill: a `skill_view` call in a chat turn, a skill command,
+and a cron run that loads the skill. The reads and the copies of a review do not count.
+
+The curator runs only in the gateway. It runs when `skills.curator.interval_hours` (168) passed
+since the last run and no chat had a message for `skills.curator.min_idle_hours` (2). The first
+run only starts the clock. A skill is a candidate when all of these are true:
+
+- It is in `~/.tether/skills/`, not in `skills.external_dirs`.
+- It is not a bundled skill, and it is not installed from the hub.
+- It is not kept (`tether skills keep` or `/skills keep`).
+- No cron job names it in its skills or as a word in its prompt, also a paused job.
+- Its folder holds no other skill.
+
+A candidate with no activity for `skills.curator.stale_after_days` (14) is stale. A candidate
+with no activity for `skills.curator.archive_after_days` (30) moves to `skills/.archive/`. The
+activity is the newest read, the newest change from a chat turn or from you, or the first time
+that the curator saw the skill.
+
+After a run that archived a skill, you get a 🗂 Skill curator card in Telegram, with
+↩ Restore all, Restore one ›, and ✓ OK. A `skill_view` of an archived skill answers that it is
+archived, so the agent does not write it again. Send `/skills restore <name>` or run
+`tether skills restore <name>` to get it back. Set `skills.curator.enabled` to `false` to stop
+the curator.
 
 ## The skill guard
 

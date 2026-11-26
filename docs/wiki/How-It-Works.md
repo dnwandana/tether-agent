@@ -38,7 +38,7 @@ The code is in `internal/`. These are the main packages:
 | `dashboard` | The web dashboard channel: the HTTP server, the device sign-in, the event stream (SSE), the cards, the JSON routes, and the embedded page from `web/`. |
 | `cron` | The scheduler, the job runs, and the delivery of results. |
 | `ctxmgr` | Compaction and the truncation of long tool output. |
-| `memory` | The two memory files and the memory notes. |
+| `memory` | The three memory files and the memory notes. |
 | `skills` | The skill loader, the skill install, and the skill guard. |
 | `security` | The approval gate, protected paths, and secret redaction. |
 | `acp` | The client of the coding agents of `acp_delegate` over the Agent Client Protocol: the adapter processes, the ACP sessions, and the permission requests. |
@@ -398,15 +398,20 @@ no header.
 
 1. **Base prompt.** It is embedded in the binary. It tells the model who it is and how to work.
    `/prompt set <text>` replaces it for one session, and `/prompt clear` restores it.
-2. **`## MEMORY`**: the content of `memory/memory.md`.
-3. **`## USER PROFILE`**: the content of `memory/user_profile.md`.
-4. **`## MEMORY TOPICS`**: the topics of the memory notes in `memory/notes/`, newest
+2. **`## OWNER RULES`**: the content of `memory/rules.md`. It comes first after the base
+   prompt, so a standing rule of the owner is never far down.
+3. **`## MEMORY`**: the content of `memory/memory.md`.
+4. **`## USER PROFILE`**: the content of `memory/user_profile.md`.
+5. **`## MEMORY TOPICS`**: the topics of the memory notes in `memory/notes/`, newest
    first, at most 40. It has no note text. It shows only when the `memory` tool is
    visible.
-5. **`## SKILLS`**: one line for each skill, with its name and description.
-6. **`## TOOL NOTES`**: short fixed notes for some tools, when those tools are visible.
-7. **Context**: the date and time, the time zone, the working directory, the channel, and the
+6. **`## SKILLS`**: one line for each skill, with its name and description.
+7. **`## TOOL NOTES`**: short fixed notes for some tools, when those tools are visible.
+8. **Context**: the date and time, the time zone, the working directory, the channel, and the
    chat.
+
+An entry whose `until` date is before today does not load. The check runs only when the prompt is
+built, so the prompt of a session does not change at midnight.
 
 There is no persona file. To change the behavior, edit the memory files, write a skill, or use
 `/prompt set`.
@@ -449,13 +454,17 @@ The adapters also help the provider prompt cache:
 
 Memory has two tiers in the data folder.
 
-The first tier is two plain text files. Both files load into the system prompt of each
+The first tier is three plain text files. All three load into the system prompt of each
 session:
 
 | File | Content | Limit |
 |---|---|---|
+| `memory/rules.md` | Your standing rules, for example "do not send a file unless I ask". | 1000 characters (`memory.rules_char_limit`) |
 | `memory/memory.md` | Facts of the agent: facts about the environment, projects, and lessons. | 2200 characters |
 | `memory/user_profile.md` | Facts about you: name, preferences, and habits. | 1375 characters |
+
+A full `rules.md` refuses a new rule. It never spills to a note, because a note does not load.
+Only your own words in a chat turn, `/memory`, a card, and the dashboard write a rule.
 
 The second tier is the memory notes. A note is one Markdown file for each topic, for
 example `memory/notes/rpc.md` for the topic `rpc`. A note does not load into the system
@@ -486,18 +495,21 @@ A line that holds only `§` separates two entries, in a memory file and in a not
 most 4000 characters (`memory.entry_max_chars`). You can read and edit the files with any text
 editor.
 
-The agent changes memory with the `memory` tool. The tool has five actions:
+The agent changes memory with the `memory` tool. The tool has six actions:
 
 - `add` adds an entry. With a `topic`, the entry goes to the note of that topic. With no
   topic, the entry goes to the memory file of the target. When the entry does not fit in
   the file, it goes to the inbox note of the target, `inbox-memory` or `inbox-user`. An
-  `add` never fails because of the limit.
+  `add` never fails because of the limit. A full `rules.md` refuses the add.
 - `replace` finds an entry by a unique part of its text and replaces it. When the new
   text does not fit in the memory file, the new text goes to the inbox note, and the old
   entry leaves the file. A `replace` that makes a note larger than 1 MiB fails.
 - `remove` finds an entry by a unique part of its text and removes it. When a note has no
   more entries, the tool deletes the note.
-- `search` finds entries by words in the two memory files and in all notes. It shows at
+- `move` moves one entry, found by `old_text`, between a memory file and a note. `to: "note"`
+  moves it out of the file of `target` into the note of `topic`. `to: "file"` moves it from the
+  note of `topic` into the file of `target`. The cap of the destination applies.
+- `search` finds entries by words in the three memory files and in all notes. It shows at
   most 8 matches.
 - `read` shows the numbered entries of one note. The `from` parameter sets the first
   entry to show.
@@ -509,10 +521,64 @@ After a spill, and after an `add` with a topic, the result tells the model to se
 notes before it saves another fact on the same subject. Thus a note does not get the
 same fact two times.
 
+The tool has two more fields:
+
+- `quote`: the exact words of the owner. A rule write from a chat turn needs it. A review write
+  to the user profile needs it too. The quote must have 3 or more words and be a part of one
+  owner message. It goes into the history and the card, not into the file.
+- `until`: a date `YYYY-MM-DD`, after today and at most 366 days ahead. The store adds the line
+  `until YYYY-MM-DD` to the entry. The entry loads through that date. At the next write to that
+  file, the store moves an expired entry to the note `archive-<target>`, for example
+  `archive-memory`.
+
+After an `add` to a memory file, the result lists up to 2 similar entries of the same file, with
+their IDs. The model then checks that they are still true, and replaces or removes an old one.
+
 The writes are atomic and use a file lock. A change to a memory file shows in the system
 prompt from the next session. A `search` and a `read` show a change at once. A new note
 shows in the `## MEMORY TOPICS` section from the next session. See
 [Why the prompt stays the same](#why-the-prompt-stays-the-same).
+
+### History and Undo
+
+Each memory change writes a row to the table `memory_edits` in `state.db`: the time, the source
+(`chat`, `review`, `tidy`, `owner`, `cron`, or `expiry`), the action, the old text, and the new
+text. Undo of a row puts the old text back in its place. Undo applies only when the entry still
+has the text of the row, so a late tap does not restore old text over a newer edit. Redo undoes
+the Undo.
+
+A memory write of a chat turn, a review, a delete, and `/memory tidy` sends a card after the
+answer:
+
+    💾 User profile updated (replace)
+    Was: `<old text>`
+    Now: `<new text>`
+    You said: "<quote>"
+
+A rule shows as `📌 Rule saved`, `📌 Rule changed`, or `📌 Rule removed`. The buttons are
+↩ Undo (↩ Undo all for two or more items), Undo one ›, and ✓ OK, each on its own row. ✓ OK
+removes the buttons. After an Undo, the card shows ↪ Redo and ✓ OK. A card stays open for 30
+days. A cron run sends no card.
+
+When you delete an entry with `/memory delete`, its text goes on a block list. A review that
+tries to save the same text again is refused. When you say the fact again in a chat turn, the
+block ends.
+
+### Held writes
+
+A memory write in a turn that read outside content waits for you: a web page, a browser page,
+an MCP tool, or the result of a background subagent. A network program in `terminal` does not
+hold a write. The card shows the text and the source, with ❌ Drop on top and ✅ Save below.
+After 24 hours with no answer, the text goes to the note `held-memory`. The agent never reads
+that note. Send `/memory held` to see the held writes.
+
+### /memory tidy
+
+`/memory tidy` starts one model run in the background. It merges entries that say the same
+thing, moves old facts and snapshots to notes, and moves a standing rule from an inbox note into
+`rules.md` with your quote. It adds no new facts and never drops text: a remove moves the entry
+to `archive-<target>`. One card lists each change and the fill of each file, for example
+"User profile 1363 → 712 of 1375".
 
 The `session_search` tool searches the past sessions with SQLite full text search. The agent uses
 it to find an old conversation. It skips the goal judge sessions and the review sessions,
@@ -534,10 +600,12 @@ After some turns, a background review looks at the conversation and saves what i
 
 A review is a copy of the conversation in a separate `review` session. It sends the same tool
 schemas as its parent and the session id of its parent as the cache key, so the prompt cache
-hits. It can use only the `memory`, `skill_view`, and `skill_manage` tools. A review sends one
-notice after the answer, with one line for each kind of change, for example
-`🧩 Skills updated: <name>, <name>`, `💾 Memory updated`, and
-`💾 Memory note updated: <topic>`.
+hits. It can use only the `memory`, `skill_view`, and `skill_manage` tools. A review sends one card after the answer, with
+all its memory and skill changes. A review write to the user profile needs a quote of the
+owner's words, and a review cannot write an owner rule. A review makes at most 3 skill
+changes (`skills.review_max_changes`). It cannot change a bundled skill or a skill from the
+hub. Before each skill change, the program copies the skill folder to
+`skills/.history/`, so `/skills undo` can restore it.
 
 Cron runs, child runs, and reviews do not start reviews.
 

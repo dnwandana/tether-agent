@@ -424,8 +424,8 @@ approval gate treats a shell write to them as dangerous.
 - `~/.tether/.env`
 - `~/.tether/config.yaml`
 - `~/.tether/state.db`, with its `-wal` and `-shm` files, and `state.db.lock`
-- `~/.tether/memory/memory.md` and `~/.tether/memory/user_profile.md` (only the `memory` tool
-  writes them)
+- `~/.tether/memory/rules.md`, `~/.tether/memory/memory.md`, and `~/.tether/memory/user_profile.md`
+  (only the `memory` tool writes them)
 - `~/.tether/skills/` (only `skill_manage` can write there)
 - `~/.tether/scripts/` (only you put cron scripts there)
 - `~/.tether/backups/`
@@ -449,9 +449,16 @@ Each command that names `state.db` is dangerous, also a read. Its description is
 protected path. The error is
 `<path> is a protected path. The tool does not send it to the provider.`
 
-Tether Agent scans each entry of `memory.md` and `user_profile.md` when it builds the prompt.
+Tether Agent scans each entry of `rules.md`, `memory.md`, and `user_profile.md` when it builds the prompt.
 A blocked entry becomes a `[BLOCKED m-<id>: …]` line. Run `tether doctor` to see the blocked
 entries.
+
+A memory write in a turn that read outside content waits for you: a web page, a browser page,
+an MCP tool, or the result of a background subagent. A network program in `terminal` does not
+hold a write. You get a card with ❌ Drop and ✅ Save. After 24 hours with no answer, the text
+goes to the note `held-memory`, which the agent never reads. Send `/memory held` to see the
+held writes. A review write to the user profile needs the exact words of the owner, and only
+your own words in a chat turn can add an owner rule.
 
 ## Secrets
 

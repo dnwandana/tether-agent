@@ -175,6 +175,20 @@ To see if an installed skill has a newer version at its source, run:
 tether skills check
 ```
 
+Before each change of a skill, the program keeps a copy of the skill folder. `tether skills log`
+shows the changes, and `tether skills undo <copy id>` puts a skill back. The skill curator moves a
+skill that nobody reads or changes for 30 days to `~/.tether/skills/.archive/`.
+`tether skills stale` shows the skills that it can move, `tether skills keep <name>` keeps a
+skill, and `tether skills restore <name>` brings an archived skill back.
+
+## Memory
+
+The agent keeps three memory files in `~/.tether/memory/`: `rules.md` holds your standing
+rules, `memory.md` holds facts, and `user_profile.md` holds facts about you. Each change sends a
+card with an Undo button. `/memory` shows the files, `/memory log` shows the last changes, and
+`/memory tidy` merges entries. A memory write after outside content, for example a web page,
+waits for your answer in `/memory held`.
+
 ## Architecture
 
 - One binary has two roles: `gateway` runs Telegram, cron, and the optional web dashboard, and

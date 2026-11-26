@@ -744,7 +744,7 @@ rules apply to it:
 
 ## Memory and background review
 
-`memory.md` and `user_profile.md` go into the system prompt of each later session. A skill
+`rules.md`, `memory.md`, and `user_profile.md` go into the system prompt of each later session. A skill
 description goes into the skills index of the prompt. So text that the agent saves there stays
 active after `/new`, after a restart, and after a model change.
 
@@ -770,19 +770,28 @@ active after `/new`, after a restart, and after a model change.
 - The topic list of the prompt leaves out each note topic whose name,
   with each `-` read as a space, has a finding of the memory threat scan.
   The agent logs a warning for it. The note file stays.
-- The notice of a review write to `memory.md` or `user_profile.md` shows the full saved text,
-  for example ``💾 Memory updated: `VPS = ovh` ``. A hidden character shows as a mark, for
-  example `<U+200B>`. So the user sees each character that goes into the system prompt. The
-  notice of a write to a note shows only the topic, for example `💾 Memory note updated: rpc`.
-- The memory store reads `memory.md`, `user_profile.md`, and the notes only as regular files. It
+- The card of a review write to `rules.md`, `memory.md`, or `user_profile.md` shows the full new
+  text, for example:
+
+  ```text
+  💾 Memory updated (replace)
+  Was: `VPS = hetzner`
+  Now: `VPS = ovh`
+  ```
+
+  The "Now" text and the quote of the owner are never cut. The "Was" text is cut at 300
+  characters. A hidden character shows as a mark, for example `<U+200B>`. So the user sees each
+  character that goes into the system prompt. A write to a note shows the topic of the note.
+- The memory store reads `rules.md`, `memory.md`, `user_profile.md`, and the notes only as regular files. It
   does not follow a symbolic link, and it does not open a FIFO or a device. All reads and writes of
   notes stay in the `notes/` folder that the store examined, also when a link replaces the folder
   after the check.
-- `<data>/memory/memory.md` and `<data>/memory/user_profile.md` are protected paths.
+- `<data>/memory/rules.md`, `<data>/memory/memory.md`, and `<data>/memory/user_profile.md` are
+  protected paths.
   `write_file` and `patch` refuse them, and a shell write to them needs an approval. So the
   `memory` tool, with its scan and its notice, is the only normal writer.
   `<data>/memory/notes/` stays writable.
-- When Tether Agent builds the system prompt, it scans each entry of the two files again. An
+- When Tether Agent builds the system prompt, it scans each entry of the three files again. An
   entry with a finding, or an entry over 4000 characters, does not go into the prompt. The
   prompt gets this line in its place:
   `[BLOCKED m-<id>: this entry matched the memory threat scan (<ids>). Remove it with the memory tool: remove m-<id>.]`
@@ -791,6 +800,41 @@ active after `/new`, after a restart, and after a model change.
   entry.
 - The `search` results of the `memory` tool show the same line, not the entry.
   `remove m-<id>` removes the entry. `tether doctor` lists the blocked entries.
+- `rules.md` (target `rule`) holds the owner rules. The `## OWNER RULES` section of the prompt
+  comes first. A chat turn can write a rule only with a `quote` of the owner's words from the
+  session. The owner can write a rule with `/memory`, a card, or the dashboard. A review and a
+  cron run cannot write a rule. A `/memory tidy` run can only move an owner rule from a note to
+  the file, with a quote. A full `rules.md` refuses a new rule. It never spills to a note.
+- A review or a `/memory tidy` write to `user_profile.md` (`add`, `replace`, or a `move` into the file) needs a `quote`
+  of 3 or more words. The quote must be a part of one owner message: a user row that is not
+  observed, in a chat session of the CLI, of the dashboard, or of an owner. A shared session has
+  no owner messages. A message of a member never counts. This rule also applies in a shared
+  session that an owner opened. The check removes these blocks first: the observed group block, a
+  compaction summary, a skill body, a document text, the delegation and goal texts, and the
+  time prefix. A write that fails the check is refused.
+- When the owner deletes an entry, the text goes on a block list (`memory_blocks`). A review or
+  tidy write that matches a blocked text is refused. A chat write with a valid owner quote
+  clears the block.
+- A memory write of a chat turn or a review waits for the owner after outside content. Outside
+  content is a result of `web_fetch`, `web_search`, a browser tool, an MCP tool, another outside
+  tool, or a background subagent. A network program in `terminal` does not hold a memory write.
+  A review checks the messages since the last review of the session, from the stored flag
+  `messages.outside`. The owner gets a card with ❌ Drop on top and ✅ Save below. Save runs the
+  threat scan and the block check again, and it applies a `replace`, a `remove`, or a `move`
+  only when the target entry did not change. After 24 hours with no answer, the gateway moves
+  the text of a held `add` or `replace` to the note `held-memory` (table `memory_held`). That
+  note never reaches the model: it is not in the topic list, the tool search, or the tool
+  `read`. Writes of the owner, Undo, Redo, and `/memory tidy` are never held.
+- Each memory change writes a row to `memory_edits`. Undo and Redo of a row run the threat scan
+  again, and a blocked text is not restored. An Undo applies only when the entry still has the
+  text of the row. Each card button carries a 4-hex stamp of its row. After a `tether restore`,
+  an old button answers "This button is too old." and changes nothing.
+- A review cannot change a bundled skill or a skill installed from the hub (an entry in
+  `skills/.hub/lock.json`). The code refuses it. A review makes at most
+  `skills.review_max_changes` (3) skill changes, and the next call is refused before it runs. A
+  review `create` is refused when a similar skill exists or is archived. Before each
+  `skill_manage` change, the program copies the skill folder to `skills/.history/<copy id>/`, so
+  `/skills undo` can restore it.
 
 ## Sessions and cron jobs of other chats
 
@@ -1126,7 +1170,7 @@ default.
 - `<data>/.env`
 - `<data>/config.yaml`
 - `<data>/state.db`, and also `<data>/state.db-wal` and `<data>/state.db-shm`
-- `<data>/memory/memory.md` and `<data>/memory/user_profile.md` (only the `memory` tool writes
+- `<data>/memory/rules.md`, `<data>/memory/memory.md`, and `<data>/memory/user_profile.md` (only the `memory` tool writes
   them)
 - `<data>/skills/` (only `skill_manage` can write there)
 - `<data>/scripts/` (only the user can put cron scripts there)
@@ -1593,7 +1637,7 @@ The checks use the real path, after the symbolic links.
 A refused `MEDIA:` tag shows as `[blocked file: <path>]` in the answer. Use strict mode when users
 who are not the owner can talk to the bot. A prompt injection can make the model name any file.
 
-The bot does not send `memory.md` or `user_profile.md`, because they are protected paths.
+The bot does not send `rules.md`, `memory.md`, or `user_profile.md`, because they are protected paths.
 
 In the gateway, Tether Agent deletes the files in `<data>/cache/media/` and
 `<data>/cache/screenshots/` that are older than `media.cache_retention_days`. The default is

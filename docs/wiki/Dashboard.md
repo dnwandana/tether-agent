@@ -118,8 +118,8 @@ tabs open. Or use a TLS proxy with HTTP/2.
 | Jobs | Show the brief, the cron jobs, their runs, and the held sends. |
 | Goals | Show the goals of all sessions with their state and gates. |
 | Approvals and security | Show the mode of each scope, the Always answers, the approval log, and the signed-in devices. |
-| Skills | Show the installed skills and the catalog. Install, update, or remove a skill. Read the files of a skill. A dangerous skill installs only from a terminal. |
-| Memory | Read, add, edit, and remove memory entries. Search the notes. |
+| Skills | Show the installed skills and the catalog. Install, update, or remove a skill. Read the files of a skill. A dangerous skill installs only from a terminal. See the last read of each skill and a "kept" chip. Keep or unkeep a skill. List the archived skills, and restore one. |
+| Memory | Read, add, edit, and remove the rules, the memory, and the user profile. Undo a change on the server, so the entry keeps its place. Search the notes. The note `held-memory` shows the label "held, not used by the agent". |
 | Usage | Show the cost and the tokens by day and by model. Point at a bar, or tap it, to see the cost of that day. |
 | Models | Show the provider entries, their health, and the role table. |
 | System | Run the doctor. Show the MCP servers and the running work. |
@@ -132,6 +132,10 @@ each channel.
 
 An answered card leaves a one-line record in the chat. The record lasts until the gateway
 restarts. The approval log keeps the permanent record.
+
+A change notice of memory or skills shows as text with command lines, for example
+`Undo: /notice undo 42.a3f1`, and has no buttons. The skill curator card and the held memory
+writes go to Telegram only. With no Telegram, `/memory held` and `/skills archived` show them.
 
 The pages update by themselves when the data changes, when the page connects again, and when
 you come back to the tab. Each page header shows the time of the last update and the Refresh button.

@@ -491,8 +491,10 @@ changes a different `state.db`.
 | `logs/tether.log` | The log of `chat` and `gateway`. |
 | `memory/memory.md` | The facts that the agent keeps. |
 | `memory/user_profile.md` | The facts about you that the agent keeps. |
+| `memory/rules.md` | Your standing rules, for example "never send a file unless I ask". They load first in the system prompt. |
 | `memory/notes/` | The memory notes, one Markdown file for each topic. They do not load into the system prompt. |
 | `skills/` | The skills. Refer to [Skills](Skills). |
+| `skills/.history/`, `skills/.archive/` | The copies of each skill from before a change, and the skills that the curator archived. |
 | `scripts/` | The scripts for cron jobs. Refer to [Cron](Cron). |
 | `cache/` | Price data, long tool outputs, media, screenshots, the browser profile, and the MCP tool lists. |
 | `exports/` | The output of `tether sessions export`. |

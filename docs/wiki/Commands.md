@@ -43,7 +43,7 @@ You can put flags after the positional arguments.
 | `gateway` | Runs Telegram, cron, and the dashboard (when it is on) until it gets SIGINT or SIGTERM. | `--log-stderr`, `--log-level` | `tether gateway` |
 | `sessions list` | Shows the 50 newest sessions. | | `tether sessions list` |
 | `sessions export <id>` | Writes one session as redacted JSONL. The default file is `<data dir>/exports/<id>.jsonl`. | `--out FILE` | `tether sessions export <id> --out chat.jsonl` |
-| `skills` | The subcommands are `list`, `install`, `uninstall`, `check`, `update`, and `reset`. See [Skills](Skills). | `--available`, `--skill`, `--ref`, `--yes`, `--force` | `tether skills install openai/skills --skill playwright` |
+| `skills` | The subcommands are `list`, `install`, `uninstall`, `check`, `update`, `reset`, `stale`, `keep`, `unkeep`, `restore`, `archived`, `log`, `undo`, and `curate`. See [Skills](Skills). | `--available`, `--skill`, `--ref`, `--yes`, `--force` | `tether skills install openai/skills --skill playwright` |
 | `pairing` | The subcommands are `list`, `approve`, and `revoke`. See [Telegram](Telegram#pairing). | | `tether pairing approve K7Q2MXRP` |
 | `dashboard` | The subcommands are `link` (a one-time sign-in link, 5 minutes), `devices` (the signed-in devices), and `signout-all` (ends every device session). Each needs a terminal: the agent cannot run them. See [Dashboard](Dashboard). | | `tether dashboard link` |
 | `usage [today\|7d\|30d\|all]` | Shows the calls, the tokens, the cached input tokens, the cache hit rate, the speed, and the cost of each model. A line under the table shows the total cache and hit rate. A range counts all chats and all groups. The default range is `today`. `all` shows all stored usage. The cost comes from the price that Tether Agent stored with each call. | | `tether usage 7d` |
@@ -85,11 +85,14 @@ task runs.
 | `/goal` | `[<text>]`, `status`, `show`, `draft <text>`, `pause`, `resume`, `clear`, `wait <pid> [reason]`, `unwait`, or `gate list\|add <command>\|remove <n> [<hash8>]\|clear` | Sets a goal and starts the first goal turn. After each turn, a judge model checks the answer, and the next goal turn starts until the goal is done. With no argument, it shows the status. On the dashboard, `--session <id>` acts on the goal of another session. See below. See [Goals](Goals). | Pause and Clear for an active goal. Resume and Clear for a paused goal. On a goal pause notice: Resume and Clear. For a dangerous gate: Add gate and Cancel. | yes, except a new goal text and `draft` |
 | `/subgoal` | `[<text>]`, `remove <n> [<hash8>]`, or `clear` | Adds a criterion to the goal. With no argument, it lists the criteria. See [Goals](Goals). | | yes |
 | `/todo` | | Shows the task list of the session. It makes no model call. See [Goals](Goals#the-task-list). | | yes |
+| `/memory` | `[log\|held\|tidy]`, `delete <id> [confirm]`, `undo <edit id>.<stamp>`, `redo <edit id>.<stamp>`, `save <held id>.<stamp>`, or `drop <held id>.<stamp>` | With no argument, shows the rules, the memory, and the user profile, each with its fill. `log` shows the last 10 memory changes. `delete` removes an entry by its ID `m-<8 hex>` after a confirmation, and puts it on the block list. `held` shows the held writes. `tidy` starts a memory tidy run. Owner only. It works in read-only mode. In a group with a member, the reply goes to your private chat. | 🗑 for each entry, More ›. Undo on each row of `log`. Cancel, 🗑 Delete. ❌ Drop, ✅ Save. | yes |
+| `/notice` | `undo\|redo\|ok\|pick <id>.<stamp> [n]` | Answers a change card. The card buttons send it. A button of a card older than 30 days answers "This notice is older than 30 days. Use /memory log or /skills log." Owner only. | ↩ Undo, Undo one ›, ✓ OK, ↪ Redo | yes |
+| `/skills` | `stale`, `keep <name>`, `unkeep <name>`, `restore <name>`, `archived`, `log`, or `undo <copy id>.<stamp>` | Shows the skills that the curator can archive, keeps a skill, restores an archived skill, and shows or undoes the skill copies. Owner only. See [Skills](Skills#the-skill-curator). | | yes |
 | `/restart` | | Restarts the gateway. It waits for the running turns first. | | yes |
 
 In the Telegram command menu, `/reload-mcp` is `/reload_mcp`, because Telegram does not permit
 `-` in a command name. The two names do the same thing. The menu does not show `/start`,
-`/reset`, `/resume`, `/unarchive`, and `/subgoal`, but they work.
+`/reset`, `/resume`, `/unarchive`, `/subgoal`, and `/notice`, but they work.
 
 ### Owners and members
 
@@ -116,7 +119,7 @@ and `/usage`. Each other command is owner-only, also a new command. A member get
 ### Skill commands
 
 Each skill also has a slash command. `/<skill> [request]` runs the skill with the request, for
-example `/arxiv transformers 2026`. A built-in command wins over a skill with the same name. In
+example `/arxiv transformers 2026`. A built-in command wins over a skill with the same name. So a skill named `memory`, `notice`, or `skills` gets no command. In
 the CLI, an unknown name gets `Unknown command /<name>. Send /help to see the commands.` In
 Telegram, a slash text that is not a command and not a skill goes to the agent as a normal
 message. See [Skills](Skills#run-a-skill-with-a-slash-command).

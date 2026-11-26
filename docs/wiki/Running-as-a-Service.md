@@ -243,8 +243,8 @@ The archive contains these items:
 
 - `state.db` (a consistent copy, made with SQLite `VACUUM INTO`)
 - `config.yaml`
-- `memory/memory.md`, `memory/user_profile.md`, and the memory notes in `memory/notes/`
-- `skills/`
+- `memory/memory.md`, `memory/user_profile.md`, `memory/rules.md`, and the memory notes in `memory/notes/`
+- `skills/` (with the skill copies in `skills/.history/` and the archived skills in `skills/.archive/`)
 - `scripts/`
 
 The archive never contains `.env`. A literal secret in `config.yaml` becomes a `${NAME}`

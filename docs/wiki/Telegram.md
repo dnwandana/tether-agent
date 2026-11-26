@@ -259,19 +259,22 @@ order:
 
 `/new`, `/sessions`, `/stop`, `/steer`, `/now`, `/goal`, `/todo`, `/model`, `/effort`, `/usage`,
 `/help`, `/rename`, `/fork`, `/compact`, `/prompt`, `/archive`, `/delete`, `/approve`, `/deny`,
-`/approvals`, `/mode`, `/secrets`, `/jobs`, `/brief`, `/sethome`, `/reload_mcp`, and `/restart`.
+`/approvals`, `/mode`, `/secrets`, `/jobs`, `/brief`, `/memory`, `/skills`, `/sethome`, `/reload_mcp`, and `/restart`.
 
 Telegram does not permit `-` in a command name, so the menu shows `/reload-mcp` as
 `/reload_mcp`. Both names work. `/start`, `/reset`, `/resume`, `/unarchive`, and `/subgoal` are not in the
-menu, but they work. See [Commands](Commands) for each command.
+menu, but they work. `/notice` is not in the menu, because the buttons of a change notice send it. See [Commands](Commands) for each command.
 
 After the built-in commands, the menu shows the skill commands in name order, with `_` in place
 of `-`. See [Skills](Skills#run-a-skill-with-a-slash-command). These rules apply:
 
-- The menu has a maximum of 60 entries (`telegram.menu_max_commands`, with the 27 built-in commands). Send `/help skills` to see all skill commands.
+- The menu has a maximum of 60 entries (`telegram.menu_max_commands`, with the 29 built-in commands). Send `/help skills` to see all skill commands.
 - A skill command with a name of more than 32 characters is not in the menu.
-- The gateway sets the menu only when it starts. A new skill shows in the menu after the next
+- The gateway sets the menu when it starts. A new skill shows in the menu after the next
   start.
+- After the skill curator archives a skill, the gateway sets the menu again. It does the same
+  after `/skills restore` and after an undo that brings a skill back. The menu then shows only
+  the skills that exist.
 - A skill command that is not in the menu still works when you type it.
 - When Telegram refuses the menu with the skills, the gateway sets the built-in commands only.
 

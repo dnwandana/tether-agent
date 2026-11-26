@@ -67,7 +67,7 @@ To restart the gateway, send `/restart` in a chat, or run `systemctl --user relo
 | `agent` | The turn loop: the tool round limit, parallel tools, the vision and delegation providers, the fallback list, the restart drain, the resume of cut turns, the stream idle limit, the limit of same tool failures, and the length of a tool preview. |
 | `context` | Compaction, the size limit of tool output, and the limits of the compaction summary. |
 | `sessions` | How long the automatic sessions stay in the database, and the result and window limits of `session_search`. |
-| `memory` | The size limits of the two memory files, the memory review interval, and the limits of one entry, the lock wait, a read, a search, and the topic list of the prompt. |
+| `memory` | The size limits of the three memory files, the memory review interval, and the limits of one entry, the lock wait, a read, a search, and the topic list of the prompt. |
 | `review` | The background memory and skill review: the rounds, the parallel reviews, and the minimum number of user turns. |
 | `skills` | More skill folders, the skill review interval, the skill guard, the git timeout, and the size limits of `skill_manage` and `skill_view`. |
 | `web` | `web_search` and `web_fetch`: the backend, the URL limits, the private network block, the HTTP timeout, and the result counts. |
@@ -166,6 +166,14 @@ These keys are the ones that most users change. The full list is in
 | `context.compact_at_tokens` | `200000` | Compaction also starts when the context is above this number of tokens. `0` turns the cap off. Another value must be from 50000 to 2147483647. |
 | `context.tool_output_max_chars` | `50000` | A longer tool output keeps its head and tail. The full output goes to a spill file. |
 | `memory.review_interval_turns` | `10` | A background memory review starts after this number of user turns. `0` stops the reviews. |
+| `memory.rules_char_limit` | `1000` | The maximum size of the owner rules file, `memory/rules.md`, in characters. The owner rules load first in the system prompt. A rule that does not fit is refused. |
+| `skills.review_max_changes` | `3` | The maximum number of skill changes in one background review. The review refuses each change after this number. |
+| `skills.history_keep` | `5` | The number of copies that `skills/.history/` keeps for each skill. The copies let you undo a skill change. |
+| `skills.curator.enabled` | `true` | When `true`, the gateway runs the skill curator. The curator moves a skill with no read to `skills/.archive/`. It never deletes a skill. `/skills restore <name>` puts a skill back. |
+| `skills.curator.interval_hours` | `168` | The minimum time between two curator runs, in hours. |
+| `skills.curator.min_idle_hours` | `2` | The curator runs only after this number of hours with no active chat session. |
+| `skills.curator.stale_after_days` | `14` | A skill with no read for this number of days is stale. |
+| `skills.curator.archive_after_days` | `30` | The curator archives a skill with no read for this number of days. A lower value than `skills.curator.stale_after_days` uses that value. |
 | `approvals.mode` | `manual` | The approval mode for dangerous commands: `manual`, `smart`, or `off`. |
 | `approvals.cron_mode` | `deny` | The result for a dangerous command and for each `execute_code` script in a cron run: `deny` or `approve`. |
 | `approvals.human_only` | `[]` | More rules that need the owner to tap Approve each time. Each entry is a rule ID, for example `git_force_push`, or an MCP tool as `mcp:<server>.<tool>`. The list can only raise a rule. The built-in human-only rules always apply. |

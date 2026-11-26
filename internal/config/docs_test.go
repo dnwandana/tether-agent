@@ -156,7 +156,9 @@ func TestSecurityDocCoversTopics(t *testing.T) {
 		"git commit -a",
 		"dashboard", "tether_dashboard_hardline", "tether dashboard link", "X-Tether-Session",
 		"tether_dash", "dashboard.trusted_proxies", "dashboard.allowed_hosts", "dashboard.tls_cert",
-		"Content-Security-Policy: sandbox"} {
+		"Content-Security-Policy: sandbox",
+		"memory/rules.md", "held-memory", "❌ Drop", "quote", "skills.review_max_changes",
+		"skills/.hub/lock.json", "skills/.history/", "memory_edits", "This button is too old."} {
 		if !strings.Contains(string(b), s) {
 			t.Fatal("SECURITY.md misses", s)
 		}
