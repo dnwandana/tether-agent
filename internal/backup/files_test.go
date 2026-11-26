@@ -341,3 +341,20 @@ func TestCollectMemoryNotesNotFolder(t *testing.T) {
 		})
 	}
 }
+
+// A backup keeps the owner rules file next to the other tier-1 memory files.
+func TestCollectMemoryRules(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "memory/memory.md", "m")
+	write(t, dir, "memory/rules.md", "Do not send a file unless I ask")
+	items, skipped, err := collectItems(dir)
+	if err != nil || len(skipped) != 0 {
+		t.Fatal(err, skipped)
+	}
+	if !slices.Contains(rels(items), "memory/rules.md") {
+		t.Fatal(rels(items))
+	}
+	if it := find(items, "memory/rules.md"); it.Dir || it.Src != filepath.Join(dir, "memory", "rules.md") {
+		t.Fatal(it)
+	}
+}

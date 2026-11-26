@@ -57,9 +57,9 @@ type Manifest struct {
 // topItems are the top-level names of the allow list. The swap moves these names.
 var topItems = []string{"state.db", "config.yaml", "memory", "skills", "scripts"}
 
-// memoryFiles are the tier-1 memory files. The archive can also hold
-// memory/notes and the note files in it. See allowed.
-var memoryFiles = []string{"memory/memory.md", "memory/user_profile.md"}
+// memoryFiles are the tier-1 memory files: the memory, the user profile, and the owner rules.
+// The archive can also hold memory/notes and the note files in it. See allowed.
+var memoryFiles = []string{"memory/memory.md", "memory/user_profile.md", "memory/rules.md"}
 
 // allowed reports whether name is in the allow list. name is a slash path
 // with no trailing "/".

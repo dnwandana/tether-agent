@@ -29,6 +29,10 @@ var freeTextColumns = map[string][]string{
 	"approval_grants":    {"preview"},
 	"held_sends":         {"text", "reason", "target_title"},
 	"dashboard_sessions": {"label", "user_agent"},
+	"memory_edits":       {"old_text", "new_text", "quote"},
+	"memory_blocks":      {"text"},
+	"memory_held":        {"op"},
+	"notices":            {"text"},
 }
 
 // stateColumns lists every other TEXT column of the schema. maskDB never masks these columns.
@@ -38,7 +42,7 @@ var freeTextColumns = map[string][]string{
 var stateColumns = map[string][]string{
 	"sessions": {"id", "session_key", "source", "chat_id", "thread_id", "user_id",
 		"model_override", "parent_id", "kind", "effort"},
-	"messages":    {"session_id", "role", "tool_call_id", "tool_name", "model", "provider", "finish_reason"},
+	"messages":    {"session_id", "role", "tool_call_id", "tool_name", "model", "provider", "finish_reason", "outside"},
 	"compactions": {"session_id"},
 	"cron_jobs": {"id", "name", "schedule", "script", "deliver", "skills", "model", "toolsets",
 		"workdir", "origin", "created_by_session", "last_status", "last_error_key", "pause_reason",
@@ -61,6 +65,14 @@ var stateColumns = map[string][]string{
 	"held_sends":         {"id", "kind", "job_id", "target", "sources", "card_chat"},
 	"dashboard_sessions": {"id", "cookie_hash", "header_hash", "ip"},
 	"dashboard_codes":    {"code_hash"},
+	"memory_edits":       {"stamp", "target", "dest", "action", "source", "session_id", "outside"},
+	"memory_blocks":      {"text_norm"},
+	"memory_held":        {"stamp", "source", "session_id", "session_key", "sources", "state"},
+	"notices":            {"stamp", "session_key", "items", "state"},
+	"skill_reads":        {"name", "source", "session_id"},
+	"skill_flags":        {"name", "rel_dir", "archived_path"},
+	"skill_copies": {"stamp", "name", "rel_dir", "action", "source", "session_id", "path",
+		"hash_after"},
 }
 
 // maskCell is one cell that maskDB changes.

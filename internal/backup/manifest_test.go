@@ -8,7 +8,7 @@ import (
 )
 
 func TestCheckEntryName(t *testing.T) {
-	ok := []string{"state.db", "config.yaml", "memory/", "memory/memory.md", "memory/user_profile.md",
+	ok := []string{"state.db", "config.yaml", "memory/", "memory/memory.md", "memory/user_profile.md", "memory/rules.md",
 		"skills/", "skills/web/SKILL.md", "scripts/", "scripts/sub/run.sh", "manifest.json"}
 	for _, n := range ok {
 		if _, err := checkEntryName(n); err != nil {

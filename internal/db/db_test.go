@@ -776,3 +776,48 @@ func TestMigrationCronAttentionFrom012(t *testing.T) {
 		t.Fatal(v, LatestVersion(), err)
 	}
 }
+
+// A new database has the tables of migration 015 and the columns messages.outside and
+// messages.member.
+func TestMemoryLearningTables(t *testing.T) {
+	ctx := context.Background()
+	d, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	for _, q := range []string{
+		`INSERT INTO memory_edits (stamp, at, target, idx, dest, action, old_text, new_text, source,
+			session_id, quote, outside, group_id, undone_by)
+			VALUES ('a3f1', 1, 'memory', -1, '', 'add', '', 'VPS = hetzner', 'chat', 's1', '', 'web_fetch', NULL, NULL)`,
+		`INSERT INTO memory_blocks (at, text_norm, text, edit_id) VALUES (1, 'vps ovh', 'VPS = ovh', 1)`,
+		`INSERT INTO memory_held (stamp, at, expires_at, op, source, session_id, session_key, sources, state)
+			VALUES ('b2c4', 1, 86401, '{}', 'chat', 's1', 'k', 'web_fetch', 'held')`,
+		`INSERT INTO notices (stamp, at, session_key, text, items, state) VALUES ('c0de', 1, 'k', 'x', '[]', 'open')`,
+		`INSERT INTO skill_reads (name, at, source, session_id) VALUES ('web', 1, 'view', 's1')`,
+		`INSERT INTO skill_flags (name, rel_dir, kept, first_seen, archived_at, archived_path)
+			VALUES ('web', 'web', 0, 1, NULL, '')`,
+		`INSERT INTO skill_copies (stamp, name, rel_dir, at, action, source, session_id, path, hash_after, undone_by)
+			VALUES ('d00d', 'web', 'web', 1, 'patch', 'chat', 's1', 'skills/.history/1', 'h', NULL)`,
+	} {
+		if _, err := d.ExecContext(ctx, q); err != nil {
+			t.Fatal(q, err)
+		}
+	}
+	if _, err := d.ExecContext(ctx, `INSERT INTO skill_flags (name) VALUES ('web')`); err == nil {
+		t.Fatal("skill_flags.name must be unique")
+	}
+	var def string
+	var notNull int
+	if err := d.QueryRowContext(ctx, `SELECT dflt_value, "notnull" FROM pragma_table_info('messages')
+		WHERE name = 'outside'`).Scan(&def, &notNull); err != nil || def != "''" || notNull != 1 {
+		t.Fatal(def, notNull, err)
+	}
+	if err := d.QueryRowContext(ctx, `SELECT dflt_value, "notnull" FROM pragma_table_info('messages')
+		WHERE name = 'member'`).Scan(&def, &notNull); err != nil || def != "0" || notNull != 1 {
+		t.Fatal(def, notNull, err)
+	}
+	if v, err := d.SchemaVersion(ctx); err != nil || v != 15 || LatestVersion() != 15 {
+		t.Fatal(v, LatestVersion(), err)
+	}
+}
