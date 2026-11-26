@@ -54,7 +54,7 @@ func (s *Store) SearchFiltered(ctx context.Context, query string, f SearchFilter
 	if f.Offset < 0 {
 		f.Offset = 0
 	}
-	args := []any{query, KindGoalJudge, KindReview, KindAux}
+	args := []any{query, KindGoalJudge, KindReview, KindAux, KindTidy}
 	var cond strings.Builder
 	if f.Source != "" {
 		cond.WriteString(" AND s.source = ?")
@@ -75,7 +75,7 @@ func (s *Store) SearchFiltered(ctx context.Context, query string, f SearchFilter
 		snippet(messages_fts, 0, '[', ']', '…', 12)
 		FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid
 		JOIN sessions s ON s.id = m.session_id
-		WHERE messages_fts MATCH ? AND s.kind NOT IN (?, ?, ?)`+cond.String()+scope+` ORDER BY m.id DESC LIMIT ? OFFSET ?`, args...)
+		WHERE messages_fts MATCH ? AND s.kind NOT IN (?, ?, ?, ?)`+cond.String()+scope+` ORDER BY m.id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, searchErr(err)
 	}

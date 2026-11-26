@@ -250,3 +250,25 @@ func TestSearchFilteredPagesAndFilters(t *testing.T) {
 		t.Fatalf("a hit names its source and kind: %+v %v", hits, err)
 	}
 }
+
+func TestSearchSkipsTidySessions(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	chat, _ := s.Create(ctx, Session{Key: "telegram:1", Source: "telegram", Title: "rules"})
+	tidy, _ := s.Create(ctx, Session{Source: "telegram", Kind: KindTidy, ParentID: chat.ID})
+	for _, id := range []string{chat.ID, tidy.ID} {
+		if _, err := s.Append(ctx, id, provider.Message{Role: provider.RoleUser, Content: "rules tidy marker"}, MessageMeta{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, f := range []SearchFilter{{}, {Source: "telegram"}} {
+		hits, err := s.SearchFiltered(ctx, "rules tidy marker", f, Scope{All: true})
+		if err != nil || len(hits) != 1 || hits[0].SessionID != chat.ID {
+			t.Fatalf("%+v %+v %v", f, hits, err)
+		}
+	}
+	hits, err := s.Search(ctx, "rules tidy marker", 10, Scope{All: true})
+	if err != nil || len(hits) != 1 || hits[0].SessionID != chat.ID {
+		t.Fatalf("%+v %v", hits, err)
+	}
+}

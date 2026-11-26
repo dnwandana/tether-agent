@@ -36,6 +36,11 @@ type MessageMeta struct {
 	Model, Provider, FinishReason string
 	CostUSD                       float64
 	Observed                      bool
+	// Outside lists the outside sources of the text that this row brought into the
+	// session, for example web_fetch. The column holds them comma-joined.
+	Outside []string
+	// Member is true when a member, not an owner, sent the user row.
+	Member bool
 }
 
 // StoredMessage is one row of the messages table.
@@ -205,12 +210,13 @@ func (s *Store) Append(ctx context.Context, sessionID string, m provider.Message
 	now := time.Now().UnixMilli()
 	res, err := s.db.ExecContext(ctx, `INSERT INTO messages (session_id, role, content, tool_call_id,
 		tool_calls, tool_name, input_tokens, output_tokens, cache_read_tokens, latency_ms,
-		latency_first_ms, cost_usd, model, provider, finish_reason, observed, timestamp, reasoning)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		latency_first_ms, cost_usd, model, provider, finish_reason, observed, timestamp, reasoning, outside, member)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID, string(m.Role), content, m.ToolCallID, toolCalls, m.ToolName,
 		meta.Usage.InputTokens, meta.Usage.OutputTokens, meta.Usage.CacheReadTokens,
 		meta.Usage.TotalMS, meta.Usage.FirstTokenMS, cost, meta.Model, meta.Provider,
-		meta.FinishReason, boolInt(meta.Observed), now, reasoning)
+		meta.FinishReason, boolInt(meta.Observed), now, reasoning, strings.Join(meta.Outside, ","),
+		boolInt(meta.Member))
 	if err != nil {
 		return 0, fmt.Errorf("sessions: append to %s: %w", sessionID, err)
 	}
@@ -416,7 +422,7 @@ func (s *Store) setColumn(ctx context.Context, id, col string, v any) error {
 // messageCols is the column list that scanMessage reads, in order.
 const messageCols = `id, role, content, tool_call_id, tool_calls, tool_name, input_tokens,
 	output_tokens, cache_read_tokens, latency_ms, latency_first_ms, cost_usd, model, provider,
-	finish_reason, compacted, observed, timestamp, reasoning`
+	finish_reason, compacted, observed, timestamp, reasoning, outside, member`
 
 // Messages returns all the messages of the session in id order.
 func (s *Store) Messages(ctx context.Context, sessionID string) ([]StoredMessage, error) {
@@ -516,12 +522,14 @@ func scanMessage(r scanner) (StoredMessage, error) {
 		reasoning           sql.NullString
 		cost                sql.NullFloat64
 		compacted, observed int
+		member              int
 		at                  int64
+		outside             string
 	)
 	if err := r.Scan(&m.ID, &role, &m.Msg.Content, &m.Msg.ToolCallID, &toolCalls, &m.Msg.ToolName,
 		&m.Meta.Usage.InputTokens, &m.Meta.Usage.OutputTokens, &m.Meta.Usage.CacheReadTokens,
 		&m.Meta.Usage.TotalMS, &m.Meta.Usage.FirstTokenMS, &cost, &m.Meta.Model, &m.Meta.Provider,
-		&m.Meta.FinishReason, &compacted, &observed, &at, &reasoning); err != nil {
+		&m.Meta.FinishReason, &compacted, &observed, &at, &reasoning, &outside, &member); err != nil {
 		return m, err
 	}
 	m.Msg.Role = provider.Role(role)
@@ -539,6 +547,10 @@ func scanMessage(r scanner) (StoredMessage, error) {
 	m.Meta.CostUSD = cost.Float64
 	m.Compacted = compacted != 0
 	m.Meta.Observed = observed != 0
+	m.Meta.Member = member != 0
+	if outside != "" {
+		m.Meta.Outside = strings.Split(outside, ",")
+	}
 	m.At = time.UnixMilli(at).UTC()
 	return m, nil
 }

@@ -20,18 +20,20 @@ const (
 	// KindAux is the kind of the hidden session that records the model calls that run
 	// outside a turn.
 	KindAux = "aux"
+	// KindTidy is the kind of the session of one /memory tidy run.
+	KindTidy = "tidy"
 )
 
 // HiddenChildKinds are the kinds of the sessions that the program makes as children of
-// another session. They have no session key. The program gives each one a parent when it
+// another session. This includes each /memory tidy run. They have no session key. The program gives each one a parent when it
 // creates the session. deleteSessions clears the parent of a child when it deletes the parent, so a hidden
 // session can lose its parent later.
-var HiddenChildKinds = []string{KindSubagent, KindReview, KindGoalJudge, KindAux}
+var HiddenChildKinds = []string{KindSubagent, KindReview, KindGoalJudge, KindAux, KindTidy}
 
 // AutomaticKinds are the session kinds that the program makes without a user: one session
 // for each cron run, each delegate_task child, each background review, each goal judge, and
-// each aux session. PruneAutomatic deletes only these kinds. It never deletes a chat session.
-var AutomaticKinds = []string{"cron", KindSubagent, KindReview, KindGoalJudge, KindAux}
+// each aux session, and each /memory tidy run. PruneAutomatic deletes only these kinds. It never deletes a chat session.
+var AutomaticKinds = []string{"cron", KindSubagent, KindReview, KindGoalJudge, KindAux, KindTidy}
 
 // pruneBatch is the maximum number of sessions that one transaction of PruneAutomatic
 // deletes. Small transactions keep the write lock of state.db short.

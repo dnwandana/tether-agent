@@ -225,3 +225,18 @@ func TestListQueriesReleaseTheConnection(t *testing.T) {
 		}
 	}
 }
+
+func TestListHidesTidyChild(t *testing.T) {
+	ctx := context.Background()
+	s := New(openTestDB(t))
+	parent, _ := s.Create(ctx, Session{Key: "dashboard:owner", Source: "dashboard", Title: "p"})
+	tidy, _ := s.Create(ctx, Session{Source: "dashboard", Kind: KindTidy, ParentID: parent.ID})
+	got, total, err := s.ListAll(ctx, ListAllQuery{})
+	if err != nil || total != 1 || !slices.Equal(summaryIDs(got), []string{parent.ID}) {
+		t.Fatalf("%v %d %v", summaryIDs(got), total, err)
+	}
+	kids, err := s.Children(ctx, parent.ID)
+	if err != nil || !slices.Equal(summaryIDs(kids), []string{tidy.ID}) {
+		t.Fatalf("%v %v", summaryIDs(kids), err)
+	}
+}

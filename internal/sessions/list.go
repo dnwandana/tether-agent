@@ -29,8 +29,8 @@ func (s *Store) ListAll(ctx context.Context, q ListAllQuery) ([]SessionSummary, 
 	args := []any{boolInt(q.Archived), KindAux}
 	if q.Kind == "" {
 		// A hidden child shows under its parent. One that lost its parent stays in the list.
-		where += ` AND NOT (s.kind IN (?, ?, ?) AND s.parent_id != '')`
-		args = append(args, KindSubagent, KindReview, KindGoalJudge)
+		where += ` AND NOT (s.kind IN (?, ?, ?, ?) AND s.parent_id != '')`
+		args = append(args, KindSubagent, KindReview, KindGoalJudge, KindTidy)
 	} else {
 		where += ` AND s.kind = ?`
 		args = append(args, q.Kind)
@@ -65,13 +65,13 @@ func (s *Store) ListAll(ctx context.Context, q ListAllQuery) ([]SessionSummary, 
 	return page, total, nil
 }
 
-// Children returns the hidden child sessions (subagent, review, goal_judge) of the parent,
+// Children returns the hidden child sessions (subagent, review, goal_judge, tidy) of the parent,
 // oldest first.
 func (s *Store) Children(ctx context.Context, parentID string) ([]SessionSummary, error) {
 	return s.querySummaries(ctx, `SELECT `+prefixCols("s.")+`,
 		(SELECT count(*) FROM messages m WHERE m.session_id = s.id)
-		FROM sessions s WHERE s.parent_id = ? AND s.kind IN (?, ?, ?)
-		ORDER BY s.started_at, s.id`, parentID, KindSubagent, KindReview, KindGoalJudge)
+		FROM sessions s WHERE s.parent_id = ? AND s.kind IN (?, ?, ?, ?)
+		ORDER BY s.started_at, s.id`, parentID, KindSubagent, KindReview, KindGoalJudge, KindTidy)
 }
 
 // querySummaries runs a query that selects the session columns and a message count. It reads

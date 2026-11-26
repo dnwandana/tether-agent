@@ -278,13 +278,13 @@ func TestPruneDeletesOldGoalJudgeSessions(t *testing.T) {
 }
 
 func TestSessionKinds(t *testing.T) {
-	if KindSubagent != "subagent" || KindReview != "review" || KindAux != "aux" || KindGoalJudge != "goal_judge" {
-		t.Fatal(KindSubagent, KindReview, KindAux, KindGoalJudge)
+	if KindSubagent != "subagent" || KindReview != "review" || KindAux != "aux" || KindGoalJudge != "goal_judge" || KindTidy != "tidy" {
+		t.Fatal(KindSubagent, KindReview, KindAux, KindGoalJudge, KindTidy)
 	}
-	if want := []string{"subagent", "review", "goal_judge", "aux"}; !slices.Equal(HiddenChildKinds, want) {
+	if want := []string{"subagent", "review", "goal_judge", "aux", "tidy"}; !slices.Equal(HiddenChildKinds, want) {
 		t.Fatalf("HiddenChildKinds = %v, want %v", HiddenChildKinds, want)
 	}
-	if want := []string{"cron", "subagent", "review", "goal_judge", "aux"}; !slices.Equal(AutomaticKinds, want) {
+	if want := []string{"cron", "subagent", "review", "goal_judge", "aux", "tidy"}; !slices.Equal(AutomaticKinds, want) {
 		t.Fatalf("AutomaticKinds = %v, want %v", AutomaticKinds, want)
 	}
 }

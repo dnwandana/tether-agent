@@ -96,10 +96,10 @@ func (s *Store) fork(ctx context.Context, id, title string, set func(f *Session)
 		res, err := tx.ExecContext(ctx, `INSERT INTO messages (session_id, role, content, tool_call_id,
 			tool_calls, tool_name, input_tokens, output_tokens, cache_read_tokens, latency_ms,
 			latency_first_ms, cost_usd, model, provider, finish_reason, compacted, observed, timestamp,
-			reasoning)
+			reasoning, outside, member)
 			SELECT ?, role, content, tool_call_id, tool_calls, tool_name, input_tokens, output_tokens,
 			cache_read_tokens, latency_ms, latency_first_ms, cost_usd, model, provider, finish_reason,
-			compacted, observed, timestamp, reasoning FROM messages WHERE id = ?`, f.ID, old)
+			compacted, observed, timestamp, reasoning, outside, member FROM messages WHERE id = ?`, f.ID, old)
 		if err != nil {
 			return nil, fmt.Errorf("sessions: fork %s: copy message %d: %w", id, old, err)
 		}
