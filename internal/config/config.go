@@ -168,8 +168,10 @@ type SessionsConfig struct {
 
 // MemoryConfig sets the memory limits and the review interval.
 type MemoryConfig struct {
-	MemoryCharLimit     int `yaml:"memory_char_limit"`
-	UserCharLimit       int `yaml:"user_char_limit"`
+	MemoryCharLimit int `yaml:"memory_char_limit"`
+	UserCharLimit   int `yaml:"user_char_limit"`
+	// RulesCharLimit is the maximum size of memory/rules.md, in characters.
+	RulesCharLimit      int `yaml:"rules_char_limit"`
 	ReviewIntervalTurns int `yaml:"review_interval_turns"`
 	// EntryMaxChars is the maximum length of one memory entry, in characters.
 	EntryMaxChars int `yaml:"entry_max_chars"`
@@ -203,6 +205,48 @@ type SkillsConfig struct {
 	SupportFileMaxBytes int `yaml:"support_file_max_bytes"`
 	// ViewMaxLinkedFiles is the maximum number of support files that skill_view lists.
 	ViewMaxLinkedFiles int `yaml:"view_max_linked_files"`
+	// ReviewMaxChanges is the maximum number of skill changes in one background review.
+	ReviewMaxChanges int `yaml:"review_max_changes"`
+	// HistoryKeep is the number of copies that skills/.history/ keeps for each skill.
+	HistoryKeep int `yaml:"history_keep"`
+	// Curator sets the skill curator.
+	Curator CuratorConfig `yaml:"curator"`
+}
+
+// CuratorConfig sets the skill curator. The curator archives skills that nobody reads.
+type CuratorConfig struct {
+	// Enabled turns the curator on in the gateway role.
+	Enabled bool `yaml:"enabled"`
+	// IntervalHours is the minimum time between two curator runs, in hours.
+	IntervalHours int `yaml:"interval_hours"`
+	// MinIdleHours is the time with no active chat session that a run needs, in hours.
+	MinIdleHours int `yaml:"min_idle_hours"`
+	// StaleAfterDays is the number of days with no read after which a skill is stale.
+	StaleAfterDays int `yaml:"stale_after_days"`
+	// ArchiveAfterDays is the number of days with no read after which the curator archives a skill.
+	ArchiveAfterDays int `yaml:"archive_after_days"`
+}
+
+// fillLearnDefaults puts the default in each learning key that is 0 or less. An archive time
+// under the stale time uses the stale time.
+func (c *Config) fillLearnDefaults() {
+	d := Default()
+	fill := func(v *int, def int) {
+		if *v <= 0 {
+			*v = def
+		}
+	}
+	fill(&c.Memory.RulesCharLimit, d.Memory.RulesCharLimit)
+	fill(&c.Skills.ReviewMaxChanges, d.Skills.ReviewMaxChanges)
+	fill(&c.Skills.HistoryKeep, d.Skills.HistoryKeep)
+	cu := &c.Skills.Curator
+	fill(&cu.IntervalHours, d.Skills.Curator.IntervalHours)
+	fill(&cu.MinIdleHours, d.Skills.Curator.MinIdleHours)
+	fill(&cu.StaleAfterDays, d.Skills.Curator.StaleAfterDays)
+	fill(&cu.ArchiveAfterDays, d.Skills.Curator.ArchiveAfterDays)
+	if cu.ArchiveAfterDays < cu.StaleAfterDays {
+		cu.ArchiveAfterDays = cu.StaleAfterDays
+	}
 }
 
 // WebConfig sets the web_search and web_fetch tools.
@@ -713,6 +757,7 @@ func Default() Config {
 		Memory: MemoryConfig{
 			MemoryCharLimit:     2200,
 			UserCharLimit:       1375,
+			RulesCharLimit:      1000,
 			ReviewIntervalTurns: 10,
 			EntryMaxChars:       4000,
 			LockWaitS:           30,
@@ -729,6 +774,10 @@ func Default() Config {
 			SkillMDMaxChars:          100000,
 			SupportFileMaxBytes:      1048576,
 			ViewMaxLinkedFiles:       50,
+			ReviewMaxChanges:         3,
+			HistoryKeep:              5,
+			Curator: CuratorConfig{Enabled: true, IntervalHours: 168, MinIdleHours: 2,
+				StaleAfterDays: 14, ArchiveAfterDays: 30},
 		},
 		Web: WebConfig{
 			SearchBackend:        "duckduckgo",

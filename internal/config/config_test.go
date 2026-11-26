@@ -425,3 +425,42 @@ func TestDashboardBadValueLoads(t *testing.T) {
 		t.Fatal("the check must refuse the values")
 	}
 }
+
+func TestLearningDefaults(t *testing.T) {
+	c := Default()
+	eq(t, c.Memory.RulesCharLimit, 1000)
+	eq(t, c.Skills.ReviewMaxChanges, 3)
+	eq(t, c.Skills.HistoryKeep, 5)
+	eq(t, c.Skills.Curator, CuratorConfig{Enabled: true, IntervalHours: 168, MinIdleHours: 2,
+		StaleAfterDays: 14, ArchiveAfterDays: 30})
+}
+
+// A value of 0 or less uses the default. An archive time under the stale time uses the stale time.
+func TestLearningZeroUsesDefault(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal+"memory:\n  rules_char_limit: 0\n"+
+		"skills:\n  review_max_changes: -1\n  history_keep: 0\n"+
+		"  curator:\n    enabled: false\n    interval_hours: 0\n    min_idle_hours: -5\n"+
+		"    stale_after_days: 20\n    archive_after_days: 10\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Memory.RulesCharLimit, 1000)
+	eq(t, c.Skills.ReviewMaxChanges, 3)
+	eq(t, c.Skills.HistoryKeep, 5)
+	eq(t, c.Skills.Curator, CuratorConfig{Enabled: false, IntervalHours: 168, MinIdleHours: 2,
+		StaleAfterDays: 20, ArchiveAfterDays: 20})
+}
+
+func TestLearningValuesFromYAML(t *testing.T) {
+	c, err := Load(writeTemp(t, minimal+"memory:\n  rules_char_limit: 1500\n"+
+		"skills:\n  review_max_changes: 5\n  history_keep: 2\n"+
+		"  curator:\n    interval_hours: 24\n    stale_after_days: 7\n    archive_after_days: 60\n"), mapEnv(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eq(t, c.Memory.RulesCharLimit, 1500)
+	eq(t, c.Skills.ReviewMaxChanges, 5)
+	eq(t, c.Skills.HistoryKeep, 2)
+	eq(t, c.Skills.Curator, CuratorConfig{Enabled: true, IntervalHours: 24, MinIdleHours: 2,
+		StaleAfterDays: 7, ArchiveAfterDays: 60})
+}

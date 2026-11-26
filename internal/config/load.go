@@ -86,6 +86,7 @@ func Load(path string, env func(string) (string, bool)) (*Config, error) {
 		errs = append(errs, errors.New(p.Unusable))
 	}
 
+	c.fillLearnDefaults()
 	if err := c.Validate(); err != nil {
 		errs = append(errs, err)
 	}

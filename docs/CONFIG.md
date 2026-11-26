@@ -184,6 +184,7 @@ stays with no parent.
 |---|---|---|
 | `memory.memory_char_limit` | `2200` | The maximum size of `memory/memory.md`, in characters. |
 | `memory.user_char_limit` | `1375` | The maximum size of `memory/user_profile.md`, in characters. |
+| `memory.rules_char_limit` | `1000` | The maximum size of `memory/rules.md`, in characters. The owner rules load first in the system prompt. A rule that does not fit is refused. It does not go to a note. A value of 0 or less uses the default. |
 | `memory.review_interval_turns` | `10` | A background memory review starts after this number of user turns. `0` stops the reviews. |
 | `memory.entry_max_chars` | `4000` | The maximum length of one memory entry, in characters. The memory threat scan uses the same limit. The minimum is 100. |
 | `memory.lock_wait_s` | `30` | The maximum time that a memory change waits for the file lock, in seconds. The minimum is 1. The maximum is 2592000. |
@@ -212,6 +213,13 @@ The background memory and skill review.
 | `skills.skill_md_max_chars` | `100000` | The maximum length of a `SKILL.md` file that `skill_manage` writes, in characters. The minimum is 1000. |
 | `skills.support_file_max_bytes` | `1048576` | The maximum size of a support file that `skill_manage` writes, in bytes. The minimum is 1024. |
 | `skills.view_max_linked_files` | `50` | The maximum number of support files that `skill_view` lists. The minimum is 1. |
+| `skills.review_max_changes` | `3` | The maximum number of skill changes in one background review. The review refuses each change after this number. A value of 0 or less uses the default. |
+| `skills.history_keep` | `5` | The number of copies that `skills/.history/` keeps for each skill. Each skill change makes a copy first, so the owner can undo the change. A value of 0 or less uses the default. |
+| `skills.curator.enabled` | `true` | When `true`, the gateway runs the skill curator. The curator moves a skill with no read to `skills/.archive/`. It never deletes a skill. |
+| `skills.curator.interval_hours` | `168` | The minimum time between two curator runs, in hours. A value of 0 or less uses the default. |
+| `skills.curator.min_idle_hours` | `2` | The curator runs only when no chat session was active for this number of hours. A value of 0 or less uses the default. |
+| `skills.curator.stale_after_days` | `14` | A skill with no read for this number of days is stale. `/skills stale` lists it. A value of 0 or less uses the default. |
+| `skills.curator.archive_after_days` | `30` | The curator archives a skill with no read for this number of days. A value of 0 or less uses the default. A value lower than `skills.curator.stale_after_days` uses that value. |
 
 ## web
 
